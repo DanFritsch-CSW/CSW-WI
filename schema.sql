@@ -42,6 +42,35 @@ create policy "anon_insert_roster"
 create policy "anon_update_roster"
   on roster_assignments for update using (true);
 
+-- ── Facility Settings ────────────────────────────────────────────
+create table if not exists facility_settings (
+  facility       text primary key,
+  hours_per_appt numeric default 1.5,
+  break_pct      numeric default 10,
+  shift1_hours   numeric default 8,
+  shift2_hours   numeric default 8,
+  updated_at     timestamptz default now()
+);
+
+alter table facility_settings enable row level security;
+
+create policy "anon_read_facility_settings"
+  on facility_settings for select using (true);
+
+create policy "anon_insert_facility_settings"
+  on facility_settings for insert with check (true);
+
+create policy "anon_update_facility_settings"
+  on facility_settings for update using (true);
+
+create trigger facility_settings_updated_at
+  before update on facility_settings
+  for each row execute procedure update_updated_at();
+
+-- ── Temp employee flag on roster_assignments ─────────────────────
+alter table roster_assignments
+  add column if not exists is_temp boolean default false;
+
 -- ── Auto-update updated_at ───────────────────────────────────────
 create or replace function update_updated_at()
 returns trigger language plpgsql as $$

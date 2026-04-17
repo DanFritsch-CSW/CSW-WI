@@ -42,3 +42,35 @@ export async function upsertEmployees(employees) {
   if (error) { console.error('upsertEmployees:', error); return error.message }
   return null
 }
+
+export async function deleteAssignment(facility, employeeId, planDate) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .eq('facility', facility)
+    .eq('employee_id', employeeId)
+    .eq('plan_date', planDate)
+  if (error) console.error('deleteAssignment:', error)
+}
+
+const SETTINGS_DEFAULTS = { hours_per_appt: 1.5, break_pct: 10, shift1_hours: 8, shift2_hours: 8 }
+
+export async function fetchFacilitySettings(facilityId) {
+  if (!supabase) return SETTINGS_DEFAULTS
+  const { data, error } = await supabase
+    .from('facility_settings')
+    .select('*')
+    .eq('facility', facilityId)
+    .single()
+  if (error || !data) return { ...SETTINGS_DEFAULTS, facility: facilityId }
+  return data
+}
+
+export async function upsertFacilitySettings(facilityId, values) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('facility_settings')
+    .upsert({ facility: facilityId, ...values }, { onConflict: 'facility' })
+  if (error) console.error('upsertFacilitySettings:', error)
+}

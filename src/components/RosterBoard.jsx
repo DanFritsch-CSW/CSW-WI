@@ -13,15 +13,16 @@ import {
 } from '@dnd-kit/sortable'
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
+import AddTempModal from './AddTempModal.jsx'
 import { LANES } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees } from '../lib/supabase.js'
+import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees, deleteAssignment } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10)
 }
 
-function DroppableLane({ lane, employees }) {
+function DroppableLane({ lane, employees, onDeleteTemp }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const ids = employees.map(e => e.id)
 
@@ -34,7 +35,11 @@ function DroppableLane({ lane, employees }) {
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <div className="lane-body">
           {employees.map(emp => (
-            <EmployeeTile key={emp.id} employee={emp} />
+            <EmployeeTile
+              key={emp.id}
+              employee={emp}
+              onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
+            />
           ))}
         </div>
       </SortableContext>
@@ -56,23 +61,37 @@ const STUB_EMPLOYEES = [
 ]
 
 export default function RosterBoard({ facility, planDate, onLaborCount }) {
-  const [laneMap, setLaneMap] = useState({})  // { [employeeId]: laneId }
-  const [employees, setEmployees] = useState([])
-  const [activeId, setActiveId] = useState(null)
-  const [syncState, setSyncState] = useState(null) // null | 'loading' | 'ok' | string(error)
+  const [laneMap, setLaneMap]       = useState({})
+  const [employees, setEmployees]   = useState([])
+  const [activeId, setActiveId]     = useState(null)
+  const [syncState, setSyncState]   = useState(null)
+  const [showAddTemp, setShowAddTemp] = useState(false)
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
-  // Load employees and assignments
   useEffect(() => {
     async function load() {
       let emps = await fetchEmployees(facility)
       if (!emps.length) emps = STUB_EMPLOYEES.map(e => ({ ...e, facility }))
-      setEmployees(emps)
 
       const date = planDate || todayISO()
       const assignments = await fetchTodayAssignments(facility, date)
+
+      // Synthesize temp employee objects from roster_assignments rows
+      const tempEmps = assignments
+        .filter(a => a.is_temp)
+        .map(a => ({
+          id:           a.employee_id,
+          name:         a.employee_name,
+          role:         a.role || 'Temp',
+          facility,
+          is_temp:      true,
+          default_lane: a.lane,
+        }))
+
+      const allEmps = [...emps, ...tempEmps]
+      setEmployees(allEmps)
 
       const map = {}
       emps.forEach(e => { map[e.id] = e.default_lane || 'shift1' })
@@ -98,7 +117,19 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
     }
   }, [facility])
 
-  // Report labor count upward whenever laneMap changes
+  const handleAddTemp = useCallback((tempEmp) => {
+    setEmployees(prev => [...prev, tempEmp])
+    setLaneMap(prev => ({ ...prev, [tempEmp.id]: tempEmp.default_lane || 'shift1' }))
+    setShowAddTemp(false)
+  }, [])
+
+  const handleDeleteTemp = useCallback(async (emp) => {
+    const date = planDate || todayISO()
+    await deleteAssignment(facility, emp.id, date)
+    setEmployees(prev => prev.filter(e => e.id !== emp.id))
+    setLaneMap(prev => { const n = { ...prev }; delete n[emp.id]; return n })
+  }, [facility, planDate])
+
   useEffect(() => {
     const active = Object.values(laneMap).filter(l => l === 'shift1' || l === 'shift2').length
     onLaborCount?.(active)
@@ -112,10 +143,8 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
     const employeeId = active.id
     const targetLane = over.id
 
-    // over.id could be a lane id or an employee id (if dropped onto a tile)
     const validLane = LANES.find(l => l.id === targetLane)
     if (!validLane) {
-      // dropped onto another employee — find its lane
       const destLane = laneMap[targetLane]
       if (!destLane || destLane === laneMap[employeeId]) return
       moveTo(employeeId, destLane)
@@ -132,11 +161,12 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
     const date = planDate || todayISO()
     upsertAssignment({
       facility,
-      employee_id: employeeId,
+      employee_id:   employeeId,
       employee_name: emp.name,
-      role: emp.role,
-      lane: laneId,
-      plan_date: date,
+      role:          emp.role,
+      lane:          laneId,
+      plan_date:     date,
+      is_temp:       emp.is_temp ?? false,
     })
   }
 
@@ -158,6 +188,13 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
           <span className="roster-stat"><strong>{activeCount}</strong> active</span>
           <span className="roster-stat"><strong>{ptoCount}</strong> PTO</span>
           <span className="roster-stat"><strong>{callinCount}</strong> call-in</span>
+          <button
+            className="b2e-sync-btn"
+            onClick={() => setShowAddTemp(true)}
+            title="Add a temporary employee for this day"
+          >
+            + Add Temp
+          </button>
           <button
             className="b2e-sync-btn"
             onClick={handleB2eSync}
@@ -183,6 +220,7 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
               key={lane.id}
               lane={lane}
               employees={laneEmployees(lane.id)}
+              onDeleteTemp={handleDeleteTemp}
             />
           ))}
         </div>
@@ -190,6 +228,14 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
           {activeEmployee ? <EmployeeTile employee={activeEmployee} /> : null}
         </DragOverlay>
       </DndContext>
+      {showAddTemp && (
+        <AddTempModal
+          facility={facility}
+          planDate={planDate || todayISO()}
+          onAdd={handleAddTemp}
+          onClose={() => setShowAddTemp(false)}
+        />
+      )}
     </div>
   )
 }

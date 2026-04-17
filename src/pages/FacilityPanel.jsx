@@ -7,32 +7,41 @@ import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import { fetchHourlyData, fetchProjectData } from '../lib/omni.js'
+import { useSettings } from '../hooks/useSettings.js'
+import { applySettings, computeDailyKpis } from '../lib/laborCalc.js'
 
 export default function FacilityPanel({ facility, planDate, networkKpi }) {
-  const [hourly, setHourly]       = useState([])
-  const [hourlyErr, setHourlyErr] = useState(null)
-  const [projects, setProjects]   = useState([])
+  const [rawHourly, setRawHourly]   = useState([])
+  const [hourlyErr, setHourlyErr]   = useState(null)
+  const [projects, setProjects]     = useState([])
   const [laborCount, setLaborCount] = useState(0)
 
+  const { settings, loading: settingsLoading } = useSettings(facility.id)
+
   useEffect(() => {
-    setHourly([])
+    setRawHourly([])
     setHourlyErr(null)
     setProjects([])
     fetchHourlyData(facility.id, planDate)
-      .then(setHourly)
+      .then(setRawHourly)
       .catch(e => setHourlyErr(e.message))
     fetchProjectData(facility.id, planDate).then(setProjects)
   }, [facility.id, planDate])
 
   const handleLaborCount = useCallback(n => setLaborCount(n), [])
 
+  // Apply settings override once both hourly data and settings are ready
+  const hourly = settingsLoading ? rawHourly : applySettings(rawHourly, settings)
+
+  const { util, delta } = computeDailyKpis(hourly)
+
   const kpiData = {
     appts: projects.reduce((s, p) => s + p.tot, 0),
     inb:   projects.reduce((s, p) => s + p.inb, 0),
     out:   projects.reduce((s, p) => s + p.out, 0),
     labor: laborCount,
-    util:  networkKpi?.util,
-    delta: networkKpi?.delta,
+    util:  util  ?? networkKpi?.util,
+    delta: delta ?? networkKpi?.delta,
   }
 
   return (
