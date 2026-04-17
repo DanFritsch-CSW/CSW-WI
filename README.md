@@ -120,6 +120,31 @@ Built with `@dnd-kit`. Four lanes per facility:
 - On drop, upserts to `roster_assignments` in Supabase
 - On load: fetches assignments from Supabase; falls back to `employees.default_lane`
 - **Labor Avail KPI** = count of employees in `shift1` + `shift2`
+- **Sync from B2E** button — pulls latest roster from Omni B2E model, seeds Supabase `employees` table, reloads board
+
+### B2E Roster Sync
+
+| Constant | Value |
+|---|---|
+| `B2E_MODEL_ID` | `f3aaca97-bb7c-405d-809b-efab83649ab3` |
+| `ROSTER` table | `silver__b2e_slv_employeeroster` |
+| `SCHEDULE` table | `silver__b2e_slv_futurescheduleentries` |
+
+**Facility location paths** (`default_location_full_path`):
+
+| Facility | Path |
+|---|---|
+| CAL | `019 - Caledonia` |
+| MAD | `011 - Madison` |
+| EC | `012 - Eau Claire` |
+| KEN | `015 - Kenosha` |
+| WR | `023 - Wisconsin Rapids` |
+
+**Filters applied:** `employee_status = Active`, `default_job_code = 205`, facility location path, plus a hardcoded exclusion list of 30 manager/supervisor IDs.
+
+**Shift mapping** (`scheduleToLane`): checks `work_schedule` text first ("1st Shift" / "2nd Shift"), falls back to `modified_start_time` (< 12:00 → `shift1`, ≥ 12:00 → `shift2`), defaults to `shift1` for Free Flow / unknown.
+
+**Architecture:** Two parallel Omni queries (ROSTER + SCHEDULE joined client-side) to avoid Omni's implicit INNER JOIN dropping employees without recent ingestion. Exclusion filter applied client-side. Supabase `employees` table = baseline; `roster_assignments` = daily drag-drop overrides.
 
 ---
 
@@ -229,7 +254,7 @@ Netlify auto-deploys from `main`. Build config in `netlify.toml`:
 ## Outstanding / Planned Work
 
 - **Hourly Breakdown** — current table is a baseline; full revamp planned
+- **B2E exclusion list** — current list is CAL-derived; verify manager IDs apply across all 5 facilities
 - **OrderCreator page** — order management UI
 - **Analytics page** — historical performance and trend views
 - **Settings page** — facility config and user preferences
-- **Supabase employee seed** — real employee data per facility (currently using placeholder names)
