@@ -570,6 +570,32 @@ input, select { font: inherit; color: inherit; }
   font-weight: 600;
 }
 
+.b2e-sync-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.b2e-sync-btn:hover:not(:disabled) {
+  background: var(--bg4);
+  color: var(--text-primary);
+}
+.b2e-sync-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.b2e-sync-err {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--red);
+}
+
 .roster-lanes {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
