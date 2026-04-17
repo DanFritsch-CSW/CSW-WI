@@ -1234,6 +1234,76 @@ input, select { font: inherit; color: inherit; }
   background: var(--bg4);
 }
 
+/* ─── Break Schedule Editor ─────────────────────────────────────── */
+.break-schedule-editor {
+  background: var(--bg2);
+  border: 1px solid var(--bg4);
+  border-radius: var(--r-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 860px;
+}
+
+.break-schedule-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.break-schedule-warehouse {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.break-schedule-warehouse-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.break-schedule-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.break-schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 6px;
+}
+
+.break-schedule-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.break-schedule-hour-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  text-align: center;
+}
+
+.break-schedule-pct-label {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
 /* ─── Scrollbar ─────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg0); }
