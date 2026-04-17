@@ -60,7 +60,7 @@ const STUB_EMPLOYEES = [
   { id: 'e9', name: 'Quinn Adams',    role: 'Associate',  default_lane: 'callin' },
 ]
 
-export default function RosterBoard({ facility, planDate, onLaborCount }) {
+export default function RosterBoard({ facility, planDate, onLaborCount, onRosterChange }) {
   const [laneMap, setLaneMap]       = useState({})
   const [employees, setEmployees]   = useState([])
   const [activeId, setActiveId]     = useState(null)
@@ -134,6 +134,10 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
     const active = Object.values(laneMap).filter(l => l === 'shift1' || l === 'shift2').length
     onLaborCount?.(active)
   }, [laneMap, onLaborCount])
+
+  useEffect(() => {
+    onRosterChange?.({ employees, laneMap })
+  }, [employees, laneMap, onRosterChange])
 
   const handleDragStart = useCallback(({ active }) => setActiveId(active.id), [])
 

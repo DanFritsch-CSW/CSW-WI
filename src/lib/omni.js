@@ -64,6 +64,14 @@ function scheduleToLane(workSchedule, startTime) {
   return 'shift1'
 }
 
+// Normalize B2E modified_start_time to "HH:MM" string, or null if invalid.
+function normalizeShiftStart(startTime) {
+  if (!startTime || startTime === '0' || startTime === 0) return null
+  const s = String(startTime)
+  const hour = parseInt(s.split(':')[0], 10)
+  return isNaN(hour) ? null : s
+}
+
 async function omniQuery(query) {
   const res = await fetch('/.netlify/functions/omni-query', {
     method: 'POST',
@@ -314,16 +322,20 @@ export async function fetchB2eRoster(facilityId) {
     .map(r => {
       const id    = String(r[`${ROSTER}.employee_id`])
       const sched = schedMap.get(id)
+      const schedRow = sched?.row
       return {
         id,
         name:         r[`${ROSTER}.employee_name`] || '',
         role:         null,
-        default_lane: sched
+        default_lane: schedRow
           ? scheduleToLane(
-              sched.row[`${SCHEDULE}.work_schedule`],
-              sched.row[`${SCHEDULE}.modified_start_time`],
+              schedRow[`${SCHEDULE}.work_schedule`],
+              schedRow[`${SCHEDULE}.modified_start_time`],
             )
           : 'shift1',
+        shift_start: schedRow
+          ? normalizeShiftStart(schedRow[`${SCHEDULE}.modified_start_time`])
+          : null,
         facility: facilityId,
       }
     })

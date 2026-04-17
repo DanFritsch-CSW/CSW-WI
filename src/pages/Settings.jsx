@@ -3,13 +3,15 @@ import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchFacilitySettings, upsertFacilitySettings } from '../lib/supabase.js'
 
 const FIELD_DEFS = [
-  { key: 'hours_per_appt', label: 'Hours / Appt',    min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
-  { key: 'break_pct',      label: 'Break %',          min: 0,   max: 50, step: 1,   hint: 'Capacity reduction per shift due to breaks & startup time' },
-  { key: 'shift1_hours',   label: '1st Shift Hours',  min: 1,   max: 16, step: 0.5, hint: 'Hours in a first shift' },
-  { key: 'shift2_hours',   label: '2nd Shift Hours',  min: 1,   max: 16, step: 0.5, hint: 'Hours in a second shift' },
+  { key: 'hours_per_appt', label: 'Hours / Appt',       min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
+  { key: 'break_pct',      label: 'Break %',             min: 0,   max: 50, step: 1,   hint: 'Capacity reduction per shift due to breaks & startup time' },
+  { key: 'shift1_start',   label: '1st Shift Start (hr)', min: 0,   max: 23, step: 1,   hint: 'Default start hour for 1st shift employees (0–23) when no B2E schedule is on file' },
+  { key: 'shift1_hours',   label: '1st Shift Hours',     min: 1,   max: 16, step: 0.5, hint: 'Duration of a first shift in hours' },
+  { key: 'shift2_start',   label: '2nd Shift Start (hr)', min: 0,   max: 23, step: 1,   hint: 'Default start hour for 2nd shift employees (0–23) when no B2E schedule is on file' },
+  { key: 'shift2_hours',   label: '2nd Shift Hours',     min: 1,   max: 16, step: 0.5, hint: 'Duration of a second shift in hours' },
 ]
 
-const DEFAULTS = { hours_per_appt: 1.5, break_pct: 10, shift1_hours: 8, shift2_hours: 8 }
+const DEFAULTS = { hours_per_appt: 1.5, break_pct: 10, shift1_start: 5, shift1_hours: 8, shift2_start: 13, shift2_hours: 8 }
 
 function FacilitySettingsCard({ facility }) {
   const [values, setValues]   = useState(DEFAULTS)
@@ -20,7 +22,9 @@ function FacilitySettingsCard({ facility }) {
       setValues({
         hours_per_appt: data.hours_per_appt ?? DEFAULTS.hours_per_appt,
         break_pct:      data.break_pct      ?? DEFAULTS.break_pct,
+        shift1_start:   data.shift1_start   ?? DEFAULTS.shift1_start,
         shift1_hours:   data.shift1_hours   ?? DEFAULTS.shift1_hours,
+        shift2_start:   data.shift2_start   ?? DEFAULTS.shift2_start,
         shift2_hours:   data.shift2_hours   ?? DEFAULTS.shift2_hours,
       })
     })

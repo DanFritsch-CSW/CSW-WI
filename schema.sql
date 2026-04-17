@@ -71,6 +71,18 @@ create trigger facility_settings_updated_at
 alter table roster_assignments
   add column if not exists is_temp boolean default false;
 
+-- ── Shift start time on employees (from B2E modified_start_time) ──
+alter table employees
+  add column if not exists shift_start text;
+
+-- ── Default shift start hours on facility_settings ───────────────
+-- Used as fallback when an employee has no shift_start from B2E
+alter table facility_settings
+  add column if not exists shift1_start numeric default 5;
+
+alter table facility_settings
+  add column if not exists shift2_start numeric default 13;
+
 -- ── Auto-update updated_at ───────────────────────────────────────
 create or replace function update_updated_at()
 returns trigger language plpgsql as $$

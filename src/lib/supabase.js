@@ -54,7 +54,7 @@ export async function deleteAssignment(facility, employeeId, planDate) {
   if (error) console.error('deleteAssignment:', error)
 }
 
-const SETTINGS_DEFAULTS = { hours_per_appt: 1.5, break_pct: 10, shift1_hours: 8, shift2_hours: 8 }
+const SETTINGS_DEFAULTS = { hours_per_appt: 1.5, break_pct: 10, shift1_hours: 8, shift2_hours: 8, shift1_start: 5, shift2_start: 13 }
 
 export async function fetchFacilitySettings(facilityId) {
   if (!supabase) return SETTINGS_DEFAULTS
