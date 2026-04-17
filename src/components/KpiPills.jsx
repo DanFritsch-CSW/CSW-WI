@@ -1,5 +1,5 @@
 export default function KpiPills({ data, color }) {
-  const fmtDelta = v => v != null ? (v >= 0 ? `+${v}` : `${v}`) : '--'
+  const fmtDelta = v => v != null ? (v >= 0 ? `+${parseFloat(v.toFixed(1))}` : `${parseFloat(v.toFixed(1))}`) : '--'
   const pills = [
     { label: 'Appointments', value: data.appts ?? '--', delta: null },
     { label: 'Inbound',      value: data.inb   ?? '--', delta: null },

@@ -6,7 +6,7 @@ function fmtHour(h) {
 }
 
 function r1(n) { return Math.round(n * 10) / 10 }
-function fmtDelta(v) { return v >= 0 ? `+${v}` : `${v}` }
+function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
 export default function HourlyTable({ hourlyData, estDrops = {}, color }) {
   if (!hourlyData?.length) return null
