@@ -22,9 +22,12 @@ const CSW_WAREHOUSE = {
   ec:  'CSW-Eau Claire',
 }
 
-// Reverse map for fetchNetworkKpis: Omni warehouse_name → facility id
+// Reverse maps: Omni warehouse_name → facility id
 const WAREHOUSE_TO_FAC = Object.fromEntries(
   Object.entries(LABOR_WAREHOUSE).map(([k, v]) => [v, k])
+)
+const CSW_WAREHOUSE_TO_FAC = Object.fromEntries(
+  Object.entries(CSW_WAREHOUSE).map(([k, v]) => [v, k])
 )
 
 const VIEW_H = 'labor_planning_app__hourly_labor_required_vs_available'
@@ -141,42 +144,63 @@ export async function fetchProjectData(facilityId, date) {
 
 /**
  * Network-level daily KPIs across all facilities.
- * Returns object keyed by facility id: { appts, inb, out, labor, util }
+ * Returns object keyed by facility id: { appts, inb, out, labor, util, delta }
+ * Labor data from VIEW_H; appointment totals from VIEW_P (more reliable aggregates).
  */
 export async function fetchNetworkKpis(date) {
-  const rows = await omniQuery({
-    modelId: MODEL_ID,
-    table: VIEW_H,
-    fields: [
-      `${VIEW_H}.warehouse_name`,
-      `${VIEW_H}.total_appointments_sum`,
-      `${VIEW_H}.inbound_count_sum`,
-      `${VIEW_H}.outbound_count_sum`,
-      `${VIEW_H}.labor_required_sum`,
-      `${VIEW_H}.adjusted_staffed_employee_sum`,
-    ],
-    filters: {
-      ...activityDateFilter(date, VIEW_H),
-    },
-    sorts: [{ column_name: `${VIEW_H}.warehouse_name`, sort_descending: false }],
-    limit: 100,
-  })
+  const [laborRows, apptRows] = await Promise.all([
+    omniQuery({
+      modelId: MODEL_ID,
+      table: VIEW_H,
+      fields: [
+        `${VIEW_H}.warehouse_name`,
+        `${VIEW_H}.labor_required_sum`,
+        `${VIEW_H}.adjusted_staffed_employee_sum`,
+      ],
+      filters: { ...activityDateFilter(date, VIEW_H) },
+      sorts: [{ column_name: `${VIEW_H}.warehouse_name`, sort_descending: false }],
+      limit: 100,
+    }),
+    omniQuery({
+      modelId: MODEL_ID,
+      table: VIEW_P,
+      fields: [
+        `${VIEW_P}.warehouse_name`,
+        `${VIEW_P}.total_appointments_sum`,
+        `${VIEW_P}.total_inbounds_sum`,
+        `${VIEW_P}.total_outbounds_sum`,
+      ],
+      filters: { ...activityDateFilter(date, VIEW_P) },
+      sorts: [{ column_name: `${VIEW_P}.warehouse_name`, sort_descending: false }],
+      limit: 100,
+    }),
+  ])
 
   const result = {}
-  for (const r of rows) {
+
+  for (const r of laborRows) {
     const wh = r[`${VIEW_H}.warehouse_name`]
     const facId = WAREHOUSE_TO_FAC[wh]
     if (!facId) continue
     const labor = Number(r[`${VIEW_H}.labor_required_sum`]) || 0
     const avail = Number(r[`${VIEW_H}.adjusted_staffed_employee_sum`]) || 0
     result[facId] = {
-      appts: Number(r[`${VIEW_H}.total_appointments_sum`]) || 0,
-      inb:   Number(r[`${VIEW_H}.inbound_count_sum`]) || 0,
-      out:   Number(r[`${VIEW_H}.outbound_count_sum`]) || 0,
+      appts: 0, inb: 0, out: 0,
       labor,
       util:  labor > 0 ? Math.round(avail / labor * 100) : 0,
       delta: Math.round((avail - labor) * 10) / 10,
     }
   }
+
+  for (const r of apptRows) {
+    const wh = r[`${VIEW_P}.warehouse_name`]
+    const facId = CSW_WAREHOUSE_TO_FAC[wh]
+    if (!facId) continue
+    if (!result[facId]) result[facId] = { labor: 0, util: 0, delta: 0 }
+    result[facId].appts = Number(r[`${VIEW_P}.total_appointments_sum`]) || 0
+    result[facId].inb   = Number(r[`${VIEW_P}.total_inbounds_sum`]) || 0
+    result[facId].out   = Number(r[`${VIEW_P}.total_outbounds_sum`]) || 0
+  }
+
   return result
 }
