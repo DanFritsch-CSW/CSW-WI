@@ -1,14 +1,16 @@
-import { Bar } from 'react-chartjs-2'
+import { Chart } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
   CategoryScale, LinearScale,
-  BarElement, LineElement, PointElement,
+  BarController, BarElement,
+  LineController, LineElement, PointElement,
   Tooltip, Legend, Filler,
 } from 'chart.js'
 
 ChartJS.register(
   CategoryScale, LinearScale,
-  BarElement, LineElement, PointElement,
+  BarController, BarElement,
+  LineController, LineElement, PointElement,
   Tooltip, Legend, Filler
 )
 
@@ -105,7 +107,7 @@ export default function HourlyChart({ hourlyData, color }) {
         </div>
       </div>
       <div style={{ height: 200 }}>
-        <Bar data={data} options={options} />
+        <Chart type="bar" data={data} options={options} />
       </div>
     </div>
   )
