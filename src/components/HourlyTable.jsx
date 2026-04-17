@@ -59,7 +59,7 @@ export default function HourlyTable({ hourlyData, color }) {
               <td>{r.out}</td>
               <td style={{ color }}>{r.appts}</td>
               <td>{r.req}</td>
-              <td>{r.avail}</td>
+              <td>{r1(r.avail)}</td>
               <td className={r.final < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.final)}</td>
               <td className={r.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.cumul)}</td>
             </tr>

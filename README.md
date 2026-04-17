@@ -15,20 +15,22 @@ Internal warehouse operations dashboard for Central Storage & Warehouse — a 3P
 | Charts | Chart.js + react-chartjs-2 |
 | Drag & Drop | @dnd-kit/core + @dnd-kit/sortable |
 | Database | Supabase (roster persistence) |
-| Data | Omni Analytics API (csw.omniapp.co) |
+| Analytics | Omni Analytics API (`csw.omniapp.co`) via Netlify proxy |
 | Hosting | Netlify (auto-deploy from `main`) |
 
 ---
 
 ## Facilities
 
-| ID | Code | Name | Color |
-|---|---|---|---|
-| `cal` | CAL | Caledonia | `#e07b4d` |
-| `mad` | MAD | Madison | `#4d9de0` |
-| `ken` | KEN | Kenosha | `#3dba7e` |
-| `wr` | WR | Wisconsin Rapids | `#d4b84a` |
-| `ec` | EC | Eau Claire | `#c084fc` |
+| ID | Code | Display Name | VIEW_H warehouse | VIEW_P warehouse | Color |
+|---|---|---|---|---|---|
+| `cal` | CAL | Caledonia | `franksville` | `CSW-Franksville` | `#e07b4d` |
+| `mad` | MAD | Madison | `madison` | `CSW-Madison` | `#4d9de0` |
+| `ken` | KEN | Kenosha | `kenosha` | `CSW-Kenosha` | `#3dba7e` |
+| `wr` | WR | Wisconsin Rapids | `wisconsin rapids` | `CSW-Wisconsin Rapids` | `#d4b84a` |
+| `ec` | EC | Eau Claire | `eau claire` | `CSW-Eau Claire` | `#c084fc` |
+
+> **Note:** Caledonia (CAL) is stored as "Franksville" in both Omni tables.
 
 ---
 
@@ -42,14 +44,64 @@ Internal warehouse operations dashboard for Central Storage & Warehouse — a 3P
 | `/settings` | Settings | Stub |
 
 ### Labor Planning (`/`)
-- **ALL tab** — network overview with a grouped inbound/outbound bar chart and per-facility scorecards
-- **Facility tabs** — per-facility view with:
-  - KPI pills (appointments, inbound, outbound, labor available, utilization)
-  - Insight chips (auto-generated status alerts)
-  - Hourly chart (appointments bar + required/available labor lines)
-  - Delta chart (labor surplus/deficit by hour)
-  - Project throughput list
-  - Shift roster board (drag-and-drop)
+
+**ALL tab** — network overview with a grouped inbound/outbound bar chart and per-facility scorecards showing Appts, Inbound, Outbound, Labor, and Utilization.
+
+**Facility tabs (CAL / MAD / KEN / WR / EC):**
+- KPI pills: Appointments, Inbound, Outbound, Labor Avail, Utilization, Daily +/-
+- Insight chips: auto-generated status alerts based on KPIs
+- Hourly chart (appointments bar + required/available labor lines)
+- Delta chart (labor surplus/deficit by hour)
+- **Hourly Breakdown table** — 24-hour shift view matching Omni dashboard (Hour, Drops, Inb, Out, Appts, Labor Req, Labor Avail, Final +/-, Cumul +/-)
+- Project throughput list (Inb / Out / Total per project)
+- Shift roster board (drag-and-drop)
+
+---
+
+## Omni Analytics Integration
+
+**Proxy:** All requests go through `/.netlify/functions/omni-query` to avoid CORS.
+**Auth:** `OMNI_API_KEY` env var set in Netlify dashboard (Bearer token).
+**Model ID:** `79a98af2-a904-4b5d-b25f-7f6a2c7ef467`
+
+### Omni Tables
+
+| Constant | Table name | Used for |
+|---|---|---|
+| `VIEW_H` | `labor_planning_app__hourly_labor_required_vs_available` | Hourly labor + appointment counts, util/delta KPIs |
+| `VIEW_P` | `labor_planning_app__hourly_inbound_outbound_drops_summary` | Project-level appointment totals |
+
+### API Functions (`src/lib/omni.js`)
+
+| Function | Source | Returns |
+|---|---|---|
+| `fetchHourlyData(facility, date)` | VIEW_H | `[{ h, req, avail, drops, inb, out, appts }]` — 24 rows, one per shift hour |
+| `fetchProjectData(facility, date)` | VIEW_P | `[{ name, inb, out, tot }]` — one row per project |
+| `fetchNetworkKpis(date)` | VIEW_H + VIEW_P (parallel) | `{ [facilityId]: { appts, inb, out, labor, util, delta } }` |
+
+### Key Field Names
+
+| Display name (Omni) | API field |
+|---|---|
+| Hour Of Day Timestamp | `hour_of_day_timestamp` |
+| Labor Required | `labor_required` |
+| Labor Available (AW Update) | `labor_available_aw_update_` |
+| Inbound Count | `inbound_count` |
+| Outbound Count | `outbound_count` |
+| Drops | `drops` |
+| Shift Timestamp (5am-5am) | `labor_shift_timestamp` ← use this for VIEW_H date filter |
+| Activity Date | `activity_date` ← use this for VIEW_P date filter |
+
+> **Columns F, M, N in the Omni workbook are formulas** (Total Appts = Drops+Inb+Out, Final +/- = Avail−Req, Cumulative = running sum). We compute these client-side — do not fetch them as API fields.
+
+### Netlify Function (`netlify/functions/omni-query.cjs`)
+
+- Receives `{ query }` POST body from the frontend
+- Calls `POST https://csw.omniapp.co/api/v1/query/run` with Bearer auth
+- Parses NDJSON response, finds the `COMPLETE` job line
+- Decodes base64 Apache Arrow IPC binary via `tableFromIPC`
+- Returns `{ rows: [...] }` as plain JSON
+- Arrow Decimal128 values come back as quoted strings (`"\"32\""`) — stripped in `arrowToRows`
 
 ---
 
@@ -66,15 +118,14 @@ Built with `@dnd-kit`. Four lanes per facility:
 
 - Dragging a tile updates local state immediately (optimistic)
 - On drop, upserts to `roster_assignments` in Supabase
-- On page load: fetches today's assignments from Supabase; falls back to `employees.default_lane`
-- Labor Available KPI = count of employees in `shift1` + `shift2`
+- On load: fetches assignments from Supabase; falls back to `employees.default_lane`
+- **Labor Avail KPI** = count of employees in `shift1` + `shift2`
 
 ---
 
 ## Supabase Schema
 
 ```sql
--- Employees master list
 create table employees (
   id           text primary key,
   facility     text not null,
@@ -83,7 +134,6 @@ create table employees (
   default_lane text
 );
 
--- Daily shift assignments (upserted on drag-drop)
 create table roster_assignments (
   id            uuid primary key default gen_random_uuid(),
   facility      text not null,
@@ -99,43 +149,24 @@ create table roster_assignments (
 
 ---
 
-## Omni Analytics Integration
-
-Base URL: `https://csw.omniapp.co`
-Auth: `x-api-key` header
-
-All calls are currently **stubbed** in `src/lib/omni.js`. Three functions ready for real query IDs:
-
-| Function | Returns | Status |
-|---|---|---|
-| `fetchHourlyData(facility, date)` | `[{ h, req, avail, appts, inb, out }]` | Stubbed |
-| `fetchProjectData(facility, date)` | `[{ name, inb, out, tot }]` | Stubbed |
-| `fetchNetworkKpis(date)` | `{ [facilityId]: { appts, inb, out, labor, util } }` | Stubbed |
-
----
-
 ## Local Development
 
 ```bash
-# 1. Install dependencies
 npm install
-
-# 2. Copy env file and fill in credentials
-cp .env.example .env
-
-# 3. Start dev server
 npm run dev
 ```
 
 ### Environment Variables
 
 ```
-VITE_SUPABASE_URL=       # Your Supabase project URL
-VITE_SUPABASE_ANON_KEY=  # Your Supabase anon/public key
-VITE_OMNI_API_KEY=       # Omni Analytics API key
+VITE_SUPABASE_URL=        # Supabase project URL
+VITE_SUPABASE_ANON_KEY=   # Supabase anon/public key
 ```
 
-The app runs fully without credentials — Supabase calls no-op gracefully and all data falls back to stubs.
+Netlify function environment (set in Netlify dashboard, not in .env):
+```
+OMNI_API_KEY=             # Omni Analytics Bearer token
+```
 
 ---
 
@@ -144,26 +175,32 @@ The app runs fully without credentials — Supabase calls no-op gracefully and a
 ```
 src/
 ├── lib/
-│   ├── constants.js      # Facility config, lane config
-│   ├── supabase.js       # Supabase client + roster helpers
-│   └── omni.js           # Omni API helpers (stubbed)
+│   ├── constants.js        # Facility config, lane config
+│   ├── supabase.js         # Supabase client + roster helpers
+│   └── omni.js             # Omni API helpers (live)
 ├── components/
-│   ├── TopNav.jsx        # Sticky nav + utility bar
-│   ├── KpiPills.jsx      # Metric pill row
-│   ├── InsightChips.jsx  # Auto status chips
-│   ├── HourlyChart.jsx   # Mixed bar+line hourly chart
-│   ├── DeltaChart.jsx    # Labor delta bar chart
-│   ├── CompareChart.jsx  # Network grouped bar chart
-│   ├── ProjectList.jsx   # Throughput table
-│   ├── RosterBoard.jsx   # dnd-kit 4-lane board
-│   └── EmployeeTile.jsx  # Draggable employee tile
+│   ├── TopNav.jsx          # Sticky nav + utility bar
+│   ├── KpiPills.jsx        # Metric pill row (Appts/Inb/Out/Labor/Util/Daily+/-)
+│   ├── InsightChips.jsx    # Auto status chips
+│   ├── HourlyChart.jsx     # Mixed bar+line hourly chart
+│   ├── DeltaChart.jsx      # Labor delta bar chart
+│   ├── HourlyTable.jsx     # 24-row hourly breakdown table
+│   ├── CompareChart.jsx    # Network grouped bar chart
+│   ├── ProjectList.jsx     # Project throughput table
+│   ├── RosterBoard.jsx     # dnd-kit 4-lane board
+│   └── EmployeeTile.jsx    # Draggable employee tile
 └── pages/
-    ├── LaborPlanning.jsx # Main page (facility tabs + day picker)
-    ├── FacilityPanel.jsx # Per-facility view
-    ├── AllFacilities.jsx # Network overview
-    ├── OrderCreator.jsx  # Stub
-    ├── Analytics.jsx     # Stub
-    └── Settings.jsx      # Stub
+    ├── LaborPlanning.jsx   # Main page (facility tabs + day picker)
+    ├── FacilityPanel.jsx   # Per-facility view
+    ├── AllFacilities.jsx   # Network overview
+    ├── OrderCreator.jsx    # Stub
+    ├── Analytics.jsx       # Stub
+    └── Settings.jsx        # Stub
+
+netlify/
+└── functions/
+    ├── omni-query.cjs      # Omni API proxy (Arrow IPC → JSON)
+    └── package.json        # type: commonjs, apache-arrow dep
 ```
 
 ---
@@ -177,6 +214,10 @@ Netlify auto-deploys from `main`. Build config in `netlify.toml`:
   command = "npm run build"
   publish = "dist"
 
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
 [[redirects]]
   from = "/*"
   to   = "/index.html"
@@ -185,11 +226,10 @@ Netlify auto-deploys from `main`. Build config in `netlify.toml`:
 
 ---
 
-## Outstanding Integration Steps
+## Outstanding / Planned Work
 
-1. **Supabase credentials** — add `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` to Netlify env vars
-2. **Employee roster seed** — seed the `employees` table per facility (data to be provided)
-3. **Omni query IDs** — swap stubs in `src/lib/omni.js` with real query IDs once provided
-4. **OrderCreator page** — build out order management UI
-5. **Analytics page** — historical performance and trend views
-6. **Settings page** — facility config and user preferences
+- **Hourly Breakdown** — current table is a baseline; full revamp planned
+- **OrderCreator page** — order management UI
+- **Analytics page** — historical performance and trend views
+- **Settings page** — facility config and user preferences
+- **Supabase employee seed** — real employee data per facility (currently using placeholder names)
