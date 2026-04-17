@@ -254,53 +254,74 @@ export async function fetchNetworkKpis(date) {
 
 /**
  * Baseline employee roster for a facility from B2E (Omni → silver schema).
- * Deduplicates by employee_id keeping the row with the latest ingestion_ts.
+ * Two separate queries (ROSTER + SCHEDULE) joined client-side to avoid
+ * Omni's implicit INNER JOIN dropping employees without recent schedule entries.
+ * Exclusions applied client-side (Omni is_negative filter unreliable).
  * Returns array of { id, name, role, default_lane, facility }
  */
 export async function fetchB2eRoster(facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
-  const rows = await omniQuery({
-    modelId: B2E_MODEL_ID,
-    table: ROSTER,
-    fields: [
-      `${ROSTER}.employee_id`,
-      `${ROSTER}.employee_name`,
-      `${SCHEDULE}.modified_start_time`,
-      `${SCHEDULE}.work_schedule`,
-      `${SCHEDULE}.ingestion_ts`,
-    ],
-    filters: {
-      [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      [`${ROSTER}.default_job_code`]: { kind: 'EQUALS', type: 'string', values: ['205'] },
-      [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-      [`${ROSTER}.employee_id`]: {
-        kind: 'EQUALS', type: 'number',
-        values: B2E_EXCLUDED_IDS.map(String),
-        is_negative: true,
+  const [rosterRows, scheduleRows] = await Promise.all([
+    omniQuery({
+      modelId: B2E_MODEL_ID,
+      table: ROSTER,
+      fields: [
+        `${ROSTER}.employee_id`,
+        `${ROSTER}.employee_name`,
+      ],
+      filters: {
+        [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+        [`${ROSTER}.default_job_code`]: { kind: 'EQUALS', type: 'string', values: ['205'] },
+        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       },
-    },
-    sorts: [{ column_name: `${ROSTER}.employee_name`, sort_descending: false }],
-    limit: 1000,
-  })
+      sorts: [{ column_name: `${ROSTER}.employee_name`, sort_descending: false }],
+      limit: 500,
+    }),
+    omniQuery({
+      modelId: B2E_MODEL_ID,
+      table: SCHEDULE,
+      fields: [
+        `${SCHEDULE}.employee_id`,
+        `${SCHEDULE}.modified_start_time`,
+        `${SCHEDULE}.work_schedule`,
+        `${SCHEDULE}.ingestion_ts`,
+      ],
+      filters: {
+        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+      },
+      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
+      limit: 2000,
+    }),
+  ])
 
-  // Keep most-recent ingestion_ts row per employee
-  const best = new Map()
-  for (const r of rows) {
-    const id = String(r[`${ROSTER}.employee_id`])
+  // Build schedule map: employee_id → most-recent row
+  const schedMap = new Map()
+  for (const r of scheduleRows) {
+    const id = String(r[`${SCHEDULE}.employee_id`])
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
-    if (!best.has(id) || ts > best.get(id).ts) best.set(id, { row: r, ts })
+    if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
-  return [...best.values()].map(({ row: r }) => ({
-    id:           String(r[`${ROSTER}.employee_id`]),
-    name:         r[`${ROSTER}.employee_name`] || '',
-    role:         null,
-    default_lane: scheduleToLane(
-      r[`${SCHEDULE}.work_schedule`],
-      r[`${SCHEDULE}.modified_start_time`],
-    ),
-    facility: facilityId,
-  }))
+  const excluded = new Set(B2E_EXCLUDED_IDS.map(String))
+
+  return rosterRows
+    .filter(r => !excluded.has(String(r[`${ROSTER}.employee_id`])))
+    .map(r => {
+      const id    = String(r[`${ROSTER}.employee_id`])
+      const sched = schedMap.get(id)
+      return {
+        id,
+        name:         r[`${ROSTER}.employee_name`] || '',
+        role:         null,
+        default_lane: sched
+          ? scheduleToLane(
+              sched.row[`${SCHEDULE}.work_schedule`],
+              sched.row[`${SCHEDULE}.modified_start_time`],
+            )
+          : 'shift1',
+        facility: facilityId,
+      }
+    })
 }
