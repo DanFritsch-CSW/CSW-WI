@@ -81,26 +81,35 @@ export async function fetchHourlyData(facilityId, date) {
       `${VIEW_H}.inbound_count`,
       `${VIEW_H}.outbound_count`,
       `${VIEW_H}.drops`,
+      `${VIEW_H}.raw_staffed_employee`,
+      `${VIEW_H}.employees_on_break`,
+      `${VIEW_H}.adjusted_staffed_employee`,
+      `${VIEW_H}.warehouse_labor_adjustment`,
     ],
     filters: {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       ...activityDateFilter(date, VIEW_H),
     },
-    sorts: [{ column_name: `${VIEW_H}.hour_of_day`, sort_descending: false }],
+    sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
     limit: 100,
   })
 
   return rows.map(r => {
-    const inb = Number(r[`${VIEW_H}.inbound_count`]) || 0
-    const out = Number(r[`${VIEW_H}.outbound_count`]) || 0
+    const inb   = Number(r[`${VIEW_H}.inbound_count`]) || 0
+    const out   = Number(r[`${VIEW_H}.outbound_count`]) || 0
     const drops = Number(r[`${VIEW_H}.drops`]) || 0
     return {
-      h:     Number(r[`${VIEW_H}.hour_of_day`]) || 0,
-      req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
-      avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
+      h:        Number(r[`${VIEW_H}.hour_of_day`]) || 0,
+      req:      Number(r[`${VIEW_H}.labor_required`]) || 0,
+      avail:    Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
+      drops,
       inb,
       out,
-      appts: inb + drops + out,
+      appts:    inb + drops + out,
+      rawStaff: Number(r[`${VIEW_H}.raw_staffed_employee`]) || 0,
+      onBreak:  Number(r[`${VIEW_H}.employees_on_break`]) || 0,
+      adjStaff: Number(r[`${VIEW_H}.adjusted_staffed_employee`]) || 0,
+      whAdj:    Number(r[`${VIEW_H}.warehouse_labor_adjustment`]) || 0,
     }
   })
 }

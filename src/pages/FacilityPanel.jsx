@@ -3,6 +3,7 @@ import KpiPills from '../components/KpiPills.jsx'
 import InsightChips from '../components/InsightChips.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
 import DeltaChart from '../components/DeltaChart.jsx'
+import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import { fetchHourlyData, fetchProjectData } from '../lib/omni.js'
@@ -38,6 +39,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         <HourlyChart hourlyData={hourly} color={facility.color} />
         <DeltaChart  hourlyData={hourly} />
       </div>
+      <div className="section-label" style={{ marginTop: 8 }}>Hourly Breakdown</div>
+      <HourlyTable hourlyData={hourly} color={facility.color} />
       <div className="section-label" style={{ marginTop: 8 }}>Projects</div>
       <ProjectList projects={projects} color={facility.color} />
       <RosterBoard

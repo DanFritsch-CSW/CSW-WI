@@ -476,6 +476,58 @@ input, select { font: inherit; color: inherit; }
   border-radius: 50%;
 }
 
+/* ─── Hourly Table ──────────────────────────────────────────────── */
+.hourly-table-wrap {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+.hourly-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hourly-table thead tr {
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+}
+.hourly-table th {
+  padding: 5px 10px;
+  text-align: right;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.hourly-table th:first-child { text-align: left; }
+.hourly-table td {
+  padding: 4px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.hourly-table td:first-child { text-align: left; color: var(--text-primary); }
+.hourly-table tbody tr:last-child td { border-bottom: none; }
+.hourly-table tbody tr:hover { background: var(--bg3); }
+.hourly-table tr.ht-deficit { background: rgba(224, 90, 90, 0.07); }
+.hourly-table tr.ht-deficit:hover { background: rgba(224, 90, 90, 0.12); }
+.hourly-table .ht-hour { font-weight: 600; color: var(--text-primary); }
+.hourly-table .ht-neg { color: #e05a5a; }
+.hourly-table .ht-pos { color: #3dba7e; }
+.hourly-table tfoot tr.ht-total td {
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+  font-weight: 700;
+  color: var(--text-primary);
+  background: var(--bg1);
+}
+
 /* ─── Project List ──────────────────────────────────────────────── */
 .project-list {
   background: var(--bg2);
