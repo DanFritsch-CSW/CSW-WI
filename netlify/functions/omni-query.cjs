@@ -1,6 +1,4 @@
-import { tableFromIPC } from 'apache-arrow'
-
-const OMNI_BASE = 'https://csw.omniapp.co'
+'use strict'
 
 function arrowToRows(table) {
   const rows = []
@@ -17,7 +15,7 @@ function arrowToRows(table) {
   return rows
 }
 
-export const handler = async (event) => {
+exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' }
   }
@@ -42,10 +40,10 @@ export const handler = async (event) => {
     }
   }
 
-  const omniRes = await fetch(`${OMNI_BASE}/api/v1/query/run`, {
+  const omniRes = await fetch('https://csw.omniapp.co/api/v1/query/run', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${API_KEY}`,
+      Authorization: `Bearer ${API_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ query }),
@@ -68,6 +66,7 @@ export const handler = async (event) => {
     }
   }
 
+  const { tableFromIPC } = await import('apache-arrow')
   const buf = Buffer.from(completeJob.result, 'base64')
   const table = tableFromIPC(buf)
   const rows = arrowToRows(table)
