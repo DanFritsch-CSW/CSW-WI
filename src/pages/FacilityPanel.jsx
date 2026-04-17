@@ -43,12 +43,22 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings)
   }, [rosterState, settings])
 
+  // Override appts per hour using est drops (inb + est_drops + out).
+  // Falls back to 0 est drops for hours without an entry.
+  const rawWithEst = useMemo(() => {
+    if (!rawHourly.length) return rawHourly
+    return rawHourly.map(row => {
+      const est = estDrops[row.h] ?? 0
+      return { ...row, appts: row.inb + est + row.out }
+    })
+  }, [rawHourly, estDrops])
+
   // Apply settings (req from appts, break% on avail), then overlay roster-based avail.
   const hourly = useMemo(() => {
-    const base = settingsLoading ? rawHourly : applySettings(rawHourly, settings)
+    const base = settingsLoading ? rawWithEst : applySettings(rawWithEst, settings)
     if (!rosterAvail) return base
     return base.map(row => ({ ...row, avail: rosterAvail[row.h] ?? 0 }))
-  }, [rawHourly, settings, settingsLoading, rosterAvail])
+  }, [rawWithEst, settings, settingsLoading, rosterAvail])
 
   const { util, delta } = computeDailyKpis(hourly)
 
