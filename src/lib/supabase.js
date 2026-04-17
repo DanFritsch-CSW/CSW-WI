@@ -33,3 +33,12 @@ export async function fetchEmployees(facility) {
   if (error) { console.error('fetchEmployees:', error); return [] }
   return data ?? []
 }
+
+export async function upsertEmployees(employees) {
+  if (!supabase) return 'Supabase not configured'
+  const { error } = await supabase
+    .from('employees')
+    .upsert(employees, { onConflict: 'id' })
+  if (error) { console.error('upsertEmployees:', error); return error.message }
+  return null
+}

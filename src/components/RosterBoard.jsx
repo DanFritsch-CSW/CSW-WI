@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   DndContext,
   closestCenter,
@@ -14,7 +14,8 @@ import {
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import { LANES } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, fetchEmployees } from '../lib/supabase.js'
+import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees } from '../lib/supabase.js'
+import { fetchB2eRoster } from '../lib/omni.js'
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10)
@@ -58,6 +59,8 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
   const [laneMap, setLaneMap] = useState({})  // { [employeeId]: laneId }
   const [employees, setEmployees] = useState([])
   const [activeId, setActiveId] = useState(null)
+  const [syncState, setSyncState] = useState(null) // null | 'loading' | 'ok' | string(error)
+  const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -76,8 +79,24 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
       assignments.forEach(a => { map[a.employee_id] = a.lane })
       setLaneMap(map)
     }
+    loadRef.current = load
     load()
   }, [facility, planDate])
+
+  const handleB2eSync = useCallback(async () => {
+    setSyncState('loading')
+    try {
+      const b2eEmployees = await fetchB2eRoster(facility)
+      if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
+      const err = await upsertEmployees(b2eEmployees)
+      if (err) { setSyncState(err); return }
+      await loadRef.current?.()
+      setSyncState('ok')
+      setTimeout(() => setSyncState(null), 3000)
+    } catch (e) {
+      setSyncState(e.message)
+    }
+  }, [facility])
 
   // Report labor count upward whenever laneMap changes
   useEffect(() => {
@@ -139,6 +158,17 @@ export default function RosterBoard({ facility, planDate, onLaborCount }) {
           <span className="roster-stat"><strong>{activeCount}</strong> active</span>
           <span className="roster-stat"><strong>{ptoCount}</strong> PTO</span>
           <span className="roster-stat"><strong>{callinCount}</strong> call-in</span>
+          <button
+            className="b2e-sync-btn"
+            onClick={handleB2eSync}
+            disabled={syncState === 'loading'}
+            title="Pull latest employee roster from B2E via Omni"
+          >
+            {syncState === 'loading' ? 'Syncing…' : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
+          </button>
+          {syncState && syncState !== 'loading' && syncState !== 'ok' && (
+            <span className="b2e-sync-err">{syncState}</span>
+          )}
         </div>
       </div>
       <DndContext
