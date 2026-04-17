@@ -488,7 +488,7 @@ input, select { font: inherit; color: inherit; }
 .project-list-header {
   display: grid;
   grid-template-columns: 1fr 60px 60px 70px;
-  padding: 8px 16px;
+  padding: 5px 12px;
   font-family: var(--font-mono);
   font-size: 9px;
   color: var(--text-dim);
@@ -502,7 +502,7 @@ input, select { font: inherit; color: inherit; }
   display: grid;
   grid-template-columns: 1fr 60px 60px 70px;
   align-items: center;
-  padding: 10px 16px;
+  padding: 5px 12px;
   border-bottom: 1px solid var(--border-subtle);
   transition: background 0.1s;
 }
@@ -511,13 +511,13 @@ input, select { font: inherit; color: inherit; }
 .project-row:hover { background: var(--bg3); }
 
 .project-name {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .project-num {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11px;
   text-align: right;
   color: var(--text-secondary);
 }
@@ -525,12 +525,12 @@ input, select { font: inherit; color: inherit; }
 .project-bar-wrap {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .project-bar {
-  width: 48px;
-  height: 3px;
+  width: 32px;
+  height: 2px;
   background: var(--bg4);
   border-radius: 2px;
   overflow: hidden;
