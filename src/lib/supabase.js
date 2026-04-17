@@ -74,3 +74,30 @@ export async function upsertFacilitySettings(facilityId, values) {
     .upsert({ facility: facilityId, ...values }, { onConflict: 'facility' })
   if (error) console.error('upsertFacilitySettings:', error)
 }
+
+// Returns { [hour]: est_drops } for the given facility + date
+export async function fetchEstDrops(facilityId, planDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('hourly_drops_forecast')
+    .select('hour, est_drops')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (error || !data) return {}
+  return Object.fromEntries(data.map(r => [r.hour, r.est_drops]))
+}
+
+// hourlyValues: [{ h: number, est: number }] — one entry per shift hour
+export async function upsertEstDrops(facilityId, planDate, hourlyValues) {
+  if (!supabase) return
+  const rows = hourlyValues.map(({ h, est }) => ({
+    facility:  facilityId,
+    plan_date: planDate,
+    hour:      h,
+    est_drops: est ?? 0,
+  }))
+  const { error } = await supabase
+    .from('hourly_drops_forecast')
+    .upsert(rows, { onConflict: 'facility,plan_date,hour' })
+  if (error) console.error('upsertEstDrops:', error)
+}

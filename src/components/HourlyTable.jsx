@@ -8,7 +8,7 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { return v >= 0 ? `+${v}` : `${v}` }
 
-export default function HourlyTable({ hourlyData, color }) {
+export default function HourlyTable({ hourlyData, estDrops = {}, color }) {
   if (!hourlyData?.length) return null
 
   const sorted = [...hourlyData].sort((a, b) => {
@@ -21,10 +21,13 @@ export default function HourlyTable({ hourlyData, color }) {
   const rows = sorted.map(r => {
     const final = r1(r.avail - r.req)
     cumul = r1(cumul + final)
-    return { ...r, final, cumul }
+    return { ...r, final, cumul, est: estDrops[r.h] ?? null }
   })
 
+  const hasEst = rows.some(r => r.est !== null)
+
   const tot = {
+    est:   hasEst ? rows.reduce((s, r) => s + (r.est ?? 0), 0) : null,
     drops: rows.reduce((s, r) => s + r.drops, 0),
     inb:   rows.reduce((s, r) => s + r.inb,   0),
     out:   rows.reduce((s, r) => s + r.out,   0),
@@ -40,6 +43,7 @@ export default function HourlyTable({ hourlyData, color }) {
         <thead>
           <tr>
             <th>Hour</th>
+            {hasEst && <th className="ht-est-col">EST Drops</th>}
             <th>Drops</th>
             <th>Inb</th>
             <th>Out</th>
@@ -54,6 +58,11 @@ export default function HourlyTable({ hourlyData, color }) {
           {rows.map((r, i) => (
             <tr key={i} className={r.final < 0 ? 'ht-deficit' : ''}>
               <td className="ht-hour">{fmtHour(r.h)}</td>
+              {hasEst && (
+                <td className="ht-est-col">
+                  {r.est !== null ? r.est : <span className="ht-est-empty">—</span>}
+                </td>
+              )}
               <td>{r.drops}</td>
               <td>{r.inb}</td>
               <td>{r.out}</td>
@@ -68,6 +77,7 @@ export default function HourlyTable({ hourlyData, color }) {
         <tfoot>
           <tr className="ht-total">
             <td>Total</td>
+            {hasEst && <td className="ht-est-col">{tot.est}</td>}
             <td>{tot.drops}</td>
             <td>{tot.inb}</td>
             <td>{tot.out}</td>

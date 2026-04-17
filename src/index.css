@@ -1148,6 +1148,92 @@ input, select { font: inherit; color: inherit; }
 .settings-save-btn:hover:not(:disabled) { background: var(--brand-light); }
 .settings-save-btn:disabled { opacity: 0.5; cursor: default; }
 
+/* ─── Hourly Table — EST Drops column ──────────────────────────── */
+.ht-est-col {
+  color: var(--brand) !important;
+}
+.ht-est-empty {
+  color: var(--text-dim);
+}
+
+/* ─── Est Drops Editor ──────────────────────────────────────────── */
+.est-drops-editor {
+  background: var(--bg2);
+  border: 1px solid var(--bg4);
+  border-radius: var(--r-lg);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 860px;
+}
+
+.est-drops-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.est-drops-select,
+.est-drops-date {
+  padding: 5px 10px;
+  border-radius: var(--r-md);
+  background: var(--bg3);
+  border: 1px solid var(--bg5);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+  color-scheme: dark;
+}
+
+.est-drops-select:focus,
+.est-drops-date:focus {
+  border-color: var(--brand-dim);
+}
+
+.est-drops-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+
+.est-drops-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.est-drops-hour {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.est-drops-input {
+  width: 100%;
+  padding: 5px 6px;
+  background: var(--bg3);
+  border: 1px solid var(--bg5);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--brand);
+  text-align: center;
+  outline: none;
+  color-scheme: dark;
+}
+
+.est-drops-input:focus {
+  border-color: var(--brand-dim);
+  background: var(--bg4);
+}
+
 /* ─── Scrollbar ─────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg0); }
