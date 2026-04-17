@@ -9,14 +9,18 @@ import RosterBoard from '../components/RosterBoard.jsx'
 import { fetchHourlyData, fetchProjectData } from '../lib/omni.js'
 
 export default function FacilityPanel({ facility, planDate, networkKpi }) {
-  const [hourly, setHourly]     = useState([])
-  const [projects, setProjects] = useState([])
+  const [hourly, setHourly]       = useState([])
+  const [hourlyErr, setHourlyErr] = useState(null)
+  const [projects, setProjects]   = useState([])
   const [laborCount, setLaborCount] = useState(0)
 
   useEffect(() => {
     setHourly([])
+    setHourlyErr(null)
     setProjects([])
-    fetchHourlyData(facility.id, planDate).then(setHourly)
+    fetchHourlyData(facility.id, planDate)
+      .then(setHourly)
+      .catch(e => setHourlyErr(e.message))
     fetchProjectData(facility.id, planDate).then(setProjects)
   }, [facility.id, planDate])
 
@@ -40,7 +44,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         <DeltaChart  hourlyData={hourly} />
       </div>
       <div className="section-label" style={{ marginTop: 8 }}>Hourly Breakdown</div>
-      <HourlyTable hourlyData={hourly} color={facility.color} />
+      {hourlyErr
+        ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
+        : <HourlyTable hourlyData={hourly} color={facility.color} />
+      }
       <div className="section-label" style={{ marginTop: 8 }}>Projects</div>
       <ProjectList projects={projects} color={facility.color} />
       <RosterBoard
