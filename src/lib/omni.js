@@ -1,6 +1,6 @@
 // Omni Analytics API helpers
 // Base URL: https://csw.omniapp.co
-// Auth header: x-api-key: VITE_OMNI_API_KEY
+// Auth header: Authorization: Bearer <token>
 // All calls are stubbed until real query IDs are provided.
 
 const BASE_URL = 'https://csw.omniapp.co'
@@ -8,7 +8,7 @@ const API_KEY  = import.meta.env.VITE_OMNI_API_KEY || ''
 
 async function omniGet(path) {
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'x-api-key': API_KEY },
+    headers: { 'Authorization': `Bearer ${API_KEY}` },
   })
   if (!res.ok) throw new Error(`Omni ${path} → ${res.status}`)
   return res.json()
