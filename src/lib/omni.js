@@ -75,7 +75,7 @@ export async function fetchHourlyData(facilityId, date) {
     modelId: MODEL_ID,
     table: VIEW_H,
     fields: [
-      `${VIEW_H}.hour_of_day`,
+      `${VIEW_H}.hour_of_day_timestamp`,
       `${VIEW_H}.labor_required`,
       `${VIEW_H}.labor_available_aw_update_`,
       `${VIEW_H}.inbound_count`,
@@ -84,9 +84,17 @@ export async function fetchHourlyData(facilityId, date) {
     ],
     filters: {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...activityDateFilter(date, VIEW_H),
+      [`${VIEW_H}.labor_shift_timestamp`]: {
+        kind: 'TIME_FOR_UNIT_DURATION',
+        type: 'date',
+        ui_type: 'DAY',
+        isFiscal: false,
+        left_side: date,
+        is_negative: false,
+        offset_interval_string: '0 days',
+      },
     },
-    sorts: [{ column_name: `${VIEW_H}.hour_of_day`, sort_descending: false }],
+    sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
     limit: 100,
   })
 
@@ -94,8 +102,17 @@ export async function fetchHourlyData(facilityId, date) {
     const inb   = Number(r[`${VIEW_H}.inbound_count`]) || 0
     const out   = Number(r[`${VIEW_H}.outbound_count`]) || 0
     const drops = Number(r[`${VIEW_H}.drops`]) || 0
+    const ts    = r[`${VIEW_H}.hour_of_day_timestamp`]
+    // ts may be epoch ms/μs number or ISO string; extract UTC hour
+    let h = 0
+    if (typeof ts === 'number') {
+      h = new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
+    } else if (typeof ts === 'string') {
+      const m = ts.match(/[T ](\d{2}):/)
+      h = m ? parseInt(m[1]) : 0
+    }
     return {
-      h:     Number(r[`${VIEW_H}.hour_of_day`]) || 0,
+      h,
       req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
       avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
       drops,
