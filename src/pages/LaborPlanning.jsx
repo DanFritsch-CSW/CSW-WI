@@ -32,7 +32,9 @@ export default function LaborPlanning() {
       {/* Header */}
       <div className="page-header">
         <div>
-          <div className="page-title">Labor Planning</div>
+          <div className="page-title">
+            <span className="page-title-gold">Labor</span> Planning
+          </div>
           <div className="page-subtitle">CSW 3PL · 5 Wisconsin Facilities</div>
         </div>
         <div className="day-selector">
