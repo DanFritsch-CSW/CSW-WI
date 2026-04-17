@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
 import InsightChips from '../components/InsightChips.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
@@ -8,13 +8,14 @@ import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import { fetchHourlyData, fetchProjectData } from '../lib/omni.js'
 import { useSettings } from '../hooks/useSettings.js'
-import { applySettings, computeDailyKpis } from '../lib/laborCalc.js'
+import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
 export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const [rawHourly, setRawHourly]   = useState([])
   const [hourlyErr, setHourlyErr]   = useState(null)
   const [projects, setProjects]     = useState([])
   const [laborCount, setLaborCount] = useState(0)
+  const [rosterState, setRosterState] = useState({ employees: [], laneMap: {} })
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
@@ -28,10 +29,22 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     fetchProjectData(facility.id, planDate).then(setProjects)
   }, [facility.id, planDate])
 
-  const handleLaborCount = useCallback(n => setLaborCount(n), [])
+  const handleLaborCount  = useCallback(n => setLaborCount(n), [])
+  const handleRosterChange = useCallback(state => setRosterState(state), [])
 
-  // Apply settings override once both hourly data and settings are ready
-  const hourly = settingsLoading ? rawHourly : applySettings(rawHourly, settings)
+  // Per-hour availability derived from the live roster.
+  // Returns a 24-element array once employees are loaded, or null to fall back to Omni avail.
+  const rosterAvail = useMemo(() => {
+    if (!rosterState.employees.length) return null
+    return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings)
+  }, [rosterState, settings])
+
+  // Apply settings (req from appts, break% on avail), then overlay roster-based avail.
+  const hourly = useMemo(() => {
+    const base = settingsLoading ? rawHourly : applySettings(rawHourly, settings)
+    if (!rosterAvail) return base
+    return base.map(row => ({ ...row, avail: rosterAvail[row.h] ?? 0 }))
+  }, [rawHourly, settings, settingsLoading, rosterAvail])
 
   const { util, delta } = computeDailyKpis(hourly)
 
@@ -63,6 +76,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         facility={facility.id}
         planDate={planDate}
         onLaborCount={handleLaborCount}
+        onRosterChange={handleRosterChange}
       />
     </div>
   )

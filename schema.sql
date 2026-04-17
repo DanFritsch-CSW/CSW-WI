@@ -28,9 +28,15 @@ create table if not exists roster_assignments (
 alter table employees          enable row level security;
 alter table roster_assignments enable row level security;
 
--- Anon can read employees (internal app, no auth yet)
+-- Anon can read/write employees (internal app, no auth yet)
 create policy "anon_read_employees"
   on employees for select using (true);
+
+create policy "anon_insert_employees"
+  on employees for insert with check (true);
+
+create policy "anon_update_employees"
+  on employees for update using (true);
 
 -- Anon can read/write roster_assignments
 create policy "anon_read_roster"
@@ -70,6 +76,18 @@ create trigger facility_settings_updated_at
 -- ── Temp employee flag on roster_assignments ─────────────────────
 alter table roster_assignments
   add column if not exists is_temp boolean default false;
+
+-- ── Shift start time on employees (from B2E modified_start_time) ──
+alter table employees
+  add column if not exists shift_start text;
+
+-- ── Default shift start hours on facility_settings ───────────────
+-- Used as fallback when an employee has no shift_start from B2E
+alter table facility_settings
+  add column if not exists shift1_start numeric default 5;
+
+alter table facility_settings
+  add column if not exists shift2_start numeric default 13;
 
 -- ── Auto-update updated_at ───────────────────────────────────────
 create or replace function update_updated_at()
