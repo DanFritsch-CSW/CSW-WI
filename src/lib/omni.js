@@ -90,7 +90,7 @@ export async function fetchHourlyData(facilityId, date) {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       ...activityDateFilter(date, VIEW_H),
     },
-    sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
+    sorts: [{ column_name: `${VIEW_H}.hour_of_day`, sort_descending: false }],
     limit: 100,
   })
 

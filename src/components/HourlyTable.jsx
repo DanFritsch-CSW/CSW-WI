@@ -10,8 +10,15 @@ function r1(n) { return Math.round(n * 10) / 10 }
 export default function HourlyTable({ hourlyData, color }) {
   if (!hourlyData?.length) return null
 
+  // Sort shift-correctly: 5am first, midnight rows after 11pm
+  const sorted = [...hourlyData].sort((a, b) => {
+    const sa = a.h < 5 ? a.h + 24 : a.h
+    const sb = b.h < 5 ? b.h + 24 : b.h
+    return sa - sb
+  })
+
   let cumul = 0
-  const rows = hourlyData.map(r => {
+  const rows = sorted.map(r => {
     const final = r1(r.avail - r.req)
     cumul = r1(cumul + final)
     return { ...r, final, cumul }
