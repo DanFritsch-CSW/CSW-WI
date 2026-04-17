@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
-import InsightChips from '../components/InsightChips.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
 import DeltaChart from '../components/DeltaChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
@@ -74,7 +73,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   return (
     <div>
       <KpiPills data={kpiData} color={facility.color} />
-      <InsightChips data={kpiData} labor={laborCount} />
       <div className="two-col">
         <HourlyChart hourlyData={hourly} color={facility.color} />
         <DeltaChart  hourlyData={hourly} />
