@@ -30,8 +30,6 @@ export default function HourlyTable({ hourlyData, color }) {
     out:      rows.reduce((s, r) => s + r.out,      0),
     appts:    rows.reduce((s, r) => s + r.appts,    0),
     req:      r1(rows.reduce((s, r) => s + r.req,      0)),
-    rawStaff: r1(rows.reduce((s, r) => s + r.rawStaff, 0)),
-    onBreak:  r1(rows.reduce((s, r) => s + r.onBreak,  0)),
     adjStaff: r1(rows.reduce((s, r) => s + r.adjStaff, 0)),
     whAdj:    r1(rows.reduce((s, r) => s + r.whAdj,    0)),
     avail:    r1(rows.reduce((s, r) => s + r.avail,    0)),
@@ -51,8 +49,6 @@ export default function HourlyTable({ hourlyData, color }) {
             <th>Out</th>
             <th>Appts</th>
             <th>Labor Req</th>
-            <th>Raw Staff</th>
-            <th>On Break</th>
             <th>Adj Staff</th>
             <th>WH Adj</th>
             <th>Labor Avail</th>
@@ -69,8 +65,6 @@ export default function HourlyTable({ hourlyData, color }) {
               <td>{r.out}</td>
               <td style={{ color }}>{r.appts}</td>
               <td>{r.req}</td>
-              <td>{r.rawStaff}</td>
-              <td>{r.onBreak}</td>
               <td>{r.adjStaff}</td>
               <td>{r.whAdj}</td>
               <td>{r.avail}</td>
@@ -87,8 +81,6 @@ export default function HourlyTable({ hourlyData, color }) {
             <td>{tot.out}</td>
             <td style={{ color }}>{tot.appts}</td>
             <td>{tot.req}</td>
-            <td>{tot.rawStaff}</td>
-            <td>{tot.onBreak}</td>
             <td>{tot.adjStaff}</td>
             <td>{tot.whAdj}</td>
             <td>{tot.avail}</td>

@@ -81,8 +81,6 @@ export async function fetchHourlyData(facilityId, date) {
       `${VIEW_H}.inbound_count`,
       `${VIEW_H}.outbound_count`,
       `${VIEW_H}.drops`,
-      `${VIEW_H}.raw_staffed_employee`,
-      `${VIEW_H}.employees_on_break`,
       `${VIEW_H}.adjusted_staffed_employee`,
       `${VIEW_H}.warehouse_labor_adjustment`,
     ],
@@ -106,8 +104,6 @@ export async function fetchHourlyData(facilityId, date) {
       inb,
       out,
       appts:    inb + drops + out,
-      rawStaff: Number(r[`${VIEW_H}.raw_staffed_employee`]) || 0,
-      onBreak:  Number(r[`${VIEW_H}.employees_on_break`]) || 0,
       adjStaff: Number(r[`${VIEW_H}.adjusted_staffed_employee`]) || 0,
       whAdj:    Number(r[`${VIEW_H}.warehouse_labor_adjustment`]) || 0,
     }
