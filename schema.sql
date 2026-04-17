@@ -28,9 +28,15 @@ create table if not exists roster_assignments (
 alter table employees          enable row level security;
 alter table roster_assignments enable row level security;
 
--- Anon can read employees (internal app, no auth yet)
+-- Anon can read/write employees (internal app, no auth yet)
 create policy "anon_read_employees"
   on employees for select using (true);
+
+create policy "anon_insert_employees"
+  on employees for insert with check (true);
+
+create policy "anon_update_employees"
+  on employees for update using (true);
 
 -- Anon can read/write roster_assignments
 create policy "anon_read_roster"
