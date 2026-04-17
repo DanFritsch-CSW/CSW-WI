@@ -24,11 +24,8 @@ export default function HourlyTable({ hourlyData, estDrops = {}, color }) {
     return { ...r, final, cumul, est: estDrops[r.h] ?? null }
   })
 
-  const hasEst = rows.some(r => r.est !== null)
-
   const tot = {
-    est:   hasEst ? rows.reduce((s, r) => s + (r.est ?? 0), 0) : null,
-    drops: rows.reduce((s, r) => s + r.drops, 0),
+    est:   rows.reduce((s, r) => s + (r.est ?? 0), 0),
     inb:   rows.reduce((s, r) => s + r.inb,   0),
     out:   rows.reduce((s, r) => s + r.out,   0),
     appts: rows.reduce((s, r) => s + r.appts, 0),
@@ -43,8 +40,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, color }) {
         <thead>
           <tr>
             <th>Hour</th>
-            {hasEst && <th className="ht-est-col">EST Drops</th>}
-            <th>Drops</th>
+            <th className="ht-est-col">EST Drops</th>
             <th>Inb</th>
             <th>Out</th>
             <th>Appts</th>
@@ -58,12 +54,9 @@ export default function HourlyTable({ hourlyData, estDrops = {}, color }) {
           {rows.map((r, i) => (
             <tr key={i} className={r.final < 0 ? 'ht-deficit' : ''}>
               <td className="ht-hour">{fmtHour(r.h)}</td>
-              {hasEst && (
-                <td className="ht-est-col">
-                  {r.est !== null ? r.est : <span className="ht-est-empty">—</span>}
-                </td>
-              )}
-              <td>{r.drops}</td>
+              <td className="ht-est-col">
+                {r.est !== null ? r.est : <span className="ht-est-empty">—</span>}
+              </td>
               <td>{r.inb}</td>
               <td>{r.out}</td>
               <td style={{ color }}>{r.appts}</td>
@@ -77,8 +70,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, color }) {
         <tfoot>
           <tr className="ht-total">
             <td>Total</td>
-            {hasEst && <td className="ht-est-col">{tot.est}</td>}
-            <td>{tot.drops}</td>
+            <td className="ht-est-col">{tot.est}</td>
             <td>{tot.inb}</td>
             <td>{tot.out}</td>
             <td style={{ color }}>{tot.appts}</td>
