@@ -40,7 +40,10 @@ const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
 
 const B2E_LOCATION = {
   cal: '019 - Caledonia',
-  // mad, ken, wr, ec: TBD — add location paths when confirmed
+  mad: '011 - Madison',
+  ec:  '012 - Eau Claire',
+  ken: '015 - Kenosha',
+  wr:  '023 - Wisconsin Rapids',
 }
 
 // Manager/supervisor employee IDs excluded from the roster board
