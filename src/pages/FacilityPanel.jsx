@@ -27,6 +27,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     out:   networkKpi?.out,
     labor: laborCount,
     util:  networkKpi?.util,
+    delta: networkKpi?.delta,
   }
 
   return (

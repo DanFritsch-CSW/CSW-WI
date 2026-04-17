@@ -6,7 +6,7 @@ const MODEL_ID = '79a98af2-a904-4b5d-b25f-7f6a2c7ef467'
 
 // Map facility IDs → Omni warehouse_name values used in labor_planning_app tables
 const LABOR_WAREHOUSE = {
-  cal: 'caledonia',
+  cal: 'franksville',
   mad: 'madison',
   ken: 'kenosha',
   wr:  'wisconsin rapids',
@@ -175,6 +175,7 @@ export async function fetchNetworkKpis(date) {
       out:   Number(r[`${VIEW_H}.outbound_count_sum`]) || 0,
       labor,
       util:  labor > 0 ? Math.round(avail / labor * 100) : 0,
+      delta: Math.round((avail - labor) * 10) / 10,
     }
   }
   return result
