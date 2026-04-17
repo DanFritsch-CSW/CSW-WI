@@ -22,9 +22,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const handleLaborCount = useCallback(n => setLaborCount(n), [])
 
   const kpiData = {
-    appts: networkKpi?.appts,
-    inb:   networkKpi?.inb,
-    out:   networkKpi?.out,
+    appts: projects.reduce((s, p) => s + p.tot, 0),
+    inb:   projects.reduce((s, p) => s + p.inb, 0),
+    out:   projects.reduce((s, p) => s + p.out, 0),
     labor: laborCount,
     util:  networkKpi?.util,
     delta: networkKpi?.delta,

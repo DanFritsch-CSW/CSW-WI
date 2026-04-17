@@ -166,13 +166,13 @@ export async function fetchNetworkKpis(date) {
       table: VIEW_P,
       fields: [
         `${VIEW_P}.warehouse_name`,
-        `${VIEW_P}.total_appointments_sum`,
-        `${VIEW_P}.total_inbounds_sum`,
-        `${VIEW_P}.total_outbounds_sum`,
+        `${VIEW_P}.total_appointments`,
+        `${VIEW_P}.total_inbounds`,
+        `${VIEW_P}.total_outbounds`,
       ],
       filters: { ...activityDateFilter(date, VIEW_P) },
       sorts: [{ column_name: `${VIEW_P}.warehouse_name`, sort_descending: false }],
-      limit: 100,
+      limit: 500,
     }),
   ])
 
@@ -192,14 +192,15 @@ export async function fetchNetworkKpis(date) {
     }
   }
 
+  // Group raw project rows by warehouse client-side (avoids broken aggregate field names)
   for (const r of apptRows) {
     const wh = r[`${VIEW_P}.warehouse_name`]
     const facId = CSW_WAREHOUSE_TO_FAC[wh]
     if (!facId) continue
     if (!result[facId]) result[facId] = { labor: 0, util: 0, delta: 0 }
-    result[facId].appts = Number(r[`${VIEW_P}.total_appointments_sum`]) || 0
-    result[facId].inb   = Number(r[`${VIEW_P}.total_inbounds_sum`]) || 0
-    result[facId].out   = Number(r[`${VIEW_P}.total_outbounds_sum`]) || 0
+    result[facId].appts = (result[facId].appts || 0) + (Number(r[`${VIEW_P}.total_appointments`]) || 0)
+    result[facId].inb   = (result[facId].inb   || 0) + (Number(r[`${VIEW_P}.total_inbounds`])    || 0)
+    result[facId].out   = (result[facId].out   || 0) + (Number(r[`${VIEW_P}.total_outbounds`])   || 0)
   }
 
   return result
