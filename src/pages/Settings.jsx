@@ -5,15 +5,14 @@ import { fetchFacilitySettings, upsertFacilitySettings, fetchEstDrops, upsertEst
 // ── Labor Settings ────────────────────────────────────────────────
 
 const FIELD_DEFS = [
-  { key: 'hours_per_appt', label: 'Hours / Appt',       min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
-  { key: 'break_pct',      label: 'Break %',             min: 0,   max: 50, step: 1,   hint: 'Capacity reduction per shift due to breaks & startup time' },
+  { key: 'hours_per_appt', label: 'Hours / Appt',        min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
   { key: 'shift1_start',   label: '1st Shift Start (hr)', min: 0,   max: 23, step: 1,   hint: 'Default start hour for 1st shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift1_hours',   label: '1st Shift Hours',     min: 1,   max: 16, step: 0.5, hint: 'Duration of a first shift in hours' },
+  { key: 'shift1_hours',   label: '1st Shift Hours',      min: 1,   max: 16, step: 0.5, hint: 'Duration of a first shift in hours' },
   { key: 'shift2_start',   label: '2nd Shift Start (hr)', min: 0,   max: 23, step: 1,   hint: 'Default start hour for 2nd shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift2_hours',   label: '2nd Shift Hours',     min: 1,   max: 16, step: 0.5, hint: 'Duration of a second shift in hours' },
+  { key: 'shift2_hours',   label: '2nd Shift Hours',      min: 1,   max: 16, step: 0.5, hint: 'Duration of a second shift in hours' },
 ]
 
-const DEFAULTS = { hours_per_appt: 1.5, break_pct: 10, shift1_start: 5, shift1_hours: 8, shift2_start: 13, shift2_hours: 8 }
+const DEFAULTS = { hours_per_appt: 1.5, shift1_start: 5, shift1_hours: 8, shift2_start: 13, shift2_hours: 8 }
 
 function FacilitySettingsCard({ facility }) {
   const [values, setValues]   = useState(DEFAULTS)
@@ -23,7 +22,6 @@ function FacilitySettingsCard({ facility }) {
     fetchFacilitySettings(facility.id).then(data => {
       setValues({
         hours_per_appt: data.hours_per_appt ?? DEFAULTS.hours_per_appt,
-        break_pct:      data.break_pct      ?? DEFAULTS.break_pct,
         shift1_start:   data.shift1_start   ?? DEFAULTS.shift1_start,
         shift1_hours:   data.shift1_hours   ?? DEFAULTS.shift1_hours,
         shift2_start:   data.shift2_start   ?? DEFAULTS.shift2_start,
@@ -80,6 +78,92 @@ function FacilitySettingsCard({ facility }) {
         >
           {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
         </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Break Schedule Editor ─────────────────────────────────────────
+
+const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
+
+function BreakScheduleEditor() {
+  const [facility, setFacility] = useState(FACILITY_LIST[0].id)
+  const [values, setValues]     = useState(BREAK_DEFAULTS)
+  const [saveState, setSave]    = useState(null)
+
+  useEffect(() => {
+    fetchFacilitySettings(facility).then(data => {
+      setValues(BREAK_DEFAULTS.map((def, i) => data[`break_hour_${i + 1}`] ?? def))
+    })
+  }, [facility])
+
+  function handleChange(i, raw) {
+    const num = parseInt(raw, 10)
+    setValues(prev => prev.map((v, j) => j === i ? (isNaN(num) ? v : Math.min(100, Math.max(0, num))) : v))
+  }
+
+  async function handleSave() {
+    setSave('saving')
+    const payload = Object.fromEntries(values.map((v, i) => [`break_hour_${i + 1}`, v]))
+    try {
+      await upsertFacilitySettings(facility, payload)
+      setSave('ok')
+      setTimeout(() => setSave(null), 2500)
+    } catch {
+      setSave('error')
+      setTimeout(() => setSave(null), 3000)
+    }
+  }
+
+  function handleClear() {
+    setValues(BREAK_DEFAULTS)
+  }
+
+  return (
+    <div className="break-schedule-editor">
+      <div className="break-schedule-controls">
+        <div className="break-schedule-warehouse">
+          <span className="break-schedule-warehouse-label">Warehouse</span>
+          <select
+            className="est-drops-select"
+            value={facility}
+            onChange={e => setFacility(e.target.value)}
+          >
+            {FACILITY_LIST.map(f => (
+              <option key={f.id} value={f.id}>{f.name}</option>
+            ))}
+          </select>
+        </div>
+        <div className="break-schedule-actions">
+          <button
+            className="settings-save-btn"
+            onClick={handleSave}
+            disabled={saveState === 'saving'}
+          >
+            {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save breaks'}
+          </button>
+          <button className="settings-save-btn" onClick={handleClear}>
+            Clear
+          </button>
+        </div>
+      </div>
+      <div className="break-schedule-grid">
+        {values.map((v, i) => (
+          <label key={i} className="break-schedule-cell">
+            <span className="break-schedule-hour-label">Shift hour {i + 1}</span>
+            <input
+              type="number"
+              className="est-drops-input"
+              value={v}
+              min={0}
+              max={100}
+              step={1}
+              onChange={e => handleChange(i, e.target.value)}
+            />
+            <span className="break-schedule-pct-label">% availability</span>
+          </label>
+        ))}
       </div>
     </div>
   )
@@ -191,6 +275,14 @@ export default function Settings() {
           <FacilitySettingsCard key={f.id} facility={f} />
         ))}
       </div>
+
+      <div className="gold-line" style={{ margin: '28px 0 20px' }} />
+
+      <div className="settings-page-header">
+        <h2 className="settings-page-title">Employee Break Assumptions</h2>
+        <p className="settings-page-sub">Set the % of employees available during each hour of their shift. Used to account for lunches, breaks, and startup time.</p>
+      </div>
+      <BreakScheduleEditor />
 
       <div className="gold-line" style={{ margin: '28px 0 20px' }} />
 

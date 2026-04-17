@@ -89,6 +89,18 @@ alter table facility_settings
 alter table facility_settings
   add column if not exists shift2_start numeric default 13;
 
+-- ── Per-shift-hour break availability (replaces flat break_pct) ──
+-- Values represent % of employees available during each hour of their shift.
+-- Defaults match screenshot: 83,100,75,100,50,100,75,100
+alter table facility_settings add column if not exists break_hour_1 numeric default 83;
+alter table facility_settings add column if not exists break_hour_2 numeric default 100;
+alter table facility_settings add column if not exists break_hour_3 numeric default 75;
+alter table facility_settings add column if not exists break_hour_4 numeric default 100;
+alter table facility_settings add column if not exists break_hour_5 numeric default 50;
+alter table facility_settings add column if not exists break_hour_6 numeric default 100;
+alter table facility_settings add column if not exists break_hour_7 numeric default 75;
+alter table facility_settings add column if not exists break_hour_8 numeric default 100;
+
 -- ── Auto-update updated_at ───────────────────────────────────────
 create or replace function update_updated_at()
 returns trigger language plpgsql as $$
