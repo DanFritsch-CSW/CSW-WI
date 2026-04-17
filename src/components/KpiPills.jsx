@@ -5,7 +5,6 @@ export default function KpiPills({ data, color }) {
     { label: 'Inbound',      value: data.inb   ?? '--', delta: null },
     { label: 'Outbound',     value: data.out   ?? '--', delta: null },
     { label: 'Labor Avail',  value: data.labor ?? '--', delta: data.laborDelta },
-    { label: 'Utilization',  value: data.util  != null ? `${data.util}%` : '--', delta: null },
     { label: 'Daily +/-',    value: fmtDelta(data.delta), delta: null, isDelta: true },
   ]
 
