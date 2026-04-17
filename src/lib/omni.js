@@ -81,8 +81,6 @@ export async function fetchHourlyData(facilityId, date) {
       `${VIEW_H}.inbound_count`,
       `${VIEW_H}.outbound_count`,
       `${VIEW_H}.drops`,
-      `${VIEW_H}.adjusted_staffed_employee`,
-      `${VIEW_H}.warehouse_labor_adjustment`,
     ],
     filters: {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
@@ -97,15 +95,13 @@ export async function fetchHourlyData(facilityId, date) {
     const out   = Number(r[`${VIEW_H}.outbound_count`]) || 0
     const drops = Number(r[`${VIEW_H}.drops`]) || 0
     return {
-      h:        Number(r[`${VIEW_H}.hour_of_day`]) || 0,
-      req:      Number(r[`${VIEW_H}.labor_required`]) || 0,
-      avail:    Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
+      h:     Number(r[`${VIEW_H}.hour_of_day`]) || 0,
+      req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
+      avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
       drops,
       inb,
       out,
-      appts:    inb + drops + out,
-      adjStaff: Number(r[`${VIEW_H}.adjusted_staffed_employee`]) || 0,
-      whAdj:    Number(r[`${VIEW_H}.warehouse_labor_adjustment`]) || 0,
+      appts: inb + drops + out,
     }
   })
 }

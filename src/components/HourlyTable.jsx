@@ -6,11 +6,11 @@ function fmtHour(h) {
 }
 
 function r1(n) { return Math.round(n * 10) / 10 }
+function fmtDelta(v) { return v >= 0 ? `+${v}` : `${v}` }
 
 export default function HourlyTable({ hourlyData, color }) {
   if (!hourlyData?.length) return null
 
-  // Sort shift-correctly: 5am first, midnight rows after 11pm
   const sorted = [...hourlyData].sort((a, b) => {
     const sa = a.h < 5 ? a.h + 24 : a.h
     const sb = b.h < 5 ? b.h + 24 : b.h
@@ -25,18 +25,14 @@ export default function HourlyTable({ hourlyData, color }) {
   })
 
   const tot = {
-    drops:    rows.reduce((s, r) => s + r.drops,    0),
-    inb:      rows.reduce((s, r) => s + r.inb,      0),
-    out:      rows.reduce((s, r) => s + r.out,      0),
-    appts:    rows.reduce((s, r) => s + r.appts,    0),
-    req:      r1(rows.reduce((s, r) => s + r.req,      0)),
-    adjStaff: r1(rows.reduce((s, r) => s + r.adjStaff, 0)),
-    whAdj:    r1(rows.reduce((s, r) => s + r.whAdj,    0)),
-    avail:    r1(rows.reduce((s, r) => s + r.avail,    0)),
-    cumul:    rows[rows.length - 1]?.cumul ?? 0,
+    drops: rows.reduce((s, r) => s + r.drops, 0),
+    inb:   rows.reduce((s, r) => s + r.inb,   0),
+    out:   rows.reduce((s, r) => s + r.out,   0),
+    appts: rows.reduce((s, r) => s + r.appts, 0),
+    req:   r1(rows.reduce((s, r) => s + r.req,   0)),
+    avail: r1(rows.reduce((s, r) => s + r.avail, 0)),
+    cumul: rows[rows.length - 1]?.cumul ?? 0,
   }
-
-  const fmtDelta = v => v >= 0 ? `+${v}` : `${v}`
 
   return (
     <div className="hourly-table-wrap">
@@ -49,8 +45,6 @@ export default function HourlyTable({ hourlyData, color }) {
             <th>Out</th>
             <th>Appts</th>
             <th>Labor Req</th>
-            <th>Adj Staff</th>
-            <th>WH Adj</th>
             <th>Labor Avail</th>
             <th>Final +/-</th>
             <th>Cumul +/-</th>
@@ -65,8 +59,6 @@ export default function HourlyTable({ hourlyData, color }) {
               <td>{r.out}</td>
               <td style={{ color }}>{r.appts}</td>
               <td>{r.req}</td>
-              <td>{r.adjStaff}</td>
-              <td>{r.whAdj}</td>
               <td>{r.avail}</td>
               <td className={r.final < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.final)}</td>
               <td className={r.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.cumul)}</td>
@@ -81,8 +73,6 @@ export default function HourlyTable({ hourlyData, color }) {
             <td>{tot.out}</td>
             <td style={{ color }}>{tot.appts}</td>
             <td>{tot.req}</td>
-            <td>{tot.adjStaff}</td>
-            <td>{tot.whAdj}</td>
             <td>{tot.avail}</td>
             <td></td>
             <td className={tot.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(tot.cumul)}</td>
