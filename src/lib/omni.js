@@ -44,16 +44,16 @@ async function omniQuery(query) {
   return rows
 }
 
-function dateFilter(field, date) {
+function activityDateFilter(date, view = VIEW_H) {
   return {
-    [field]: {
+    [`${view}.activity_date`]: {
       kind: 'TIME_FOR_UNIT_DURATION',
       type: 'date',
       ui_type: 'DAY',
       isFiscal: false,
       left_side: date,
       is_negative: false,
-      offset_interval_string: null,
+      offset_interval_string: '0 days',
     },
   }
 }
@@ -81,7 +81,7 @@ export async function fetchHourlyData(facilityId, date) {
     ],
     filters: {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...dateFilter(`${VIEW_H}.labor_shift_timestamp`, date),
+      ...activityDateFilter(date, VIEW_H),
     },
     sorts: [{ column_name: `${VIEW_H}.hour_of_day`, sort_descending: false }],
     limit: 100,
@@ -121,7 +121,7 @@ export async function fetchProjectData(facilityId, date) {
     ],
     filters: {
       [`${VIEW_P}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...dateFilter(`${VIEW_P}.activity_date`, date),
+      ...activityDateFilter(date, VIEW_P),
       [`${VIEW_P}.total_appointments`]: {
         kind: 'EQUALS', type: 'number', values: ['0'],
         is_negative: true, is_inclusive: false,
@@ -156,7 +156,7 @@ export async function fetchNetworkKpis(date) {
       `${VIEW_H}.adjusted_staffed_employee_sum`,
     ],
     filters: {
-      ...dateFilter(`${VIEW_H}.labor_shift_timestamp`, date),
+      ...activityDateFilter(date, VIEW_H),
     },
     sorts: [{ column_name: `${VIEW_H}.warehouse_name`, sort_descending: false }],
     limit: 100,

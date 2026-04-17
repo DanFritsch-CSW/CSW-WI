@@ -8,6 +8,10 @@ function arrowToRows(table) {
       const col = table.getChild(field.name)
       let val = col.get(i)
       if (typeof val === 'bigint') val = Number(val)
+      // Arrow Decimal128 values serialize as quoted strings e.g. '"32"' — strip the extra quotes
+      if (typeof val === 'string' && val.startsWith('"') && val.endsWith('"')) {
+        val = val.slice(1, -1)
+      }
       row[field.name] = val
     }
     rows.push(row)
