@@ -15,7 +15,7 @@ const LABOR_WAREHOUSE = {
 
 // Map facility IDs → warehouse_name used in appointments/summary tables (CSW- prefix)
 const CSW_WAREHOUSE = {
-  cal: 'CSW-Caledonia',
+  cal: 'CSW-Franksville',
   mad: 'CSW-Madison',
   ken: 'CSW-Kenosha',
   wr:  'CSW-Wisconsin Rapids',
