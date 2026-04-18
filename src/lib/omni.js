@@ -284,8 +284,7 @@ export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
-  const refDate     = date || new Date().toISOString().slice(0, 10)
-  const twoWeeksAgo = new Date(new Date(refDate) - 14 * 864e5).toISOString().slice(0, 10)
+  const refDate = date || new Date().toISOString().slice(0, 10)
 
   const [rosterRows, scheduleRows, monHoursRows] = await Promise.all([
     omniQuery({
@@ -347,7 +346,6 @@ export async function fetchB2eRoster(facilityId, date) {
       filters: {
         [`${MON_HOURS}.location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
         [`${MON_HOURS}.is_time_off`]: { kind: 'EQUALS', type: 'string', values: ['true'], is_negative: true },
-        [`${MON_HOURS}.date`]: { kind: 'GREATER_THAN_OR_EQUAL_TO', type: 'date', values: [twoWeeksAgo] },
       },
       sorts: [{ column_name: `${MON_HOURS}.date`, sort_descending: true }],
       limit: 2000,
