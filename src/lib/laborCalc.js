@@ -1,4 +1,17 @@
-const DEFAULTS = { hours_per_appt: 1.5, shift1_hours: 8, shift2_hours: 8, shift1_start: 5, shift2_start: 13 }
+const DEFAULTS = {
+  hours_per_appt: 1.5,
+  shift1_start: 5,  shift1_hours: 8,
+  mid_start:    9,  mid_hours:    8,
+  shift2_start: 13, shift2_hours: 8,
+  shift3_start: 22, shift3_hours: 8,
+}
+
+const LANE_KEYS = {
+  shift1: { start: 'shift1_start', hours: 'shift1_hours' },
+  mid:    { start: 'mid_start',    hours: 'mid_hours'    },
+  shift2: { start: 'shift2_start', hours: 'shift2_hours' },
+  shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+}
 const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 
 // Returns an array of fractional multipliers (0–1) for each shift hour.
@@ -44,20 +57,16 @@ function parseStartHour(shiftStart) {
  * @returns {Array<number>}  24-element array indexed by hour 0-23
  */
 export function buildRosterAvailability(employees, laneMap, settings) {
-  const shift1Hours = settings?.shift1_hours ?? DEFAULTS.shift1_hours
-  const shift2Hours = settings?.shift2_hours ?? DEFAULTS.shift2_hours
-  const shift1Start = settings?.shift1_start ?? DEFAULTS.shift1_start
-  const shift2Start = settings?.shift2_start ?? DEFAULTS.shift2_start
   const breakMuls   = getBreakMultipliers(settings)
-
   const hourlyAvail = new Array(24).fill(0)
 
   for (const emp of employees) {
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
-    if (lane !== 'shift1' && lane !== 'shift2') continue
+    const keys = LANE_KEYS[lane]
+    if (!keys) continue  // pto, callin — not counted
 
-    const defaultStart = lane === 'shift1' ? shift1Start : shift2Start
-    const shiftHours   = lane === 'shift1' ? shift1Hours : shift2Hours
+    const defaultStart = settings?.[keys.start] ?? DEFAULTS[keys.start]
+    const shiftHours   = settings?.[keys.hours]  ?? DEFAULTS[keys.hours]
     const startHour    = parseStartHour(emp.shift_start) ?? defaultStart
 
     for (let i = 0; i < shiftHours; i++) {

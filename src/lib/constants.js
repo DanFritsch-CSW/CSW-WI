@@ -10,9 +10,11 @@ export const FACILITY_LIST = Object.values(FACILITIES)
 
 export const LANES = [
   { id: 'shift1', label: '1st Shift' },
+  { id: 'mid',    label: 'Mid Shift' },
   { id: 'shift2', label: '2nd Shift' },
+  { id: 'shift3', label: '3rd Shift' },
   { id: 'pto',    label: 'PTO'       },
   { id: 'callin', label: 'Call-In'   },
 ]
 
-export const ACTIVE_LANES = ['shift1', 'shift2']
+export const ACTIVE_LANES = ['shift1', 'mid', 'shift2', 'shift3']

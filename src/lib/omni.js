@@ -56,10 +56,18 @@ const B2E_EXCLUDED_IDS = [
 function scheduleToLane(workSchedule, startTime) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
+  if (ws.includes('mid'))       return 'mid'
   if (ws.includes('2nd shift')) return 'shift2'
+  if (ws.includes('3rd shift')) return 'shift3'
+  // 4x10s and free-flow: fall through to start-time bucketing
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
-    if (!isNaN(hour)) return hour < 12 ? 'shift1' : 'shift2'
+    if (!isNaN(hour)) {
+      if (hour < 10)             return 'shift1'  // 4am–9am
+      if (hour < 14)             return 'mid'     // 10am–1pm
+      if (hour < 20)             return 'shift2'  // 2pm–7pm
+      return 'shift3'                             // 8pm–3am
+    }
   }
   return 'shift1'
 }
@@ -270,7 +278,7 @@ export async function fetchNetworkKpis(date) {
  * Exclusions applied client-side (Omni is_negative filter unreliable).
  * Returns array of { id, name, role, default_lane, facility }
  */
-export async function fetchB2eRoster(facilityId) {
+export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
@@ -295,19 +303,35 @@ export async function fetchB2eRoster(facilityId) {
       table: SCHEDULE,
       fields: [
         `${SCHEDULE}.employee_id`,
+        `${SCHEDULE}.entry_date`,
+        `${SCHEDULE}.start_time`,
+        `${SCHEDULE}.end_time`,
         `${SCHEDULE}.modified_start_time`,
+        `${SCHEDULE}.modified_end_time`,
         `${SCHEDULE}.work_schedule`,
+        `${SCHEDULE}.type`,
         `${SCHEDULE}.ingestion_ts`,
       ],
       filters: {
         [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        ...(date ? {
+          [`${SCHEDULE}.entry_date`]: {
+            kind: 'TIME_FOR_UNIT_DURATION',
+            type: 'date',
+            ui_type: 'DAY',
+            isFiscal: false,
+            left_side: date,
+            is_negative: false,
+            offset_interval_string: '0 days',
+          },
+        } : {}),
       },
       sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
       limit: 2000,
     }),
   ])
 
-  // Build schedule map: employee_id → most-recent row
+  // Build schedule map: employee_id → most-recent row for target date
   const schedMap = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])

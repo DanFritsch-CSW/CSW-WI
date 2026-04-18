@@ -63,7 +63,9 @@ export default function AddTempModal({ facility, planDate, onAdd, onClose }) {
             Starting lane
             <select className="modal-select" value={lane} onChange={e => setLane(e.target.value)}>
               <option value="shift1">1st Shift</option>
+              <option value="mid">Mid Shift</option>
               <option value="shift2">2nd Shift</option>
+              <option value="shift3">3rd Shift</option>
             </select>
           </label>
           <div className="modal-actions">
