@@ -35,8 +35,9 @@ const VIEW_P = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 
 // ── B2E Roster ───────────────────────────────────────────────────
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
-const ROSTER   = 'silver__b2e_slv_employeeroster'
-const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
+const ROSTER    = 'silver__b2e_slv_employeeroster'
+const SCHEDULE  = 'silver__b2e_slv_futurescheduleentries'
+const MON_HOURS = 'silver__b2e_slv_mondetailedhours'
 
 const B2E_LOCATION = {
   cal: '019 - Caledonia',
@@ -273,16 +274,20 @@ export async function fetchNetworkKpis(date) {
 
 /**
  * Baseline employee roster for a facility from B2E (Omni → silver schema).
- * Two separate queries (ROSTER + SCHEDULE) joined client-side to avoid
- * Omni's implicit INNER JOIN dropping employees without recent schedule entries.
- * Exclusions applied client-side (Omni is_negative filter unreliable).
- * Returns array of { id, name, role, default_lane, facility }
+ * Three parallel queries joined client-side:
+ *   ROSTER    — active job-205 employees at the facility
+ *   SCHEDULE  — futurescheduleentries for the planning date (shift label + scheduled times)
+ *   MON_HOURS — mondetailedhours last 14 days (actual timesheet start/end, most reliable)
+ * Priority for shift lane + start time: MON_HOURS → SCHEDULE (modified) → SCHEDULE (base)
  */
 export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
-  const [rosterRows, scheduleRows] = await Promise.all([
+  const refDate     = date || new Date().toISOString().slice(0, 10)
+  const twoWeeksAgo = new Date(new Date(refDate) - 14 * 864e5).toISOString().slice(0, 10)
+
+  const [rosterRows, scheduleRows, monHoursRows] = await Promise.all([
     omniQuery({
       modelId: B2E_MODEL_ID,
       table: ROSTER,
@@ -329,9 +334,27 @@ export async function fetchB2eRoster(facilityId, date) {
       sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
       limit: 2000,
     }),
+    omniQuery({
+      modelId: B2E_MODEL_ID,
+      table: MON_HOURS,
+      fields: [
+        `${MON_HOURS}.employee_id`,
+        `${MON_HOURS}.shift`,
+        `${MON_HOURS}.start_time`,
+        `${MON_HOURS}.end_time`,
+        `${MON_HOURS}.date`,
+      ],
+      filters: {
+        [`${MON_HOURS}.location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${MON_HOURS}.is_time_off`]: { kind: 'EQUALS', type: 'string', values: ['true'], is_negative: true },
+        [`${MON_HOURS}.date`]: { kind: 'GREATER_THAN_OR_EQUAL_TO', type: 'date', values: [twoWeeksAgo] },
+      },
+      sorts: [{ column_name: `${MON_HOURS}.date`, sort_descending: true }],
+      limit: 2000,
+    }),
   ])
 
-  // Build schedule map: employee_id → most-recent row for target date
+  // Schedule map: employee_id → most-recent ingested row for target date
   const schedMap = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
@@ -339,28 +362,37 @@ export async function fetchB2eRoster(facilityId, date) {
     if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
+  // Mon-hours map: employee_id → most recent worked entry (actual timesheet data)
+  const monMap = new Map()
+  for (const r of monHoursRows) {
+    const id = String(r[`${MON_HOURS}.employee_id`])
+    const d  = r[`${MON_HOURS}.date`] ?? ''
+    if (!monMap.has(id) || d > monMap.get(id).date) monMap.set(id, { row: r, date: d })
+  }
+
   const excluded = new Set(B2E_EXCLUDED_IDS.map(String))
 
   return rosterRows
     .filter(r => !excluded.has(String(r[`${ROSTER}.employee_id`])))
     .map(r => {
-      const id    = String(r[`${ROSTER}.employee_id`])
-      const sched = schedMap.get(id)
-      const schedRow = sched?.row
+      const id       = String(r[`${ROSTER}.employee_id`])
+      const schedRow = schedMap.get(id)?.row
+      const monRow   = monMap.get(id)?.row
+
+      // Actual timesheet data is most reliable; fall back to scheduled data
+      const shiftLabel = monRow?.[`${MON_HOURS}.shift`]
+        ?? schedRow?.[`${SCHEDULE}.work_schedule`]
+      const startTime  = monRow?.[`${MON_HOURS}.start_time`]
+        ?? schedRow?.[`${SCHEDULE}.modified_start_time`]
+        ?? schedRow?.[`${SCHEDULE}.start_time`]
+
       return {
         id,
         name:         r[`${ROSTER}.employee_name`] || '',
         role:         null,
-        default_lane: schedRow
-          ? scheduleToLane(
-              schedRow[`${SCHEDULE}.work_schedule`],
-              schedRow[`${SCHEDULE}.modified_start_time`] ?? schedRow[`${SCHEDULE}.start_time`],
-            )
-          : 'shift1',
-        shift_start: schedRow
-          ? normalizeShiftStart(schedRow[`${SCHEDULE}.modified_start_time`] ?? schedRow[`${SCHEDULE}.start_time`])
-          : null,
-        facility: facilityId,
+        default_lane: scheduleToLane(shiftLabel, startTime),
+        shift_start:  normalizeShiftStart(startTime),
+        facility:     facilityId,
       }
     })
 }
