@@ -354,11 +354,11 @@ export async function fetchB2eRoster(facilityId, date) {
         default_lane: schedRow
           ? scheduleToLane(
               schedRow[`${SCHEDULE}.work_schedule`],
-              schedRow[`${SCHEDULE}.modified_start_time`],
+              schedRow[`${SCHEDULE}.modified_start_time`] ?? schedRow[`${SCHEDULE}.start_time`],
             )
           : 'shift1',
         shift_start: schedRow
-          ? normalizeShiftStart(schedRow[`${SCHEDULE}.modified_start_time`])
+          ? normalizeShiftStart(schedRow[`${SCHEDULE}.modified_start_time`] ?? schedRow[`${SCHEDULE}.start_time`])
           : null,
         facility: facilityId,
       }
