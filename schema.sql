@@ -101,6 +101,12 @@ alter table facility_settings add column if not exists break_hour_6 numeric defa
 alter table facility_settings add column if not exists break_hour_7 numeric default 75;
 alter table facility_settings add column if not exists break_hour_8 numeric default 100;
 
+-- ── Mid Shift and 3rd Shift settings on facility_settings ────────
+alter table facility_settings add column if not exists mid_start    numeric default 9;
+alter table facility_settings add column if not exists mid_hours    numeric default 8;
+alter table facility_settings add column if not exists shift3_start numeric default 22;
+alter table facility_settings add column if not exists shift3_hours numeric default 8;
+
 -- ── Auto-update updated_at ───────────────────────────────────────
 create or replace function update_updated_at()
 returns trigger language plpgsql as $$

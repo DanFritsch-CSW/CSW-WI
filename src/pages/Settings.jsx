@@ -5,14 +5,24 @@ import { fetchFacilitySettings, upsertFacilitySettings, fetchEstDrops, upsertEst
 // ── Labor Settings ────────────────────────────────────────────────
 
 const FIELD_DEFS = [
-  { key: 'hours_per_appt', label: 'Hours / Appt',        min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
-  { key: 'shift1_start',   label: '1st Shift Start (hr)', min: 0,   max: 23, step: 1,   hint: 'Default start hour for 1st shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift1_hours',   label: '1st Shift Hours',      min: 1,   max: 16, step: 0.5, hint: 'Duration of a first shift in hours' },
-  { key: 'shift2_start',   label: '2nd Shift Start (hr)', min: 0,   max: 23, step: 1,   hint: 'Default start hour for 2nd shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift2_hours',   label: '2nd Shift Hours',      min: 1,   max: 16, step: 0.5, hint: 'Duration of a second shift in hours' },
+  { key: 'hours_per_appt', label: 'Hours / Appt',          min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
+  { key: 'shift1_start',   label: '1st Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for 1st shift employees (0–23) when no B2E schedule is on file' },
+  { key: 'shift1_hours',   label: '1st Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a 1st shift in hours' },
+  { key: 'mid_start',      label: 'Mid Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for mid shift employees (0–23) when no B2E schedule is on file' },
+  { key: 'mid_hours',      label: 'Mid Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a mid shift in hours' },
+  { key: 'shift2_start',   label: '2nd Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for 2nd shift employees (0–23) when no B2E schedule is on file' },
+  { key: 'shift2_hours',   label: '2nd Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a 2nd shift in hours' },
+  { key: 'shift3_start',   label: '3rd Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for 3rd shift employees (0–23) when no B2E schedule is on file' },
+  { key: 'shift3_hours',   label: '3rd Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a 3rd shift in hours' },
 ]
 
-const DEFAULTS = { hours_per_appt: 1.5, shift1_start: 5, shift1_hours: 8, shift2_start: 13, shift2_hours: 8 }
+const DEFAULTS = {
+  hours_per_appt: 1.5,
+  shift1_start: 5,  shift1_hours: 8,
+  mid_start:    9,  mid_hours:    8,
+  shift2_start: 13, shift2_hours: 8,
+  shift3_start: 22, shift3_hours: 8,
+}
 
 function FacilitySettingsCard({ facility }) {
   const [values, setValues]   = useState(DEFAULTS)
@@ -24,8 +34,12 @@ function FacilitySettingsCard({ facility }) {
         hours_per_appt: data.hours_per_appt ?? DEFAULTS.hours_per_appt,
         shift1_start:   data.shift1_start   ?? DEFAULTS.shift1_start,
         shift1_hours:   data.shift1_hours   ?? DEFAULTS.shift1_hours,
+        mid_start:      data.mid_start      ?? DEFAULTS.mid_start,
+        mid_hours:      data.mid_hours      ?? DEFAULTS.mid_hours,
         shift2_start:   data.shift2_start   ?? DEFAULTS.shift2_start,
         shift2_hours:   data.shift2_hours   ?? DEFAULTS.shift2_hours,
+        shift3_start:   data.shift3_start   ?? DEFAULTS.shift3_start,
+        shift3_hours:   data.shift3_hours   ?? DEFAULTS.shift3_hours,
       })
     })
   }, [facility.id])
