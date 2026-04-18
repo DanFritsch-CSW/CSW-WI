@@ -14,7 +14,7 @@ import {
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
-import { LANES } from '../lib/constants.js'
+import { LANES, ACTIVE_LANES } from '../lib/constants.js'
 import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees, deleteAssignment } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
@@ -131,7 +131,7 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
   }, [facility, planDate])
 
   useEffect(() => {
-    const active = Object.values(laneMap).filter(l => l === 'shift1' || l === 'shift2').length
+    const active = Object.values(laneMap).filter(l => ACTIVE_LANES.includes(l)).length
     onLaborCount?.(active)
   }, [laneMap, onLaborCount])
 
@@ -179,7 +179,7 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
   const laneEmployees = (laneId) =>
     employees.filter(e => (laneMap[e.id] || e.default_lane) === laneId)
 
-  const activeCount = LANES.filter(l => l.id === 'shift1' || l.id === 'shift2')
+  const activeCount = LANES.filter(l => ACTIVE_LANES.includes(l.id))
     .reduce((n, l) => n + laneEmployees(l.id).length, 0)
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length

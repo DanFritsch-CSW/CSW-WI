@@ -56,10 +56,18 @@ const B2E_EXCLUDED_IDS = [
 function scheduleToLane(workSchedule, startTime) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
+  if (ws.includes('mid'))       return 'mid'
   if (ws.includes('2nd shift')) return 'shift2'
+  if (ws.includes('3rd shift')) return 'shift3'
+  // 4x10s and free-flow: fall through to start-time bucketing
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
-    if (!isNaN(hour)) return hour < 12 ? 'shift1' : 'shift2'
+    if (!isNaN(hour)) {
+      if (hour < 10)             return 'shift1'  // 4am–9am
+      if (hour < 14)             return 'mid'     // 10am–1pm
+      if (hour < 20)             return 'shift2'  // 2pm–7pm
+      return 'shift3'                             // 8pm–3am
+    }
   }
   return 'shift1'
 }
