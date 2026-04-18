@@ -298,6 +298,12 @@ export async function fetchB2eRoster(facilityId) {
         `${SCHEDULE}.modified_start_time`,
         `${SCHEDULE}.work_schedule`,
         `${SCHEDULE}.ingestion_ts`,
+        // Discovery fields — checking which date column exists on this table
+        `${SCHEDULE}.schedule_date`,
+        `${SCHEDULE}.work_date`,
+        `${SCHEDULE}.effective_date`,
+        `${SCHEDULE}.entry_date`,
+        `${SCHEDULE}.shift_date`,
       ],
       filters: {
         [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
@@ -306,6 +312,12 @@ export async function fetchB2eRoster(facilityId) {
       limit: 2000,
     }),
   ])
+
+  // DISCOVERY: log a sample row to identify the correct date field name
+  if (scheduleRows.length > 0) {
+    console.log('[B2E SCHEDULE] sample row keys:', Object.keys(scheduleRows[0]))
+    console.log('[B2E SCHEDULE] sample row values:', scheduleRows[0])
+  }
 
   // Build schedule map: employee_id → most-recent row
   const schedMap = new Map()
