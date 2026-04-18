@@ -105,7 +105,7 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
   const handleB2eSync = useCallback(async () => {
     setSyncState('loading')
     try {
-      const b2eEmployees = await fetchB2eRoster(facility)
+      const b2eEmployees = await fetchB2eRoster(facility, planDate || todayISO())
       if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
       const err = await upsertEmployees(b2eEmployees)
       if (err) { setSyncState(err); return }

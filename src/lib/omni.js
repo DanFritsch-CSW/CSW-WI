@@ -270,7 +270,7 @@ export async function fetchNetworkKpis(date) {
  * Exclusions applied client-side (Omni is_negative filter unreliable).
  * Returns array of { id, name, role, default_lane, facility }
  */
-export async function fetchB2eRoster(facilityId) {
+export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
@@ -295,31 +295,35 @@ export async function fetchB2eRoster(facilityId) {
       table: SCHEDULE,
       fields: [
         `${SCHEDULE}.employee_id`,
-        `${SCHEDULE}.modified_start_time`,
-        `${SCHEDULE}.work_schedule`,
-        `${SCHEDULE}.ingestion_ts`,
-        // Discovery fields — checking which date column exists on this table
-        `${SCHEDULE}.schedule_date`,
-        `${SCHEDULE}.work_date`,
-        `${SCHEDULE}.effective_date`,
         `${SCHEDULE}.entry_date`,
-        `${SCHEDULE}.shift_date`,
+        `${SCHEDULE}.start_time`,
+        `${SCHEDULE}.end_time`,
+        `${SCHEDULE}.modified_start_time`,
+        `${SCHEDULE}.modified_end_time`,
+        `${SCHEDULE}.work_schedule`,
+        `${SCHEDULE}.type`,
+        `${SCHEDULE}.ingestion_ts`,
       ],
       filters: {
         [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        ...(date ? {
+          [`${SCHEDULE}.entry_date`]: {
+            kind: 'TIME_FOR_UNIT_DURATION',
+            type: 'date',
+            ui_type: 'DAY',
+            isFiscal: false,
+            left_side: date,
+            is_negative: false,
+            offset_interval_string: '0 days',
+          },
+        } : {}),
       },
       sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
       limit: 2000,
     }),
   ])
 
-  // DISCOVERY: log a sample row to identify the correct date field name
-  if (scheduleRows.length > 0) {
-    console.log('[B2E SCHEDULE] sample row keys:', Object.keys(scheduleRows[0]))
-    console.log('[B2E SCHEDULE] sample row values:', scheduleRows[0])
-  }
-
-  // Build schedule map: employee_id → most-recent row
+  // Build schedule map: employee_id → most-recent row for target date
   const schedMap = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
