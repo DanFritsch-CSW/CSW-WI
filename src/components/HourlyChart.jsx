@@ -106,7 +106,7 @@ export default function HourlyChart({ hourlyData, color }) {
           </span>
         </div>
       </div>
-      <div style={{ height: 200 }}>
+      <div style={{ height: 260 }}>
         <Chart type="bar" data={data} options={options} />
       </div>
     </div>

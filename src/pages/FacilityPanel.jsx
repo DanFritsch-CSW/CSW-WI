@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
-import DeltaChart from '../components/DeltaChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
@@ -73,10 +72,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   return (
     <div>
       <KpiPills data={kpiData} color={facility.color} />
-      <div className="two-col">
-        <HourlyChart hourlyData={hourly} color={facility.color} />
-        <DeltaChart  hourlyData={hourly} />
-      </div>
+      <HourlyChart hourlyData={hourly} color={facility.color} />
       <div className="section-label" style={{ marginTop: 8 }}>Hourly Breakdown</div>
       {hourlyErr
         ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
