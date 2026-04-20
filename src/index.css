@@ -347,9 +347,13 @@ input, select { font: inherit; color: inherit; }
   display: flex;
   flex-direction: column;
   gap: 10px;
+  height: 100%;
 }
 .kpi-stack .kpi-row {
   margin-bottom: 0;
+}
+.kpi-stack .kpi-row .kpill {
+  flex: 1;
 }
 
 .kpi-row {
@@ -359,11 +363,59 @@ input, select { font: inherit; color: inherit; }
   flex-wrap: wrap;
 }
 
+/* ── Hero appointment card ────────────────────────────── */
+.kpi-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  border-top-width: 2px;
+  border-top-style: solid;
+  position: relative;
+  overflow: hidden;
+  padding: 24px;
+  min-height: 120px;
+}
+.kpi-hero-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  position: relative;
+  z-index: 1;
+}
+.kpi-hero-value {
+  font-family: var(--font-mono);
+  font-size: 64px;
+  font-weight: 500;
+  line-height: 1;
+  position: relative;
+  z-index: 1;
+}
+.kpi-hero-glow {
+  position: absolute;
+  bottom: -40px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 160px;
+  height: 80px;
+  border-radius: 50%;
+  opacity: 0.08;
+  filter: blur(24px);
+  pointer-events: none;
+}
+
 .panel-top-grid {
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
   margin-bottom: 14px;
 }
 @media (max-width: 860px) {
