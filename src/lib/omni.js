@@ -200,12 +200,12 @@ export async function fetchProjectData(facilityId, date) {
     limit: 100,
   })
 
-  return rows.map(r => ({
-    name: r[`${VIEW_P}.project_name`] || '',
-    inb:  Number(r[`${VIEW_P}.total_inbounds`]) || 0,
-    out:  Number(r[`${VIEW_P}.total_outbounds`]) || 0,
-    tot:  Number(r[`${VIEW_P}.total_appointments`]) || 0,
-  }))
+  return rows.map(r => {
+    const inb = Number(r[`${VIEW_P}.total_inbounds`])  || 0
+    const out = Number(r[`${VIEW_P}.total_outbounds`]) || 0
+    const tot = Number(r[`${VIEW_P}.total_appointments`]) || 0
+    return { name: r[`${VIEW_P}.project_name`] || '', inb, out, tot, drops: Math.max(0, tot - inb - out) }
+  })
 }
 
 /**
