@@ -1,8 +1,8 @@
 export const FACILITIES = {
   cal: { id: 'cal', code: 'CAL', name: 'Caledonia',         color: '#e07b4d' },
-  mad: { id: 'mad', code: 'MAD', name: 'Madison',           color: '#4d9de0' },
   ken: { id: 'ken', code: 'KEN', name: 'Kenosha',           color: '#3dba7e' },
   wr:  { id: 'wr',  code: 'WR',  name: 'Wisconsin Rapids',  color: '#d4b84a' },
+  mad: { id: 'mad', code: 'MAD', name: 'Madison',           color: '#4d9de0' },
   ec:  { id: 'ec',  code: 'EC',  name: 'Eau Claire',        color: '#c084fc' },
 }
 
