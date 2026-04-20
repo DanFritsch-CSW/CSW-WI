@@ -1,31 +1,36 @@
 export default function KpiPills({ data, color }) {
   const fmtDelta = v => v != null ? (v >= 0 ? `+${parseFloat(v.toFixed(1))}` : `${parseFloat(v.toFixed(1))}`) : '--'
-  const pills = [
-    { label: 'Appointments', value: data.appts ?? '--', delta: null },
-    { label: 'Inbound',      value: data.inb   ?? '--', delta: null },
-    { label: 'Outbound',     value: data.out   ?? '--', delta: null },
-    { label: 'Labor Avail',  value: data.labor ?? '--', delta: data.laborDelta },
-    { label: 'Daily +/-',    value: fmtDelta(data.delta), delta: null, isDelta: true },
-  ]
+
+  function Pill({ label, value, delta, isDelta }) {
+    return (
+      <div className="kpill" style={{ borderTopColor: color, borderTopWidth: 2 }}>
+        <span className="kpill-label">{label}</span>
+        <span
+          className="kpill-value"
+          style={isDelta && data.delta != null
+            ? { color: data.delta >= 0 ? '#3dba7e' : '#e05a5a' }
+            : { color }}
+        >{value}</span>
+        {delta != null && (
+          <span className={`kpill-delta ${delta >= 0 ? 'up' : 'down'}`}>
+            {delta >= 0 ? '+' : ''}{delta}
+          </span>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <div className="kpi-row">
-      {pills.map(p => (
-        <div className="kpill" key={p.label} style={{ borderTopColor: color, borderTopWidth: 2 }}>
-          <span className="kpill-label">{p.label}</span>
-          <span
-            className="kpill-value"
-            style={p.isDelta && data.delta != null
-              ? { color: data.delta >= 0 ? '#3dba7e' : '#e05a5a' }
-              : { color }}
-          >{p.value}</span>
-          {p.delta != null && (
-            <span className={`kpill-delta ${p.delta >= 0 ? 'up' : 'down'}`}>
-              {p.delta >= 0 ? '+' : ''}{p.delta}
-            </span>
-          )}
-        </div>
-      ))}
+    <div className="kpi-stack">
+      <div className="kpi-row">
+        <Pill label="Appointments" value={data.appts ?? '--'} />
+        <Pill label="Inbound"      value={data.inb   ?? '--'} />
+        <Pill label="Outbound"     value={data.out   ?? '--'} />
+      </div>
+      <div className="kpi-row">
+        <Pill label="Labor Avail" value={data.labor ?? '--'} delta={data.laborDelta} />
+        <Pill label="Daily +/-"   value={fmtDelta(data.delta)} isDelta />
+      </div>
     </div>
   )
 }

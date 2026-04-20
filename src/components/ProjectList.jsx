@@ -2,7 +2,6 @@ export default function ProjectList({ projects, projectDrops = {}, color }) {
   if (!projects?.length) return null
 
   const maxTot = Math.max(...projects.map(p => p.tot), 1)
-  const hasDrops = Object.keys(projectDrops).length > 0
 
   return (
     <div className="project-list">
@@ -10,7 +9,7 @@ export default function ProjectList({ projects, projectDrops = {}, color }) {
         <span>Project</span>
         <span style={{ textAlign: 'right' }}>Inb</span>
         <span style={{ textAlign: 'right' }}>Out</span>
-        {hasDrops && <span style={{ textAlign: 'right' }}>Est Drops</span>}
+        <span style={{ textAlign: 'right' }}>Est</span>
         <span style={{ textAlign: 'right' }}>Total</span>
       </div>
       {projects.map((p, i) => (
@@ -26,11 +25,7 @@ export default function ProjectList({ projects, projectDrops = {}, color }) {
           </div>
           <span className="project-num">{p.inb}</span>
           <span className="project-num">{p.out}</span>
-          {hasDrops && (
-            <span className="project-num" style={{ color: 'var(--text-secondary)' }}>
-              {projectDrops[p.name] ?? 0}
-            </span>
-          )}
+          <span className="project-num">{projectDrops[p.name] ?? 0}</span>
           <span className="project-num" style={{ color }}>{p.tot}</span>
         </div>
       ))}

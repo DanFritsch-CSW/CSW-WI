@@ -343,11 +343,31 @@ input, select { font: inherit; color: inherit; }
 }
 
 /* ─── KPI Pills ─────────────────────────────────────────────────── */
+.kpi-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kpi-stack .kpi-row {
+  margin-bottom: 0;
+}
+
 .kpi-row {
   display: flex;
   gap: 10px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.panel-top-grid {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 14px;
+}
+@media (max-width: 860px) {
+  .panel-top-grid { grid-template-columns: 1fr; }
 }
 
 .kpill {
@@ -539,7 +559,7 @@ input, select { font: inherit; color: inherit; }
 
 .project-list-header {
   display: grid;
-  grid-template-columns: 1fr 60px 60px 70px;
+  grid-template-columns: 1fr 40px 40px 40px 52px;
   padding: 5px 12px;
   font-family: var(--font-mono);
   font-size: 9px;
@@ -552,7 +572,7 @@ input, select { font: inherit; color: inherit; }
 
 .project-row {
   display: grid;
-  grid-template-columns: 1fr 60px 60px 70px;
+  grid-template-columns: 1fr 40px 40px 40px 52px;
   align-items: center;
   padding: 5px 12px;
   border-bottom: 1px solid var(--border-subtle);

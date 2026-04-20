@@ -91,10 +91,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
 
   return (
     <div>
-      <KpiPills data={kpiData} color={facility.color} />
+      <div className="panel-top-grid">
+        <KpiPills data={kpiData} color={facility.color} />
+        <div>
+          <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
+          <ProjectList projects={projects} projectDrops={projectDrops} color={facility.color} />
+        </div>
+      </div>
       <HourlyChart hourlyData={hourly} color={facility.color} />
-      <div className="section-label" style={{ marginTop: 8 }}>Projects</div>
-      <ProjectList projects={projects} projectDrops={projectDrops} color={facility.color} />
       <div className="section-label" style={{ marginTop: 8 }}>
         Hourly Breakdown
         {seedingDrops && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast…</span>}
