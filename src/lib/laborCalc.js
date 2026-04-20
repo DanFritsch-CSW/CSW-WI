@@ -51,12 +51,13 @@ function parseStartHour(shiftStart) {
  * Each employee contributes their per-shift-hour availability fraction to each clock
  * hour they work (shift hour 1 = first hour of their shift, regardless of start time).
  *
- * @param {Array}  employees - employee objects (must have id, shift_start, default_lane)
- * @param {Object} laneMap   - { [employeeId]: laneId }
- * @param {Object} settings  - facility settings (shift1_hours, shift2_hours, shift1_start, shift2_start, break_hour_1…8)
+ * @param {Array}  employees     - employee objects (must have id, shift_start, default_lane)
+ * @param {Object} laneMap       - { [employeeId]: laneId }
+ * @param {Object} settings      - facility settings (shift1_hours, shift2_hours, shift1_start, shift2_start, break_hour_1…8)
+ * @param {Object} assignmentMap - { [employeeId]: { shift_start?, shift_hours? } } day-specific overrides
  * @returns {Array<number>}  24-element array indexed by hour 0-23
  */
-export function buildRosterAvailability(employees, laneMap, settings) {
+export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}) {
   const breakMuls   = getBreakMultipliers(settings)
   const hourlyAvail = new Array(24).fill(0)
 
@@ -65,9 +66,13 @@ export function buildRosterAvailability(employees, laneMap, settings) {
     const keys = LANE_KEYS[lane]
     if (!keys) continue  // pto, callin — not counted
 
+    const assignment   = assignmentMap?.[emp.id]
     const defaultStart = settings?.[keys.start] ?? DEFAULTS[keys.start]
-    const shiftHours   = settings?.[keys.hours]  ?? DEFAULTS[keys.hours]
-    const startHour    = parseStartHour(emp.shift_start) ?? defaultStart
+    const defaultHours = settings?.[keys.hours]  ?? DEFAULTS[keys.hours]
+
+    // Day-specific override takes precedence over B2E shift_start
+    const startHour  = assignment?.shift_start ?? parseStartHour(emp.shift_start) ?? defaultStart
+    const shiftHours = assignment?.shift_hours ?? defaultHours
 
     for (let i = 0; i < shiftHours; i++) {
       const mul = breakMuls[i] ?? 1

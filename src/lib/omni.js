@@ -273,6 +273,38 @@ export async function fetchNetworkKpis(date) {
 }
 
 /**
+ * Fetch historical hourly drops for the same day-of-week as targetDate over the past
+ * weeksBack weeks, then return the per-hour average as [{ h, est }].
+ * Used to auto-seed hourly_drops_forecast when no manual data exists for a date.
+ */
+export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBack = 4) {
+  const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
+  const base = new Date(targetDate + 'T00:00:00Z')
+
+  const pastDates = Array.from({ length: weeksBack }, (_, i) => {
+    const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
+    return d.toISOString().slice(0, 10)
+  })
+
+  const results = await Promise.all(pastDates.map(d => fetchHourlyData(facilityId, d).catch(() => [])))
+
+  // Average drops per hour across all fetched weeks
+  const sums   = {}
+  const counts = {}
+  for (const rows of results) {
+    for (const row of rows) {
+      sums[row.h]   = (sums[row.h]   ?? 0) + row.drops
+      counts[row.h] = (counts[row.h] ?? 0) + 1
+    }
+  }
+
+  return Object.entries(sums).map(([h, total]) => ({
+    h:   Number(h),
+    est: Math.round(total / counts[h]),
+  }))
+}
+
+/**
  * Baseline employee roster for a facility from B2E (Omni → silver schema).
  * Three parallel queries joined client-side:
  *   ROSTER    — active job-205 employees at the facility
