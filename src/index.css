@@ -666,6 +666,127 @@ input, select { font: inherit; color: inherit; }
   border-radius: 2px;
 }
 
+.project-row--expanded { border-bottom: none; }
+
+.project-drops-btn {
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 1px 3px;
+  transition: background 0.12s;
+}
+.project-drops-btn:hover { background: rgba(255,255,255,0.07); }
+.project-drops-btn--active { background: rgba(255,255,255,0.11); outline: 1px solid rgba(255,255,255,0.18); }
+
+.project-hourly-row {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.proj-hourly-editor {
+  padding: 10px 14px 12px;
+  background: var(--bg1);
+}
+
+.proj-hourly-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.proj-hourly-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.proj-hourly-close:hover { color: var(--text); }
+
+.proj-hourly-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.proj-hourly-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.proj-hourly-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.proj-hourly-input {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+  padding: 2px 0;
+}
+.proj-hourly-input:focus { outline: 1px solid rgba(255,255,255,0.25); border-color: transparent; }
+
+.proj-hourly-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.proj-hourly-total {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.proj-hourly-save {
+  background: #3a6ea5;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.proj-hourly-save:hover:not(:disabled) { background: #4a80be; }
+.proj-hourly-save:disabled { opacity: 0.5; cursor: default; }
+
+.proj-hourly-cancel {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.proj-hourly-cancel:hover { background: var(--bg3); }
+
+.proj-hourly-loading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 8px 0;
+}
+
 /* ─── Roster Board ──────────────────────────────────────────────── */
 .roster-section {
   margin-bottom: 16px;

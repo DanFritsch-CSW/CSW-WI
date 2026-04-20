@@ -110,7 +110,7 @@ export async function upsertEstDrops(facilityId, planDate, hourlyValues) {
   if (error) console.error('upsertEstDrops:', error)
 }
 
-// Returns { [project_name]: est_drops } for the given facility + date
+// Returns { [project_name]: total_est_drops } (sum across all hours) for facility + date
 export async function fetchProjectDrops(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -119,20 +119,36 @@ export async function fetchProjectDrops(facilityId, planDate) {
     .eq('facility', facilityId)
     .eq('plan_date', planDate)
   if (error || !data) return {}
-  return Object.fromEntries(data.map(r => [r.project_name, r.est_drops]))
+  const totals = {}
+  data.forEach(r => { totals[r.project_name] = (totals[r.project_name] ?? 0) + r.est_drops })
+  return totals
 }
 
-// rows: [{ project_name: string, est_drops: number }]
-export async function upsertProjectDrops(facilityId, planDate, rows) {
+// Returns { [hour]: est_drops } for a specific facility + date + project
+export async function fetchProjectHourlyDrops(facilityId, planDate, projectName) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('project_drops_forecast')
+    .select('hour, est_drops')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+    .eq('project_name', projectName)
+  if (error || !data) return {}
+  return Object.fromEntries(data.map(r => [r.hour, r.est_drops]))
+}
+
+// hourlyValues: [{ h: number, est: number }] — saves per-hour drops for a project
+export async function upsertProjectDrops(facilityId, planDate, projectName, hourlyValues) {
   if (!supabase) return
-  const records = rows.map(({ project_name, est_drops }) => ({
+  const records = hourlyValues.map(({ h, est }) => ({
     facility:     facilityId,
     plan_date:    planDate,
-    project_name,
-    est_drops:    est_drops ?? 0,
+    project_name: projectName,
+    hour:         h,
+    est_drops:    est ?? 0,
   }))
   const { error } = await supabase
     .from('project_drops_forecast')
-    .upsert(records, { onConflict: 'facility,plan_date,project_name' })
+    .upsert(records, { onConflict: 'facility,plan_date,project_name,hour' })
   if (error) console.error('upsertProjectDrops:', error)
 }
