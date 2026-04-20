@@ -361,7 +361,7 @@ input, select { font: inherit; color: inherit; }
 
 .panel-top-grid {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: max-content 1fr;
   gap: 14px;
   align-items: start;
   margin-bottom: 14px;
@@ -392,7 +392,7 @@ input, select { font: inherit; color: inherit; }
 
 .kpill-label {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.1em;
@@ -400,7 +400,7 @@ input, select { font: inherit; color: inherit; }
 
 .kpill-value {
   font-family: var(--font-mono);
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 500;
   line-height: 1;
 }
@@ -559,10 +559,10 @@ input, select { font: inherit; color: inherit; }
 
 .project-list-header {
   display: grid;
-  grid-template-columns: 1fr 40px 40px 40px 52px;
-  padding: 5px 12px;
+  grid-template-columns: 1fr 48px 48px 48px 60px;
+  padding: 6px 14px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -572,9 +572,9 @@ input, select { font: inherit; color: inherit; }
 
 .project-row {
   display: grid;
-  grid-template-columns: 1fr 40px 40px 40px 52px;
+  grid-template-columns: 1fr 48px 48px 48px 60px;
   align-items: center;
-  padding: 5px 12px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--border-subtle);
   transition: background 0.1s;
 }
@@ -583,13 +583,13 @@ input, select { font: inherit; color: inherit; }
 .project-row:hover { background: var(--bg3); }
 
 .project-name {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
 }
 
 .project-num {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   text-align: right;
   color: var(--text-secondary);
 }
