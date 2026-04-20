@@ -109,3 +109,30 @@ export async function upsertEstDrops(facilityId, planDate, hourlyValues) {
     .upsert(rows, { onConflict: 'facility,plan_date,hour' })
   if (error) console.error('upsertEstDrops:', error)
 }
+
+// Returns { [project_name]: est_drops } for the given facility + date
+export async function fetchProjectDrops(facilityId, planDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('project_drops_forecast')
+    .select('project_name, est_drops')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (error || !data) return {}
+  return Object.fromEntries(data.map(r => [r.project_name, r.est_drops]))
+}
+
+// rows: [{ project_name: string, est_drops: number }]
+export async function upsertProjectDrops(facilityId, planDate, rows) {
+  if (!supabase) return
+  const records = rows.map(({ project_name, est_drops }) => ({
+    facility:     facilityId,
+    plan_date:    planDate,
+    project_name,
+    est_drops:    est_drops ?? 0,
+  }))
+  const { error } = await supabase
+    .from('project_drops_forecast')
+    .upsert(records, { onConflict: 'facility,plan_date,project_name' })
+  if (error) console.error('upsertProjectDrops:', error)
+}

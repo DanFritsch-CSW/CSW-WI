@@ -18,11 +18,33 @@ import { LANES, ACTIVE_LANES } from '../lib/constants.js'
 import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees, deleteAssignment } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
+const LANE_SETTING_KEYS = {
+  shift1: { start: 'shift1_start', hours: 'shift1_hours' },
+  mid:    { start: 'mid_start',    hours: 'mid_hours'    },
+  shift2: { start: 'shift2_start', hours: 'shift2_hours' },
+  shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+}
+const LANE_DEFAULTS = {
+  shift1_start: 5,  shift1_hours: 8,
+  mid_start:    9,  mid_hours:    8,
+  shift2_start: 13, shift2_hours: 8,
+  shift3_start: 22, shift3_hours: 8,
+}
+
+function getLaneSettings(laneId, settings) {
+  const keys = LANE_SETTING_KEYS[laneId]
+  if (!keys) return null
+  return {
+    defaultStart: settings?.[keys.start] ?? LANE_DEFAULTS[keys.start],
+    defaultHours: settings?.[keys.hours]  ?? LANE_DEFAULTS[keys.hours],
+  }
+}
+
 function todayISO() {
   return new Date().toISOString().slice(0, 10)
 }
 
-function DroppableLane({ lane, employees, onDeleteTemp }) {
+function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const ids = employees.map(e => e.id)
 
@@ -38,6 +60,9 @@ function DroppableLane({ lane, employees, onDeleteTemp }) {
             <EmployeeTile
               key={emp.id}
               employee={emp}
+              assignment={assignmentMap?.[emp.id]}
+              laneSettings={getLaneSettings(lane.id, settings)}
+              onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
               onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
             />
           ))}
@@ -60,12 +85,13 @@ const STUB_EMPLOYEES = [
   { id: 'e9', name: 'Quinn Adams',    role: 'Associate',  default_lane: 'callin' },
 ]
 
-export default function RosterBoard({ facility, planDate, onLaborCount, onRosterChange }) {
-  const [laneMap, setLaneMap]       = useState({})
-  const [employees, setEmployees]   = useState([])
-  const [activeId, setActiveId]     = useState(null)
-  const [syncState, setSyncState]   = useState(null)
-  const [showAddTemp, setShowAddTemp] = useState(false)
+export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
+  const [laneMap, setLaneMap]           = useState({})
+  const [assignmentMap, setAssignmentMap] = useState({})
+  const [employees, setEmployees]       = useState([])
+  const [activeId, setActiveId]         = useState(null)
+  const [syncState, setSyncState]       = useState(null)
+  const [showAddTemp, setShowAddTemp]   = useState(false)
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -97,6 +123,10 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
       emps.forEach(e => { map[e.id] = e.default_lane || 'shift1' })
       assignments.forEach(a => { map[a.employee_id] = a.lane })
       setLaneMap(map)
+
+      const asgMap = {}
+      assignments.forEach(a => { asgMap[a.employee_id] = a })
+      setAssignmentMap(asgMap)
     }
     loadRef.current = load
     load()
@@ -128,7 +158,29 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
     await deleteAssignment(facility, emp.id, date)
     setEmployees(prev => prev.filter(e => e.id !== emp.id))
     setLaneMap(prev => { const n = { ...prev }; delete n[emp.id]; return n })
+    setAssignmentMap(prev => { const n = { ...prev }; delete n[emp.id]; return n })
   }, [facility, planDate])
+
+  const handleShiftChange = useCallback(async (empId, shiftStart, shiftHours) => {
+    const emp  = employees.find(e => e.id === empId)
+    if (!emp) return
+    const date = planDate || todayISO()
+    const existing = assignmentMap[empId] ?? {}
+    const updated = {
+      facility,
+      employee_id:   empId,
+      employee_name: emp.name,
+      role:          emp.role,
+      lane:          laneMap[empId] || emp.default_lane || 'shift1',
+      plan_date:     date,
+      is_temp:       emp.is_temp ?? false,
+      ...existing,
+      shift_start:   shiftStart,
+      shift_hours:   shiftHours,
+    }
+    await upsertAssignment(updated)
+    setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
+  }, [employees, assignmentMap, laneMap, facility, planDate])
 
   useEffect(() => {
     const active = Object.values(laneMap).filter(l => ACTIVE_LANES.includes(l)).length
@@ -136,8 +188,8 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
   }, [laneMap, onLaborCount])
 
   useEffect(() => {
-    onRosterChange?.({ employees, laneMap })
-  }, [employees, laneMap, onRosterChange])
+    onRosterChange?.({ employees, laneMap, assignmentMap })
+  }, [employees, laneMap, assignmentMap, onRosterChange])
 
   const handleDragStart = useCallback(({ active }) => setActiveId(active.id), [])
 
@@ -162,7 +214,8 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
     const emp = employees.find(e => e.id === employeeId)
     if (!emp) return
-    const date = planDate || todayISO()
+    const date    = planDate || todayISO()
+    const existing = assignmentMap[employeeId] ?? {}
     upsertAssignment({
       facility,
       employee_id:   employeeId,
@@ -171,6 +224,8 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
       lane:          laneId,
       plan_date:     date,
       is_temp:       emp.is_temp ?? false,
+      shift_start:   existing.shift_start ?? null,
+      shift_hours:   existing.shift_hours ?? null,
     })
   }
 
@@ -224,7 +279,10 @@ export default function RosterBoard({ facility, planDate, onLaborCount, onRoster
               key={lane.id}
               lane={lane}
               employees={laneEmployees(lane.id)}
+              assignmentMap={assignmentMap}
+              settings={settings}
               onDeleteTemp={handleDeleteTemp}
+              onShiftChange={handleShiftChange}
             />
           ))}
         </div>

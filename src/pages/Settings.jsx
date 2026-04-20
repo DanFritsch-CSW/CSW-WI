@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { FACILITY_LIST } from '../lib/constants.js'
-import { fetchFacilitySettings, upsertFacilitySettings, fetchEstDrops, upsertEstDrops } from '../lib/supabase.js'
+import { fetchFacilitySettings, upsertFacilitySettings, fetchEstDrops, upsertEstDrops, fetchProjectDrops, upsertProjectDrops } from '../lib/supabase.js'
+import { fetchProjectData } from '../lib/omni.js'
 
 // ── Labor Settings ────────────────────────────────────────────────
 
@@ -275,6 +276,105 @@ function EstDropsEditor() {
   )
 }
 
+// ── Project Drops Editor ──────────────────────────────────────────
+
+function ProjectDropsEditor() {
+  const [facility, setFacility] = useState(FACILITY_LIST[0].id)
+  const [date, setDate]         = useState(todayISO)
+  const [projects, setProjects] = useState([])      // [{ name }] from Omni
+  const [values, setValues]     = useState({})      // { [project_name]: est_drops }
+  const [loading, setLoading]   = useState(false)
+  const [saveState, setSave]    = useState(null)
+
+  useEffect(() => {
+    setLoading(true)
+    Promise.all([
+      fetchProjectData(facility, date),
+      fetchProjectDrops(facility, date),
+    ]).then(([omniProjects, saved]) => {
+      setProjects(omniProjects.map(p => ({ name: p.name })))
+      const init = {}
+      omniProjects.forEach(p => { init[p.name] = saved[p.name] ?? 0 })
+      setValues(init)
+    }).finally(() => setLoading(false))
+  }, [facility, date])
+
+  function handleChange(name, raw) {
+    const num = parseInt(raw, 10)
+    setValues(prev => ({ ...prev, [name]: isNaN(num) ? 0 : Math.max(0, num) }))
+  }
+
+  async function handleSave() {
+    setSave('saving')
+    try {
+      const rows = projects.map(p => ({ project_name: p.name, est_drops: values[p.name] ?? 0 }))
+      await upsertProjectDrops(facility, date, rows)
+      setSave('ok')
+      setTimeout(() => setSave(null), 2500)
+    } catch {
+      setSave('error')
+      setTimeout(() => setSave(null), 3000)
+    }
+  }
+
+  const fac = FACILITY_LIST.find(f => f.id === facility)
+
+  return (
+    <div className="est-drops-editor">
+      <div className="est-drops-controls">
+        <select
+          className="est-drops-select"
+          value={facility}
+          onChange={e => setFacility(e.target.value)}
+        >
+          {FACILITY_LIST.map(f => (
+            <option key={f.id} value={f.id}>{f.name} ({f.code})</option>
+          ))}
+        </select>
+        <input
+          type="date"
+          className="est-drops-date"
+          value={date}
+          onChange={e => setDate(e.target.value)}
+          style={{ colorScheme: 'dark' }}
+        />
+        <button
+          className="settings-save-btn"
+          onClick={handleSave}
+          disabled={saveState === 'saving' || loading}
+        >
+          {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
+        </button>
+      </div>
+      {loading ? (
+        <div style={{ padding: '12px', fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+          Loading projects…
+        </div>
+      ) : projects.length === 0 ? (
+        <div style={{ padding: '12px', fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+          No projects found for this facility / date. Try selecting a recent business day.
+        </div>
+      ) : (
+        <div className="project-drops-list">
+          {projects.map(p => (
+            <label key={p.name} className="project-drops-row">
+              <span className="project-drops-name" style={{ color: fac?.color }}>{p.name}</span>
+              <input
+                type="number"
+                className="est-drops-input"
+                value={values[p.name] ?? 0}
+                min={0}
+                step={1}
+                onChange={e => handleChange(p.name, e.target.value)}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -301,8 +401,16 @@ export default function Settings() {
       <div className="gold-line" style={{ margin: '28px 0 20px' }} />
 
       <div className="settings-page-header">
-        <h2 className="settings-page-title">Estimated Drops</h2>
-        <p className="settings-page-sub">Manually enter forecasted drop counts per hour for a facility and date. Shown alongside actuals in the Hourly Breakdown table.</p>
+        <h2 className="settings-page-title">Estimated Drops — By Project</h2>
+        <p className="settings-page-sub">Set forecasted drop counts per project for a facility and date. Displayed in the Projects Table alongside actuals.</p>
+      </div>
+      <ProjectDropsEditor />
+
+      <div className="gold-line" style={{ margin: '28px 0 20px' }} />
+
+      <div className="settings-page-header">
+        <h2 className="settings-page-title">Estimated Drops — Hourly</h2>
+        <p className="settings-page-sub">Manual hourly drop forecast used in the Hourly Breakdown chart. Auto-populated from historical averages when a date has no prior entries.</p>
       </div>
       <EstDropsEditor />
     </div>

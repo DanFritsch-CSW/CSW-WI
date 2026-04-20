@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
@@ -12,18 +13,57 @@ function avatarColor(name) {
   return palette[Math.abs(h) % palette.length]
 }
 
-export default function EmployeeTile({ employee, onDelete }) {
+function fmtHour(h) {
+  const n = ((h % 24) + 24) % 24
+  if (n === 0)  return '12am'
+  if (n < 12)   return `${n}am`
+  if (n === 12) return '12pm'
+  return `${n - 12}pm`
+}
+
+function fmtShift(start, hours) {
+  if (start == null) return null
+  const end = Math.round((start + (hours ?? 8)) % 24)
+  return `${fmtHour(start)} – ${fmtHour(end)}`
+}
+
+export default function EmployeeTile({ employee, assignment, laneSettings, onShiftChange, onDelete }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: employee.id,
   })
+  const [editing, setEditing]     = useState(false)
+  const [editStart, setEditStart] = useState(0)
+  const [editHours, setEditHours] = useState(8)
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
   }
 
-  const color = avatarColor(employee.name)
+  const color  = avatarColor(employee.name)
   const isTemp = !!employee.is_temp
+
+  const effectiveStart = assignment?.shift_start ?? laneSettings?.defaultStart ?? null
+  const effectiveHours = assignment?.shift_hours ?? laneSettings?.defaultHours ?? 8
+  const shiftLabel     = fmtShift(effectiveStart, effectiveHours)
+
+  function openEdit(e) {
+    e.stopPropagation()
+    setEditStart(effectiveStart ?? laneSettings?.defaultStart ?? 5)
+    setEditHours(effectiveHours)
+    setEditing(true)
+  }
+
+  function handleSave(e) {
+    e.stopPropagation()
+    onShiftChange?.(editStart, editHours)
+    setEditing(false)
+  }
+
+  function handleCancel(e) {
+    e.stopPropagation()
+    setEditing(false)
+  }
 
   return (
     <div
@@ -42,6 +82,43 @@ export default function EmployeeTile({ employee, onDelete }) {
           {isTemp && <span className="emp-temp-badge">TEMP</span>}
           {employee.role}
         </div>
+        {editing ? (
+          <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
+            <input
+              type="number"
+              className="emp-shift-input"
+              value={editStart}
+              min={0}
+              max={23}
+              title="Start hour (0–23)"
+              onChange={e => setEditStart(Number(e.target.value))}
+            />
+            <span className="emp-shift-sep">+</span>
+            <input
+              type="number"
+              className="emp-shift-input"
+              value={editHours}
+              min={1}
+              max={16}
+              step={0.5}
+              title="Hours"
+              onChange={e => setEditHours(Number(e.target.value))}
+            />
+            <button className="emp-shift-save"   onClick={handleSave}>✓</button>
+            <button className="emp-shift-cancel" onClick={handleCancel}>✕</button>
+          </div>
+        ) : (
+          shiftLabel && (
+            <div
+              className="emp-shift-label"
+              onClick={openEdit}
+              onPointerDown={e => e.stopPropagation()}
+              title="Click to edit shift hours for today"
+            >
+              {shiftLabel}
+            </div>
+          )
+        )}
       </div>
       {onDelete ? (
         <button
