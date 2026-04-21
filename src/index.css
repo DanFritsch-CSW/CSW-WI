@@ -1326,6 +1326,42 @@ input, select { font: inherit; color: inherit; }
 .ht-est-empty {
   color: var(--text-dim);
 }
+.ht-proj-col {
+  font-size: 10px;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ht-expand-btn {
+  background: none;
+  border: none;
+  color: var(--brand);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 0 0 4px;
+  line-height: 1;
+  vertical-align: middle;
+  opacity: 0.7;
+}
+.ht-expand-btn:hover { opacity: 1; }
+.ht-cell-editable {
+  cursor: pointer;
+  display: inline-block;
+  min-width: 20px;
+  border-bottom: 1px dashed var(--brand);
+}
+.ht-cell-editable:hover { opacity: 0.75; }
+.ht-cell-input {
+  width: 52px;
+  background: var(--bg1);
+  border: 1px solid var(--brand);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 1px 4px;
+  text-align: right;
+}
 
 /* ─── Est Drops Editor ──────────────────────────────────────────── */
 .est-drops-editor {

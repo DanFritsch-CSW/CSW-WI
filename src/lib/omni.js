@@ -409,6 +409,104 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
     .reduce((s, r) => s + (Number(r[`${VIEW_APPT}.count`]) || 0), 0)
 }
 
+// Like fetchProjectDropsByRule but returns { [hour]: count } instead of a total.
+// Adds scheduled_arrival to the selected fields so we can group drops by UTC hour.
+async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule) {
+  const wh = CSW_WAREHOUSE[facilityId]
+  if (!wh) return {}
+
+  const rows = await omniQuery({
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_APPT,
+    fields: [
+      `${VIEW_APPT}.lookup_code`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
+      `${VIEW_APPT}.count`,
+      `${VIEW_APPT}.scheduled_arrival`,
+    ],
+    filters: {
+      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
+      [`${VIEW_APPT}.scheduled_arrival`]: {
+        kind: 'TIME_FOR_UNIT_DURATION',
+        type: 'date',
+        ui_type: 'DAY',
+        isFiscal: false,
+        left_side: date,
+        is_negative: false,
+        offset_interval_string: '0 days',
+      },
+    },
+    sorts: [],
+    limit: 500,
+  })
+
+  const hourCounts = {}
+  for (const r of rows) {
+    const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
+    const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
+    if (!type.startsWith('inbound')) continue
+    if (rule.method === 'inbound_exclude_lookup') {
+      if (rule.excludeWhenAll.some(group => group.every(p => code.includes(p.toUpperCase())))) continue
+    } else if (rule.method === 'inbound_include_lookup') {
+      if (!rule.includePatterns.some(p => code.includes(p.toUpperCase()))) continue
+    }
+    // Extract UTC hour from scheduled_arrival (mirrors fetchHourlyData hour parsing)
+    const ts = r[`${VIEW_APPT}.scheduled_arrival`]
+    let h = 0
+    if (typeof ts === 'number') {
+      h = new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
+    } else if (typeof ts === 'string') {
+      const m = ts.match(/[T ](\d{2}):/)
+      h = m ? parseInt(m[1]) : 0
+    }
+    const count = Number(r[`${VIEW_APPT}.count`]) || 0
+    hourCounts[h] = (hourCounts[h] ?? 0) + count
+  }
+  return hourCounts
+}
+
+/**
+ * Fetch historical per-project hourly drops for the same day-of-week as targetDate
+ * over the past weeksBack weeks, returning a 4-week average per project per hour.
+ * Returns { [projectName]: { [hour]: avgDrops } }.
+ */
+export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack = 4) {
+  const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
+  const base = new Date(targetDate + 'T00:00:00Z')
+
+  const pastDates = Array.from({ length: weeksBack }, (_, i) => {
+    const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
+    return d.toISOString().slice(0, 10)
+  })
+
+  // Determine which projects at this facility have drop rules
+  const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]))]
+
+  const out = {} // { projectName: { hour: avgDrops } }
+
+  for (const projectName of ruleProjects) {
+    const rule = PROJECT_DROP_RULES[projectName]
+    const weeklyHourCounts = await Promise.all(
+      pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
+    )
+    // Sum per hour across all weeks, then average by weeksBack
+    const sums = {}
+    for (const hourMap of weeklyHourCounts) {
+      for (const [h, count] of Object.entries(hourMap)) {
+        sums[h] = (sums[h] ?? 0) + count
+      }
+    }
+    const avgs = Object.fromEntries(
+      Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)])
+    )
+    if (Object.keys(avgs).length > 0) out[projectName] = avgs
+  }
+
+  return out
+}
+
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
