@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
+import { fetchAllFacilitiesEstDrops } from '../lib/supabase.js'
 import AllFacilities from './AllFacilities.jsx'
 import FacilityPanel from './FacilityPanel.jsx'
 
@@ -20,9 +21,11 @@ export default function LaborPlanning() {
   const [activeTab, setActiveTab] = useState('all')
   const [planDate, setPlanDate]   = useState(todayISO)
   const [networkData, setNetworkData] = useState(null)
+  const [facilityEstDrops, setFacilityEstDrops] = useState({})
 
   useEffect(() => {
     fetchNetworkKpis(planDate).then(setNetworkData)
+    fetchAllFacilitiesEstDrops(planDate).then(setFacilityEstDrops)
   }, [planDate])
 
   const activeFac = FACILITY_LIST.find(f => f.id === activeTab) || null
@@ -75,7 +78,7 @@ export default function LaborPlanning() {
 
       {/* Content */}
       {activeTab === 'all' ? (
-        <AllFacilities networkData={networkData} planDate={planDate} />
+        <AllFacilities networkData={networkData} facilityEstDrops={facilityEstDrops} planDate={planDate} />
       ) : activeFac ? (
         <FacilityPanel
           key={activeFac.id}
