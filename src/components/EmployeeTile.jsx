@@ -14,16 +14,17 @@ function avatarColor(name) {
 }
 
 function fmtHour(h) {
-  const n = ((h % 24) + 24) % 24
-  if (n === 0)  return '12am'
-  if (n < 12)   return `${n}am`
-  if (n === 12) return '12pm'
-  return `${n - 12}pm`
+  const n    = ((h % 24) + 24) % 24
+  const hr   = Math.floor(n)
+  const mins = Math.round((n - hr) * 60)
+  const disp = hr === 0 || hr === 12 ? 12 : hr % 12
+  const suf  = hr < 12 ? 'am' : 'pm'
+  return `${disp}:${String(mins).padStart(2, '0')}${suf}`
 }
 
 function fmtShift(start, hours) {
   if (start == null) return null
-  const end = Math.round((start + (hours ?? 8)) % 24)
+  const end = (start + (hours ?? 8)) % 24
   return `${fmtHour(start)} – ${fmtHour(end)}`
 }
 
