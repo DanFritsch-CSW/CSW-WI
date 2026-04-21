@@ -315,7 +315,8 @@ export async function fetchNetworkKpis(date) {
     const avail = Number(r[`${VIEW_H}.adjusted_staffed_employee_sum`]) || 0
     result[facId] = {
       appts: 0, inb: 0, out: 0,
-      labor,
+      labor: Math.round(labor * 10) / 10,
+      avail: Math.round(avail * 10) / 10,
       util:  labor > 0 ? Math.round(avail / labor * 100) : 0,
       delta: Math.round((avail - labor) * 10) / 10,
     }
