@@ -9,7 +9,8 @@ export default function ProjectList({ projects, projectDrops = {}, facilityId, p
 
   if (!projects?.length) return null
 
-  const maxTot = Math.max(...projects.map(p => p.tot), 1)
+  const visible = projects.filter(p => p.tot > 0)
+  const maxTot = Math.max(...visible.map(p => p.tot), 1)
 
   function handleRowClick(p) {
     if (expanded === p.name) {
@@ -41,7 +42,7 @@ export default function ProjectList({ projects, projectDrops = {}, facilityId, p
         <span style={{ textAlign: 'right' }}>Outbound</span>
         <span style={{ textAlign: 'right' }}>Total</span>
       </div>
-      {projects.map((p, i) => {
+      {visible.map((p, i) => {
         const estVal = overrides[p.name] ?? projectDrops[p.name] ?? 0
         const isOpen = expanded === p.name
         return (
