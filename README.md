@@ -259,3 +259,18 @@ Netlify auto-deploys from `main`. Build config in `netlify.toml`:
 - **Analytics page** — historical performance and trend views
 - **Settings page** — facility config and user preferences
 - **Est Drops — per-project hourly breakdown (Option B)** — clicking a project row currently lets you edit a single daily EST drops total. A future upgrade would show a full 24-hour grid scoped to that project, letting planners distribute drops across hours. Requires a new Supabase table (`project_hourly_drops_forecast(facility, plan_date, project_name, hour, est_drops)`), new fetch/upsert helpers in `supabase.js`, updated auto-seeding logic in `fetchHistoricalProjectDrops` to produce per-project-per-hour estimates, and an expanded inline edit UI in `ProjectList.jsx`.
+- **Est Drops — remaining project rules** — `PROJECT_DROP_RULES` in `src/lib/omni.js` currently covers CAL (Palermos CALEDONIA finished) and KEN (Crown, Pretzilla, Birchwood, Fair Oaks, Richelieu). All other projects default to 0 until their drop logic is confirmed. Add a one-liner per project to the config as rules are defined.
+
+## Known Issues / Performance Notes
+
+### Omni API concurrency limit (502 errors)
+**Symptom:** `omni-query 502: {"error":"Omni query did not complete"}` appears in the Hourly Breakdown panel.
+
+**Root cause:** The EST Drops auto-seed fires raw appointment queries (`gold__truck_appointments`) for every project that has a rule in `PROJECT_DROP_RULES`. With 7+ Kenosha rule-projects × 4 historical weeks, this was 28+ simultaneous Omni API calls on first load for an unseeded date — enough to overload the API alongside the regular hourly and project data fetches.
+
+**Current fix:** Rule-project queries are now serialized (one project at a time, 4 weeks in parallel per project) in `fetchHistoricalProjectDrops`. This keeps concurrency manageable.
+
+**Scaling concern:** As more projects are added to `PROJECT_DROP_RULES` across all 5 facilities, first-load seeding time will grow linearly. If load times become unacceptable with a larger audience, options include:
+1. Move seeding to a Netlify background function triggered on date change (fire-and-forget, UI shows 0 until ready)
+2. Pre-seed all facilities nightly via a scheduled Netlify function
+3. Add a concurrency cap (e.g. max 3 in-flight Omni requests) using a semaphore pattern
