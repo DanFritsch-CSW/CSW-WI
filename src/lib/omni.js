@@ -33,10 +33,6 @@ const CSW_WAREHOUSE_TO_FAC = Object.fromEntries(
 const VIEW_H = 'labor_planning_app__hourly_labor_required_vs_available'
 const VIEW_P = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 
-// Raw appointments topic — used for project list (VIEW_P has no project_name dimension)
-const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
-const VIEW_APPT     = 'gold__truck_appointments'
-
 // ── B2E Roster ───────────────────────────────────────────────────
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
 const ROSTER    = 'silver__b2e_slv_employeeroster'
@@ -177,9 +173,8 @@ export async function fetchHourlyData(facilityId, date) {
 
 /**
  * Project-level throughput for a facility on a given date.
- * Queries gold__truck_appointments (raw appointments topic) so that all projects
- * appear regardless of whether they exist in the labor planning summary view.
- * Groups by project_name + dock_appointment_type_name client-side.
+ * Queries VIEW_P (the authoritative labor planning summary) so counts match
+ * the Omni dashboard exactly.
  * Returns array of { name, inb, out, drops, tot }
  */
 export async function fetchProjectData(facilityId, date) {
@@ -187,45 +182,32 @@ export async function fetchProjectData(facilityId, date) {
   if (!wh) return []
 
   const rows = await omniQuery({
-    modelId: GOLD_MODEL_ID,
-    table: VIEW_APPT,
+    modelId: MODEL_ID,
+    table: VIEW_P,
     fields: [
-      `${VIEW_APPT}.project_name`,
-      `${VIEW_APPT}.dock_appointment_type_name`,
-      `${VIEW_APPT}.count`,
+      `${VIEW_P}.project_name`,
+      `${VIEW_P}.total_inbounds`,
+      `${VIEW_P}.total_outbounds`,
+      `${VIEW_P}.total_inbound_drops`,
     ],
     filters: {
-      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      [`${VIEW_APPT}.scheduled_arrival`]: {
-        kind: 'TIME_FOR_UNIT_DURATION',
-        type: 'date',
-        ui_type: 'DAY',
-        isFiscal: false,
-        left_side: date,
-        is_negative: false,
-        offset_interval_string: '0 days',
-      },
+      [`${VIEW_P}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      ...activityDateFilter(date, VIEW_P),
     },
-    sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
+    sorts: [{ column_name: `${VIEW_P}.project_name`, sort_descending: false }],
     limit: 200,
   })
 
-  const map = new Map()
-  for (const r of rows) {
-    const name = r[`${VIEW_APPT}.project_name`] || ''
-    const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
-    const cnt  = Number(r[`${VIEW_APPT}.count`]) || 0
-    if (!map.has(name)) map.set(name, { name, inb: 0, out: 0, drops: 0 })
-    const p = map.get(name)
-    if (type === 'inbound/drop')          p.drops += cnt
-    else if (type.startsWith('inbound'))  p.inb   += cnt
-    else if (type.startsWith('outbound')) p.out   += cnt
-    // null/empty type → ignored
-  }
-
-  return Array.from(map.values())
-    .map(p => ({ ...p, tot: p.inb + p.out + p.drops }))
-    .sort((a, b) => (b.inb + b.out + b.drops) - (a.inb + a.out + a.drops))
+  return rows
+    .map(r => {
+      const name  = r[`${VIEW_P}.project_name`] || ''
+      const inb   = Number(r[`${VIEW_P}.total_inbounds`])       || 0
+      const out   = Number(r[`${VIEW_P}.total_outbounds`])      || 0
+      const drops = Number(r[`${VIEW_P}.total_inbound_drops`])  || 0
+      return { name, inb, out, drops, tot: inb + out + drops }
+    })
+    .filter(p => p.name)
+    .sort((a, b) => b.tot - a.tot)
 }
 
 /**
