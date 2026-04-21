@@ -65,9 +65,7 @@ const PROJECT_DROP_RULES = {
 
 // ── B2E Roster ───────────────────────────────────────────────────
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
-const ROSTER    = 'silver__b2e_slv_employeeroster'
 const SCHEDULE  = 'silver__b2e_slv_futurescheduleentries'
-const MON_HOURS = 'silver__b2e_slv_mondetailedhours'
 
 const B2E_LOCATION = {
   cal: '019 - Caledonia',
@@ -103,12 +101,22 @@ function scheduleToLane(workSchedule, startTime) {
   return 'shift1'
 }
 
-// Normalize B2E modified_start_time to "HH:MM" string, or null if invalid.
+// Normalize B2E start time to "HH:MM" string, or null if invalid.
 function normalizeShiftStart(startTime) {
   if (!startTime || startTime === '0' || startTime === 0) return null
   const s = String(startTime)
   const hour = parseInt(s.split(':')[0], 10)
   return isNaN(hour) ? null : s
+}
+
+// Derive shift duration in hours from start and end time strings ("HH:MM").
+function computeShiftHours(startTime, endTime) {
+  if (!startTime || !endTime) return null
+  const sh = parseInt(String(startTime).split(':')[0], 10)
+  const eh = parseInt(String(endTime).split(':')[0], 10)
+  if (isNaN(sh) || isNaN(eh)) return null
+  const hours = (eh - sh + 24) % 24
+  return hours > 0 ? hours : null
 }
 
 async function omniQuery(query) {
@@ -421,11 +429,10 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 
 /**
  * Baseline employee roster for a facility from B2E (Omni → silver schema).
- * Three parallel queries joined client-side:
- *   ROSTER    — active job-205 employees at the facility
- *   SCHEDULE  — futurescheduleentries for the planning date (shift label + scheduled times)
- *   MON_HOURS — mondetailedhours last 14 days (actual timesheet start/end, most reliable)
- * Priority for shift lane + start time: MON_HOURS → SCHEDULE (modified) → SCHEDULE (base)
+ * Single query against futurescheduleentries — name, location, shift label, and
+ * start/end times all live there. Deduplicates on employee_id keeping the
+ * most-recently ingested row. Hour-bucketing fallback in scheduleToLane is
+ * retained until work_schedule reliability is confirmed across all facilities.
  */
 export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
@@ -433,73 +440,38 @@ export async function fetchB2eRoster(facilityId, date) {
 
   const refDate = date || new Date().toISOString().slice(0, 10)
 
-  const [rosterRows, scheduleRows, monHoursRows] = await Promise.all([
-    omniQuery({
-      modelId: B2E_MODEL_ID,
-      table: ROSTER,
-      fields: [
-        `${ROSTER}.employee_id`,
-        `${ROSTER}.employee_name`,
-      ],
-      filters: {
-        [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
-        [`${ROSTER}.default_job_code`]: { kind: 'EQUALS', type: 'string', values: ['205'] },
-        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+  const scheduleRows = await omniQuery({
+    modelId: B2E_MODEL_ID,
+    table: SCHEDULE,
+    fields: [
+      `${SCHEDULE}.employee_id`,
+      `${SCHEDULE}.first_name`,
+      `${SCHEDULE}.last_name`,
+      `${SCHEDULE}.start_time`,
+      `${SCHEDULE}.end_time`,
+      `${SCHEDULE}.modified_start_time`,
+      `${SCHEDULE}.modified_end_time`,
+      `${SCHEDULE}.work_schedule`,
+      `${SCHEDULE}.ingestion_ts`,
+    ],
+    filters: {
+      [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+      [`${SCHEDULE}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+      [`${SCHEDULE}.entry_date`]: {
+        kind: 'TIME_FOR_UNIT_DURATION',
+        type: 'date',
+        ui_type: 'DAY',
+        isFiscal: false,
+        left_side: refDate,
+        is_negative: false,
+        offset_interval_string: '0 days',
       },
-      sorts: [{ column_name: `${ROSTER}.employee_name`, sort_descending: false }],
-      limit: 500,
-    }),
-    omniQuery({
-      modelId: B2E_MODEL_ID,
-      table: SCHEDULE,
-      fields: [
-        `${SCHEDULE}.employee_id`,
-        `${SCHEDULE}.entry_date`,
-        `${SCHEDULE}.start_time`,
-        `${SCHEDULE}.end_time`,
-        `${SCHEDULE}.modified_start_time`,
-        `${SCHEDULE}.modified_end_time`,
-        `${SCHEDULE}.work_schedule`,
-        `${SCHEDULE}.type`,
-        `${SCHEDULE}.ingestion_ts`,
-      ],
-      filters: {
-        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        ...(date ? {
-          [`${SCHEDULE}.entry_date`]: {
-            kind: 'TIME_FOR_UNIT_DURATION',
-            type: 'date',
-            ui_type: 'DAY',
-            isFiscal: false,
-            left_side: date,
-            is_negative: false,
-            offset_interval_string: '0 days',
-          },
-        } : {}),
-      },
-      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-      limit: 2000,
-    }),
-    omniQuery({
-      modelId: B2E_MODEL_ID,
-      table: MON_HOURS,
-      fields: [
-        `${MON_HOURS}.employee_id`,
-        `${MON_HOURS}.shift`,
-        `${MON_HOURS}.start_time`,
-        `${MON_HOURS}.end_time`,
-        `${MON_HOURS}.date`,
-      ],
-      filters: {
-        [`${MON_HOURS}.location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${MON_HOURS}.is_time_off`]: { kind: 'EQUALS', type: 'string', values: ['true'], is_negative: true },
-      },
-      sorts: [{ column_name: `${MON_HOURS}.date`, sort_descending: true }],
-      limit: 2000,
-    }),
-  ])
+    },
+    sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
+    limit: 500,
+  })
 
-  // Schedule map: employee_id → most-recent ingested row for target date
+  // Deduplicate: keep most-recently ingested row per employee
   const schedMap = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
@@ -507,37 +479,24 @@ export async function fetchB2eRoster(facilityId, date) {
     if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
-  // Mon-hours map: employee_id → most recent worked entry (actual timesheet data)
-  const monMap = new Map()
-  for (const r of monHoursRows) {
-    const id = String(r[`${MON_HOURS}.employee_id`])
-    const d  = r[`${MON_HOURS}.date`] ?? ''
-    if (!monMap.has(id) || d > monMap.get(id).date) monMap.set(id, { row: r, date: d })
-  }
-
   const excluded = new Set(B2E_EXCLUDED_IDS.map(String))
 
-  return rosterRows
-    .filter(r => !excluded.has(String(r[`${ROSTER}.employee_id`])))
-    .map(r => {
-      const id       = String(r[`${ROSTER}.employee_id`])
-      const schedRow = schedMap.get(id)?.row
-      const monRow   = monMap.get(id)?.row
-
-      // Actual timesheet data is most reliable; fall back to scheduled data
-      const shiftLabel = monRow?.[`${MON_HOURS}.shift`]
-        ?? schedRow?.[`${SCHEDULE}.work_schedule`]
-      const startTime  = monRow?.[`${MON_HOURS}.start_time`]
-        ?? schedRow?.[`${SCHEDULE}.modified_start_time`]
-        ?? schedRow?.[`${SCHEDULE}.start_time`]
-
+  return [...schedMap.entries()]
+    .filter(([id]) => !excluded.has(id))
+    .map(([id, { row: r }]) => {
+      const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
+      const endTime   = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
+      const firstName = r[`${SCHEDULE}.first_name`] || ''
+      const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       return {
         id,
-        name:         r[`${ROSTER}.employee_name`] || '',
+        name:         [firstName, lastName].filter(Boolean).join(' '),
         role:         null,
-        default_lane: scheduleToLane(shiftLabel, startTime),
+        default_lane: scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime),
         shift_start:  normalizeShiftStart(startTime),
+        shift_hours:  computeShiftHours(startTime, endTime),
         facility:     facilityId,
       }
     })
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
