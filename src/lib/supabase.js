@@ -200,6 +200,22 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
   return result
 }
 
+// Returns { [facilityId]: totalEstDrops } for all facilities on the given date.
+// Used by the ALL tab to include EST drops in the Appts KPI.
+export async function fetchAllFacilitiesEstDrops(planDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('project_hourly_drops_forecast')
+    .select('facility, est_drops')
+    .eq('plan_date', planDate)
+  if (error || !data) return {}
+  const result = {}
+  for (const r of data) {
+    result[r.facility] = (result[r.facility] ?? 0) + r.est_drops
+  }
+  return result
+}
+
 // rows: [{ project_name: string, h: number, est_drops: number }]
 export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (!supabase) return

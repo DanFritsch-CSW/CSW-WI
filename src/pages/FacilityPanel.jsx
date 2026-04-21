@@ -104,7 +104,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const { util, delta } = computeDailyKpis(hourly)
 
   const kpiData = {
-    appts:  projects.reduce((s, p) => s + p.tot,           0),
+    appts:  projects.reduce((s, p) => s + p.inb + p.out + (projectDrops[p.name] ?? 0), 0),
     drops:  projects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0),
     inb:    projects.reduce((s, p) => s + p.inb,           0),
     out:    projects.reduce((s, p) => s + p.out,           0),
