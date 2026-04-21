@@ -402,16 +402,16 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 
   const sums = {}
 
-  // For projects with custom rules, query raw appointments for each past date in parallel.
-  // Divide by weeksBack so weeks with zero drops are included in the denominator.
+  // For projects with custom rules, query raw appointments sequentially (one project at a time)
+  // to avoid overwhelming the Omni API with too many simultaneous requests.
   const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]))]
-  await Promise.all(ruleProjects.map(async projectName => {
+  for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
     const counts = await Promise.all(
       pastDates.map(d => fetchProjectDropsByRule(facilityId, d, projectName, rule).catch(() => 0))
     )
     sums[projectName] = counts.reduce((s, c) => s + c, 0)
-  }))
+  }
 
   return Object.entries(sums).map(([project_name, total]) => ({
     project_name,
