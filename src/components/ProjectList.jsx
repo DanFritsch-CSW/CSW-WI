@@ -7,7 +7,8 @@ export default function ProjectList({ projects, projectDrops = {}, color }) {
     <div className="project-list">
       <div className="project-list-header">
         <span>Project</span>
-        <span style={{ textAlign: 'right' }}>Est Inb/Drop</span>
+        <span style={{ textAlign: 'right' }}>Est Drops</span>
+        <span style={{ textAlign: 'right' }}>Inbound</span>
         <span style={{ textAlign: 'right' }}>Outbound</span>
         <span style={{ textAlign: 'right' }}>Total</span>
       </div>
@@ -23,6 +24,7 @@ export default function ProjectList({ projects, projectDrops = {}, color }) {
             <span className="project-name">{p.name}</span>
           </div>
           <span className="project-num">{projectDrops[p.name] ?? 0}</span>
+          <span className="project-num">{p.inb}</span>
           <span className="project-num">{p.out}</span>
           <span className="project-num" style={{ color }}>{p.tot}</span>
         </div>
