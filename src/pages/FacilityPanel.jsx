@@ -74,39 +74,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return result
   }, [projectHourlyDrops])
 
-  // When a user edits a project day total, scale each hourly value proportionally
-  // so the hourly breakdown stays consistent with the new total.
-  const handleProjectDropSave = useCallback(async (projectName, newTotal) => {
-    const currentHourMap = projectHourlyDrops[projectName] ?? {}
-    const hours = Object.keys(currentHourMap).map(Number)
-    if (hours.length === 0) return
-
-    const currentTotal = Object.values(currentHourMap).reduce((s, v) => s + v, 0)
-
-    let newHourMap
-    if (currentTotal === 0) {
-      const perHour = Math.floor(newTotal / hours.length)
-      const remainder = newTotal - perHour * hours.length
-      newHourMap = Object.fromEntries(hours.map((h, i) => [h, perHour + (i < remainder ? 1 : 0)]))
-    } else {
-      newHourMap = Object.fromEntries(
-        Object.entries(currentHourMap).map(([h, v]) => [Number(h), Math.round(v * newTotal / currentTotal)])
-      )
-      // Fix rounding drift so sum matches newTotal exactly
-      const drift = newTotal - Object.values(newHourMap).reduce((s, v) => s + v, 0)
-      if (drift !== 0) {
-        const maxH = Object.entries(newHourMap).sort((a, b) => b[1] - a[1])[0]?.[0]
-        if (maxH !== undefined) newHourMap[Number(maxH)] += drift
-      }
-    }
-
-    const rows = Object.entries(newHourMap).map(([h, est_drops]) => ({
-      project_name: projectName, h: Number(h), est_drops,
-    }))
-    await upsertProjectHourlyDrops(facility.id, planDate, rows)
-    setProjectHourlyDrops(prev => ({ ...prev, [projectName]: newHourMap }))
-  }, [projectHourlyDrops, facility.id, planDate])
-
   // Sum per-project hourly drops into a single { [hour]: total } for labor calc.
   const estDrops = useMemo(() => {
     const sums = {}
@@ -152,7 +119,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         <KpiPills data={kpiData} color={facility.color} />
         <div>
           <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
-          <ProjectList projects={projects} projectDrops={projectDrops} onSave={handleProjectDropSave} color={facility.color} />
+          <ProjectList projects={projects} projectDrops={projectDrops} color={facility.color} />
         </div>
       </div>
       <HourlyChart hourlyData={hourly} color={facility.color} />
