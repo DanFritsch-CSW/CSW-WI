@@ -23,7 +23,7 @@ export default function ProjectList({ projects, projectDrops = {}, color }) {
             </div>
             <span className="project-name">{p.name}</span>
           </div>
-          <span className="project-num">{projectDrops[p.name] ?? p.drops ?? 0}</span>
+          <span className="project-num">{projectDrops[p.name] ?? 0}</span>
           <span className="project-num">{p.inb}</span>
           <span className="project-num">{p.out}</span>
           <span className="project-num" style={{ color }}>{p.tot}</span>
