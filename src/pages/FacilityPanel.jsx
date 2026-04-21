@@ -4,8 +4,8 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalHourlyDrops, fetchHistoricalProjectDrops } from '../lib/omni.js'
-import { fetchEstDrops, fetchProjectDrops, upsertEstDrops, upsertProjectDrops } from '../lib/supabase.js'
+import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchHistoricalProjectDrops } from '../lib/omni.js'
+import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchProjectDrops, upsertProjectDrops } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
@@ -15,9 +15,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const [projects, setProjects]     = useState([])
   const [laborCount, setLaborCount] = useState(0)
   const [rosterState, setRosterState] = useState({ employees: [], laneMap: {} })
-  const [estDrops, setEstDrops]           = useState({})
-  const [projectDrops, setProjectDrops]   = useState({})
-  const [seedingDrops, setSeedingDrops]   = useState(false)
+  const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
+  const [projectDrops, setProjectDrops]             = useState({})
+  const [seedingDrops, setSeedingDrops]             = useState(false)
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
@@ -25,24 +25,30 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     setRawHourly([])
     setHourlyErr(null)
     setProjects([])
-    setEstDrops({})
+    setProjectHourlyDrops({})
     setProjectDrops({})
     fetchHourlyData(facility.id, planDate)
       .then(setRawHourly)
       .catch(e => setHourlyErr(e.message))
     fetchProjectData(facility.id, planDate).then(setProjects)
-    fetchEstDrops(facility.id, planDate).then(async data => {
+    fetchProjectHourlyDrops(facility.id, planDate).then(async data => {
       if (Object.keys(data).length > 0) {
-        setEstDrops(data)
+        setProjectHourlyDrops(data)
         return
       }
-      // No manual entries yet — auto-seed from historical average
+      // No manual entries yet — auto-seed from historical per-project hourly average
       setSeedingDrops(true)
       try {
-        const historical = await fetchHistoricalHourlyDrops(facility.id, planDate)
-        if (historical.length) {
-          await upsertEstDrops(facility.id, planDate, historical)
-          setEstDrops(Object.fromEntries(historical.map(({ h, est }) => [h, est])))
+        const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+        if (Object.keys(historical).length) {
+          const rows = []
+          for (const [project_name, hourMap] of Object.entries(historical)) {
+            for (const [h, est_drops] of Object.entries(hourMap)) {
+              rows.push({ project_name, h: Number(h), est_drops })
+            }
+          }
+          await upsertProjectHourlyDrops(facility.id, planDate, rows)
+          setProjectHourlyDrops(historical)
         }
       } finally {
         setSeedingDrops(false)
@@ -76,8 +82,18 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap)
   }, [rosterState, settings])
 
+  // Sum per-project hourly drops into a single { [hour]: total } for labor calc.
+  const estDrops = useMemo(() => {
+    const sums = {}
+    for (const hourMap of Object.values(projectHourlyDrops)) {
+      for (const [h, v] of Object.entries(hourMap)) {
+        sums[h] = (sums[h] ?? 0) + v
+      }
+    }
+    return sums
+  }, [projectHourlyDrops])
+
   // Override appts per hour using est drops (inb + est_drops + out).
-  // Falls back to 0 est drops for hours without an entry.
   const rawWithEst = useMemo(() => {
     if (!rawHourly.length) return rawHourly
     return rawHourly.map(row => {
@@ -121,7 +137,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
       </div>
       {hourlyErr
         ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
-        : <HourlyTable hourlyData={hourly} estDrops={estDrops} color={facility.color} />
+        : <HourlyTable
+            hourlyData={hourly}
+            estDrops={estDrops}
+            projectHourlyDrops={projectHourlyDrops}
+            onProjectHourlyChange={(projectName, h, val) => {
+              setProjectHourlyDrops(prev => ({
+                ...prev,
+                [projectName]: { ...(prev[projectName] ?? {}), [h]: val },
+              }))
+              upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
+            }}
+            color={facility.color}
+          />
       }
       <RosterBoard
         facility={facility.id}
