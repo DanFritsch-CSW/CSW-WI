@@ -34,20 +34,25 @@ export async function fetchEmployees(facility) {
   return data ?? []
 }
 
-// Replaces the full employee list for a facility — deletes stale records first,
-// then inserts the current B2E set. Ensures removed/filtered employees don't linger.
+// Syncs the employee list for a facility: upserts current B2E employees, then
+// deletes any facility employees whose IDs are no longer in the B2E result.
+// Uses upsert (not insert) so cross-facility employees sharing the same ID don't
+// cause a primary key conflict.
 export async function replaceEmployees(facilityId, employees) {
   if (!supabase) return 'Supabase not configured'
-  const { error: delErr } = await supabase
-    .from('employees')
-    .delete()
-    .eq('facility', facilityId)
-  if (delErr) { console.error('replaceEmployees delete:', delErr); return delErr.message }
-  if (!employees.length) return null
-  const { error: insErr } = await supabase
-    .from('employees')
-    .insert(employees)
-  if (insErr) { console.error('replaceEmployees insert:', insErr); return insErr.message }
+  if (employees.length) {
+    const { error: upsertErr } = await supabase
+      .from('employees')
+      .upsert(employees, { onConflict: 'id' })
+    if (upsertErr) { console.error('replaceEmployees upsert:', upsertErr); return upsertErr.message }
+  }
+  // Prune employees that are no longer in the B2E result for this facility
+  const activeIds = employees.map(e => String(e.id))
+  const base = supabase.from('employees').delete().eq('facility', facilityId)
+  const { error: delErr } = await (activeIds.length
+    ? base.not('id', 'in', `(${activeIds.join(',')})`)
+    : base)
+  if (delErr) { console.error('replaceEmployees prune:', delErr); return delErr.message }
   return null
 }
 
