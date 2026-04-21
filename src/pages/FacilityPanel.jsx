@@ -4,8 +4,8 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalHourlyDrops } from '../lib/omni.js'
-import { fetchEstDrops, fetchProjectDrops, upsertEstDrops } from '../lib/supabase.js'
+import { fetchHourlyData, fetchProjectData, fetchHistoricalHourlyDrops, fetchHistoricalProjectDrops } from '../lib/omni.js'
+import { fetchEstDrops, fetchProjectDrops, upsertEstDrops, upsertProjectDrops } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
@@ -48,7 +48,22 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         setSeedingDrops(false)
       }
     })
-    fetchProjectDrops(facility.id, planDate).then(setProjectDrops)
+    fetchProjectDrops(facility.id, planDate).then(async data => {
+      if (Object.keys(data).length > 0) {
+        setProjectDrops(data)
+        return
+      }
+      // No manual entries yet — auto-seed from historical average
+      try {
+        const historical = await fetchHistoricalProjectDrops(facility.id, planDate)
+        if (historical.length) {
+          await upsertProjectDrops(facility.id, planDate, historical)
+          setProjectDrops(Object.fromEntries(historical.map(({ project_name, est_drops }) => [project_name, est_drops])))
+        }
+      } catch {
+        // silently fail — UI will show 0
+      }
+    })
   }, [facility.id, planDate])
 
   const handleLaborCount   = useCallback(n => setLaborCount(n), [])
