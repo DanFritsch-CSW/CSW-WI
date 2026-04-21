@@ -6,6 +6,57 @@ Internal warehouse operations dashboard for Central Storage & Warehouse — a 3P
 
 ---
 
+## Notion Documentation
+
+The Notion page is the living document for this app — every element, integration, and data model is catalogued there. It auto-updates on every push to `main`.
+
+### What lives in Notion
+
+- App overview and purpose
+- Tech stack and dependency versions
+- Facility table (IDs, Omni keys, brand colors)
+- Pages and feature breakdown (live vs. stub)
+- Omni Analytics integration details (tables, API functions, field mappings)
+- Roster Board architecture and B2E sync details
+- Supabase schema and migration history
+- Deployment architecture and environment variables
+- Outstanding and planned work
+- **Changelog** — a timestamped toggle entry is appended automatically on every deploy
+
+### One-time setup (initial page creation)
+
+1. Create a Notion integration at [notion.so/my-integrations](https://www.notion.so/my-integrations). Copy the `secret_...` token.
+2. Share a parent Notion page with your integration (open the page → **Share** → add integration by name).
+3. Copy that parent page's ID from its URL: `notion.so/<workspace>/<PAGE_ID>?v=...`
+4. Install the Notion client and run the init script:
+
+```bash
+cd scripts && npm install && cd ..
+
+NOTION_API_KEY=secret_xxx \
+NOTION_PARENT_PAGE_ID=<parent-page-id> \
+node scripts/notion-init.js
+```
+
+5. The script prints the new page ID. Add two secrets to the GitHub repo (**Settings → Secrets and variables → Actions**):
+
+| Secret | Value |
+|---|---|
+| `NOTION_API_KEY` | Your `secret_xxx` integration token |
+| `NOTION_PAGE_ID` | The page ID printed by the init script |
+
+### How automatic updates work
+
+A GitHub Action (`.github/workflows/notion-sync.yml`) fires on every push to `main`. It:
+
+1. Runs `scripts/notion-update.js` with the commit SHA, message, and author injected as env vars.
+2. **Updates** the "Last Deployed" banner at the top of the Notion page.
+3. **Appends** a collapsible changelog entry at the bottom with the timestamp, short SHA, commit message, and author.
+
+No Netlify configuration changes are needed — the Action is tied to the same `main` push that triggers the Netlify deploy.
+
+---
+
 ## Stack
 
 | Layer | Technology |
@@ -226,6 +277,15 @@ netlify/
 └── functions/
     ├── omni-query.cjs      # Omni API proxy (Arrow IPC → JSON)
     └── package.json        # type: commonjs, apache-arrow dep
+
+scripts/
+├── notion-init.js          # One-time: creates the Notion documentation page
+├── notion-update.js        # Per-deploy: updates banner + appends changelog entry
+└── package.json            # @notionhq/client dependency
+
+.github/
+└── workflows/
+    └── notion-sync.yml     # GitHub Action: runs notion-update.js on push to main
 ```
 
 ---
