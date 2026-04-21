@@ -111,7 +111,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         <KpiPills data={kpiData} color={facility.color} />
         <div>
           <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
-          <ProjectList projects={projects} projectDrops={projectDrops} color={facility.color} />
+          <ProjectList projects={projects} projectDrops={projectDrops} facilityId={facility.id} planDate={planDate} color={facility.color} />
         </div>
       </div>
       <HourlyChart hourlyData={hourly} color={facility.color} />
