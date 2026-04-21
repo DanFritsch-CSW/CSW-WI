@@ -15,7 +15,7 @@ import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
 import { LANES, ACTIVE_LANES } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees, deleteAssignment } from '../lib/supabase.js'
+import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees, seedRosterAssignments, deleteAssignment } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
@@ -135,17 +135,23 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const handleB2eSync = useCallback(async () => {
     setSyncState('loading')
     try {
-      const b2eEmployees = await fetchB2eRoster(facility, planDate || todayISO())
+      const date         = planDate || todayISO()
+      const b2eEmployees = await fetchB2eRoster(facility, date)
       if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
-      const err = await upsertEmployees(b2eEmployees)
+      // Strip shift_hours — employees table doesn't have that column
+      const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+      const err = await upsertEmployees(empRows)
       if (err) { setSyncState(err); return }
+      // Seed assignments with B2E shift times; ignoreDuplicates preserves manual edits
+      const seedErr = await seedRosterAssignments(b2eEmployees, date)
+      if (seedErr) { setSyncState(seedErr); return }
       await loadRef.current?.()
       setSyncState('ok')
       setTimeout(() => setSyncState(null), 3000)
     } catch (e) {
       setSyncState(e.message)
     }
-  }, [facility])
+  }, [facility, planDate])
 
   const handleAddTemp = useCallback((tempEmp) => {
     setEmployees(prev => [...prev, tempEmp])
