@@ -4,7 +4,7 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops } from '../lib/omni.js'
+import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, isRuleProject } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
@@ -30,8 +30,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
       .catch(e => setHourlyErr(e.message))
     fetchProjectData(facility.id, planDate).then(setProjects)
     fetchProjectHourlyDrops(facility.id, planDate).then(async data => {
-      if (Object.keys(data).length > 0) {
-        setProjectHourlyDrops(data)
+      // Strip any cross-facility entries seeded before facility guards were added
+      const filtered = Object.fromEntries(
+        Object.entries(data).filter(([name]) => isRuleProject(facility.id, name))
+      )
+      if (Object.keys(filtered).length > 0) {
+        setProjectHourlyDrops(filtered)
         return
       }
       // No manual entries yet — auto-seed from historical per-project hourly average

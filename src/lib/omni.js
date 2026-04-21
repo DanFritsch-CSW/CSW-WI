@@ -47,20 +47,28 @@ const PROJECT_DROP_RULES = {
   // CAL — PVI FG: exclude live unloads identified by PUR *combined with* CMM or Peter Brothers carrier.
   // PUR alone (other carriers) still counts as a drop. CMM/Peter Brothers without PUR are also drops.
   'Palermos CALEDONIA finished': {
+    facility: 'cal',
     method: 'inbound_exclude_lookup',
     excludeWhenAll: [['PUR', 'CMM'], ['PUR', 'PETER BROTHERS']],
   },
 
   // KEN — all inbounds are drops
-  'CROWN BAKERIES':          { method: 'inbound_all' },
-  'Pretzilla Kenosha':       { method: 'inbound_all' },
-  'BIRCHWOOD FOODS KENOSHA': { method: 'inbound_all' },
-  'FAIR OAKS FARMS':         { method: 'inbound_all' },
-  'FAIR OAKS FARMS WEST':    { method: 'inbound_all' },
+  'CROWN BAKERIES':          { facility: 'ken', method: 'inbound_all' },
+  'Pretzilla Kenosha':       { facility: 'ken', method: 'inbound_all' },
+  'BIRCHWOOD FOODS KENOSHA': { facility: 'ken', method: 'inbound_all' },
+  'FAIR OAKS FARMS':         { facility: 'ken', method: 'inbound_all' },
+  'FAIR OAKS FARMS WEST':    { facility: 'ken', method: 'inbound_all' },
 
   // KEN — Richelieu drops only when lookup code contains TOP or PSH
-  'RICHELIEU KENOSHA':               { method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
-  'RICHELIEU RAW MATERIALS KENOSHA': { method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
+  'RICHELIEU KENOSHA':               { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
+  'RICHELIEU RAW MATERIALS KENOSHA': { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
+}
+
+// Returns true if projectName has a drop rule for the given facilityId.
+// Used to filter stale Supabase data seeded before facility guards were added.
+export function isRuleProject(facilityId, projectName) {
+  const rule = PROJECT_DROP_RULES[projectName]
+  return rule != null && rule.facility === facilityId
 }
 
 // ── B2E Roster ───────────────────────────────────────────────────
@@ -482,7 +490,7 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
 
   // Determine which projects at this facility have drop rules
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]))]
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
 
   const out = {} // { projectName: { hour: avgDrops } }
 
@@ -525,7 +533,7 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 
   // For projects with custom rules, query raw appointments sequentially (one project at a time)
   // to avoid overwhelming the Omni API with too many simultaneous requests.
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]))]
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
     const counts = await Promise.all(
