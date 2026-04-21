@@ -38,13 +38,24 @@ const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 
 // Per-project drop estimation rules used during historical averaging.
-// method 'inbound_exclude_lookup': count all Inbound-type appointments where
-//   lookup_code does NOT contain any of excludePatterns (case-insensitive).
-//   Used when the Inbound/Drop appointment type is not consistently applied
-//   and drops are better identified by what the lookup code is NOT.
+// Methods (all case-insensitive on lookup_code):
+//   inbound_all:             count all Inbound-type appointments
+//   inbound_exclude_lookup:  count Inbound appts where lookup_code contains NONE of excludePatterns
+//   inbound_include_lookup:  count Inbound appts where lookup_code contains ANY of includePatterns
 const PROJECT_DROP_RULES = {
-  // PVI FG: drops = all Inbound appts excluding PUR (live purchases) and CMM/Peter Brothers (live carriers)
+  // CAL — PVI FG: exclude live purchases (PUR) and live-unload carriers (CMM, Peter Brothers)
   'Palermos CALEDONIA finished': { method: 'inbound_exclude_lookup', excludePatterns: ['PUR', 'CMM', 'PETER BROTHERS'] },
+
+  // KEN — all inbounds are drops
+  'CROWN BAKERIES':          { method: 'inbound_all' },
+  'Pretzilla Kenosha':       { method: 'inbound_all' },
+  'BIRCHWOOD FOODS KENOSHA': { method: 'inbound_all' },
+  'FAIR OAKS FARMS':         { method: 'inbound_all' },
+  'FAIR OAKS FARMS WEST':    { method: 'inbound_all' },
+
+  // KEN — Richelieu drops only when lookup code contains TOP or PSH
+  'RICHELIEU KENOSHA':               { method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
+  'RICHELIEU RAW MATERIALS KENOSHA': { method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
 }
 
 // ── B2E Roster ───────────────────────────────────────────────────
@@ -330,43 +341,44 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return 0
 
-  if (rule.method === 'inbound_exclude_lookup') {
-    const rows = await omniQuery({
-      modelId: GOLD_MODEL_ID,
-      table: VIEW_APPT,
-      fields: [
-        `${VIEW_APPT}.lookup_code`,
-        `${VIEW_APPT}.dock_appointment_type_name`,
-        `${VIEW_APPT}.count`,
-      ],
-      filters: {
-        [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-        [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
-        [`${VIEW_APPT}.scheduled_arrival`]: {
-          kind: 'TIME_FOR_UNIT_DURATION',
-          type: 'date',
-          ui_type: 'DAY',
-          isFiscal: false,
-          left_side: date,
-          is_negative: false,
-          offset_interval_string: '0 days',
-        },
+  const rows = await omniQuery({
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_APPT,
+    fields: [
+      `${VIEW_APPT}.lookup_code`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
+      `${VIEW_APPT}.count`,
+    ],
+    filters: {
+      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
+      [`${VIEW_APPT}.scheduled_arrival`]: {
+        kind: 'TIME_FOR_UNIT_DURATION',
+        type: 'date',
+        ui_type: 'DAY',
+        isFiscal: false,
+        left_side: date,
+        is_negative: false,
+        offset_interval_string: '0 days',
       },
-      sorts: [],
-      limit: 500,
+    },
+    sorts: [],
+    limit: 500,
+  })
+
+  return rows
+    .filter(r => {
+      const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
+      const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
+      if (!type.startsWith('inbound')) return false
+      if (rule.method === 'inbound_all') return true
+      if (rule.method === 'inbound_exclude_lookup')
+        return rule.excludePatterns.every(p => !code.includes(p.toUpperCase()))
+      if (rule.method === 'inbound_include_lookup')
+        return rule.includePatterns.some(p => code.includes(p.toUpperCase()))
+      return false
     })
-
-    const excls = rule.excludePatterns.map(p => p.toUpperCase())
-    return rows
-      .filter(r => {
-        const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
-        const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
-        return type.startsWith('inbound') && excls.every(p => !code.includes(p))
-      })
-      .reduce((s, r) => s + (Number(r[`${VIEW_APPT}.count`]) || 0), 0)
-  }
-
-  return 0
+    .reduce((s, r) => s + (Number(r[`${VIEW_APPT}.count`]) || 0), 0)
 }
 
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
