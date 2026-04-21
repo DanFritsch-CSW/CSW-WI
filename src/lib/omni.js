@@ -101,22 +101,37 @@ function scheduleToLane(workSchedule, startTime) {
   return 'shift1'
 }
 
-// Normalize B2E start time to "HH:MM" string, or null if invalid.
-function normalizeShiftStart(startTime) {
-  if (!startTime || startTime === '0' || startTime === 0) return null
-  const s = String(startTime)
-  const hour = parseInt(s.split(':')[0], 10)
-  return isNaN(hour) ? null : s
+// Parse B2E time strings to a decimal 24-hour value.
+// Handles "H:MMa" / "H:MMp" (Omni format), "HH:MM" (24-hour), and plain numeric hours.
+function parseB2eTime(s) {
+  if (!s || s === '0' || s === 0) return null
+  const str = String(s).trim().toLowerCase()
+  const m = str.match(/^(\d{1,2}):(\d{2})\s*([ap])?/)
+  if (m) {
+    let h      = parseInt(m[1], 10)
+    const min  = parseInt(m[2], 10)
+    const ap   = m[3]
+    if (ap === 'p' && h !== 12) h += 12
+    else if (ap === 'a' && h === 12) h = 0
+    return h + min / 60
+  }
+  const plain = parseFloat(str)
+  return isNaN(plain) ? null : plain
 }
 
-// Derive shift duration in hours from start and end time strings ("HH:MM").
+// Returns integer start hour (0-23) for array indexing in the availability calc.
+function normalizeShiftStart(startTime) {
+  const h = parseB2eTime(startTime)
+  return h != null ? Math.floor(h) : null
+}
+
+// Returns shift duration in decimal hours (e.g. 8.5), rounded to nearest 0.5.
 function computeShiftHours(startTime, endTime) {
-  if (!startTime || !endTime) return null
-  const sh = parseInt(String(startTime).split(':')[0], 10)
-  const eh = parseInt(String(endTime).split(':')[0], 10)
-  if (isNaN(sh) || isNaN(eh)) return null
+  const sh = parseB2eTime(startTime)
+  const eh = parseB2eTime(endTime)
+  if (sh == null || eh == null) return null
   const hours = (eh - sh + 24) % 24
-  return hours > 0 ? hours : null
+  return hours > 0 ? Math.round(hours * 2) / 2 : null
 }
 
 async function omniQuery(query) {
@@ -457,7 +472,6 @@ export async function fetchB2eRoster(facilityId, date) {
     filters: {
       [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${SCHEDULE}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      [`${SCHEDULE}.default_job_code`]: { kind: 'EQUALS', type: 'string', values: ['205', '209'] },
       [`${SCHEDULE}.entry_date`]: {
         kind: 'TIME_FOR_UNIT_DURATION',
         type: 'date',
