@@ -34,6 +34,23 @@ export async function fetchEmployees(facility) {
   return data ?? []
 }
 
+// Replaces the full employee list for a facility — deletes stale records first,
+// then inserts the current B2E set. Ensures removed/filtered employees don't linger.
+export async function replaceEmployees(facilityId, employees) {
+  if (!supabase) return 'Supabase not configured'
+  const { error: delErr } = await supabase
+    .from('employees')
+    .delete()
+    .eq('facility', facilityId)
+  if (delErr) { console.error('replaceEmployees delete:', delErr); return delErr.message }
+  if (!employees.length) return null
+  const { error: insErr } = await supabase
+    .from('employees')
+    .insert(employees)
+  if (insErr) { console.error('replaceEmployees insert:', insErr); return insErr.message }
+  return null
+}
+
 export async function upsertEmployees(employees) {
   if (!supabase) return 'Supabase not configured'
   const { error } = await supabase
