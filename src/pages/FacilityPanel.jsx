@@ -4,8 +4,8 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchHistoricalProjectDrops } from '../lib/omni.js'
-import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchProjectDrops, upsertProjectDrops } from '../lib/supabase.js'
+import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops } from '../lib/omni.js'
+import { fetchProjectHourlyDrops, upsertProjectHourlyDrops } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
@@ -16,7 +16,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const [laborCount, setLaborCount] = useState(0)
   const [rosterState, setRosterState] = useState({ employees: [], laneMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
-  const [projectDrops, setProjectDrops]             = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
@@ -26,7 +25,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     setHourlyErr(null)
     setProjects([])
     setProjectHourlyDrops({})
-    setProjectDrops({})
     fetchHourlyData(facility.id, planDate)
       .then(setRawHourly)
       .catch(e => setHourlyErr(e.message))
@@ -54,22 +52,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         setSeedingDrops(false)
       }
     })
-    fetchProjectDrops(facility.id, planDate).then(async data => {
-      if (Object.keys(data).length > 0) {
-        setProjectDrops(data)
-        return
-      }
-      // No manual entries yet — auto-seed from historical average
-      try {
-        const historical = await fetchHistoricalProjectDrops(facility.id, planDate)
-        if (historical.length) {
-          await upsertProjectDrops(facility.id, planDate, historical)
-          setProjectDrops(Object.fromEntries(historical.map(({ project_name, est_drops }) => [project_name, est_drops])))
-        }
-      } catch {
-        // silently fail — UI will show 0
-      }
-    })
   }, [facility.id, planDate])
 
   const handleLaborCount   = useCallback(n => setLaborCount(n), [])
@@ -81,6 +63,49 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     if (!rosterState.employees.length) return null
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap)
   }, [rosterState, settings])
+
+  // Single source of truth: project day totals are always the sum of their hourly values.
+  // This guarantees ProjectList and HourlyTable always show identical numbers.
+  const projectDrops = useMemo(() => {
+    const result = {}
+    for (const [name, hourMap] of Object.entries(projectHourlyDrops)) {
+      result[name] = Object.values(hourMap).reduce((s, v) => s + v, 0)
+    }
+    return result
+  }, [projectHourlyDrops])
+
+  // When a user edits a project day total, scale each hourly value proportionally
+  // so the hourly breakdown stays consistent with the new total.
+  const handleProjectDropSave = useCallback(async (projectName, newTotal) => {
+    const currentHourMap = projectHourlyDrops[projectName] ?? {}
+    const hours = Object.keys(currentHourMap).map(Number)
+    if (hours.length === 0) return
+
+    const currentTotal = Object.values(currentHourMap).reduce((s, v) => s + v, 0)
+
+    let newHourMap
+    if (currentTotal === 0) {
+      const perHour = Math.floor(newTotal / hours.length)
+      const remainder = newTotal - perHour * hours.length
+      newHourMap = Object.fromEntries(hours.map((h, i) => [h, perHour + (i < remainder ? 1 : 0)]))
+    } else {
+      newHourMap = Object.fromEntries(
+        Object.entries(currentHourMap).map(([h, v]) => [Number(h), Math.round(v * newTotal / currentTotal)])
+      )
+      // Fix rounding drift so sum matches newTotal exactly
+      const drift = newTotal - Object.values(newHourMap).reduce((s, v) => s + v, 0)
+      if (drift !== 0) {
+        const maxH = Object.entries(newHourMap).sort((a, b) => b[1] - a[1])[0]?.[0]
+        if (maxH !== undefined) newHourMap[Number(maxH)] += drift
+      }
+    }
+
+    const rows = Object.entries(newHourMap).map(([h, est_drops]) => ({
+      project_name: projectName, h: Number(h), est_drops,
+    }))
+    await upsertProjectHourlyDrops(facility.id, planDate, rows)
+    setProjectHourlyDrops(prev => ({ ...prev, [projectName]: newHourMap }))
+  }, [projectHourlyDrops, facility.id, planDate])
 
   // Sum per-project hourly drops into a single { [hour]: total } for labor calc.
   const estDrops = useMemo(() => {
@@ -127,7 +152,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         <KpiPills data={kpiData} color={facility.color} />
         <div>
           <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
-          <ProjectList projects={projects} projectDrops={projectDrops} facilityId={facility.id} planDate={planDate} color={facility.color} />
+          <ProjectList projects={projects} projectDrops={projectDrops} onSave={handleProjectDropSave} color={facility.color} />
         </div>
       </div>
       <HourlyChart hourlyData={hourly} color={facility.color} />
