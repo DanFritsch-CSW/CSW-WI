@@ -217,9 +217,10 @@ export async function fetchProjectData(facilityId, date) {
     const cnt  = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!map.has(name)) map.set(name, { name, inb: 0, out: 0, drops: 0 })
     const p = map.get(name)
-    if (type === 'inbound')       p.inb += cnt
-    else if (type === 'outbound') p.out += cnt
-    else                          p.drops += cnt
+    if (type === 'inbound/drop')          p.drops += cnt
+    else if (type.startsWith('inbound'))  p.inb   += cnt
+    else if (type.startsWith('outbound')) p.out   += cnt
+    // null/empty type → ignored
   }
 
   return Array.from(map.values())
@@ -307,19 +308,19 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
 
   const results = await Promise.all(pastDates.map(d => fetchHourlyData(facilityId, d).catch(() => [])))
 
-  // Average drops per hour across all fetched weeks
-  const sums   = {}
-  const counts = {}
+  // Average drops per hour across all fetched weeks.
+  // Divide by weeksBack (not weeks-with-data) so hours with zero drops in a week
+  // are included in the denominator rather than inflating the average.
+  const sums = {}
   for (const rows of results) {
     for (const row of rows) {
-      sums[row.h]   = (sums[row.h]   ?? 0) + row.drops
-      counts[row.h] = (counts[row.h] ?? 0) + 1
+      sums[row.h] = (sums[row.h] ?? 0) + row.drops
     }
   }
 
   return Object.entries(sums).map(([h, total]) => ({
     h:   Number(h),
-    est: Math.round(total / counts[h]),
+    est: Math.round(total / weeksBack),
   }))
 }
 
@@ -339,18 +340,18 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
 
-  const sums   = {}
-  const counts = {}
+  // Divide by weeksBack (not weeks-with-data) so project weeks with zero
+  // Inbound/Drop appointments are included in the denominator.
+  const sums = {}
   for (const rows of results) {
     for (const row of rows) {
-      sums[row.name]   = (sums[row.name]   ?? 0) + row.drops
-      counts[row.name] = (counts[row.name] ?? 0) + 1
+      sums[row.name] = (sums[row.name] ?? 0) + row.drops
     }
   }
 
   return Object.entries(sums).map(([project_name, total]) => ({
     project_name,
-    est_drops: Math.round(total / counts[project_name]),
+    est_drops: Math.round(total / weeksBack),
   }))
 }
 
