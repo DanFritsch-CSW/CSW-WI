@@ -611,7 +611,7 @@ input, select { font: inherit; color: inherit; }
 
 .project-list-header {
   display: grid;
-  grid-template-columns: 1fr 88px 80px 60px;
+  grid-template-columns: 1fr 72px 72px 80px 60px;
   padding: 6px 14px;
   font-family: var(--font-mono);
   font-size: 10px;
@@ -624,7 +624,7 @@ input, select { font: inherit; color: inherit; }
 
 .project-row {
   display: grid;
-  grid-template-columns: 1fr 88px 80px 60px;
+  grid-template-columns: 1fr 72px 72px 80px 60px;
   align-items: center;
   padding: 6px 14px;
   border-bottom: 1px solid var(--border-subtle);
