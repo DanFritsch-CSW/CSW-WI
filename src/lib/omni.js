@@ -513,6 +513,7 @@ export async function fetchB2eRoster(facilityId, date) {
         id,
         name:         [firstName, lastName].filter(Boolean).join(' '),
         role:         null,
+        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
         default_lane: scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime),
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),

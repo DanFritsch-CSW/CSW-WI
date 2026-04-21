@@ -30,6 +30,7 @@ export async function fetchEmployees(facility) {
     .from('employees')
     .select('*')
     .eq('facility', facility)
+    .in('job_code', ['205', '209'])
   if (error) { console.error('fetchEmployees:', error); return [] }
   return data ?? []
 }
