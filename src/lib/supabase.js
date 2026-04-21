@@ -43,6 +43,28 @@ export async function upsertEmployees(employees) {
   return null
 }
 
+// Seeds roster_assignments from B2E data without overwriting manual edits.
+// ignoreDuplicates: true means existing rows (manual lane/time changes) are left intact.
+export async function seedRosterAssignments(employees, planDate) {
+  if (!supabase || !employees.length) return null
+  const rows = employees.map(e => ({
+    facility:      e.facility,
+    employee_id:   e.id,
+    employee_name: e.name,
+    role:          e.role ?? null,
+    lane:          e.default_lane || 'shift1',
+    plan_date:     planDate,
+    shift_start:   e.shift_start ?? null,
+    shift_hours:   e.shift_hours ?? null,
+    is_temp:       false,
+  }))
+  const { error } = await supabase
+    .from('roster_assignments')
+    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: true })
+  if (error) { console.error('seedRosterAssignments:', error); return error.message }
+  return null
+}
+
 export async function deleteAssignment(facility, employeeId, planDate) {
   if (!supabase) return
   const { error } = await supabase
