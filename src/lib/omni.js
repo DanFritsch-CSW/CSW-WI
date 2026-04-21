@@ -457,6 +457,7 @@ export async function fetchB2eRoster(facilityId, date) {
     filters: {
       [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${SCHEDULE}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+      [`${SCHEDULE}.default_job_code`]: { kind: 'EQUALS', type: 'string', values: ['205', '209'] },
       [`${SCHEDULE}.entry_date`]: {
         kind: 'TIME_FOR_UNIT_DURATION',
         type: 'date',
