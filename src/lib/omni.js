@@ -33,6 +33,19 @@ const CSW_WAREHOUSE_TO_FAC = Object.fromEntries(
 const VIEW_H = 'labor_planning_app__hourly_labor_required_vs_available'
 const VIEW_P = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 
+// Raw appointments — needed for lookup-code-based drop rules (VIEW_P doesn't expose lookup_code)
+const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
+const VIEW_APPT     = 'gold__truck_appointments'
+
+// Per-project drop estimation rules used during historical averaging.
+// method 'inbound_exclude_lookup': count all Inbound-type appointments where
+//   lookup_code does NOT contain excludePattern (case-insensitive).
+//   Used when the Inbound/Drop appointment type is not consistently applied
+//   and drops are better identified by what the lookup code is NOT.
+const PROJECT_DROP_RULES = {
+  'Palermos CALEDONIA finished': { method: 'inbound_exclude_lookup', excludePattern: 'PUR' },
+}
+
 // ── B2E Roster ───────────────────────────────────────────────────
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
 const ROSTER    = 'silver__b2e_slv_employeeroster'
@@ -311,6 +324,50 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
  * weeksBack weeks, then return the per-project average as [{ project_name, est_drops }].
  * Used to auto-seed project_drops_forecast when no manual data exists for a date.
  */
+// Queries raw appointments for a single project+date and applies a PROJECT_DROP_RULES rule.
+async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
+  const wh = CSW_WAREHOUSE[facilityId]
+  if (!wh) return 0
+
+  if (rule.method === 'inbound_exclude_lookup') {
+    const rows = await omniQuery({
+      modelId: GOLD_MODEL_ID,
+      table: VIEW_APPT,
+      fields: [
+        `${VIEW_APPT}.lookup_code`,
+        `${VIEW_APPT}.dock_appointment_type_name`,
+        `${VIEW_APPT}.count`,
+      ],
+      filters: {
+        [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+        [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
+        [`${VIEW_APPT}.scheduled_arrival`]: {
+          kind: 'TIME_FOR_UNIT_DURATION',
+          type: 'date',
+          ui_type: 'DAY',
+          isFiscal: false,
+          left_side: date,
+          is_negative: false,
+          offset_interval_string: '0 days',
+        },
+      },
+      sorts: [],
+      limit: 500,
+    })
+
+    const excl = rule.excludePattern.toUpperCase()
+    return rows
+      .filter(r => {
+        const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
+        const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
+        return type.startsWith('inbound') && !code.includes(excl)
+      })
+      .reduce((s, r) => s + (Number(r[`${VIEW_APPT}.count`]) || 0), 0)
+  }
+
+  return 0
+}
+
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
@@ -320,16 +377,29 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
     return d.toISOString().slice(0, 10)
   })
 
+  // Fetch VIEW_P summaries for all past dates in parallel.
+  // Projects without a custom rule use VIEW_P total_inbound_drops directly.
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
 
-  // Divide by weeksBack (not weeks-with-data) so project weeks with zero
-  // Inbound/Drop appointments are included in the denominator.
   const sums = {}
   for (const rows of results) {
     for (const row of rows) {
-      sums[row.name] = (sums[row.name] ?? 0) + row.drops
+      if (!PROJECT_DROP_RULES[row.name]) {
+        sums[row.name] = (sums[row.name] ?? 0) + row.drops
+      }
     }
   }
+
+  // For projects with custom rules, query raw appointments for each past date in parallel.
+  // Divide by weeksBack so weeks with zero drops are included in the denominator.
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]))]
+  await Promise.all(ruleProjects.map(async projectName => {
+    const rule = PROJECT_DROP_RULES[projectName]
+    const counts = await Promise.all(
+      pastDates.map(d => fetchProjectDropsByRule(facilityId, d, projectName, rule).catch(() => 0))
+    )
+    sums[projectName] = counts.reduce((s, c) => s + c, 0)
+  }))
 
   return Object.entries(sums).map(([project_name, total]) => ({
     project_name,
