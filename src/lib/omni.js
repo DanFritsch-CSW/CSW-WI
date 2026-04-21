@@ -40,11 +40,16 @@ const VIEW_APPT     = 'gold__truck_appointments'
 // Per-project drop estimation rules used during historical averaging.
 // Methods (all case-insensitive on lookup_code):
 //   inbound_all:             count all Inbound-type appointments
-//   inbound_exclude_lookup:  count Inbound appts where lookup_code contains NONE of excludePatterns
+//   inbound_exclude_lookup:  excludeWhenAll is an array of AND-groups; a row is excluded when its
+//                            lookup_code matches ALL patterns in any single group.
 //   inbound_include_lookup:  count Inbound appts where lookup_code contains ANY of includePatterns
 const PROJECT_DROP_RULES = {
-  // CAL — PVI FG: exclude live purchases (PUR) and live-unload carriers (CMM, Peter Brothers)
-  'Palermos CALEDONIA finished': { method: 'inbound_exclude_lookup', excludePatterns: ['PUR', 'CMM', 'PETER BROTHERS'] },
+  // CAL — PVI FG: exclude live unloads identified by PUR *combined with* CMM or Peter Brothers carrier.
+  // PUR alone (other carriers) still counts as a drop. CMM/Peter Brothers without PUR are also drops.
+  'Palermos CALEDONIA finished': {
+    method: 'inbound_exclude_lookup',
+    excludeWhenAll: [['PUR', 'CMM'], ['PUR', 'PETER BROTHERS']],
+  },
 
   // KEN — all inbounds are drops
   'CROWN BAKERIES':          { method: 'inbound_all' },
@@ -373,7 +378,7 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
       if (!type.startsWith('inbound')) return false
       if (rule.method === 'inbound_all') return true
       if (rule.method === 'inbound_exclude_lookup')
-        return rule.excludePatterns.every(p => !code.includes(p.toUpperCase()))
+        return !rule.excludeWhenAll.some(group => group.every(p => code.includes(p.toUpperCase())))
       if (rule.method === 'inbound_include_lookup')
         return rule.includePatterns.some(p => code.includes(p.toUpperCase()))
       return false
