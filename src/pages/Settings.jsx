@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { FACILITY_LIST } from '../lib/constants.js'
-import { fetchFacilitySettings, upsertFacilitySettings, fetchEstDrops, upsertEstDrops } from '../lib/supabase.js'
+import { fetchFacilitySettings, upsertFacilitySettings } from '../lib/supabase.js'
 
 // ── Labor Settings ────────────────────────────────────────────────
 
@@ -194,87 +194,6 @@ function fmtHour(h) {
   return `${h - 12}pm`
 }
 
-function todayISO() {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function EstDropsEditor() {
-  const [facility, setFacility] = useState(FACILITY_LIST[0].id)
-  const [date, setDate]         = useState(todayISO)
-  const [values, setValues]     = useState(() => Object.fromEntries(SHIFT_HOURS.map(h => [h, 0])))
-  const [saveState, setSave]    = useState(null)
-
-  useEffect(() => {
-    fetchEstDrops(facility, date).then(data => {
-      setValues(Object.fromEntries(SHIFT_HOURS.map(h => [h, data[h] ?? 0])))
-    })
-  }, [facility, date])
-
-  function handleChange(h, raw) {
-    const num = parseInt(raw, 10)
-    setValues(prev => ({ ...prev, [h]: isNaN(num) ? 0 : Math.max(0, num) }))
-  }
-
-  async function handleSave() {
-    setSave('saving')
-    try {
-      await upsertEstDrops(facility, date, SHIFT_HOURS.map(h => ({ h, est: values[h] })))
-      setSave('ok')
-      setTimeout(() => setSave(null), 2500)
-    } catch {
-      setSave('error')
-      setTimeout(() => setSave(null), 3000)
-    }
-  }
-
-  const fac = FACILITY_LIST.find(f => f.id === facility)
-
-  return (
-    <div className="est-drops-editor">
-      <div className="est-drops-controls">
-        <select
-          className="est-drops-select"
-          value={facility}
-          onChange={e => setFacility(e.target.value)}
-        >
-          {FACILITY_LIST.map(f => (
-            <option key={f.id} value={f.id}>{f.name} ({f.code})</option>
-          ))}
-        </select>
-        <input
-          type="date"
-          className="est-drops-date"
-          value={date}
-          onChange={e => setDate(e.target.value)}
-          style={{ colorScheme: 'dark' }}
-        />
-        <button
-          className="settings-save-btn"
-          onClick={handleSave}
-          disabled={saveState === 'saving'}
-        >
-          {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
-        </button>
-      </div>
-      <div className="est-drops-grid">
-        {SHIFT_HOURS.map(h => (
-          <label key={h} className="est-drops-cell">
-            <span className="est-drops-hour" style={{ color: fac?.color }}>{fmtHour(h)}</span>
-            <input
-              type="number"
-              className="est-drops-input"
-              value={values[h]}
-              min={0}
-              step={1}
-              onChange={e => handleChange(h, e.target.value)}
-            />
-          </label>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 // ── Page ──────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -298,13 +217,6 @@ export default function Settings() {
       </div>
       <BreakScheduleEditor />
 
-      <div className="gold-line" style={{ margin: '28px 0 20px' }} />
-
-      <div className="settings-page-header">
-        <h2 className="settings-page-title">Estimated Drops — Hourly</h2>
-        <p className="settings-page-sub">Manual hourly drop forecast used in the Hourly Breakdown chart. Auto-populated from historical averages when a date has no prior entries.</p>
-      </div>
-      <EstDropsEditor />
     </div>
   )
 }
