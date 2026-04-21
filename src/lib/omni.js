@@ -462,6 +462,7 @@ export async function fetchB2eRoster(facilityId, date) {
       `${SCHEDULE}.employee_id`,
       `${SCHEDULE}.first_name`,
       `${SCHEDULE}.last_name`,
+      `${SCHEDULE}.default_job_code`,
       `${SCHEDULE}.start_time`,
       `${SCHEDULE}.end_time`,
       `${SCHEDULE}.modified_start_time`,
@@ -494,10 +495,15 @@ export async function fetchB2eRoster(facilityId, date) {
     if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
-  const excluded = new Set(B2E_EXCLUDED_IDS.map(String))
+  const excluded     = new Set(B2E_EXCLUDED_IDS.map(String))
+  const allowedCodes = new Set(['205', '209'])
 
   return [...schedMap.entries()]
-    .filter(([id]) => !excluded.has(id))
+    .filter(([id, { row: r }]) => {
+      if (excluded.has(id)) return false
+      const code = String(r[`${SCHEDULE}.default_job_code`] ?? '')
+      return allowedCodes.has(code)
+    })
     .map(([id, { row: r }]) => {
       const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
       const endTime   = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
