@@ -752,6 +752,23 @@ input, select { font: inherit; color: inherit; }
   font-weight: 600;
 }
 
+.snapshot-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--brand-dim);
+  background: var(--brand-bg);
+  color: var(--brand);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.snapshot-btn:hover {
+  background: var(--bg3);
+  color: var(--brand-light);
+}
+
 .est-reset-btn {
   font-family: var(--font-mono);
   font-size: 10px;
