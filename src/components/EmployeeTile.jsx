@@ -28,18 +28,29 @@ function fmtShift(start, hours) {
   return `${fmtHour(start)} – ${fmtHour(end)}`
 }
 
+// Decimal hour (e.g. 7.5) → "07:30"
+function decToTimeStr(dec) {
+  const norm = ((dec % 24) + 24) % 24
+  const h = Math.floor(norm)
+  const m = Math.round((norm - h) * 60)
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+
+// "HH:MM" → decimal hour
+function timeStrToDec(t) {
+  const [h, m] = (t || '00:00').split(':').map(Number)
+  return h + m / 60
+}
+
 export default function EmployeeTile({ employee, assignment, laneSettings, onShiftChange, onDelete }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: employee.id,
   })
-  const [editing, setEditing]     = useState(false)
-  const [editStart, setEditStart] = useState(0)
-  const [editHours, setEditHours] = useState(8)
+  const [editing, setEditing]       = useState(false)
+  const [editStart, setEditStart]   = useState('00:00')
+  const [editEnd, setEditEnd]       = useState('00:00')
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  }
+  const style = { transform: CSS.Transform.toString(transform), transition }
 
   const color  = avatarColor(employee.name)
   const isTemp = !!employee.is_temp
@@ -50,14 +61,20 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
 
   function openEdit(e) {
     e.stopPropagation()
-    setEditStart(effectiveStart ?? laneSettings?.defaultStart ?? 5)
-    setEditHours(effectiveHours)
+    const start = effectiveStart ?? laneSettings?.defaultStart ?? 5
+    const end   = (start + effectiveHours) % 24
+    setEditStart(decToTimeStr(start))
+    setEditEnd(decToTimeStr(end))
     setEditing(true)
   }
 
   function handleSave(e) {
     e.stopPropagation()
-    onShiftChange?.(editStart, editHours)
+    const startDec = timeStrToDec(editStart)
+    let   endDec   = timeStrToDec(editEnd)
+    let   hours    = endDec - startDec
+    if (hours <= 0) hours += 24  // overnight shift
+    onShiftChange?.(startDec, Math.round(hours * 4) / 4)  // round to nearest 15 min
     setEditing(false)
   }
 
@@ -86,24 +103,17 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
         {editing ? (
           <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
             <input
-              type="number"
-              className="emp-shift-input"
+              type="time"
+              className="emp-shift-time"
               value={editStart}
-              min={0}
-              max={23}
-              title="Start hour (0–23)"
-              onChange={e => setEditStart(Number(e.target.value))}
+              onChange={e => setEditStart(e.target.value)}
             />
-            <span className="emp-shift-sep">+</span>
+            <span className="emp-shift-sep">–</span>
             <input
-              type="number"
-              className="emp-shift-input"
-              value={editHours}
-              min={1}
-              max={16}
-              step={0.5}
-              title="Hours"
-              onChange={e => setEditHours(Number(e.target.value))}
+              type="time"
+              className="emp-shift-time"
+              value={editEnd}
+              onChange={e => setEditEnd(e.target.value)}
             />
             <button className="emp-shift-save"   onClick={handleSave}>✓</button>
             <button className="emp-shift-cancel" onClick={handleCancel}>✕</button>
@@ -114,7 +124,7 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
               className="emp-shift-label"
               onClick={openEdit}
               onPointerDown={e => e.stopPropagation()}
-              title="Click to edit shift hours for today"
+              title="Click to edit shift times"
             >
               {shiftLabel}
             </div>

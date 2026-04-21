@@ -937,19 +937,20 @@ input, select { font: inherit; color: inherit; }
 .emp-shift-edit {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   margin-top: 3px;
+  flex-wrap: nowrap;
 }
-.emp-shift-input {
-  width: 36px;
-  padding: 1px 3px;
+.emp-shift-time {
+  width: 80px;
+  padding: 1px 4px;
   font-size: 10px;
   font-family: var(--font-mono);
   background: var(--bg4);
   border: 1px solid var(--border);
   border-radius: 3px;
   color: var(--text);
-  text-align: center;
+  color-scheme: dark;
 }
 .emp-shift-sep {
   font-size: 9px;
