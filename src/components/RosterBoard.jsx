@@ -15,7 +15,7 @@ import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
 import { LANES, ACTIVE_LANES } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, fetchEmployees, upsertEmployees, seedRosterAssignments, deleteAssignment } from '../lib/supabase.js'
+import { fetchTodayAssignments, upsertAssignment, fetchEmployees, replaceEmployees, seedRosterAssignments, deleteAssignment } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
@@ -140,7 +140,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
       // Strip shift_hours — employees table doesn't have that column
       const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
-      const err = await upsertEmployees(empRows)
+      const err = await replaceEmployees(facility, empRows)
       if (err) { setSyncState(err); return }
       // Seed assignments with B2E shift times; ignoreDuplicates preserves manual edits
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
