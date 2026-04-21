@@ -343,7 +343,7 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
   const counts = {}
   for (const rows of results) {
     for (const row of rows) {
-      sums[row.name]   = (sums[row.name]   ?? 0) + row.drops
+      sums[row.name]   = (sums[row.name]   ?? 0) + row.inb + row.drops
       counts[row.name] = (counts[row.name] ?? 0) + 1
     }
   }
