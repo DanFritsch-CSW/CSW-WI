@@ -378,17 +378,11 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
   })
 
   // Fetch VIEW_P summaries for all past dates in parallel.
-  // Projects without a custom rule use VIEW_P total_inbound_drops directly.
+  // Only projects explicitly listed in PROJECT_DROP_RULES get a non-zero EST drops value.
+  // All others default to 0 until their drop logic is confirmed and added to the config.
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
 
   const sums = {}
-  for (const rows of results) {
-    for (const row of rows) {
-      if (!PROJECT_DROP_RULES[row.name]) {
-        sums[row.name] = (sums[row.name] ?? 0) + row.drops
-      }
-    }
-  }
 
   // For projects with custom rules, query raw appointments for each past date in parallel.
   // Divide by weeksBack so weeks with zero drops are included in the denominator.
