@@ -35,23 +35,24 @@ export async function fetchEmployees(facility) {
 }
 
 // Syncs the employee list for a facility: upserts current B2E employees, then
-// deletes any facility employees whose IDs are no longer in the B2E result.
-// Uses upsert (not insert) so cross-facility employees sharing the same ID don't
-// cause a primary key conflict.
+// deletes any stale facility employees not in the B2E result.
 export async function replaceEmployees(facilityId, employees) {
   if (!supabase) return 'Supabase not configured'
   if (employees.length) {
-    const { error: upsertErr } = await supabase
+    const { error } = await supabase
       .from('employees')
       .upsert(employees, { onConflict: 'id' })
-    if (upsertErr) { console.error('replaceEmployees upsert:', upsertErr); return upsertErr.message }
+    if (error) { console.error('replaceEmployees upsert:', error); return error.message }
   }
-  // Prune employees that are no longer in the B2E result for this facility
-  const activeIds = employees.map(e => String(e.id))
-  const base = supabase.from('employees').delete().eq('facility', facilityId)
-  const { error: delErr } = await (activeIds.length
-    ? base.not('id', 'in', `(${activeIds.join(',')})`)
-    : base)
+  // Fetch current facility employees and delete any not in the new B2E list
+  const { data: current, error: fetchErr } = await supabase
+    .from('employees').select('id').eq('facility', facilityId)
+  if (fetchErr) { console.error('replaceEmployees fetch:', fetchErr); return fetchErr.message }
+  const activeIds = new Set(employees.map(e => String(e.id)))
+  const staleIds  = (current ?? []).filter(e => !activeIds.has(String(e.id))).map(e => e.id)
+  if (!staleIds.length) return null
+  const { error: delErr } = await supabase
+    .from('employees').delete().in('id', staleIds)
   if (delErr) { console.error('replaceEmployees prune:', delErr); return delErr.message }
   return null
 }
