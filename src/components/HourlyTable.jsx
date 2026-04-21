@@ -59,7 +59,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
   if (!hourlyData?.length) return null
 
   const projects = Object.keys(projectHourlyDrops)
-  const multiProject = projects.length > 1
+  const multiProject = projects.length >= 1
 
   const sorted = [...hourlyData].sort((a, b) => {
     const sa = a.h < 5 ? a.h + 24 : a.h
