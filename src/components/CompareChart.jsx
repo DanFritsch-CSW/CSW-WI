@@ -7,7 +7,7 @@ import { FACILITY_LIST } from '../lib/constants.js'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
-export default function CompareChart({ networkData }) {
+export default function CompareChart({ networkData, facilityEstDrops = {} }) {
   if (!networkData) return null
 
   const labels = FACILITY_LIST.map(f => f.code)
@@ -28,7 +28,15 @@ export default function CompareChart({ networkData }) {
         label: 'Outbound',
         data: FACILITY_LIST.map(f => networkData[f.id]?.out ?? 0),
         backgroundColor: colors.map(c => `${c}44`),
-        borderColor: colors.map(c => `${c}99`),
+        borderColor: colors.map(c => `${c}77`),
+        borderWidth: 1,
+        borderRadius: 3,
+      },
+      {
+        label: 'Est Drops',
+        data: FACILITY_LIST.map(f => facilityEstDrops[f.id] ?? 0),
+        backgroundColor: colors.map(c => `${c}bb`),
+        borderColor: colors.map(c => `${c}dd`),
         borderWidth: 1,
         borderRadius: 3,
       },
@@ -67,7 +75,7 @@ export default function CompareChart({ networkData }) {
   return (
     <div className="chart-card">
       <div className="chart-header">
-        <span className="chart-title">Network Throughput — Inbound vs Outbound</span>
+        <span className="chart-title">Network Throughput — Inbound / Outbound / Est Drops</span>
       </div>
       <div style={{ height: 220 }}>
         <Bar data={data} options={options} />

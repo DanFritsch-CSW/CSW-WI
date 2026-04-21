@@ -183,6 +183,22 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
+// Returns { [facilityId]: activeHeadcount } — active roster employees (non-PTO/callin) per facility.
+export async function fetchAllFacilitiesLaborCounts(planDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('roster_assignments')
+    .select('facility, lane')
+    .eq('plan_date', planDate)
+    .in('lane', ['shift1', 'mid', 'shift2', 'shift3'])
+  if (error || !data) return {}
+  const result = {}
+  for (const r of data) {
+    result[r.facility] = (result[r.facility] ?? 0) + 1
+  }
+  return result
+}
+
 // Returns { [projectName]: { [hour]: estDrops } } for the given facility + date
 export async function fetchProjectHourlyDrops(facilityId, planDate) {
   if (!supabase) return {}
