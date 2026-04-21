@@ -1,11 +1,9 @@
 import { useState } from 'react'
-import { upsertProjectDrops } from '../lib/supabase.js'
 
-export default function ProjectList({ projects, projectDrops = {}, facilityId, planDate, color }) {
-  const [expanded, setExpanded]   = useState(null)
+export default function ProjectList({ projects, projectDrops = {}, onSave, color }) {
+  const [expanded, setExpanded] = useState(null)
   const [editValue, setEditValue] = useState(0)
   const [saving, setSaving]       = useState(false)
-  const [overrides, setOverrides] = useState({})
 
   if (!projects?.length) return null
 
@@ -18,15 +16,14 @@ export default function ProjectList({ projects, projectDrops = {}, facilityId, p
       return
     }
     setExpanded(p.name)
-    setEditValue(overrides[p.name] ?? projectDrops[p.name] ?? 0)
+    setEditValue(projectDrops[p.name] ?? 0)
   }
 
   async function handleSave(projectName) {
     setSaving(true)
     const val = Math.max(0, Math.round(editValue))
     try {
-      await upsertProjectDrops(facilityId, planDate, [{ project_name: projectName, est_drops: val }])
-      setOverrides(prev => ({ ...prev, [projectName]: val }))
+      await onSave?.(projectName, val)
       setExpanded(null)
     } finally {
       setSaving(false)
@@ -43,7 +40,7 @@ export default function ProjectList({ projects, projectDrops = {}, facilityId, p
         <span style={{ textAlign: 'right' }}>Total</span>
       </div>
       {visible.map((p, i) => {
-        const estVal = overrides[p.name] ?? projectDrops[p.name] ?? 0
+        const estVal = projectDrops[p.name] ?? 0
         const isOpen = expanded === p.name
         return (
           <div key={i}>
