@@ -127,9 +127,35 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
         </div>
       </div>
       <HourlyChart hourlyData={hourly} color={facility.color} />
-      <div className="section-label" style={{ marginTop: 8 }}>
-        Hourly Breakdown
-        {seedingDrops && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast…</span>}
+      <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span>Hourly Breakdown</span>
+        {seedingDrops
+          ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast…</span>
+          : <button
+              className="est-reset-btn"
+              title="Recalculate EST drops from last 4-week historical average, overwriting any manual edits"
+              onClick={async () => {
+                setSeedingDrops(true)
+                try {
+                  const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+                  if (Object.keys(historical).length) {
+                    const rows = []
+                    for (const [project_name, hourMap] of Object.entries(historical)) {
+                      for (const [h, est_drops] of Object.entries(hourMap)) {
+                        rows.push({ project_name, h: Number(h), est_drops })
+                      }
+                    }
+                    await upsertProjectHourlyDrops(facility.id, planDate, rows)
+                    setProjectHourlyDrops(historical)
+                  }
+                } finally {
+                  setSeedingDrops(false)
+                }
+              }}
+            >
+              ↺ Reset EST Drops
+            </button>
+        }
       </div>
       {hourlyErr
         ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>

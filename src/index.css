@@ -752,6 +752,22 @@ input, select { font: inherit; color: inherit; }
   font-weight: 600;
 }
 
+.est-reset-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.est-reset-btn:hover {
+  color: var(--text-secondary);
+  border-color: var(--text-dim);
+}
+
 .b2e-sync-btn {
   font-family: var(--font-mono);
   font-size: 10px;
