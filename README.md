@@ -258,3 +258,4 @@ Netlify auto-deploys from `main`. Build config in `netlify.toml`:
 - **OrderCreator page** — order management UI
 - **Analytics page** — historical performance and trend views
 - **Settings page** — facility config and user preferences
+- **Est Drops — per-project hourly breakdown (Option B)** — clicking a project row currently lets you edit a single daily EST drops total. A future upgrade would show a full 24-hour grid scoped to that project, letting planners distribute drops across hours. Requires a new Supabase table (`project_hourly_drops_forecast(facility, plan_date, project_name, hour, est_drops)`), new fetch/upsert helpers in `supabase.js`, updated auto-seeding logic in `fetchHistoricalProjectDrops` to produce per-project-per-hour estimates, and an expanded inline edit UI in `ProjectList.jsx`.

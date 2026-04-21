@@ -633,6 +633,64 @@ input, select { font: inherit; color: inherit; }
 
 .project-row:last-child { border-bottom: none; }
 .project-row:hover { background: var(--bg3); }
+.project-row--active { background: var(--bg3); }
+
+.project-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 10px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.project-edit-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.project-edit-input {
+  width: 72px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  padding: 3px 6px;
+  text-align: right;
+}
+
+.project-edit-input:focus { outline: none; border-color: var(--brand); }
+
+.project-edit-save {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  border: none;
+  background: var(--brand);
+  color: #000;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.project-edit-save:disabled { opacity: 0.5; cursor: default; }
+
+.project-edit-cancel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
 
 .project-name {
   font-size: 12px;
