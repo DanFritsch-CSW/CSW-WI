@@ -39,11 +39,12 @@ const VIEW_APPT     = 'gold__truck_appointments'
 
 // Per-project drop estimation rules used during historical averaging.
 // method 'inbound_exclude_lookup': count all Inbound-type appointments where
-//   lookup_code does NOT contain excludePattern (case-insensitive).
+//   lookup_code does NOT contain any of excludePatterns (case-insensitive).
 //   Used when the Inbound/Drop appointment type is not consistently applied
 //   and drops are better identified by what the lookup code is NOT.
 const PROJECT_DROP_RULES = {
-  'Palermos CALEDONIA finished': { method: 'inbound_exclude_lookup', excludePattern: 'PUR' },
+  // PVI FG: drops = all Inbound appts excluding PUR (live purchases) and CMM/Peter Brothers (live carriers)
+  'Palermos CALEDONIA finished': { method: 'inbound_exclude_lookup', excludePatterns: ['PUR', 'CMM', 'PETER BROTHERS'] },
 }
 
 // ── B2E Roster ───────────────────────────────────────────────────
@@ -355,12 +356,12 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
       limit: 500,
     })
 
-    const excl = rule.excludePattern.toUpperCase()
+    const excls = rule.excludePatterns.map(p => p.toUpperCase())
     return rows
       .filter(r => {
         const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
         const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
-        return type.startsWith('inbound') && !code.includes(excl)
+        return type.startsWith('inbound') && excls.every(p => !code.includes(p))
       })
       .reduce((s, r) => s + (Number(r[`${VIEW_APPT}.count`]) || 0), 0)
   }
