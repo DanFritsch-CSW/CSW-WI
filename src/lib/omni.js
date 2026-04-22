@@ -573,13 +573,11 @@ export async function fetchB2eRoster(facilityId, date) {
       fields: [
         `${ROSTER}.employee_id`,
         `${ROSTER}.employee_status`,
-        `${ROSTER}.ingestion_ts`,
       ],
       filters: {
         [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
         [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
       },
-      sorts: [{ column_name: `${ROSTER}.ingestion_ts`, sort_descending: true }],
       limit: 500,
     }),
     omniQuery({
