@@ -30,23 +30,23 @@ export default function DeltaChart({ hourlyData }) {
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#131a1c',
-        borderColor: '#1e2a2c',
+        backgroundColor: '#ffffff',
+        borderColor: '#dce2ec',
         borderWidth: 1,
-        titleColor: '#8a9899',
-        bodyColor: '#e8eced',
+        titleColor: '#6b7a90',
+        bodyColor: '#111827',
         titleFont: { family: 'DM Mono', size: 10 },
         bodyFont: { family: 'DM Mono', size: 11 },
       },
     },
     scales: {
       x: {
-        grid: { color: '#152022' },
-        ticks: { color: '#4a5859', font: { family: 'DM Mono', size: 10 } },
+        grid: { color: '#e8edf3' },
+        ticks: { color: '#6b7a90', font: { family: 'DM Mono', size: 10 } },
       },
       y: {
-        grid: { color: '#152022' },
-        ticks: { color: '#4a5859', font: { family: 'DM Mono', size: 10 } },
+        grid: { color: '#e8edf3' },
+        ticks: { color: '#6b7a90', font: { family: 'DM Mono', size: 10 } },
       },
     },
   }
