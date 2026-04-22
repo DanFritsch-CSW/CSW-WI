@@ -73,7 +73,8 @@ export function isRuleProject(facilityId, projectName) {
 
 // ── B2E Roster ───────────────────────────────────────────────────
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
-const SCHEDULE  = 'silver__b2e_slv_futurescheduleentries'
+const ROSTER   = 'silver__b2e_slv_employeeroster'
+const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
 
 const B2E_LOCATION = {
   cal: '019 - Caledonia',
@@ -562,39 +563,68 @@ export async function fetchB2eRoster(facilityId, date) {
 
   const refDate = date || new Date().toISOString().slice(0, 10)
 
-  const scheduleRows = await omniQuery({
-    modelId: B2E_MODEL_ID,
-    table: SCHEDULE,
-    fields: [
-      `${SCHEDULE}.employee_id`,
-      `${SCHEDULE}.first_name`,
-      `${SCHEDULE}.last_name`,
-      `${SCHEDULE}.default_job_code`,
-      `${SCHEDULE}.start_time`,
-      `${SCHEDULE}.end_time`,
-      `${SCHEDULE}.modified_start_time`,
-      `${SCHEDULE}.modified_end_time`,
-      `${SCHEDULE}.work_schedule`,
-      `${SCHEDULE}.ingestion_ts`,
-    ],
-    filters: {
-      [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-      [`${SCHEDULE}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      [`${SCHEDULE}.entry_date`]: {
-        kind: 'TIME_FOR_UNIT_DURATION',
-        type: 'date',
-        ui_type: 'DAY',
-        isFiscal: false,
-        left_side: refDate,
-        is_negative: false,
-        offset_interval_string: '0 days',
+  // Two parallel queries:
+  // ROSTER  → authoritative list of currently-employed active associates
+  // SCHEDULE → shift times for the target date (left-joined client-side)
+  // Keeping them separate avoids Omni's implicit INNER JOIN, which would drop
+  // employees who have no schedule entry on the target date.
+  const [rosterRows, scheduleRows] = await Promise.all([
+    omniQuery({
+      modelId: B2E_MODEL_ID,
+      table: ROSTER,
+      fields: [
+        `${ROSTER}.employee_id`,
+        `${ROSTER}.first_name`,
+        `${ROSTER}.last_name`,
+        `${ROSTER}.default_job_code`,
+        `${ROSTER}.employee_status`,
+        `${ROSTER}.ingestion_ts`,
+      ],
+      filters: {
+        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
       },
-    },
-    sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-    limit: 500,
-  })
+      sorts: [{ column_name: `${ROSTER}.ingestion_ts`, sort_descending: true }],
+      limit: 500,
+    }),
+    omniQuery({
+      modelId: B2E_MODEL_ID,
+      table: SCHEDULE,
+      fields: [
+        `${SCHEDULE}.employee_id`,
+        `${SCHEDULE}.start_time`,
+        `${SCHEDULE}.end_time`,
+        `${SCHEDULE}.modified_start_time`,
+        `${SCHEDULE}.modified_end_time`,
+        `${SCHEDULE}.work_schedule`,
+        `${SCHEDULE}.ingestion_ts`,
+      ],
+      filters: {
+        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${SCHEDULE}.entry_date`]: {
+          kind: 'TIME_FOR_UNIT_DURATION',
+          type: 'date',
+          ui_type: 'DAY',
+          isFiscal: false,
+          left_side: refDate,
+          is_negative: false,
+          offset_interval_string: '0 days',
+        },
+      },
+      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
+      limit: 500,
+    }),
+  ])
 
-  // Deduplicate: keep most-recently ingested row per employee
+  // Deduplicate ROSTER by employee — keep latest ingestion
+  const rosterMap = new Map()
+  for (const r of rosterRows) {
+    const id = String(r[`${ROSTER}.employee_id`])
+    const ts = r[`${ROSTER}.ingestion_ts`] ?? ''
+    if (!rosterMap.has(id) || ts > rosterMap.get(id).ts) rosterMap.set(id, { row: r, ts })
+  }
+
+  // Deduplicate SCHEDULE by employee — keep latest ingestion
   const schedMap = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
@@ -605,23 +635,26 @@ export async function fetchB2eRoster(facilityId, date) {
   const excluded     = new Set(B2E_EXCLUDED_IDS.map(String))
   const allowedCodes = new Set(['205', '209'])
 
-  return [...schedMap.entries()]
+  // Build from ROSTER (authoritative). SCHEDULE enriches shift times only.
+  return [...rosterMap.entries()]
     .filter(([id, { row: r }]) => {
       if (excluded.has(id)) return false
-      const code = String(r[`${SCHEDULE}.default_job_code`] ?? '')
+      const code = String(r[`${ROSTER}.default_job_code`] ?? '')
       return allowedCodes.has(code)
     })
     .map(([id, { row: r }]) => {
-      const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
-      const endTime   = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
-      const firstName = r[`${SCHEDULE}.first_name`] || ''
-      const lastName  = r[`${SCHEDULE}.last_name`]  || ''
+      const sched      = schedMap.get(id)?.row
+      const startTime  = sched ? (sched[`${SCHEDULE}.modified_start_time`] ?? sched[`${SCHEDULE}.start_time`]) : null
+      const endTime    = sched ? (sched[`${SCHEDULE}.modified_end_time`]   ?? sched[`${SCHEDULE}.end_time`])   : null
+      const workSched  = sched?.[`${SCHEDULE}.work_schedule`] ?? null
+      const firstName  = r[`${ROSTER}.first_name`] || ''
+      const lastName   = r[`${ROSTER}.last_name`]  || ''
       return {
         id,
         name:         [firstName, lastName].filter(Boolean).join(' '),
         role:         null,
-        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
-        default_lane: scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime),
+        job_code:     String(r[`${ROSTER}.default_job_code`] ?? ''),
+        default_lane: scheduleToLane(workSched, startTime),
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),
         facility:     facilityId,
