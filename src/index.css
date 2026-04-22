@@ -1,27 +1,27 @@
 /* ─── Design Tokens ─────────────────────────────────────────────── */
 :root {
-  /* Backgrounds — CSW deep navy */
-  --bg0: #080e1a;
-  --bg1: #0c1528;
-  --bg2: #101d35;
-  --bg3: #152443;
-  --bg4: #1b2d52;
-  --bg5: #213560;
+  /* Backgrounds — clean white/light */
+  --bg0: #f3f5f8;
+  --bg1: #ffffff;
+  --bg2: #f8f9fb;
+  --bg3: #edf0f5;
+  --bg4: #e2e7ef;
+  --bg5: #d4dbe6;
 
   /* Text */
-  --text-primary: #eef1f7;
-  --text-secondary: #7e92b8;
-  --text-dim: #3a4f72;
+  --text-primary: #111827;
+  --text-secondary: #4b5a72;
+  --text-dim: #9aaabb;
 
   /* Borders */
-  --border: #1b2d52;
-  --border-subtle: #101d35;
+  --border: #dce2ec;
+  --border-subtle: #eceff5;
 
   /* CSW brand */
-  --brand:       #c9a227;   /* CSW gold */
-  --brand-light: #e8be45;
-  --brand-dim:   #7a621a;
-  --brand-bg:    #1a1608;   /* dark gold tint for hover bg */
+  --brand:       #a07818;   /* CSW gold — darkened for light-bg contrast */
+  --brand-light: #c9a227;
+  --brand-dim:   #ddc87c;
+  --brand-bg:    #fef9ec;   /* light gold tint */
 
   /* Facility accent colors */
   --cal: #e07b4d;
@@ -31,10 +31,10 @@
   --ec:  #c084fc;
 
   /* Status */
-  --green: #3dba7e;
-  --yellow: #c9a227;
-  --red:   #e05c5c;
-  --blue:  #4d9de0;
+  --green: #1a8a52;
+  --yellow: #a07818;
+  --red:   #c0392b;
+  --blue:  #2a72b8;
 
   /* Fonts */
   --font-display: 'Syne', sans-serif;
@@ -86,8 +86,8 @@ input, select { font: inherit; color: inherit; }
   justify-content: space-between;
   padding: 0 24px;
   height: 30px;
-  background: #060b14;
-  border-bottom: 1px solid #0d1a2e;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-dim);
@@ -168,7 +168,7 @@ input, select { font: inherit; color: inherit; }
 .nav-logo-mark svg {
   width: 22px;
   height: 22px;
-  fill: #080e1a;
+  fill: #ffffff;
 }
 
 .nav-brand-text {
@@ -499,10 +499,10 @@ input, select { font: inherit; color: inherit; }
 .chip.alert .chip-dot { background: var(--red); }
 .chip.info .chip-dot { background: var(--blue); }
 
-.chip.ok { border-color: #0f3020; color: var(--green); background: #091a12; }
-.chip.warn { border-color: #3a2d08; color: var(--yellow); background: #1a1406; }
-.chip.alert { border-color: #3d1c1c; color: var(--red); background: #1a0d0d; }
-.chip.info { border-color: #102540; color: var(--blue); background: #081525; }
+.chip.ok    { border-color: #a8dfc4; color: var(--green);  background: #edfaf4; }
+.chip.warn  { border-color: #f0d68a; color: var(--yellow); background: #fdf8ec; }
+.chip.alert { border-color: #f0aaaa; color: var(--red);    background: #fdf0f0; }
+.chip.info  { border-color: #a8ccf0; color: var(--blue);   background: #edf5fd; }
 
 /* ─── Charts ────────────────────────────────────────────────────── */
 .chart-card {
@@ -983,7 +983,7 @@ input, select { font: inherit; color: inherit; }
   border: 1px solid var(--border);
   border-radius: 3px;
   color: var(--text);
-  color-scheme: dark;
+  color-scheme: light;
 }
 .emp-shift-sep {
   font-size: 9px;
@@ -1096,7 +1096,7 @@ input, select { font: inherit; color: inherit; }
   border: 1px solid var(--border);
   color: var(--text-secondary);
   outline: none;
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 .day-input:focus {
@@ -1215,7 +1215,7 @@ input, select { font: inherit; color: inherit; }
   color: var(--text-primary);
   font-size: 12px;
   outline: none;
-  color-scheme: dark;
+  color-scheme: light;
 }
 .modal-input:focus, .modal-select:focus { border-color: var(--brand-dim); }
 .modal-actions {
@@ -1332,7 +1332,7 @@ input, select { font: inherit; color: inherit; }
   color: var(--text-primary);
   text-align: right;
   outline: none;
-  color-scheme: dark;
+  color-scheme: light;
 }
 .settings-field-input:focus { border-color: var(--brand-dim); }
 .settings-card-footer {
@@ -1426,7 +1426,7 @@ input, select { font: inherit; color: inherit; }
   font-family: var(--font-mono);
   font-size: 11px;
   outline: none;
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 .est-drops-select:focus,
@@ -1467,7 +1467,7 @@ input, select { font: inherit; color: inherit; }
   color: var(--brand);
   text-align: center;
   outline: none;
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 .est-drops-input:focus {
