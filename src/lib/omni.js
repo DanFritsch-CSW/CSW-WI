@@ -564,19 +564,14 @@ export async function fetchB2eRoster(facilityId, date) {
   const refDate = date || new Date().toISOString().slice(0, 10)
 
   // Two parallel queries:
-  // ROSTER  → authoritative list of currently-employed active associates
-  // SCHEDULE → shift times for the target date (left-joined client-side)
-  // Keeping them separate avoids Omni's implicit INNER JOIN, which would drop
-  // employees who have no schedule entry on the target date.
+  // ROSTER   → active employee ID set (authoritative termination filter); no name fields here
+  // SCHEDULE → names, job codes, shift times for the target date
   const [rosterRows, scheduleRows] = await Promise.all([
     omniQuery({
       modelId: B2E_MODEL_ID,
       table: ROSTER,
       fields: [
         `${ROSTER}.employee_id`,
-        `${ROSTER}.first_name`,
-        `${ROSTER}.last_name`,
-        `${ROSTER}.default_job_code`,
         `${ROSTER}.employee_status`,
         `${ROSTER}.ingestion_ts`,
       ],
@@ -592,6 +587,9 @@ export async function fetchB2eRoster(facilityId, date) {
       table: SCHEDULE,
       fields: [
         `${SCHEDULE}.employee_id`,
+        `${SCHEDULE}.first_name`,
+        `${SCHEDULE}.last_name`,
+        `${SCHEDULE}.default_job_code`,
         `${SCHEDULE}.start_time`,
         `${SCHEDULE}.end_time`,
         `${SCHEDULE}.modified_start_time`,
@@ -616,13 +614,8 @@ export async function fetchB2eRoster(facilityId, date) {
     }),
   ])
 
-  // Deduplicate ROSTER by employee — keep latest ingestion
-  const rosterMap = new Map()
-  for (const r of rosterRows) {
-    const id = String(r[`${ROSTER}.employee_id`])
-    const ts = r[`${ROSTER}.ingestion_ts`] ?? ''
-    if (!rosterMap.has(id) || ts > rosterMap.get(id).ts) rosterMap.set(id, { row: r, ts })
-  }
+  // Active employee ID set from ROSTER (termination gate)
+  const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
 
   // Deduplicate SCHEDULE by employee — keep latest ingestion
   const schedMap = new Map()
@@ -635,26 +628,27 @@ export async function fetchB2eRoster(facilityId, date) {
   const excluded     = new Set(B2E_EXCLUDED_IDS.map(String))
   const allowedCodes = new Set(['205', '209'])
 
-  // Build from ROSTER (authoritative). SCHEDULE enriches shift times only.
-  return [...rosterMap.entries()]
+  // Build from SCHEDULE (names + shift times), gated by active ROSTER membership.
+  // Terminated employees with stale schedule entries are excluded because they
+  // won't appear in the ROSTER active set.
+  return [...schedMap.entries()]
     .filter(([id, { row: r }]) => {
+      if (!activeIds.has(id)) return false   // not in active ROSTER → terminated
       if (excluded.has(id)) return false
-      const code = String(r[`${ROSTER}.default_job_code`] ?? '')
+      const code = String(r[`${SCHEDULE}.default_job_code`] ?? '')
       return allowedCodes.has(code)
     })
     .map(([id, { row: r }]) => {
-      const sched      = schedMap.get(id)?.row
-      const startTime  = sched ? (sched[`${SCHEDULE}.modified_start_time`] ?? sched[`${SCHEDULE}.start_time`]) : null
-      const endTime    = sched ? (sched[`${SCHEDULE}.modified_end_time`]   ?? sched[`${SCHEDULE}.end_time`])   : null
-      const workSched  = sched?.[`${SCHEDULE}.work_schedule`] ?? null
-      const firstName  = r[`${ROSTER}.first_name`] || ''
-      const lastName   = r[`${ROSTER}.last_name`]  || ''
+      const startTime  = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
+      const endTime    = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
+      const firstName  = r[`${SCHEDULE}.first_name`] || ''
+      const lastName   = r[`${SCHEDULE}.last_name`]  || ''
       return {
         id,
         name:         [firstName, lastName].filter(Boolean).join(' '),
         role:         null,
-        job_code:     String(r[`${ROSTER}.default_job_code`] ?? ''),
-        default_lane: scheduleToLane(workSched, startTime),
+        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
+        default_lane: scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime),
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),
         facility:     facilityId,
