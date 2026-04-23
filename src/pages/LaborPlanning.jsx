@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
 import { fetchAllFacilitiesEstDrops, fetchAllFacilitiesLaborCounts } from '../lib/supabase.js'
@@ -9,22 +10,41 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10)
 }
 
-
 const ALL_TAB = { id: 'all', code: 'ALL', name: 'All Facilities', color: '#8a9899' }
 const TABS = [ALL_TAB, ...FACILITY_LIST]
 
 export default function LaborPlanning() {
-  const [activeTab, setActiveTab] = useState('all')
-  const [planDate, setPlanDate]   = useState(todayISO)
-  const [networkData, setNetworkData]       = useState(null)
-  const [facilityEstDrops, setFacilityEstDrops]     = useState({})
-  const [facilityLaborCounts, setFacilityLaborCounts] = useState({})
-  const [snapLabel, setSnapLabel] = useState('Snapshot')
-  const pageRef = useRef(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Read state from URL; fall back to sensible defaults
+  const activeTab = searchParams.get('fac') || 'all'
+  const planDate  = searchParams.get('date') || todayISO()
+
+  function setActiveTab(tab) {
+    setSearchParams(prev => { prev.set('fac', tab); return prev }, { replace: true })
+  }
+
+  function setPlanDate(date) {
+    setSearchParams(prev => { prev.set('date', date); return prev }, { replace: true })
+  }
+
+  const [networkData, setNetworkData]               = [null, () => {}]
+  const [facilityEstDrops, setFacilityEstDrops]     = [{ }, () => {}]
+  const [facilityLaborCounts, setFacilityLaborCounts] = [{}, () => {}]
+
+  // Use refs for the data that doesn't need to trigger re-renders on its own
+  const networkDataRef       = useRef(null)
+  const facilityEstDropsRef  = useRef({})
+  const facilityLaborRef     = useRef({})
+  const [, forceUpdate]      = useReducer(x => x + 1, 0)
+
+  const snapLabelRef = useRef('Snapshot')
+  const pageRef      = useRef(null)
 
   const handleSnapshot = useCallback(async () => {
     if (!pageRef.current) return
-    setSnapLabel('Capturing…')
+    snapLabelRef.current = 'Capturing…'
+    forceUpdate()
     try {
       const { default: html2canvas } = await import('html2canvas')
       const canvas = await html2canvas(pageRef.current, {
@@ -38,30 +58,29 @@ export default function LaborPlanning() {
         windowHeight: pageRef.current.scrollHeight,
       })
       const blob = await new Promise(res => canvas.toBlob(res, 'image/png'))
-      // Copy to clipboard (Chrome/Edge) — most useful for pasting into chat
       try {
         await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-        setSnapLabel('Copied!')
+        snapLabelRef.current = 'Copied!'
       } catch {
-        setSnapLabel('Saved!')
+        snapLabelRef.current = 'Saved!'
       }
-      // Always download so there's a file to attach
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = `csw-${activeTab}-${planDate}.png`
       a.click()
       URL.revokeObjectURL(url)
-    } catch (e) {
-      setSnapLabel('Snapshot')
+    } catch {
+      snapLabelRef.current = 'Snapshot'
     }
-    setTimeout(() => setSnapLabel('Snapshot'), 2500)
+    forceUpdate()
+    setTimeout(() => { snapLabelRef.current = 'Snapshot'; forceUpdate() }, 2500)
   }, [activeTab, planDate])
 
   useEffect(() => {
-    fetchNetworkKpis(planDate).then(setNetworkData)
-    fetchAllFacilitiesEstDrops(planDate).then(setFacilityEstDrops)
-    fetchAllFacilitiesLaborCounts(planDate).then(setFacilityLaborCounts)
+    fetchNetworkKpis(planDate).then(d => { networkDataRef.current = d; forceUpdate() })
+    fetchAllFacilitiesEstDrops(planDate).then(d => { facilityEstDropsRef.current = d; forceUpdate() })
+    fetchAllFacilitiesLaborCounts(planDate).then(d => { facilityLaborRef.current = d; forceUpdate() })
   }, [planDate])
 
   const activeFac = FACILITY_LIST.find(f => f.id === activeTab) || null
@@ -91,7 +110,7 @@ export default function LaborPlanning() {
           />
           {activeTab !== 'all' && (
             <button className="snapshot-btn" onClick={handleSnapshot}>
-              {snapLabel}
+              {snapLabelRef.current}
             </button>
           )}
         </div>
@@ -116,13 +135,18 @@ export default function LaborPlanning() {
 
       {/* Content */}
       {activeTab === 'all' ? (
-        <AllFacilities networkData={networkData} facilityEstDrops={facilityEstDrops} facilityLaborCounts={facilityLaborCounts} planDate={planDate} />
+        <AllFacilities
+          networkData={networkDataRef.current}
+          facilityEstDrops={facilityEstDropsRef.current}
+          facilityLaborCounts={facilityLaborRef.current}
+          planDate={planDate}
+        />
       ) : activeFac ? (
         <FacilityPanel
           key={activeFac.id}
           facility={activeFac}
           planDate={planDate}
-          networkKpi={networkData?.[activeFac.id]}
+          networkKpi={networkDataRef.current?.[activeFac.id]}
         />
       ) : null}
     </div>

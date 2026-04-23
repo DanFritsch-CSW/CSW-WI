@@ -94,6 +94,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [syncState, setSyncState]         = useState(null)
   const [resetState, setResetState]       = useState(null)
   const [showAddTemp, setShowAddTemp]     = useState(false)
+  const [pendingWrites, setPendingWrites] = useState(0)
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -160,6 +161,16 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     loadRef.current = load
     load()
   }, [facility, planDate])
+
+  // Tracked write — increments pendingWrites before, decrements after
+  const trackedUpsert = useCallback(async (assignment) => {
+    setPendingWrites(n => n + 1)
+    try {
+      await upsertAssignment(assignment)
+    } finally {
+      setPendingWrites(n => n - 1)
+    }
+  }, [])
 
   const handleB2eSync = useCallback(async () => {
     setSyncState('loading')
@@ -233,9 +244,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       shift_start:   shiftStart,
       shift_hours:   shiftHours,
     }
-    await upsertAssignment(updated)
+    await trackedUpsert(updated)
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
-  }, [employees, assignmentMap, laneMap, facility, planDate])
+  }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
   useEffect(() => {
     const active = Object.values(laneMap).filter(l => ACTIVE_LANES.includes(l)).length
@@ -273,9 +284,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     })
     const emp = employees.find(e => e.id === employeeId)
     if (!emp) return
-    const date    = planDate || todayISO()
+    const date     = planDate || todayISO()
     const existing = assignmentMap[employeeId] ?? {}
-    upsertAssignment({
+    trackedUpsert({
       facility,
       employee_id:   employeeId,
       employee_name: emp.name,
@@ -314,6 +325,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           <span className="roster-stat"><strong>{activeCount}</strong> active</span>
           <span className="roster-stat"><strong>{ptoCount}</strong> PTO</span>
           <span className="roster-stat"><strong>{callinCount}</strong> call-in</span>
+          {pendingWrites > 0 && (
+            <span className="roster-saving">Saving…</span>
+          )}
           <button
             className="b2e-sync-btn"
             onClick={() => setShowAddTemp(true)}
