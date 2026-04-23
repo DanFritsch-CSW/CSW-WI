@@ -125,15 +125,23 @@ function groupByStartHour(employees, assignmentMap) {
   return sorted
 }
 
+// Derive side tint class from lane ID (cal2 only)
+function laneSideClass(laneId) {
+  if (laneId.startsWith('side12_')) return 'lane-side12'
+  if (laneId.startsWith('side35_')) return 'lane-side35'
+  return ''
+}
+
 function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, sortOrder }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const sorted       = sortEmployees(employees, sortOrder)
   const ids          = sorted.map(e => e.id)
   const groups       = groupByStartHour(sorted, assignmentMap)
   const laneSettings = getLaneSettings(lane.id, settings)
+  const sideClass    = laneSideClass(lane.id)
 
   return (
-    <div ref={setNodeRef} className={`lane${isOver ? ' over' : ''}`}>
+    <div ref={setNodeRef} className={`lane${sideClass ? ` ${sideClass}` : ''}${isOver ? ' over' : ''}`}>
       <div className="lane-header">
         <span className="lane-title">{lane.label}</span>
         <span className="lane-count">{employees.length}</span>
