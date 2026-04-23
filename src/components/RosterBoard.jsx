@@ -23,7 +23,6 @@ const LANE_SETTING_KEYS = {
   mid:    { start: 'mid_start',    hours: 'mid_hours'    },
   shift2: { start: 'shift2_start', hours: 'shift2_hours' },
   shift3: { start: 'shift3_start', hours: 'shift3_hours' },
-  // CAL v2 side lanes map to the same settings as their shift equivalent
   side12_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
   side12_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
   side12_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
@@ -128,9 +127,9 @@ function groupByStartHour(employees, assignmentMap) {
 
 function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, sortOrder }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
-  const sorted     = sortEmployees(employees, sortOrder)
-  const ids        = sorted.map(e => e.id)
-  const groups     = groupByStartHour(sorted, assignmentMap)
+  const sorted       = sortEmployees(employees, sortOrder)
+  const ids          = sorted.map(e => e.id)
+  const groups       = groupByStartHour(sorted, assignmentMap)
   const laneSettings = getLaneSettings(lane.id, settings)
 
   return (
@@ -191,9 +190,8 @@ const STUB_EMPLOYEES = [
 ]
 
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
-  // Choose lane set based on facility
-  const isCal2    = facility === 'cal2'
-  const activeLaneSet  = isCal2 ? LANES_CAL2    : LANES
+  const isCal2         = facility === 'cal2'
+  const activeLaneSet  = isCal2 ? LANES_CAL2     : LANES
   const activeLaneIds  = isCal2 ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
 
   const [laneMap, setLaneMap]             = useState({})
@@ -336,9 +334,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const handleShiftChange = useCallback(async (empId, shiftStart, shiftHours) => {
     const emp  = employees.find(e => e.id === empId)
     if (!emp) return
-    const date = planDate || todayISO()
+    const date     = planDate || todayISO()
     const existing = assignmentMap[empId] ?? {}
-    const updated = {
+    const updated  = {
       facility,
       employee_id:   empId,
       employee_name: emp.name,
@@ -370,7 +368,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (!over) return
     const employeeId = active.id
     const targetLane = over.id
-    const validLane = activeLaneSet.find(l => l.id === targetLane)
+    const validLane  = activeLaneSet.find(l => l.id === targetLane)
     if (!validLane) {
       const destLane = laneMap[targetLane]
       if (!destLane || destLane === laneMap[employeeId]) return
@@ -387,7 +385,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const existing = prev[employeeId] ?? {}
       return { ...prev, [employeeId]: { ...existing, lane: laneId } }
     })
-    const emp = employees.find(e => e.id === employeeId)
+    const emp      = employees.find(e => e.id === employeeId)
     if (!emp) return
     const date     = planDate || todayISO()
     const existing = assignmentMap[employeeId] ?? {}
@@ -405,9 +403,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   }
 
   const activeEmployee = activeId ? employees.find(e => e.id === activeId) : null
-
-  const laneEmployees = (laneId) =>
-    employees.filter(e => (laneMap[e.id] || e.default_lane) === laneId)
+  const laneEmployees  = (laneId) => employees.filter(e => (laneMap[e.id] || e.default_lane) === laneId)
 
   const activeCount = activeLaneSet
     .filter(l => activeLaneIds.includes(l.id))
@@ -415,7 +411,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
 
-  // CAL v2: compute side-level counts for display
   const side12Count = isCal2
     ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
     : null
@@ -424,15 +419,14 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     : null
 
   const currentSort = SORT_MODES.find(m => m.key === sortOrder)
-  const nextSort = () => {
+  const nextSort    = () => {
     const idx = SORT_MODES.findIndex(m => m.key === sortOrder)
     setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
   }
 
-  // CAL v2: column layout — 4+4+2
-  const gridStyle = isCal2
-    ? { gridTemplateColumns: 'repeat(10, 1fr)' }
-    : { gridTemplateColumns: 'repeat(6, 1fr)' }
+  // Shared grid template — 10 equal columns for cal2, 6 for others
+  const gridCols   = isCal2 ? 'repeat(10, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))'
+  const gridStyle  = { gridTemplateColumns: gridCols }
 
   if (isLoading) {
     return (
@@ -455,54 +449,31 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           <span className="roster-stat"><strong>{activeCount}</strong> active</span>
           <span className="roster-stat"><strong>{ptoCount}</strong> PTO</span>
           <span className="roster-stat"><strong>{callinCount}</strong> call-in</span>
-          {pendingWrites > 0 && (
-            <span className="roster-saving">Saving…</span>
-          )}
-          <button
-            className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`}
-            onClick={nextSort}
-            title="Cycle sort: Default → A–Z First Name → A–Z Last Name"
-          >
-            {currentSort.label}
-          </button>
-          <button
-            className="b2e-sync-btn"
-            onClick={() => setShowAddTemp(true)}
-            title="Add a temporary employee for this day"
-          >
-            + Add Temp
-          </button>
-          <button
-            className="b2e-sync-btn"
-            onClick={handleB2eSync}
-            disabled={syncState === 'loading'}
-            title="Pull latest employee roster from B2E via Omni"
-          >
+          {pendingWrites > 0 && <span className="roster-saving">Saving…</span>}
+          <button className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`} onClick={nextSort} title="Cycle sort">{currentSort.label}</button>
+          <button className="b2e-sync-btn" onClick={() => setShowAddTemp(true)}>+ Add Temp</button>
+          <button className="b2e-sync-btn" onClick={handleB2eSync} disabled={syncState === 'loading'}>
             {syncState === 'loading' ? 'Syncing…' : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
           </button>
-          {syncState && syncState !== 'loading' && syncState !== 'ok' && (
-            <span className="b2e-sync-err">{syncState}</span>
-          )}
-          <button
-            className="b2e-sync-btn b2e-reset-btn"
-            onClick={handleReset}
-            disabled={resetState === 'loading'}
-            title="Clear all manual changes for this day and reload from B2E (keeps temp employees)"
-          >
+          {syncState && syncState !== 'loading' && syncState !== 'ok' && <span className="b2e-sync-err">{syncState}</span>}
+          <button className="b2e-sync-btn b2e-reset-btn" onClick={handleReset} disabled={resetState === 'loading'}>
             {resetState === 'loading' ? 'Resetting…' : resetState === 'ok' ? 'Reset ✓' : 'Reset to B2E'}
           </button>
-          {resetState && resetState !== 'loading' && resetState !== 'ok' && (
-            <span className="b2e-sync-err">{resetState}</span>
-          )}
+          {resetState && resetState !== 'loading' && resetState !== 'ok' && <span className="b2e-sync-err">{resetState}</span>}
         </div>
       </div>
 
-      {/* CAL v2: side divider labels above the lane grid */}
+      {/*
+        CAL v2: side headers sit in a grid that shares the exact same column
+        template as the lanes grid below — both use repeat(10, minmax(0,1fr)).
+        1-2 Side spans columns 1–4, 3.5 Side spans 5–8, cols 9–10 (PTO/Call-In)
+        are left empty so no header appears over them.
+      */}
       {isCal2 && (
-        <div className="cal2-side-headers">
-          <div className="cal2-side-label cal2-side-12">1-2 Side</div>
-          <div className="cal2-side-label cal2-side-35">3.5 Side</div>
-          <div className="cal2-side-spacer" />
+        <div className="roster-lanes" style={{ ...gridStyle, marginBottom: 6 }}>
+          <div className="cal2-side-label cal2-side-12" style={{ gridColumn: '1 / 5' }}>1-2 Side</div>
+          <div className="cal2-side-label cal2-side-35" style={{ gridColumn: '5 / 9' }}>3.5 Side</div>
+          {/* cols 9-10 intentionally empty */}
         </div>
       )}
 
@@ -530,6 +501,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           {activeEmployee ? <EmployeeTile employee={activeEmployee} /> : null}
         </DragOverlay>
       </DndContext>
+
       {showAddTemp && (
         <AddTempModal
           facility={facility}
