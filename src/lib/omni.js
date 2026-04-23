@@ -6,54 +6,51 @@ const MODEL_ID = '79a98af2-a904-4b5d-b25f-7f6a2c7ef467'
 
 // Map facility IDs → Omni warehouse_name values used in labor_planning_app tables
 const LABOR_WAREHOUSE = {
-  cal: 'franksville',
-  mad: 'madison',
-  ken: 'kenosha',
-  wr:  'wisconsin rapids',
-  ec:  'eau claire',
+  cal:  'franksville',
+  cal2: 'franksville',   // same physical facility as cal
+  mad:  'madison',
+  ken:  'kenosha',
+  wr:   'wisconsin rapids',
+  ec:   'eau claire',
 }
 
 // Map facility IDs → warehouse_name used in appointments/summary tables (CSW- prefix)
 const CSW_WAREHOUSE = {
-  cal: 'CSW-Franksville',
-  mad: 'CSW-Madison',
-  ken: 'CSW-Kenosha',
-  wr:  'CSW-Wisconsin Rapids',
-  ec:  'CSW-Eau Claire',
+  cal:  'CSW-Franksville',
+  cal2: 'CSW-Franksville',   // same physical facility as cal
+  mad:  'CSW-Madison',
+  ken:  'CSW-Kenosha',
+  wr:   'CSW-Wisconsin Rapids',
+  ec:   'CSW-Eau Claire',
 }
 
 // Reverse maps: Omni warehouse_name → facility id
-const WAREHOUSE_TO_FAC = Object.fromEntries(
-  Object.entries(LABOR_WAREHOUSE).map(([k, v]) => [v, k])
-)
-const CSW_WAREHOUSE_TO_FAC = Object.fromEntries(
-  Object.entries(CSW_WAREHOUSE).map(([k, v]) => [v, k])
-)
+// cal2 intentionally omitted — reverse lookup returns 'cal'
+const WAREHOUSE_TO_FAC = {
+  franksville:       'cal',
+  madison:           'mad',
+  kenosha:           'ken',
+  'wisconsin rapids':'wr',
+  'eau claire':      'ec',
+}
+const CSW_WAREHOUSE_TO_FAC = {
+  'CSW-Franksville':       'cal',
+  'CSW-Madison':           'mad',
+  'CSW-Kenosha':           'ken',
+  'CSW-Wisconsin Rapids':  'wr',
+  'CSW-Eau Claire':        'ec',
+}
 
 const VIEW_H = 'labor_planning_app__hourly_labor_required_vs_available'
 
-// NOTE: VIEW_P (labor_planning_app__hourly_inbound_outbound_drops_summary) is NO LONGER
-// used for project-level or network appointment queries. The underlying dbt pipeline
-// (model.data_platform.hourly_inbound_outbound_drops_summary) has a broken activity_date
-// aggregation that stores all appointments for newer projects under a null date, causing
-// them to be filtered out when querying by date. All appointment queries now use
-// gold__truck_appointments directly. Consultants should fix the dbt model and this can
-// be revisited once the pipeline is confirmed stable.
 const VIEW_P = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 
 // Raw appointments — source of truth for all project-level appointment data
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 
-// Per-project drop estimation rules used during historical averaging.
-// Methods (all case-insensitive on lookup_code):
-//   inbound_all:             count all Inbound-type appointments
-//   inbound_exclude_lookup:  excludeWhenAll is an array of AND-groups; a row is excluded when its
-//                            lookup_code matches ALL patterns in any single group.
-//   inbound_include_lookup:  count Inbound appts where lookup_code contains ANY of includePatterns
 const PROJECT_DROP_RULES = {
-  // CAL — PVI FG: exclude live unloads identified by PUR *combined with* CMM or Peter Brothers carrier.
-  // PUR alone (other carriers) still counts as a drop. CMM/Peter Brothers without PUR are also drops.
+  // CAL / CAL2 — PVI FG: exclude live unloads
   'Palermos CALEDONIA finished': {
     facility: 'cal',
     method: 'inbound_exclude_lookup',
@@ -72,11 +69,13 @@ const PROJECT_DROP_RULES = {
   'RICHELIEU RAW MATERIALS KENOSHA': { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
 }
 
-// Returns true if projectName has a drop rule for the given facilityId.
-// Used to filter stale Supabase data seeded before facility guards were added.
+// cal2 mirrors cal rules — isRuleProject needs to accept both
 export function isRuleProject(facilityId, projectName) {
   const rule = PROJECT_DROP_RULES[projectName]
-  return rule != null && rule.facility === facilityId
+  if (!rule) return false
+  // cal2 shares cal's rules
+  const effectiveFac = facilityId === 'cal2' ? 'cal' : facilityId
+  return rule.facility === effectiveFac
 }
 
 // ── B2E Roster ───────────────────────────────────────────────────
@@ -85,11 +84,12 @@ const ROSTER   = 'silver__b2e_slv_employeeroster'
 const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
 
 const B2E_LOCATION = {
-  cal: '019 - Caledonia',
-  mad: '011 - Madison',
-  ec:  '012 - Eau Claire',
-  ken: '015 - Kenosha',
-  wr:  '023 - Wisconsin Rapids',
+  cal:  '019 - Caledonia',
+  cal2: '019 - Caledonia',   // same location as cal
+  mad:  '011 - Madison',
+  ec:   '012 - Eau Claire',
+  ken:  '015 - Kenosha',
+  wr:   '023 - Wisconsin Rapids',
 }
 
 // Manager/supervisor employee IDs excluded from the roster board
@@ -99,27 +99,53 @@ const B2E_EXCLUDED_IDS = [
   5423, 5429, 5434, 5438, 5441, 5442, 5449, 5462, 5470, 5472, 5474,
 ]
 
+// CAL v2 dock assignment map: employee name → lane id on the split board.
+// 3.5 side employees are mapped to side35_* lanes; everyone else defaults to side12_*.
+// Partial names are checked with startsWith so middle initials don't break matches.
+const CAL2_DOCK_NAMES_35 = new Set([
+  'Calvieon Howard',
+  'Ethan Lindsey',
+  'Jose Cuevas',
+  'Nicholas J. Free',
+  'Nicholas Free',
+  'Zarious Brinner',
+  'Juan Bido',
+  'Eduardo Ramon',
+])
+
+function cal2DefaultLane(name, shiftLane) {
+  // shiftLane is the standard shift1/mid/shift2/shift3 from scheduleToLane
+  // Map to the correct side + shift
+  const is35 = [...CAL2_DOCK_NAMES_35].some(n => name.startsWith(n) || name.includes(n))
+  const side = is35 ? 'side35' : 'side12'
+  // Map standard shift IDs to side-prefixed IDs
+  const shiftSuffix = {
+    shift1: 'shift1',
+    mid:    'mid',
+    shift2: 'shift2',
+    shift3: 'shift3',
+  }[shiftLane] || 'shift1'
+  return `${side}_${shiftSuffix}`
+}
+
 function scheduleToLane(workSchedule, startTime) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
   if (ws.includes('mid'))       return 'mid'
   if (ws.includes('2nd shift')) return 'shift2'
   if (ws.includes('3rd shift')) return 'shift3'
-  // 4x10s and free-flow: fall through to start-time bucketing
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
     if (!isNaN(hour)) {
-      if (hour < 10)             return 'shift1'  // 4am–9am
-      if (hour < 14)             return 'mid'     // 10am–1pm
-      if (hour < 20)             return 'shift2'  // 2pm–7pm
-      return 'shift3'                             // 8pm–3am
+      if (hour < 10)  return 'shift1'
+      if (hour < 14)  return 'mid'
+      if (hour < 20)  return 'shift2'
+      return 'shift3'
     }
   }
   return 'shift1'
 }
 
-// Parse B2E time strings to a decimal 24-hour value.
-// Handles "H:MMa" / "H:MMp" (Omni format), "HH:MM" (24-hour), and plain numeric hours.
 function parseB2eTime(s) {
   if (!s || s === '0' || s === 0) return null
   const str = String(s).trim().toLowerCase()
@@ -136,13 +162,11 @@ function parseB2eTime(s) {
   return isNaN(plain) ? null : plain
 }
 
-// Returns integer start hour (0-23) for array indexing in the availability calc.
 function normalizeShiftStart(startTime) {
   const h = parseB2eTime(startTime)
   return h != null ? Math.floor(h) : null
 }
 
-// Returns shift duration in decimal hours (e.g. 8.5), rounded to nearest 0.5.
 function computeShiftHours(startTime, endTime) {
   const sh = parseB2eTime(startTime)
   const eh = parseB2eTime(endTime)
@@ -195,10 +219,6 @@ function scheduledArrivalDateFilter(date) {
 
 // ── Public API ───────────────────────────────────────────────────
 
-/**
- * Hourly labor + appointment data for a facility on a given date.
- * Returns array of { h, req, avail, appts, inb, out }
- */
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -235,7 +255,6 @@ export async function fetchHourlyData(facilityId, date) {
     const out   = Number(r[`${VIEW_H}.outbound_count`]) || 0
     const drops = Number(r[`${VIEW_H}.drops`]) || 0
     const ts    = r[`${VIEW_H}.hour_of_day_timestamp`]
-    // ts may be epoch ms/μs number or ISO string; extract UTC hour
     let h = 0
     if (typeof ts === 'number') {
       h = new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
@@ -255,13 +274,6 @@ export async function fetchHourlyData(facilityId, date) {
   })
 }
 
-/**
- * Project-level throughput for a facility on a given date.
- * Queries gold__truck_appointments directly — bypasses the broken dbt pipeline
- * in labor_planning_app__hourly_inbound_outbound_drops_summary which stores all
- * appointments for newer projects under a null activity_date.
- * Returns array of { name, inb, out, drops, tot }
- */
 export async function fetchProjectData(facilityId, date) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -282,7 +294,6 @@ export async function fetchProjectData(facilityId, date) {
     limit: 500,
   })
 
-  // Aggregate by project name client-side
   const projectMap = new Map()
   for (const r of rows) {
     const name = r[`${VIEW_APPT}.project_name`] || ''
@@ -301,11 +312,6 @@ export async function fetchProjectData(facilityId, date) {
     .sort((a, b) => b.tot - a.tot)
 }
 
-/**
- * Network-level daily KPIs across all facilities.
- * Returns object keyed by facility id: { appts, inb, out, labor, util, delta }
- * Labor data from VIEW_H; appointment totals from gold__truck_appointments.
- */
 export async function fetchNetworkKpis(date) {
   const [laborRows, apptRows] = await Promise.all([
     omniQuery({
@@ -351,7 +357,6 @@ export async function fetchNetworkKpis(date) {
     }
   }
 
-  // Aggregate appointment counts from gold by warehouse
   for (const r of apptRows) {
     const wh    = r[`${VIEW_APPT}.warehouse_name`]
     const facId = CSW_WAREHOUSE_TO_FAC[wh]
@@ -367,11 +372,6 @@ export async function fetchNetworkKpis(date) {
   return result
 }
 
-/**
- * Fetch historical hourly drops for the same day-of-week as targetDate over the past
- * weeksBack weeks, then return the per-hour average as [{ h, est }].
- * Used to auto-seed hourly_drops_forecast when no manual data exists for a date.
- */
 export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBack = 4) {
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
@@ -383,9 +383,6 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
 
   const results = await Promise.all(pastDates.map(d => fetchHourlyData(facilityId, d).catch(() => [])))
 
-  // Average drops per hour across all fetched weeks.
-  // Divide by weeksBack (not weeks-with-data) so hours with zero drops in a week
-  // are included in the denominator rather than inflating the average.
   const sums = {}
   for (const rows of results) {
     for (const row of rows) {
@@ -399,12 +396,6 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
   }))
 }
 
-/**
- * Fetch historical project-level drops for the same day-of-week as targetDate over the past
- * weeksBack weeks, then return the per-project average as [{ project_name, est_drops }].
- * Used to auto-seed project_drops_forecast when no manual data exists for a date.
- */
-// Queries raw appointments for a single project+date and applies a PROJECT_DROP_RULES rule.
 async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return 0
@@ -449,8 +440,6 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
     .reduce((s, r) => s + (Number(r[`${VIEW_APPT}.count`]) || 0), 0)
 }
 
-// Like fetchProjectDropsByRule but returns { [hour]: count } instead of a total.
-// Adds scheduled_arrival to the selected fields so we can group drops by UTC hour.
 async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
@@ -491,7 +480,6 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
     } else if (rule.method === 'inbound_include_lookup') {
       if (!rule.includePatterns.some(p => code.includes(p.toUpperCase()))) continue
     }
-    // Extract UTC hour from scheduled_arrival (mirrors fetchHourlyData hour parsing)
     const ts = r[`${VIEW_APPT}.scheduled_arrival`]
     let h = 0
     if (typeof ts === 'number') {
@@ -506,12 +494,10 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
   return hourCounts
 }
 
-/**
- * Fetch historical per-project hourly drops for the same day-of-week as targetDate
- * over the past weeksBack weeks, returning a 4-week average per project per hour.
- * Returns { [projectName]: { [hour]: avgDrops } }.
- */
 export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack = 4) {
+  // cal2 uses cal's historical data and rules
+  const effectiveFacId = facilityId === 'cal2' ? 'cal' : facilityId
+
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
 
@@ -520,18 +506,16 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     return d.toISOString().slice(0, 10)
   })
 
-  // Determine which projects at this facility have drop rules
-  const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
+  const results = await Promise.all(pastDates.map(d => fetchProjectData(effectiveFacId, d).catch(() => [])))
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === effectiveFacId))]
 
-  const out = {} // { projectName: { hour: avgDrops } }
+  const out = {}
 
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
     const weeklyHourCounts = await Promise.all(
-      pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
+      pastDates.map(d => fetchProjectHourlyDropsByRule(effectiveFacId, d, projectName, rule).catch(() => ({})))
     )
-    // Sum per hour across all weeks, then average by weeksBack
     const sums = {}
     for (const hourMap of weeklyHourCounts) {
       for (const [h, count] of Object.entries(hourMap)) {
@@ -548,6 +532,8 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
 }
 
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
+  const effectiveFacId = facilityId === 'cal2' ? 'cal' : facilityId
+
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
 
@@ -556,20 +542,15 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
     return d.toISOString().slice(0, 10)
   })
 
-  // Fetch project data for all past dates in parallel.
-  // Only projects explicitly listed in PROJECT_DROP_RULES get a non-zero EST drops value.
-  // All others default to 0 until their drop logic is confirmed and added to the config.
-  const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
+  const results = await Promise.all(pastDates.map(d => fetchProjectData(effectiveFacId, d).catch(() => [])))
 
   const sums = {}
 
-  // For projects with custom rules, query raw appointments sequentially (one project at a time)
-  // to avoid overwhelming the Omni API with too many simultaneous requests.
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === effectiveFacId))]
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
     const counts = await Promise.all(
-      pastDates.map(d => fetchProjectDropsByRule(facilityId, d, projectName, rule).catch(() => 0))
+      pastDates.map(d => fetchProjectDropsByRule(effectiveFacId, d, projectName, rule).catch(() => 0))
     )
     sums[projectName] = counts.reduce((s, c) => s + c, 0)
   }
@@ -580,22 +561,13 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
   }))
 }
 
-/**
- * Baseline employee roster for a facility from B2E (Omni → silver schema).
- * Single query against futurescheduleentries — name, location, shift label, and
- * start/end times all live there. Deduplicates on employee_id keeping the
- * most-recently ingested row. Hour-bucketing fallback in scheduleToLane is
- * retained until work_schedule reliability is confirmed across all facilities.
- */
 export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
   const refDate = date || new Date().toISOString().slice(0, 10)
+  const isCal2  = facilityId === 'cal2'
 
-  // Two parallel queries:
-  // ROSTER   → active employee ID set (authoritative termination filter); no name fields here
-  // SCHEDULE → names, job codes, shift times for the target date
   const [rosterRows, scheduleRows] = await Promise.all([
     omniQuery({
       modelId: B2E_MODEL_ID,
@@ -642,10 +614,8 @@ export async function fetchB2eRoster(facilityId, date) {
     }),
   ])
 
-  // Active employee ID set from ROSTER (termination gate)
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
 
-  // Deduplicate SCHEDULE by employee — keep latest ingestion
   const schedMap = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
@@ -656,12 +626,9 @@ export async function fetchB2eRoster(facilityId, date) {
   const excluded     = new Set(B2E_EXCLUDED_IDS.map(String))
   const allowedCodes = new Set(['205', '209'])
 
-  // Build from SCHEDULE (names + shift times), gated by active ROSTER membership.
-  // Terminated employees with stale schedule entries are excluded because they
-  // won't appear in the ROSTER active set.
   return [...schedMap.entries()]
     .filter(([id, { row: r }]) => {
-      if (!activeIds.has(id)) return false   // not in active ROSTER → terminated
+      if (!activeIds.has(id)) return false
       if (excluded.has(id)) return false
       const code = String(r[`${SCHEDULE}.default_job_code`] ?? '')
       return allowedCodes.has(code)
@@ -671,12 +638,16 @@ export async function fetchB2eRoster(facilityId, date) {
       const endTime    = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
       const firstName  = r[`${SCHEDULE}.first_name`] || ''
       const lastName   = r[`${SCHEDULE}.last_name`]  || ''
+      const fullName   = [firstName, lastName].filter(Boolean).join(' ')
+      const shiftLane  = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+
       return {
         id,
-        name:         [firstName, lastName].filter(Boolean).join(' '),
+        name:         fullName,
         role:         null,
         job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
-        default_lane: scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime),
+        // For cal2, map into side-prefixed lanes; otherwise use standard lane
+        default_lane: isCal2 ? cal2DefaultLane(fullName, shiftLane) : shiftLane,
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),
         facility:     facilityId,

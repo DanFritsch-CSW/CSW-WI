@@ -14,7 +14,7 @@ import {
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
-import { LANES, ACTIVE_LANES } from '../lib/constants.js'
+import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2 } from '../lib/constants.js'
 import { fetchTodayAssignments, upsertAssignment, replaceEmployees, seedRosterAssignments, deleteAssignment, resetAssignmentsForDate } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
@@ -23,6 +23,15 @@ const LANE_SETTING_KEYS = {
   mid:    { start: 'mid_start',    hours: 'mid_hours'    },
   shift2: { start: 'shift2_start', hours: 'shift2_hours' },
   shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+  // CAL v2 side lanes map to the same settings as their shift equivalent
+  side12_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
+  side12_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
+  side12_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
+  side12_shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+  side35_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
+  side35_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
+  side35_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
+  side35_shift3: { start: 'shift3_start', hours: 'shift3_hours' },
 }
 const LANE_DEFAULTS = {
   shift1_start: 5,  shift1_hours: 8,
@@ -71,29 +80,20 @@ function sortEmployees(employees, sortOrder) {
   })
 }
 
-// Parse shift_start into a rounded hour integer (0–23).
-// Handles: integer (7, 14), "HH:MM" string ("07:00", "14:30"), or decimal (7.5).
-// Returns null if unparseable or null/undefined.
 function parseStartHour(shiftStart) {
   if (shiftStart === null || shiftStart === undefined || shiftStart === '') return null
-
   const val = Number(shiftStart)
-
-  // Integer or decimal number: e.g. 7 → 7, 7.5 → 8
   if (!isNaN(val)) {
     const h = Math.floor(val)
     const m = Math.round((val - h) * 60)
     return m >= 30 ? (h + 1) % 24 : h
   }
-
-  // "HH:MM" string: e.g. "07:00", "14:30"
   const match = String(shiftStart).match(/^(\d{1,2}):(\d{2})/)
   if (match) {
     const h = parseInt(match[1], 10)
     const m = parseInt(match[2], 10)
     return m >= 30 ? (h + 1) % 24 : h
   }
-
   return null
 }
 
@@ -104,41 +104,33 @@ function formatHour(h) {
   return `${h - 12}:00 PM`
 }
 
-// Group employees by rounded start hour. Returns array of { hour, label, employees }
-// sorted ascending. Employees with no parseable start go into an 'unknown' group
-// rendered last. Only returns grouped structure if there are 2+ distinct hours.
 function groupByStartHour(employees, assignmentMap) {
   const groups = {}
-
   for (const emp of employees) {
-    const asg = assignmentMap?.[emp.id]
+    const asg  = assignmentMap?.[emp.id]
     const hour = parseStartHour(asg?.shift_start)
-    const key = hour !== null ? hour : 'unknown'
+    const key  = hour !== null ? hour : 'unknown'
     if (!groups[key]) groups[key] = []
     groups[key].push(emp)
   }
-
   const keys = Object.keys(groups)
   if (keys.length <= 1) return null
-
   const sorted = keys
     .filter(k => k !== 'unknown')
     .map(Number)
     .sort((a, b) => a - b)
     .map(h => ({ hour: h, label: formatHour(h), employees: groups[h] }))
-
   if (groups['unknown']) {
     sorted.push({ hour: null, label: 'No start time', employees: groups['unknown'] })
   }
-
   return sorted
 }
 
 function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, sortOrder }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
-  const sorted = sortEmployees(employees, sortOrder)
-  const ids = sorted.map(e => e.id)
-  const groups = groupByStartHour(sorted, assignmentMap)
+  const sorted     = sortEmployees(employees, sortOrder)
+  const ids        = sorted.map(e => e.id)
+  const groups     = groupByStartHour(sorted, assignmentMap)
   const laneSettings = getLaneSettings(lane.id, settings)
 
   return (
@@ -199,6 +191,11 @@ const STUB_EMPLOYEES = [
 ]
 
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
+  // Choose lane set based on facility
+  const isCal2    = facility === 'cal2'
+  const activeLaneSet  = isCal2 ? LANES_CAL2    : LANES
+  const activeLaneIds  = isCal2 ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
+
   const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
   const [employees, setEmployees]         = useState([])
@@ -358,9 +355,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
   useEffect(() => {
-    const active = Object.values(laneMap).filter(l => ACTIVE_LANES.includes(l)).length
+    const active = Object.values(laneMap).filter(l => activeLaneIds.includes(l)).length
     onLaborCount?.(active)
-  }, [laneMap, onLaborCount])
+  }, [laneMap, onLaborCount, activeLaneIds])
 
   useEffect(() => {
     onRosterChange?.({ employees, laneMap, assignmentMap })
@@ -373,7 +370,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (!over) return
     const employeeId = active.id
     const targetLane = over.id
-    const validLane = LANES.find(l => l.id === targetLane)
+    const validLane = activeLaneSet.find(l => l.id === targetLane)
     if (!validLane) {
       const destLane = laneMap[targetLane]
       if (!destLane || destLane === laneMap[employeeId]) return
@@ -382,7 +379,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       if (laneMap[employeeId] === targetLane) return
       moveTo(employeeId, targetLane)
     }
-  }, [laneMap])
+  }, [laneMap, activeLaneSet])
 
   function moveTo(employeeId, laneId) {
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
@@ -412,16 +409,30 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const laneEmployees = (laneId) =>
     employees.filter(e => (laneMap[e.id] || e.default_lane) === laneId)
 
-  const activeCount = LANES.filter(l => ACTIVE_LANES.includes(l.id))
+  const activeCount = activeLaneSet
+    .filter(l => activeLaneIds.includes(l.id))
     .reduce((n, l) => n + laneEmployees(l.id).length, 0)
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
+
+  // CAL v2: compute side-level counts for display
+  const side12Count = isCal2
+    ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
+    : null
+  const side35Count = isCal2
+    ? ['side35_shift1','side35_mid','side35_shift2','side35_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
+    : null
 
   const currentSort = SORT_MODES.find(m => m.key === sortOrder)
   const nextSort = () => {
     const idx = SORT_MODES.findIndex(m => m.key === sortOrder)
     setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
   }
+
+  // CAL v2: column layout — 4+4+2
+  const gridStyle = isCal2
+    ? { gridTemplateColumns: 'repeat(10, 1fr)' }
+    : { gridTemplateColumns: 'repeat(6, 1fr)' }
 
   if (isLoading) {
     return (
@@ -434,7 +445,12 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   return (
     <div className="roster-section">
       <div className="roster-header">
-        <span className="section-label">Shift Roster</span>
+        <span className="section-label">
+          {isCal2
+            ? <>Shift Roster &nbsp;<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>1-2 side: <strong style={{ color: 'var(--brand)' }}>{side12Count}</strong> &nbsp;·&nbsp; 3.5 side: <strong style={{ color: 'var(--brand)' }}>{side35Count}</strong></span></>
+            : 'Shift Roster'
+          }
+        </span>
         <div className="roster-stats">
           <span className="roster-stat"><strong>{activeCount}</strong> active</span>
           <span className="roster-stat"><strong>{ptoCount}</strong> PTO</span>
@@ -480,14 +496,24 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           )}
         </div>
       </div>
+
+      {/* CAL v2: side divider labels above the lane grid */}
+      {isCal2 && (
+        <div className="cal2-side-headers">
+          <div className="cal2-side-label cal2-side-12">1-2 Side</div>
+          <div className="cal2-side-label cal2-side-35">3.5 Side</div>
+          <div className="cal2-side-spacer" />
+        </div>
+      )}
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        <div className="roster-lanes">
-          {LANES.map(lane => (
+        <div className="roster-lanes" style={gridStyle}>
+          {activeLaneSet.map(lane => (
             <DroppableLane
               key={lane.id}
               lane={lane}
