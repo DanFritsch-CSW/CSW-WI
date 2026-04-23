@@ -31,9 +31,17 @@ const CSW_WAREHOUSE_TO_FAC = Object.fromEntries(
 )
 
 const VIEW_H = 'labor_planning_app__hourly_labor_required_vs_available'
+
+// NOTE: VIEW_P (labor_planning_app__hourly_inbound_outbound_drops_summary) is NO LONGER
+// used for project-level or network appointment queries. The underlying dbt pipeline
+// (model.data_platform.hourly_inbound_outbound_drops_summary) has a broken activity_date
+// aggregation that stores all appointments for newer projects under a null date, causing
+// them to be filtered out when querying by date. All appointment queries now use
+// gold__truck_appointments directly. Consultants should fix the dbt model and this can
+// be revisited once the pipeline is confirmed stable.
 const VIEW_P = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 
-// Raw appointments — needed for lookup-code-based drop rules (VIEW_P doesn't expose lookup_code)
+// Raw appointments — source of truth for all project-level appointment data
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 
@@ -171,6 +179,20 @@ function activityDateFilter(date, view = VIEW_H) {
   }
 }
 
+function scheduledArrivalDateFilter(date) {
+  return {
+    [`${VIEW_APPT}.scheduled_arrival`]: {
+      kind: 'TIME_FOR_UNIT_DURATION',
+      type: 'date',
+      ui_type: 'DAY',
+      isFiscal: false,
+      left_side: date,
+      is_negative: false,
+      offset_interval_string: '0 days',
+    },
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────
 
 /**
@@ -235,8 +257,9 @@ export async function fetchHourlyData(facilityId, date) {
 
 /**
  * Project-level throughput for a facility on a given date.
- * Queries VIEW_P (the authoritative labor planning summary) so counts match
- * the Omni dashboard exactly.
+ * Queries gold__truck_appointments directly — bypasses the broken dbt pipeline
+ * in labor_planning_app__hourly_inbound_outbound_drops_summary which stores all
+ * appointments for newer projects under a null activity_date.
  * Returns array of { name, inb, out, drops, tot }
  */
 export async function fetchProjectData(facilityId, date) {
@@ -244,38 +267,44 @@ export async function fetchProjectData(facilityId, date) {
   if (!wh) return []
 
   const rows = await omniQuery({
-    modelId: MODEL_ID,
-    table: VIEW_P,
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_APPT,
     fields: [
-      `${VIEW_P}.project_name`,
-      `${VIEW_P}.total_inbounds`,
-      `${VIEW_P}.total_outbounds`,
-      `${VIEW_P}.total_inbound_drops`,
+      `${VIEW_APPT}.project_name`,
+      `${VIEW_APPT}.dock_appointment_type_name_groups`,
+      `${VIEW_APPT}.count`,
     ],
     filters: {
-      [`${VIEW_P}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...activityDateFilter(date, VIEW_P),
+      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      ...scheduledArrivalDateFilter(date),
     },
-    sorts: [{ column_name: `${VIEW_P}.project_name`, sort_descending: false }],
-    limit: 200,
+    sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
+    limit: 500,
   })
 
-  return rows
-    .map(r => {
-      const name  = r[`${VIEW_P}.project_name`] || ''
-      const inb   = Number(r[`${VIEW_P}.total_inbounds`])       || 0
-      const out   = Number(r[`${VIEW_P}.total_outbounds`])      || 0
-      const drops = Number(r[`${VIEW_P}.total_inbound_drops`])  || 0
-      return { name, inb, out, drops, tot: inb + out + drops }
-    })
-    .filter(p => p.name)
+  // Aggregate by project name client-side
+  const projectMap = new Map()
+  for (const r of rows) {
+    const name = r[`${VIEW_APPT}.project_name`] || ''
+    if (!name) continue
+    const typeGroup = (r[`${VIEW_APPT}.dock_appointment_type_name_groups`] || '').toLowerCase()
+    const count = Number(r[`${VIEW_APPT}.count`]) || 0
+    if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
+    const p = projectMap.get(name)
+    if (typeGroup === 'inbounds') p.inb += count
+    else if (typeGroup === 'outbounds') p.out += count
+  }
+
+  return [...projectMap.values()]
+    .map(p => ({ ...p, tot: p.inb + p.out + p.drops }))
+    .filter(p => p.tot > 0)
     .sort((a, b) => b.tot - a.tot)
 }
 
 /**
  * Network-level daily KPIs across all facilities.
  * Returns object keyed by facility id: { appts, inb, out, labor, util, delta }
- * Labor data from VIEW_H; appointment totals from VIEW_P (more reliable aggregates).
+ * Labor data from VIEW_H; appointment totals from gold__truck_appointments.
  */
 export async function fetchNetworkKpis(date) {
   const [laborRows, apptRows] = await Promise.all([
@@ -292,17 +321,16 @@ export async function fetchNetworkKpis(date) {
       limit: 100,
     }),
     omniQuery({
-      modelId: MODEL_ID,
-      table: VIEW_P,
+      modelId: GOLD_MODEL_ID,
+      table: VIEW_APPT,
       fields: [
-        `${VIEW_P}.warehouse_name`,
-        `${VIEW_P}.total_appointments`,
-        `${VIEW_P}.total_inbounds`,
-        `${VIEW_P}.total_outbounds`,
+        `${VIEW_APPT}.warehouse_name`,
+        `${VIEW_APPT}.dock_appointment_type_name_groups`,
+        `${VIEW_APPT}.count`,
       ],
-      filters: { ...activityDateFilter(date, VIEW_P) },
-      sorts: [{ column_name: `${VIEW_P}.warehouse_name`, sort_descending: false }],
-      limit: 500,
+      filters: { ...scheduledArrivalDateFilter(date) },
+      sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
+      limit: 1000,
     }),
   ])
 
@@ -323,15 +351,17 @@ export async function fetchNetworkKpis(date) {
     }
   }
 
-  // Group raw project rows by warehouse client-side (avoids broken aggregate field names)
+  // Aggregate appointment counts from gold by warehouse
   for (const r of apptRows) {
-    const wh    = r[`${VIEW_P}.warehouse_name`]
+    const wh    = r[`${VIEW_APPT}.warehouse_name`]
     const facId = CSW_WAREHOUSE_TO_FAC[wh]
     if (!facId) continue
     if (!result[facId]) result[facId] = { labor: 0, util: 0, delta: 0 }
-    result[facId].appts = (result[facId].appts || 0) + (Number(r[`${VIEW_P}.total_appointments`]) || 0)
-    result[facId].inb   = (result[facId].inb   || 0) + (Number(r[`${VIEW_P}.total_inbounds`])    || 0)
-    result[facId].out   = (result[facId].out   || 0) + (Number(r[`${VIEW_P}.total_outbounds`])   || 0)
+    const typeGroup = (r[`${VIEW_APPT}.dock_appointment_type_name_groups`] || '').toLowerCase()
+    const count = Number(r[`${VIEW_APPT}.count`]) || 0
+    result[facId].appts = (result[facId].appts || 0) + count
+    if (typeGroup === 'inbounds')  result[facId].inb = (result[facId].inb || 0) + count
+    if (typeGroup === 'outbounds') result[facId].out = (result[facId].out || 0) + count
   }
 
   return result
@@ -526,7 +556,7 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
     return d.toISOString().slice(0, 10)
   })
 
-  // Fetch VIEW_P summaries for all past dates in parallel.
+  // Fetch project data for all past dates in parallel.
   // Only projects explicitly listed in PROJECT_DROP_RULES get a non-zero EST drops value.
   // All others default to 0 until their drop logic is confirmed and added to the config.
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
