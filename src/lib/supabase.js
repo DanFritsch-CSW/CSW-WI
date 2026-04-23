@@ -214,17 +214,26 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
+// Returns per-facility: { [facilityId]: { headcount, totalHours } }
+// headcount  = # of active-lane (shift1/mid/shift2/shift3) employees
+// totalHours = sum of shift_hours for those employees (fallback 8 hrs if null)
 export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
     .from('roster_assignments')
-    .select('facility, lane')
+    .select('facility, lane, shift_hours')
     .eq('plan_date', planDate)
-    .in('lane', ['shift1', 'mid', 'shift2', 'shift3'])
+    .in('lane', ['shift1', 'mid', 'shift2', 'shift3',
+                 'side12_shift1','side12_mid','side12_shift2','side12_shift3',
+                 'side35_shift1','side35_mid','side35_shift2','side35_shift3'])
   if (error || !data) return {}
   const result = {}
   for (const r of data) {
-    result[r.facility] = (result[r.facility] ?? 0) + 1
+    // Normalise cal2 → cal for the scorecards (cal2 is excluded from the ALL grid anyway)
+    const fac = r.facility
+    if (!result[fac]) result[fac] = { headcount: 0, totalHours: 0 }
+    result[fac].headcount  += 1
+    result[fac].totalHours += r.shift_hours != null ? Number(r.shift_hours) : 8
   }
   return result
 }

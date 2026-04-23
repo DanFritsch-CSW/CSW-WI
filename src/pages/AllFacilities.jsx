@@ -1,6 +1,9 @@
 import CompareChart from '../components/CompareChart.jsx'
 import { FACILITY_LIST } from '../lib/constants.js'
 
+// Exclude cal2 from the ALL-tab scorecards grid — it's the same facility as CAL
+const SCORECARD_FACILITIES = FACILITY_LIST.filter(f => f.id !== 'cal2')
+
 export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, planDate }) {
   if (!networkData) return null
 
@@ -8,12 +11,17 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
     <div>
       <CompareChart networkData={networkData} facilityEstDrops={facilityEstDrops} />
       <div className="scorecards-grid">
-        {FACILITY_LIST.map(fac => {
-          const d        = networkData[fac.id] || {}
-          const estDrops = facilityEstDrops[fac.id] ?? 0
-          const appts    = (d.inb ?? 0) + (d.out ?? 0) + estDrops
-          const labor    = d.labor != null ? Math.round(d.labor * 10) / 10 : null
-          const laborAvail = facilityLaborCounts[fac.id] ?? '--'
+        {SCORECARD_FACILITIES.map(fac => {
+          const d          = networkData[fac.id] || {}
+          const estDrops   = facilityEstDrops[fac.id] ?? 0
+          const appts      = (d.inb ?? 0) + (d.out ?? 0) + estDrops
+          const labor      = d.labor != null ? Math.round(d.labor * 10) / 10 : null
+          const laborData  = facilityLaborCounts[fac.id]
+          const headcount  = laborData?.headcount  ?? '--'
+          const totalHours = laborData?.totalHours != null
+            ? Math.round(laborData.totalHours * 10) / 10
+            : '--'
+
           return (
             <div
               key={fac.id}
@@ -44,9 +52,20 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                     {labor ?? '--'}
                   </span>
                 </div>
-                <div className="scorecard-kpi">
-                  <span className="scorecard-kpi-label">Labor Avail</span>
-                  <span className="scorecard-kpi-value">{laborAvail}</span>
+                {/* Labor Available — dual metric tile */}
+                <div className="scorecard-kpi scorecard-kpi--labor-avail">
+                  <span className="scorecard-kpi-label">Labor Available</span>
+                  <div className="labor-avail-metrics">
+                    <div className="labor-avail-metric">
+                      <span className="labor-avail-value">{headcount}</span>
+                      <span className="labor-avail-sub">Warehousemen</span>
+                    </div>
+                    <div className="labor-avail-divider" />
+                    <div className="labor-avail-metric">
+                      <span className="labor-avail-value">{totalHours}</span>
+                      <span className="labor-avail-sub">Total Hours</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
