@@ -9,7 +9,6 @@ import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustmen
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
-// CAL v2 — projects that belong to the 3.5 side (Palermo's Finished FG)
 const CAL2_SIDE35_PROJECTS = new Set([
   'Palermos CALEDONIA finished',
   "Palermo's CALEDONIA finished",
@@ -25,7 +24,7 @@ const CAL2_TABS = [
   { id: 'side35', label: '3.5 Side' },
 ]
 
-export default function FacilityPanel({ facility, planDate, networkKpi }) {
+export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
   const [rawHourly, setRawHourly]     = useState([])
   const [hourlyErr, setHourlyErr]     = useState(null)
   const [projects, setProjects]       = useState([])
@@ -36,7 +35,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const [seedingDrops, setSeedingDrops]             = useState(false)
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
 
-  // CAL v2 per-side hourly appointment data: { [hour]: { inb, out } }
   const [sideHourlyAppts, setSideHourlyAppts] = useState({})
 
   const isCal2 = facility.id === 'cal2'
@@ -44,7 +42,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
-  // Main data fetch — fires on facility/date change
   useEffect(() => {
     setRawHourly([])
     setHourlyErr(null)
@@ -87,7 +84,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     })
   }, [facility.id, planDate])
 
-  // CAL v2: when side tab changes (and not 'all'), fetch per-side hourly appointments
   useEffect(() => {
     if (!isCal2 || sideTab === 'all') {
       setSideHourlyAppts({})
@@ -106,14 +102,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
       .catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
-  // Receive headcount + totalHours from RosterBoard
   const handleLaborCount   = useCallback((count, hours) => {
     setLaborCount(count)
     setTotalHours(hours)
   }, [])
   const handleRosterChange = useCallback(state => setRosterState(state), [])
 
-  // ── CAL v2 side filtering ──────────────────────────────────────────
   const visibleProjects = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projects
     if (sideTab === 'side35') return projects.filter(p => CAL2_SIDE35_PROJECTS.has(p.name))
@@ -125,7 +119,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return sideTab === 'side12' ? SIDE12_LANES : SIDE35_LANES
   }, [isCal2, sideTab])
 
-  // ── Roster availability ────────────────────────────────────────────
   const rosterAvail = useMemo(() => {
     if (!rosterState.employees.length) return null
     return buildRosterAvailability(
@@ -137,7 +130,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     )
   }, [rosterState, settings, laneFilter])
 
-  // ── EST drops scoped to visible projects ─────────────────────────
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
     return Object.fromEntries(
@@ -167,7 +159,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return sums
   }, [visibleProjectHourlyDrops])
 
-  // ── Hourly data — merge side-filtered appointments ─────────────────
   const rawWithEst = useMemo(() => {
     if (!rawHourly.length) return rawHourly
 
@@ -195,7 +186,15 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
 
   const { util, delta } = computeDailyKpis(hourly)
 
-  // For cal2 side tabs, compute side-filtered headcount and hours
+  // Bubble the break-adjusted delta up to LaborPlanning so the ALL tab scorecard
+  // shows the same number as the facility panel. Only fires for the 'all' sideTab
+  // (whole-facility delta, not a side-filtered one) and only when delta is real.
+  useEffect(() => {
+    if (onDeltaComputed && sideTab === 'all' && delta != null) {
+      onDeltaComputed(facility.id, delta)
+    }
+  }, [delta, facility.id, sideTab, onDeltaComputed])
+
   const sideHeadcount  = isCal2 && sideTab !== 'all'
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount

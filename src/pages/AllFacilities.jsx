@@ -4,7 +4,7 @@ import { FACILITY_LIST } from '../lib/constants.js'
 // Exclude cal2 from the ALL-tab scorecards grid — same facility as CAL
 const SCORECARD_FACILITIES = FACILITY_LIST.filter(f => f.id !== 'cal2')
 
-export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, planDate, onFacilityClick }) {
+export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, facilityDeltas = {}, planDate, onFacilityClick }) {
   if (!networkData) return null
 
   return (
@@ -22,10 +22,18 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
             ? Math.round(laborData.totalHours * 10) / 10
             : '--'
 
-          // Daily +/- = Total Hrs Available minus Labor Req
-          const delta = (typeof totalHours === 'number' && labor != null)
+          // Use the facility-computed delta (break-adjusted hourly avail - req)
+          // if available — matches exactly what the facility panel shows.
+          // Falls back to flat (totalHours - labor) if the facility hasn’t been
+          // visited this session yet.
+          const facilityDelta = facilityDeltas[fac.id]
+          const flatDelta = (typeof totalHours === 'number' && labor != null)
             ? Math.round((totalHours - labor) * 10) / 10
             : null
+          const delta = facilityDelta != null
+            ? Math.round(facilityDelta * 10) / 10
+            : flatDelta
+
           const deltaPositive = delta != null && delta >= 0
           const deltaLabel    = delta != null
             ? `${delta >= 0 ? '+' : ''}${delta}`
@@ -53,8 +61,6 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                   <span className="scorecard-kpi-label">Outbound</span>
                   <span className="scorecard-kpi-value">{d.out ?? '--'}</span>
                 </div>
-
-                {/* — Est Drops → Warehousemen → Total Hours → Labor Req → Daily +/- — */}
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Est Drops</span>
                   <span className="scorecard-kpi-value">{estDrops}</span>

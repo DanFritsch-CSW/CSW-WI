@@ -28,7 +28,6 @@ const TABS = [ALL_TAB, ...FACILITY_LIST]
 export default function LaborPlanning() {
   const [searchParams, setSearchParams] = useSearchParams()
 
-  // activeTab and planDate live in the URL so they survive navigation to/from Settings
   const activeTab = searchParams.get('fac') || 'all'
   const planDate  = searchParams.get('date') || todayISO()
 
@@ -47,8 +46,19 @@ export default function LaborPlanning() {
   const [networkData, setNetworkData]                 = useState(null)
   const [facilityEstDrops, setFacilityEstDrops]       = useState({})
   const [facilityLaborCounts, setFacilityLaborCounts] = useState({})
+  // Facility-computed deltas (break-adjusted hourly avail - req) bubbled up from FacilityPanel
+  const [facilityDeltas, setFacilityDeltas]           = useState({})
   const [snapLabel, setSnapLabel]                     = useState('Snapshot')
   const pageRef = useRef(null)
+
+  // Reset deltas when date changes so stale values don’t linger
+  useEffect(() => {
+    setFacilityDeltas({})
+  }, [planDate])
+
+  const handleDeltaComputed = useCallback((facilityId, delta) => {
+    setFacilityDeltas(prev => ({ ...prev, [facilityId]: delta }))
+  }, [])
 
   const handleSnapshot = useCallback(async () => {
     if (!pageRef.current) return
@@ -162,6 +172,7 @@ export default function LaborPlanning() {
           networkData={networkData}
           facilityEstDrops={facilityEstDrops}
           facilityLaborCounts={facilityLaborCounts}
+          facilityDeltas={facilityDeltas}
           planDate={planDate}
           onFacilityClick={setActiveTab}
         />
@@ -171,6 +182,7 @@ export default function LaborPlanning() {
           facility={activeFac}
           planDate={planDate}
           networkKpi={networkData?.[activeFac.id]}
+          onDeltaComputed={handleDeltaComputed}
         />
       ) : null}
     </div>
