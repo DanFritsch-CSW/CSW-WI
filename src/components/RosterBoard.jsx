@@ -197,10 +197,18 @@ const STUB_EMPLOYEES = [
   { id: 'e9', name: 'Quinn Adams',    role: 'Associate',  default_lane: 'callin' },
 ]
 
+// Active lane IDs for standard and cal2 facilities
+const STANDARD_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2', 'shift3'])
+const CAL2_ACTIVE_LANES = new Set([
+  'side12_shift1','side12_mid','side12_shift2','side12_shift3',
+  'side35_shift1','side35_mid','side35_shift2','side35_shift3',
+])
+
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
   const isCal2         = facility === 'cal2'
   const activeLaneSet  = isCal2 ? LANES_CAL2     : LANES
   const activeLaneIds  = isCal2 ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
+  const activeLaneSet_ = isCal2 ? CAL2_ACTIVE_LANES : STANDARD_ACTIVE_LANES
 
   const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
@@ -360,10 +368,16 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
+  // Fire onLaborCount with both headcount and total hours whenever roster changes
   useEffect(() => {
-    const active = Object.values(laneMap).filter(l => activeLaneIds.includes(l)).length
-    onLaborCount?.(active)
-  }, [laneMap, onLaborCount, activeLaneIds])
+    const activeEmps = employees.filter(e => activeLaneSet_.has(laneMap[e.id] || e.default_lane))
+    const headcount  = activeEmps.length
+    const totalHours = activeEmps.reduce((sum, emp) => {
+      const asg = assignmentMap[emp.id]
+      return sum + (asg?.shift_hours != null ? Number(asg.shift_hours) : 8)
+    }, 0)
+    onLaborCount?.(headcount, totalHours)
+  }, [laneMap, assignmentMap, employees, onLaborCount, activeLaneSet_])
 
   useEffect(() => {
     onRosterChange?.({ employees, laneMap, assignmentMap })
@@ -471,17 +485,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         </div>
       </div>
 
-      {/*
-        CAL v2: side headers sit in a grid that shares the exact same column
-        template as the lanes grid below — both use repeat(10, minmax(0,1fr)).
-        1-2 Side spans columns 1–4, 3.5 Side spans 5–8, cols 9–10 (PTO/Call-In)
-        are left empty so no header appears over them.
-      */}
       {isCal2 && (
         <div className="roster-lanes" style={{ ...gridStyle, marginBottom: 6 }}>
           <div className="cal2-side-label cal2-side-12" style={{ gridColumn: '1 / 5' }}>1-2 Side</div>
           <div className="cal2-side-label cal2-side-35" style={{ gridColumn: '5 / 9' }}>3.5 Side</div>
-          {/* cols 9-10 intentionally empty */}
         </div>
       )}
 

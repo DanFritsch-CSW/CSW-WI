@@ -3,7 +3,7 @@ function fmtDelta(v) {
   return v >= 0 ? `+${parseFloat(v.toFixed(1))}` : `${parseFloat(v.toFixed(1))}`
 }
 
-function Pill({ label, value, color, isDelta, delta: deltaVal }) {
+function Pill({ label, value, color, delta: deltaVal }) {
   return (
     <div className="kpill" style={{ borderTopColor: color, borderTopWidth: 2 }}>
       <span className="kpill-label">{label}</span>
@@ -39,9 +39,10 @@ export default function KpiPills({ data, color }) {
         <Pill label="Outbound"  value={data.out   ?? '--'} color={color} />
       </div>
 
-      {/* Row 3 — Labor Available · Daily +/- */}
+      {/* Row 3 — Warehousemen · Total Hours Available */}
       <div className="kpi-row">
-        <Pill label="Labor Available" value={data.labor ?? '--'} color={color} />
+        <Pill label="Warehousemen"         value={data.labor      ?? '--'} color={color} />
+        <Pill label="Total Hrs Available"  value={data.totalHours ?? '--'} color={color} />
         <Pill label="Daily +/-" value={fmtDelta(data.delta)} color={deltaColor} />
       </div>
 

@@ -30,6 +30,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const [hourlyErr, setHourlyErr]     = useState(null)
   const [projects, setProjects]       = useState([])
   const [laborCount, setLaborCount]   = useState(0)
+  const [totalHours, setTotalHours]   = useState(0)
   const [rosterState, setRosterState] = useState({ employees: [], laneMap: {}, assignmentMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
@@ -92,8 +93,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
       setSideHourlyAppts({})
       return
     }
-    // Determine which project names belong to this side
-    // We need all project names — wait for projects to load, then filter
     if (!projects.length) return
     const sideProjectNames = projects
       .map(p => p.name)
@@ -107,10 +106,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
       .catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
-  const handleLaborCount   = useCallback(n => setLaborCount(n), [])
+  // Receive headcount + totalHours from RosterBoard
+  const handleLaborCount   = useCallback((count, hours) => {
+    setLaborCount(count)
+    setTotalHours(hours)
+  }, [])
   const handleRosterChange = useCallback(state => setRosterState(state), [])
 
-  // ── CAL v2 side filtering ──────────────────────────────────────
+  // ── CAL v2 side filtering ──────────────────────────────────────────
   const visibleProjects = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projects
     if (sideTab === 'side35') return projects.filter(p => CAL2_SIDE35_PROJECTS.has(p.name))
@@ -122,7 +125,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return sideTab === 'side12' ? SIDE12_LANES : SIDE35_LANES
   }, [isCal2, sideTab])
 
-  // ── Roster availability ────────────────────────────────────────
+  // ── Roster availability ────────────────────────────────────────────
   const rosterAvail = useMemo(() => {
     if (!rosterState.employees.length) return null
     return buildRosterAvailability(
@@ -134,7 +137,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     )
   }, [rosterState, settings, laneFilter])
 
-  // ── EST drops scoped to visible projects ───────────────────────
+  // ── EST drops scoped to visible projects ─────────────────────────
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
     return Object.fromEntries(
@@ -164,20 +167,17 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return sums
   }, [visibleProjectHourlyDrops])
 
-  // ── Hourly data — merge side-filtered appointments ─────────────
+  // ── Hourly data — merge side-filtered appointments ─────────────────
   const rawWithEst = useMemo(() => {
     if (!rawHourly.length) return rawHourly
 
     if (!isCal2 || sideTab === 'all') {
-      // Standard path — use full Omni hourly data
       return rawHourly.map(row => {
         const est = estDrops[row.h] ?? 0
         return { ...row, appts: row.inb + est + row.out }
       })
     }
 
-    // Side tab path — replace inb/out with per-side project appointment counts
-    // sideHourlyAppts: { [hour]: { inb, out } } from fetchProjectHourlyAppointments
     return rawHourly.map(row => {
       const est      = estDrops[row.h] ?? 0
       const sideAppt = sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }
@@ -195,16 +195,28 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
 
   const { util, delta } = computeDailyKpis(hourly)
 
+  // For cal2 side tabs, compute side-filtered headcount and hours
+  const sideHeadcount  = isCal2 && sideTab !== 'all'
+    ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
+    : laborCount
+  const sideTotalHours = isCal2 && sideTab !== 'all'
+    ? Object.entries(rosterState.laneMap)
+        .filter(([, l]) => laneFilter?.has(l))
+        .reduce((sum, [id]) => {
+          const asg = rosterState.assignmentMap[id]
+          return sum + (asg?.shift_hours != null ? Number(asg.shift_hours) : 8)
+        }, 0)
+    : totalHours
+
   const kpiData = {
-    appts:  visibleProjects.reduce((s, p) => s + p.inb + p.out + (projectDrops[p.name] ?? 0), 0),
-    drops:  visibleProjects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0),
-    inb:    visibleProjects.reduce((s, p) => s + p.inb, 0),
-    out:    visibleProjects.reduce((s, p) => s + p.out, 0),
-    labor:  isCal2 && sideTab !== 'all'
-      ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
-      : laborCount,
-    util:   util  ?? networkKpi?.util,
-    delta:  delta ?? networkKpi?.delta,
+    appts:      visibleProjects.reduce((s, p) => s + p.inb + p.out + (projectDrops[p.name] ?? 0), 0),
+    drops:      visibleProjects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0),
+    inb:        visibleProjects.reduce((s, p) => s + p.inb, 0),
+    out:        visibleProjects.reduce((s, p) => s + p.out, 0),
+    labor:      sideHeadcount,
+    totalHours: Math.round(sideTotalHours * 10) / 10,
+    util:       util  ?? networkKpi?.util,
+    delta:      delta ?? networkKpi?.delta,
   }
 
   const resetEstDrops = async () => {
