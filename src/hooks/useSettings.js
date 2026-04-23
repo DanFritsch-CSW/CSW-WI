@@ -1,14 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { fetchFacilitySettings, upsertFacilitySettings } from '../lib/supabase.js'
 
+// Only hours_per_appt and break assumptions are user-configurable.
+// Shift start times and durations are hardcoded in laborCalc.js.
 const DEFAULTS = {
   hours_per_appt: 1.5,
-  shift1_start: 5,  shift1_hours: 8,
-  mid_start:    9,  mid_hours:    8,
-  shift2_start: 13, shift2_hours: 8,
-  shift3_start: 22, shift3_hours: 8,
-  break_hour_1: 83, break_hour_2: 100, break_hour_3: 75, break_hour_4: 100,
-  break_hour_5: 50, break_hour_6: 100, break_hour_7: 75, break_hour_8: 100,
+  break_hour_1: 83, break_hour_2: 100, break_hour_3: 75,  break_hour_4: 100,
+  break_hour_5: 50, break_hour_6: 100, break_hour_7: 75,  break_hour_8: 100,
 }
 
 export function useSettings(facilityId) {
@@ -26,7 +24,7 @@ export function useSettings(facilityId) {
 
   const saveSettings = useCallback(async (values) => {
     const next = { ...settings, ...values }
-    setSettings(next)  // optimistic
+    setSettings(next)
     await upsertFacilitySettings(facilityId, values)
   }, [facilityId, settings])
 

@@ -3,56 +3,27 @@ import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchFacilitySettings, upsertFacilitySettings } from '../lib/supabase.js'
 
 // ── Labor Settings ────────────────────────────────────────────────
-
-const FIELD_DEFS = [
-  { key: 'hours_per_appt', label: 'Hours / Appt',          min: 0.1, max: 10, step: 0.1, hint: 'Labor hours per appointment (used to calculate required labor)' },
-  { key: 'shift1_start',   label: '1st Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for 1st shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift1_hours',   label: '1st Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a 1st shift in hours' },
-  { key: 'mid_start',      label: 'Mid Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for mid shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'mid_hours',      label: 'Mid Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a mid shift in hours' },
-  { key: 'shift2_start',   label: '2nd Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for 2nd shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift2_hours',   label: '2nd Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a 2nd shift in hours' },
-  { key: 'shift3_start',   label: '3rd Shift Start (hr)',   min: 0,   max: 23, step: 1,   hint: 'Default start hour for 3rd shift employees (0–23) when no B2E schedule is on file' },
-  { key: 'shift3_hours',   label: '3rd Shift Hours',        min: 1,   max: 16, step: 0.5, hint: 'Duration of a 3rd shift in hours' },
-]
+// Only Hours / Appt is user-configurable per facility.
+// Shift start times and durations are now hardcoded constants in laborCalc.js.
 
 const DEFAULTS = {
   hours_per_appt: 1.5,
-  shift1_start: 5,  shift1_hours: 8,
-  mid_start:    9,  mid_hours:    8,
-  shift2_start: 13, shift2_hours: 8,
-  shift3_start: 22, shift3_hours: 8,
 }
 
 function FacilitySettingsCard({ facility }) {
-  const [values, setValues]   = useState(DEFAULTS)
-  const [saveState, setSave]  = useState(null)
+  const [hpa, setHpa]        = useState(DEFAULTS.hours_per_appt)
+  const [saveState, setSave] = useState(null)
 
   useEffect(() => {
     fetchFacilitySettings(facility.id).then(data => {
-      setValues({
-        hours_per_appt: data.hours_per_appt ?? DEFAULTS.hours_per_appt,
-        shift1_start:   data.shift1_start   ?? DEFAULTS.shift1_start,
-        shift1_hours:   data.shift1_hours   ?? DEFAULTS.shift1_hours,
-        mid_start:      data.mid_start      ?? DEFAULTS.mid_start,
-        mid_hours:      data.mid_hours      ?? DEFAULTS.mid_hours,
-        shift2_start:   data.shift2_start   ?? DEFAULTS.shift2_start,
-        shift2_hours:   data.shift2_hours   ?? DEFAULTS.shift2_hours,
-        shift3_start:   data.shift3_start   ?? DEFAULTS.shift3_start,
-        shift3_hours:   data.shift3_hours   ?? DEFAULTS.shift3_hours,
-      })
+      setHpa(data.hours_per_appt ?? DEFAULTS.hours_per_appt)
     })
   }, [facility.id])
-
-  function handleChange(key, raw) {
-    const num = parseFloat(raw)
-    setValues(prev => ({ ...prev, [key]: isNaN(num) ? raw : num }))
-  }
 
   async function handleSave() {
     setSave('saving')
     try {
-      await upsertFacilitySettings(facility.id, values)
+      await upsertFacilitySettings(facility.id, { hours_per_appt: hpa })
       setSave('ok')
       setTimeout(() => setSave(null), 2500)
     } catch {
@@ -69,20 +40,18 @@ function FacilitySettingsCard({ facility }) {
         <span className="settings-facility-code">{facility.code}</span>
       </div>
       <div className="settings-fields">
-        {FIELD_DEFS.map(({ key, label, min, max, step, hint }) => (
-          <label key={key} className="settings-field" title={hint}>
-            <span className="settings-field-label">{label}</span>
-            <input
-              type="number"
-              className="settings-field-input"
-              value={values[key]}
-              min={min}
-              max={max}
-              step={step}
-              onChange={e => handleChange(key, e.target.value)}
-            />
-          </label>
-        ))}
+        <label className="settings-field" title="Labor hours required per appointment — drives the Labor Required calculation">
+          <span className="settings-field-label">Hours / Appt</span>
+          <input
+            type="number"
+            className="settings-field-input"
+            value={hpa}
+            min={0.1}
+            max={10}
+            step={0.1}
+            onChange={e => setHpa(parseFloat(e.target.value))}
+          />
+        </label>
       </div>
       <div className="settings-card-footer">
         <button
@@ -130,10 +99,6 @@ function BreakScheduleEditor() {
     }
   }
 
-  function handleClear() {
-    setValues(BREAK_DEFAULTS)
-  }
-
   return (
     <div className="break-schedule-editor">
       <div className="break-schedule-controls">
@@ -157,7 +122,7 @@ function BreakScheduleEditor() {
           >
             {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save breaks'}
           </button>
-          <button className="settings-save-btn" onClick={handleClear}>
+          <button className="settings-save-btn" onClick={() => setValues(BREAK_DEFAULTS)}>
             Clear
           </button>
         </div>
@@ -183,17 +148,6 @@ function BreakScheduleEditor() {
   )
 }
 
-// ── Est Drops Editor (Hourly) ─────────────────────────────────────
-
-const SHIFT_HOURS = [5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,0,1,2,3,4]
-
-function fmtHour(h) {
-  if (h === 0) return '12am'
-  if (h < 12) return `${h}am`
-  if (h === 12) return '12pm'
-  return `${h - 12}pm`
-}
-
 // ── Page ──────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -216,7 +170,6 @@ export default function Settings() {
         <p className="settings-page-sub">Set the % of employees available during each hour of their shift. Used to account for lunches, breaks, and startup time.</p>
       </div>
       <BreakScheduleEditor />
-
     </div>
   )
 }

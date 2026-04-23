@@ -1,34 +1,38 @@
-const DEFAULTS = {
-  hours_per_appt: 1.5,
-  shift1_start: 5,  shift1_hours: 8,
-  mid_start:    9,  mid_hours:    8,
-  shift2_start: 13, shift2_hours: 8,
-  shift3_start: 22, shift3_hours: 8,
+// Hardcoded shift defaults — used as fallback when an employee has no
+// personal shift_start / shift_hours in their roster_assignments row.
+// These are no longer stored in or read from facility_settings.
+const SHIFT_DEFAULTS = {
+  shift1: { start: 5,  hours: 8 },
+  mid:    { start: 9,  hours: 8 },
+  shift2: { start: 13, hours: 8 },
+  shift3: { start: 22, hours: 8 },
 }
 
-const LANE_KEYS = {
-  shift1: { start: 'shift1_start', hours: 'shift1_hours' },
-  mid:    { start: 'mid_start',    hours: 'mid_hours'    },
-  shift2: { start: 'shift2_start', hours: 'shift2_hours' },
-  shift3: { start: 'shift3_start', hours: 'shift3_hours' },
-  // CAL v2 side lanes — map to the same settings as their shift equivalent
-  side12_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
-  side12_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
-  side12_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
-  side12_shift3: { start: 'shift3_start', hours: 'shift3_hours' },
-  side35_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
-  side35_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
-  side35_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
-  side35_shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+// Map any lane ID → the shift bucket whose defaults apply
+const LANE_TO_SHIFT = {
+  shift1:        'shift1',
+  mid:           'mid',
+  shift2:        'shift2',
+  shift3:        'shift3',
+  side12_shift1: 'shift1',
+  side12_mid:    'mid',
+  side12_shift2: 'shift2',
+  side12_shift3: 'shift3',
+  side35_shift1: 'shift1',
+  side35_mid:    'mid',
+  side35_shift2: 'shift2',
+  side35_shift3: 'shift3',
 }
+
 const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 
 function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
 }
 
+// Override req using facility hours_per_appt setting.
 export function applySettings(hourlyData, settings) {
-  const hpa = settings?.hours_per_appt ?? DEFAULTS.hours_per_appt
+  const hpa = settings?.hours_per_appt ?? 1.5
   return hourlyData.map(row => ({
     ...row,
     req: row.appts * hpa,
@@ -45,7 +49,7 @@ export function computeDailyKpis(hourly) {
 }
 
 function parseStartHour(shiftStart) {
-  if (!shiftStart) return null
+  if (shiftStart === null || shiftStart === undefined || shiftStart === '') return null
   const val = Number(shiftStart)
   if (!isNaN(val)) return Math.floor(val)
   const h = parseInt(String(shiftStart).split(':')[0], 10)
@@ -55,9 +59,14 @@ function parseStartHour(shiftStart) {
 /**
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
+ * Priority for each employee's start/hours:
+ *  1. Day-specific assignment override (shift_start / shift_hours from roster_assignments)
+ *  2. B2E schedule data stored on the employee object (emp.shift_start)
+ *  3. Hardcoded SHIFT_DEFAULTS for the employee's shift bucket
+ *
  * @param {Array}    employees     - employee objects
  * @param {Object}   laneMap       - { [employeeId]: laneId }
- * @param {Object}   settings      - facility settings
+ * @param {Object}   settings      - facility settings (only break_hour_* used now)
  * @param {Object}   assignmentMap - day-specific overrides
  * @param {Set|null} laneFilter    - if provided, only count employees in these lane IDs
  * @returns {Array<number>}  24-element array indexed by hour 0-23
@@ -69,18 +78,19 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
   for (const emp of employees) {
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
 
-    // If a lane filter is provided, skip employees not in those lanes
+    // Skip employees not in the filtered lane set
     if (laneFilter && !laneFilter.has(lane)) continue
 
-    const keys = LANE_KEYS[lane]
-    if (!keys) continue  // pto, callin — not counted
+    const shiftKey = LANE_TO_SHIFT[lane]
+    if (!shiftKey) continue  // pto, callin — not counted
 
-    const assignment   = assignmentMap?.[emp.id]
-    const defaultStart = settings?.[keys.start] ?? DEFAULTS[keys.start]
-    const defaultHours = settings?.[keys.hours]  ?? DEFAULTS[keys.hours]
+    const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
+    const assignment    = assignmentMap?.[emp.id]
 
-    const startHour  = assignment?.shift_start ?? parseStartHour(emp.shift_start) ?? defaultStart
-    const shiftHours = assignment?.shift_hours ?? defaultHours
+    // Resolve start hour: assignment override → B2E schedule → hardcoded default
+    const startHour  = assignment?.shift_start  ?? parseStartHour(emp.shift_start)  ?? shiftDefaults.start
+    // Resolve hours: assignment override → hardcoded default (B2E doesn't reliably provide duration)
+    const shiftHours = assignment?.shift_hours  ?? shiftDefaults.hours
 
     for (let i = 0; i < shiftHours; i++) {
       const mul = breakMuls[i] ?? 1
