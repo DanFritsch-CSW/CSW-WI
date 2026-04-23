@@ -74,8 +74,6 @@ input, select { font: inherit; color: inherit; }
 .page-content {
   flex: 1;
   padding: 0 24px 40px;
-  max-width: 1400px;
-  margin: 0 auto;
   width: 100%;
 }
 
@@ -739,6 +737,7 @@ input, select { font: inherit; color: inherit; }
 .roster-stats {
   display: flex;
   gap: 16px;
+  align-items: center;
 }
 
 .roster-stat {
@@ -750,6 +749,18 @@ input, select { font: inherit; color: inherit; }
 .roster-stat strong {
   color: var(--brand);
   font-weight: 600;
+}
+
+.roster-saving {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--brand);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 .snapshot-btn {
@@ -820,9 +831,10 @@ input, select { font: inherit; color: inherit; }
   color: var(--red);
 }
 
+/* 6 columns: 1st, Mid, 2nd, 3rd, PTO, Call-In all on one row */
 .roster-lanes {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 10px;
 }
 
