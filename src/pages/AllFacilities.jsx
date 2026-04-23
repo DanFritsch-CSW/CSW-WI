@@ -4,7 +4,7 @@ import { FACILITY_LIST } from '../lib/constants.js'
 // Exclude cal2 from the ALL-tab scorecards grid — same facility as CAL
 const SCORECARD_FACILITIES = FACILITY_LIST.filter(f => f.id !== 'cal2')
 
-export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, planDate }) {
+export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, planDate, onFacilityClick }) {
   if (!networkData) return null
 
   return (
@@ -25,8 +25,10 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
           return (
             <div
               key={fac.id}
-              className="scorecard"
+              className="scorecard scorecard--clickable"
               style={{ '--accent': fac.color }}
+              onClick={() => onFacilityClick?.(fac.id)}
+              title={`Open ${fac.code}`}
             >
               <div className="scorecard-name">{fac.code}</div>
               <div className="scorecard-kpis">

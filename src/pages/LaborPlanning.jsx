@@ -131,6 +131,7 @@ export default function LaborPlanning() {
           facilityEstDrops={facilityEstDrops}
           facilityLaborCounts={facilityLaborCounts}
           planDate={planDate}
+          onFacilityClick={setActiveTab}
         />
       ) : activeFac ? (
         <FacilityPanel
