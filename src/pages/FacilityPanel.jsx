@@ -5,7 +5,7 @@ import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, isRuleProject } from '../lib/omni.js'
-import { fetchProjectHourlyDrops, upsertProjectHourlyDrops } from '../lib/supabase.js'
+import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
@@ -17,6 +17,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
   const [rosterState, setRosterState] = useState({ employees: [], laneMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
+  const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
@@ -25,10 +26,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     setHourlyErr(null)
     setProjects([])
     setProjectHourlyDrops({})
+    setHourlyAdjustments({})
     fetchHourlyData(facility.id, planDate)
       .then(setRawHourly)
       .catch(e => setHourlyErr(e.message))
     fetchProjectData(facility.id, planDate).then(setProjects)
+    fetchHourlyAdjustments(facility.id, planDate).then(setHourlyAdjustments)
     fetchProjectHourlyDrops(facility.id, planDate).then(async data => {
       // Strip any cross-facility entries seeded before facility guards were added
       const filtered = Object.fromEntries(
@@ -163,12 +166,17 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
             hourlyData={hourly}
             estDrops={estDrops}
             projectHourlyDrops={projectHourlyDrops}
+            hourlyAdjustments={hourlyAdjustments}
             onProjectHourlyChange={(projectName, h, val) => {
               setProjectHourlyDrops(prev => ({
                 ...prev,
                 [projectName]: { ...(prev[projectName] ?? {}), [h]: val },
               }))
               upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
+            }}
+            onAdjustmentChange={(h, val) => {
+              setHourlyAdjustments(prev => ({ ...prev, [h]: val }))
+              upsertHourlyAdjustment(facility.id, planDate, h, val)
             }}
             color={facility.color}
           />

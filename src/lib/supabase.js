@@ -229,6 +229,27 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
   return result
 }
 
+// Returns { [hour]: adjustment } for the given facility + date
+export async function fetchHourlyAdjustments(facilityId, planDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('hourly_labor_adjustments')
+    .select('hour, adjustment')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (error || !data) return {}
+  return Object.fromEntries(data.map(r => [r.hour, r.adjustment]))
+}
+
+export async function upsertHourlyAdjustment(facilityId, planDate, hour, adjustment) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('hourly_labor_adjustments')
+    .upsert({ facility: facilityId, plan_date: planDate, hour, adjustment },
+            { onConflict: 'facility,plan_date,hour' })
+  if (error) console.error('upsertHourlyAdjustment:', error)
+}
+
 // Returns { [facilityId]: totalEstDrops } for all facilities on the given date.
 // Used by the ALL tab to include EST drops in the Appts KPI.
 export async function fetchAllFacilitiesEstDrops(planDate) {

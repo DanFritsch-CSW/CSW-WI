@@ -1375,6 +1375,10 @@ input, select { font: inherit; color: inherit; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ht-adj-col {
+  color: #c09050 !important;
+  min-width: 38px;
+}
 .ht-expand-btn {
   background: none;
   border: none;
