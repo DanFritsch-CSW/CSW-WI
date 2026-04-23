@@ -31,11 +31,12 @@ function getBreakMultipliers(settings) {
 }
 
 // Override req using facility hours_per_appt setting.
+// req is rounded to exactly 1 decimal to avoid floating-point noise.
 export function applySettings(hourlyData, settings) {
   const hpa = settings?.hours_per_appt ?? 1.5
   return hourlyData.map(row => ({
     ...row,
-    req: row.appts * hpa,
+    req: Math.round(row.appts * hpa * 10) / 10,
   }))
 }
 

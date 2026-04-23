@@ -245,7 +245,6 @@ input, select { font: inherit; color: inherit; }
 .cal2-side-spacer { }
 
 /* ─── CAL v2 lane side tints ────────────────────────────────────── */
-/* Applied to .lane elements in the 1-2 and 3.5 column groups */
 .lane-side12 {
   background: rgba(42,114,184,0.05);
   border-color: rgba(42,114,184,0.22);
@@ -305,6 +304,7 @@ input, select { font: inherit; color: inherit; }
 .emp-shift-save   { color: #3dba7e; background: rgba(61,186,126,0.12); border: 1px solid rgba(61,186,126,0.3); }
 .emp-shift-cancel { color: var(--text-dim); background: var(--bg4); border: 1px solid var(--border); }
 
+/* ─── Scorecards (ALL tab) ──────────────────────────────────────── */
 .scorecards-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }
 .scorecard { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 14px 16px; border-top: 3px solid var(--accent); transition: border-color 0.15s; }
 .scorecard:hover { border-color: var(--accent); }
@@ -313,6 +313,56 @@ input, select { font: inherit; color: inherit; }
 .scorecard-kpi { display: flex; justify-content: space-between; align-items: baseline; }
 .scorecard-kpi-label { font-family: var(--font-mono); font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
 .scorecard-kpi-value { font-family: var(--font-mono); font-size: 14px; font-weight: 500; }
+
+/* Labor Available dual-metric tile */
+.scorecard-kpi--labor-avail {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.scorecard-kpi--labor-avail .scorecard-kpi-label {
+  margin-bottom: 4px;
+}
+.labor-avail-metrics {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.labor-avail-metric {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 4px 5px;
+  gap: 2px;
+}
+.labor-avail-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-primary);
+}
+.labor-avail-sub {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.labor-avail-divider {
+  width: 1px;
+  height: 36px;
+  background: var(--border);
+  flex-shrink: 0;
+}
 
 .day-selector { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .day-btn { padding: 5px 12px; border-radius: var(--r-md); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); background: var(--bg2); border: 1px solid var(--border); transition: all 0.15s; }
