@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useReducer } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
@@ -16,7 +16,7 @@ const TABS = [ALL_TAB, ...FACILITY_LIST]
 export default function LaborPlanning() {
   const [searchParams, setSearchParams] = useSearchParams()
 
-  // Read state from URL; fall back to sensible defaults
+  // activeTab and planDate live in the URL so they survive navigation to/from Settings
   const activeTab = searchParams.get('fac') || 'all'
   const planDate  = searchParams.get('date') || todayISO()
 
@@ -28,19 +28,15 @@ export default function LaborPlanning() {
     setSearchParams(prev => { prev.set('date', date); return prev }, { replace: true })
   }
 
-  // Refs for async data — avoids stale state on navigation return
-  const networkDataRef      = useRef(null)
-  const facilityEstDropsRef = useRef({})
-  const facilityLaborRef    = useRef({})
-  const [, forceUpdate]     = useReducer(x => x + 1, 0)
-
-  const snapLabelRef = useRef('Snapshot')
-  const pageRef      = useRef(null)
+  const [networkData, setNetworkData]                 = useState(null)
+  const [facilityEstDrops, setFacilityEstDrops]       = useState({})
+  const [facilityLaborCounts, setFacilityLaborCounts] = useState({})
+  const [snapLabel, setSnapLabel]                     = useState('Snapshot')
+  const pageRef = useRef(null)
 
   const handleSnapshot = useCallback(async () => {
     if (!pageRef.current) return
-    snapLabelRef.current = 'Capturing…'
-    forceUpdate()
+    setSnapLabel('Capturing…')
     try {
       const { default: html2canvas } = await import('html2canvas')
       const canvas = await html2canvas(pageRef.current, {
@@ -56,9 +52,9 @@ export default function LaborPlanning() {
       const blob = await new Promise(res => canvas.toBlob(res, 'image/png'))
       try {
         await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-        snapLabelRef.current = 'Copied!'
+        setSnapLabel('Copied!')
       } catch {
-        snapLabelRef.current = 'Saved!'
+        setSnapLabel('Saved!')
       }
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -67,16 +63,15 @@ export default function LaborPlanning() {
       a.click()
       URL.revokeObjectURL(url)
     } catch {
-      snapLabelRef.current = 'Snapshot'
+      setSnapLabel('Snapshot')
     }
-    forceUpdate()
-    setTimeout(() => { snapLabelRef.current = 'Snapshot'; forceUpdate() }, 2500)
+    setTimeout(() => setSnapLabel('Snapshot'), 2500)
   }, [activeTab, planDate])
 
   useEffect(() => {
-    fetchNetworkKpis(planDate).then(d => { networkDataRef.current = d; forceUpdate() })
-    fetchAllFacilitiesEstDrops(planDate).then(d => { facilityEstDropsRef.current = d; forceUpdate() })
-    fetchAllFacilitiesLaborCounts(planDate).then(d => { facilityLaborRef.current = d; forceUpdate() })
+    fetchNetworkKpis(planDate).then(setNetworkData)
+    fetchAllFacilitiesEstDrops(planDate).then(setFacilityEstDrops)
+    fetchAllFacilitiesLaborCounts(planDate).then(setFacilityLaborCounts)
   }, [planDate])
 
   const activeFac = FACILITY_LIST.find(f => f.id === activeTab) || null
@@ -106,7 +101,7 @@ export default function LaborPlanning() {
           />
           {activeTab !== 'all' && (
             <button className="snapshot-btn" onClick={handleSnapshot}>
-              {snapLabelRef.current}
+              {snapLabel}
             </button>
           )}
         </div>
@@ -132,9 +127,9 @@ export default function LaborPlanning() {
       {/* Content */}
       {activeTab === 'all' ? (
         <AllFacilities
-          networkData={networkDataRef.current}
-          facilityEstDrops={facilityEstDropsRef.current}
-          facilityLaborCounts={facilityLaborRef.current}
+          networkData={networkData}
+          facilityEstDrops={facilityEstDrops}
+          facilityLaborCounts={facilityLaborCounts}
           planDate={planDate}
         />
       ) : activeFac ? (
@@ -142,7 +137,7 @@ export default function LaborPlanning() {
           key={activeFac.id}
           facility={activeFac}
           planDate={planDate}
-          networkKpi={networkDataRef.current?.[activeFac.id]}
+          networkKpi={networkData?.[activeFac.id]}
         />
       ) : null}
     </div>
