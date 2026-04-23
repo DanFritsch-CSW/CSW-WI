@@ -220,9 +220,28 @@ input, select { font: inherit; color: inherit; }
 
 /* ─── CAL v2 side divider headers ───────────────────────────────── */
 .cal2-side-headers { display: grid; grid-template-columns: 4fr 4fr 2fr; gap: 10px; margin-bottom: 4px; }
-.cal2-side-label { font-family: var(--font-mono); font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; text-align: center; padding: 4px 0; border-radius: var(--r-sm); }
-.cal2-side-12 { background: rgba(74,144,226,0.08); border: 1px solid rgba(74,144,226,0.25); color: #2a72b8; }
-.cal2-side-35 { background: rgba(224,123,77,0.08); border: 1px solid rgba(224,123,77,0.25); color: #c05a2a; }
+.cal2-side-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-align: center;
+  padding: 7px 0;
+  border-radius: var(--r-sm);
+}
+.cal2-side-12 {
+  background: rgba(42,114,184,0.13);
+  border: 2px solid rgba(42,114,184,0.55);
+  color: #1a5fa8;
+  border-left: 4px solid #2a72b8;
+}
+.cal2-side-35 {
+  background: rgba(192,90,42,0.11);
+  border: 2px solid rgba(192,90,42,0.50);
+  color: #a04020;
+  border-left: 4px solid #c05a2a;
+}
 .cal2-side-spacer { }
 
 .lane { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-lg); min-height: 200px; display: flex; flex-direction: column; }
