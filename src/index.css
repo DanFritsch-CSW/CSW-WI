@@ -87,6 +87,44 @@ input, select { font: inherit; color: inherit; }
 .fac-tab.active { color: var(--brand); border-bottom-color: var(--brand); background: var(--brand-bg); border-radius: var(--r-sm) var(--r-sm) 0 0; }
 .fac-tab .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
+/* ─── CAL v2 side tab row ───────────────────────────────────────── */
+.cal2-tab-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.cal2-tab {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 5px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cal2-tab:hover { background: var(--bg3); color: var(--text-primary); }
+.cal2-tab.active {
+  background: var(--brand-bg);
+  border-color: var(--brand-dim);
+  color: var(--brand);
+}
+/* Tint the 1-2 and 3.5 tabs when active */
+.cal2-tab.active[data-side="side12"] {
+  background: rgba(74, 144, 226, 0.08);
+  border-color: rgba(74, 144, 226, 0.4);
+  color: #2a72b8;
+}
+.cal2-tab.active[data-side="side35"] {
+  background: rgba(224, 123, 77, 0.08);
+  border-color: rgba(224, 123, 77, 0.4);
+  color: #c05a2a;
+}
+
 .kpi-stack { display: flex; flex-direction: column; gap: 10px; height: 100%; }
 .kpi-stack .kpi-row { margin-bottom: 0; }
 .kpi-stack .kpi-row .kpill { flex: 1; }
@@ -211,7 +249,7 @@ input, select { font: inherit; color: inherit; }
   border: 1px solid rgba(224, 123, 77, 0.25);
   color: #c05a2a;
 }
-.cal2-side-spacer { /* empty spacer for PTO+Call-In columns */ }
+.cal2-side-spacer { }
 
 .lane { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-lg); min-height: 200px; display: flex; flex-direction: column; }
 .lane-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 8px; border-bottom: 1px solid var(--border-subtle); background: var(--bg1); border-radius: var(--r-lg) var(--r-lg) 0 0; }
