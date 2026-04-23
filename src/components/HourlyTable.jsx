@@ -53,7 +53,7 @@ function EditableCell({ value, onSave }) {
   )
 }
 
-export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, onProjectHourlyChange, color }) {
+export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
 
   if (!hourlyData?.length) return null
@@ -69,9 +69,10 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
 
   let cumul = 0
   const rows = sorted.map(r => {
-    const final = r1(r.avail - r.req)
+    const adj   = hourlyAdjustments[r.h] ?? 0
+    const final = r1(r.avail - r.req - adj)
     cumul = r1(cumul + final)
-    return { ...r, final, cumul, est: estDrops[r.h] ?? null }
+    return { ...r, adj, final, cumul, est: estDrops[r.h] ?? null }
   })
 
   const tot = {
@@ -81,6 +82,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
     appts: rows.reduce((s, r) => s + r.appts, 0),
     req:   r1(rows.reduce((s, r) => s + r.req,   0)),
     avail: r1(rows.reduce((s, r) => s + r.avail, 0)),
+    adj:   rows.reduce((s, r) => s + r.adj, 0),
     cumul: rows[rows.length - 1]?.cumul ?? 0,
   }
 
@@ -119,6 +121,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
             <th>Appts</th>
             <th>Labor Req</th>
             <th>Labor Avail</th>
+            <th className="ht-adj-col" title="Additional labor required this hour (e.g. difficult appointments like white wood). Reduces Final +/-.">Adj</th>
             <th>Final +/-</th>
             <th>Cumul +/-</th>
           </tr>
@@ -150,6 +153,12 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
               <td style={{ color }}>{r.appts}</td>
               <td>{r.req}</td>
               <td>{r1(r.avail)}</td>
+              <td className="ht-adj-col">
+                <EditableCell
+                  value={r.adj}
+                  onSave={val => onAdjustmentChange?.(r.h, val)}
+                />
+              </td>
               <td className={r.final < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.final)}</td>
               <td className={r.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.cumul)}</td>
             </tr>
@@ -172,6 +181,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
             <td style={{ color }}>{tot.appts}</td>
             <td>{tot.req}</td>
             <td>{tot.avail}</td>
+            <td className="ht-adj-col">{tot.adj > 0 ? tot.adj : '—'}</td>
             <td></td>
             <td className={tot.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(tot.cumul)}</td>
           </tr>

@@ -100,6 +100,19 @@ export async function deleteAssignment(facility, employeeId, planDate) {
   if (error) console.error('deleteAssignment:', error)
 }
 
+// Deletes all non-temp roster assignments for a facility+date, preserving manually-added temp employees.
+export async function resetAssignmentsForDate(facility, planDate) {
+  if (!supabase) return 'Supabase not configured'
+  const { error } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .eq('is_temp', false)
+  if (error) { console.error('resetAssignmentsForDate:', error); return error.message }
+  return null
+}
+
 const SETTINGS_DEFAULTS = {
   hours_per_appt: 1.5,
   shift1_start: 5,  shift1_hours: 8,
@@ -214,6 +227,27 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
     result[r.project_name][r.hour] = r.est_drops
   }
   return result
+}
+
+// Returns { [hour]: adjustment } for the given facility + date
+export async function fetchHourlyAdjustments(facilityId, planDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('hourly_labor_adjustments')
+    .select('hour, adjustment')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (error || !data) return {}
+  return Object.fromEntries(data.map(r => [r.hour, r.adjustment]))
+}
+
+export async function upsertHourlyAdjustment(facilityId, planDate, hour, adjustment) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('hourly_labor_adjustments')
+    .upsert({ facility: facilityId, plan_date: planDate, hour, adjustment },
+            { onConflict: 'facility,plan_date,hour' })
+  if (error) console.error('upsertHourlyAdjustment:', error)
 }
 
 // Returns { [facilityId]: totalEstDrops } for all facilities on the given date.

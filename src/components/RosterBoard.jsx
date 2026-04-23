@@ -15,7 +15,7 @@ import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
 import { LANES, ACTIVE_LANES } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, fetchEmployees, replaceEmployees, seedRosterAssignments, deleteAssignment } from '../lib/supabase.js'
+import { fetchTodayAssignments, upsertAssignment, fetchEmployees, replaceEmployees, seedRosterAssignments, deleteAssignment, resetAssignmentsForDate } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
@@ -91,6 +91,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [employees, setEmployees]       = useState([])
   const [activeId, setActiveId]         = useState(null)
   const [syncState, setSyncState]       = useState(null)
+  const [resetState, setResetState]     = useState(null)
   const [showAddTemp, setShowAddTemp]   = useState(false)
   const loadRef = useRef(null)
 
@@ -150,6 +151,28 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       setTimeout(() => setSyncState(null), 3000)
     } catch (e) {
       setSyncState(e.message)
+    }
+  }, [facility, planDate])
+
+  const handleReset = useCallback(async () => {
+    if (!window.confirm('Reset all manual changes for this day and reload from B2E? Temp employees will be preserved.')) return
+    setResetState('loading')
+    try {
+      const date = planDate || todayISO()
+      const err = await resetAssignmentsForDate(facility, date)
+      if (err) { setResetState(err); return }
+      const b2eEmployees = await fetchB2eRoster(facility, date)
+      if (!b2eEmployees.length) { setResetState('No B2E data found'); return }
+      const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+      const replErr = await replaceEmployees(facility, empRows)
+      if (replErr) { setResetState(replErr); return }
+      const seedErr = await seedRosterAssignments(b2eEmployees, date)
+      if (seedErr) { setResetState(seedErr); return }
+      await loadRef.current?.()
+      setResetState('ok')
+      setTimeout(() => setResetState(null), 3000)
+    } catch (e) {
+      setResetState(e.message)
     }
   }, [facility, planDate])
 
@@ -270,6 +293,17 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           </button>
           {syncState && syncState !== 'loading' && syncState !== 'ok' && (
             <span className="b2e-sync-err">{syncState}</span>
+          )}
+          <button
+            className="b2e-sync-btn b2e-reset-btn"
+            onClick={handleReset}
+            disabled={resetState === 'loading'}
+            title="Clear all manual changes for this day and reload from B2E (keeps temp employees)"
+          >
+            {resetState === 'loading' ? 'Resetting…' : resetState === 'ok' ? 'Reset ✓' : 'Reset to B2E'}
+          </button>
+          {resetState && resetState !== 'loading' && resetState !== 'ok' && (
+            <span className="b2e-sync-err">{resetState}</span>
           )}
         </div>
       </div>
