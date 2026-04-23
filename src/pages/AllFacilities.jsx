@@ -22,6 +22,15 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
             ? Math.round(laborData.totalHours * 10) / 10
             : '--'
 
+          // Daily +/- = Total Hrs Available minus Labor Req
+          const delta = (typeof totalHours === 'number' && labor != null)
+            ? Math.round((totalHours - labor) * 10) / 10
+            : null
+          const deltaPositive = delta != null && delta >= 0
+          const deltaLabel    = delta != null
+            ? `${delta >= 0 ? '+' : ''}${delta}`
+            : '--'
+
           return (
             <div
               key={fac.id}
@@ -45,7 +54,7 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                   <span className="scorecard-kpi-value">{d.out ?? '--'}</span>
                 </div>
 
-                {/* — Est Drops → Warehousemen → Total Hours → Labor Req — */}
+                {/* — Est Drops → Warehousemen → Total Hours → Labor Req → Daily +/- — */}
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Est Drops</span>
                   <span className="scorecard-kpi-value">{estDrops}</span>
@@ -62,6 +71,15 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                   <span className="scorecard-kpi-label">Labor Req</span>
                   <span className="scorecard-kpi-value" style={{ color: fac.color }}>
                     {labor ?? '--'}
+                  </span>
+                </div>
+                <div className="scorecard-kpi scorecard-kpi--delta">
+                  <span className="scorecard-kpi-label">Daily +/−</span>
+                  <span
+                    className="scorecard-kpi-value scorecard-delta-value"
+                    style={{ color: delta == null ? 'var(--text-dim)' : deltaPositive ? 'var(--green)' : 'var(--red)' }}
+                  >
+                    {deltaLabel}
                   </span>
                 </div>
               </div>
