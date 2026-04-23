@@ -31,6 +31,12 @@ const LANE_DEFAULTS = {
   shift3_start: 22, shift3_hours: 8,
 }
 
+const SORT_MODES = [
+  { key: 'default', label: 'Sort' },
+  { key: 'first',   label: 'A–Z First' },
+  { key: 'last',    label: 'A–Z Last' },
+]
+
 function getLaneSettings(laneId, settings) {
   const keys = LANE_SETTING_KEYS[laneId]
   if (!keys) return null
@@ -44,9 +50,31 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10)
 }
 
-function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange }) {
+function sortEmployees(employees, sortOrder) {
+  if (sortOrder === 'default') return employees
+  return [...employees].sort((a, b) => {
+    const nameA = a.name || ''
+    const nameB = b.name || ''
+    if (sortOrder === 'first') {
+      const fa = nameA.split(' ')[0] || ''
+      const fb = nameB.split(' ')[0] || ''
+      return fa.localeCompare(fb)
+    }
+    if (sortOrder === 'last') {
+      const partsA = nameA.trim().split(' ')
+      const partsB = nameB.trim().split(' ')
+      const la = partsA[partsA.length - 1] || ''
+      const lb = partsB[partsB.length - 1] || ''
+      return la.localeCompare(lb)
+    }
+    return 0
+  })
+}
+
+function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, sortOrder }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
-  const ids = employees.map(e => e.id)
+  const sorted = sortEmployees(employees, sortOrder)
+  const ids = sorted.map(e => e.id)
 
   return (
     <div ref={setNodeRef} className={`lane${isOver ? ' over' : ''}`}>
@@ -56,7 +84,7 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
       </div>
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <div className="lane-body">
-          {employees.map(emp => (
+          {sorted.map(emp => (
             <EmployeeTile
               key={emp.id}
               employee={emp}
@@ -95,6 +123,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [resetState, setResetState]       = useState(null)
   const [showAddTemp, setShowAddTemp]     = useState(false)
   const [pendingWrites, setPendingWrites] = useState(0)
+  const [sortOrder, setSortOrder]         = useState('default')
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -309,6 +338,12 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
 
+  const currentSort = SORT_MODES.find(m => m.key === sortOrder)
+  const nextSort = () => {
+    const idx = SORT_MODES.findIndex(m => m.key === sortOrder)
+    setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
+  }
+
   if (isLoading) {
     return (
       <div className="roster-section">
@@ -328,6 +363,13 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           {pendingWrites > 0 && (
             <span className="roster-saving">Saving…</span>
           )}
+          <button
+            className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`}
+            onClick={nextSort}
+            title="Cycle sort: Default → A–Z First Name → A–Z Last Name"
+          >
+            {currentSort.label}
+          </button>
           <button
             className="b2e-sync-btn"
             onClick={() => setShowAddTemp(true)}
@@ -373,6 +415,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
               employees={laneEmployees(lane.id)}
               assignmentMap={assignmentMap}
               settings={settings}
+              sortOrder={sortOrder}
               onDeleteTemp={handleDeleteTemp}
               onShiftChange={handleShiftChange}
             />
