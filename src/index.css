@@ -306,13 +306,18 @@ input, select { font: inherit; color: inherit; }
 
 /* ─── Scorecards (ALL tab) ──────────────────────────────────────── */
 .scorecards-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }
-.scorecard { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 14px 16px; border-top: 3px solid var(--accent); transition: border-color 0.15s; }
+.scorecard { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 14px 16px; border-top: 3px solid var(--accent); transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s; }
 .scorecard:hover { border-color: var(--accent); }
+.scorecard--clickable { cursor: pointer; }
+.scorecard--clickable:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); transform: translateY(-1px); }
 .scorecard-name { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); margin-bottom: 12px; }
 .scorecard-kpis { display: flex; flex-direction: column; gap: 7px; }
 .scorecard-kpi { display: flex; justify-content: space-between; align-items: baseline; }
 .scorecard-kpi-label { font-family: var(--font-mono); font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
 .scorecard-kpi-value { font-family: var(--font-mono); font-size: 14px; font-weight: 500; }
+/* Daily +/- separator row */
+.scorecard-kpi--delta { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border-subtle); }
+.scorecard-delta-value { font-size: 15px; font-weight: 700; }
 
 /* Labor Available dual-metric tile */
 .scorecard-kpi--labor-avail {
@@ -364,10 +369,14 @@ input, select { font: inherit; color: inherit; }
   flex-shrink: 0;
 }
 
+/* ─── Date selector ─────────────────────────────────────────────── */
 .day-selector { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.day-btn { padding: 5px 12px; border-radius: var(--r-md); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); background: var(--bg2); border: 1px solid var(--border); transition: all 0.15s; }
+.day-btn { padding: 5px 12px; border-radius: var(--r-md); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); background: var(--bg2); border: 1px solid var(--border); transition: all 0.15s; white-space: nowrap; }
 .day-btn:hover { background: var(--bg3); color: var(--text-primary); }
 .day-btn.today { color: var(--brand); border-color: var(--brand-dim); background: var(--brand-bg); }
+/* Next Day — action stepper, visually distinct from jump-to-date buttons */
+.day-btn--next { border-style: dashed; }
+.day-btn--next:hover { border-style: solid; background: var(--bg4); }
 .day-input { padding: 5px 10px; border-radius: var(--r-md); font-family: var(--font-mono); font-size: 10px; background: var(--bg2); border: 1px solid var(--border); color: var(--text-secondary); outline: none; color-scheme: light; }
 .day-input:focus { border-color: var(--brand-dim); color: var(--text-primary); }
 
