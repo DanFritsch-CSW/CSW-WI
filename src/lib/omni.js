@@ -7,25 +7,22 @@ const MODEL_ID = '79a98af2-a904-4b5d-b25f-7f6a2c7ef467'
 // Map facility IDs → Omni warehouse_name values used in labor_planning_app tables
 const LABOR_WAREHOUSE = {
   cal:  'franksville',
-  cal2: 'franksville',   // same physical facility as cal
+  cal2: 'franksville',
   mad:  'madison',
   ken:  'kenosha',
   wr:   'wisconsin rapids',
   ec:   'eau claire',
 }
 
-// Map facility IDs → warehouse_name used in appointments/summary tables (CSW- prefix)
 const CSW_WAREHOUSE = {
   cal:  'CSW-Franksville',
-  cal2: 'CSW-Franksville',   // same physical facility as cal
+  cal2: 'CSW-Franksville',
   mad:  'CSW-Madison',
   ken:  'CSW-Kenosha',
   wr:   'CSW-Wisconsin Rapids',
   ec:   'CSW-Eau Claire',
 }
 
-// Reverse maps: Omni warehouse_name → facility id
-// cal2 intentionally omitted — reverse lookup returns 'cal'
 const WAREHOUSE_TO_FAC = {
   franksville:       'cal',
   madison:           'mad',
@@ -41,39 +38,29 @@ const CSW_WAREHOUSE_TO_FAC = {
   'CSW-Eau Claire':        'ec',
 }
 
-const VIEW_H = 'labor_planning_app__hourly_labor_required_vs_available'
-
-const VIEW_P = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
-
-// Raw appointments — source of truth for all project-level appointment data
+const VIEW_H    = 'labor_planning_app__hourly_labor_required_vs_available'
+const VIEW_P    = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 
 const PROJECT_DROP_RULES = {
-  // CAL / CAL2 — PVI FG: exclude live unloads
   'Palermos CALEDONIA finished': {
     facility: 'cal',
     method: 'inbound_exclude_lookup',
     excludeWhenAll: [['PUR', 'CMM'], ['PUR', 'PETER BROTHERS']],
   },
-
-  // KEN — all inbounds are drops
   'CROWN BAKERIES':          { facility: 'ken', method: 'inbound_all' },
   'Pretzilla Kenosha':       { facility: 'ken', method: 'inbound_all' },
   'BIRCHWOOD FOODS KENOSHA': { facility: 'ken', method: 'inbound_all' },
   'FAIR OAKS FARMS':         { facility: 'ken', method: 'inbound_all' },
   'FAIR OAKS FARMS WEST':    { facility: 'ken', method: 'inbound_all' },
-
-  // KEN — Richelieu drops only when lookup code contains TOP or PSH
   'RICHELIEU KENOSHA':               { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
   'RICHELIEU RAW MATERIALS KENOSHA': { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
 }
 
-// cal2 mirrors cal rules — isRuleProject needs to accept both
 export function isRuleProject(facilityId, projectName) {
   const rule = PROJECT_DROP_RULES[projectName]
   if (!rule) return false
-  // cal2 shares cal's rules
   const effectiveFac = facilityId === 'cal2' ? 'cal' : facilityId
   return rule.facility === effectiveFac
 }
@@ -85,23 +72,19 @@ const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
 
 const B2E_LOCATION = {
   cal:  '019 - Caledonia',
-  cal2: '019 - Caledonia',   // same location as cal
+  cal2: '019 - Caledonia',
   mad:  '011 - Madison',
   ec:   '012 - Eau Claire',
   ken:  '015 - Kenosha',
   wr:   '023 - Wisconsin Rapids',
 }
 
-// Manager/supervisor employee IDs excluded from the roster board
 const B2E_EXCLUDED_IDS = [
   192, 566, 619, 621, 650, 727, 750, 800, 826, 964, 966,
   5282, 5333, 5343, 5350, 5381, 5389, 5405, 5407, 5414,
   5423, 5429, 5434, 5438, 5441, 5442, 5449, 5462, 5470, 5472, 5474,
 ]
 
-// CAL v2 dock assignment map: employee name → lane id on the split board.
-// 3.5 side employees are mapped to side35_* lanes; everyone else defaults to side12_*.
-// Partial names are checked with startsWith so middle initials don't break matches.
 const CAL2_DOCK_NAMES_35 = new Set([
   'Calvieon Howard',
   'Ethan Lindsey',
@@ -114,17 +97,9 @@ const CAL2_DOCK_NAMES_35 = new Set([
 ])
 
 function cal2DefaultLane(name, shiftLane) {
-  // shiftLane is the standard shift1/mid/shift2/shift3 from scheduleToLane
-  // Map to the correct side + shift
   const is35 = [...CAL2_DOCK_NAMES_35].some(n => name.startsWith(n) || name.includes(n))
   const side = is35 ? 'side35' : 'side12'
-  // Map standard shift IDs to side-prefixed IDs
-  const shiftSuffix = {
-    shift1: 'shift1',
-    mid:    'mid',
-    shift2: 'shift2',
-    shift3: 'shift3',
-  }[shiftLane] || 'shift1'
+  const shiftSuffix = { shift1: 'shift1', mid: 'mid', shift2: 'shift2', shift3: 'shift3' }[shiftLane] || 'shift1'
   return `${side}_${shiftSuffix}`
 }
 
@@ -151,9 +126,9 @@ function parseB2eTime(s) {
   const str = String(s).trim().toLowerCase()
   const m = str.match(/^(\d{1,2}):(\d{2})\s*([ap])?/)
   if (m) {
-    let h      = parseInt(m[1], 10)
-    const min  = parseInt(m[2], 10)
-    const ap   = m[3]
+    let h = parseInt(m[1], 10)
+    const min = parseInt(m[2], 10)
+    const ap  = m[3]
     if (ap === 'p' && h !== 12) h += 12
     else if (ap === 'a' && h === 12) h = 0
     return h + min / 60
@@ -192,12 +167,8 @@ async function omniQuery(query) {
 function activityDateFilter(date, view = VIEW_H) {
   return {
     [`${view}.activity_date`]: {
-      kind: 'TIME_FOR_UNIT_DURATION',
-      type: 'date',
-      ui_type: 'DAY',
-      isFiscal: false,
-      left_side: date,
-      is_negative: false,
+      kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+      isFiscal: false, left_side: date, is_negative: false,
       offset_interval_string: '0 days',
     },
   }
@@ -206,15 +177,23 @@ function activityDateFilter(date, view = VIEW_H) {
 function scheduledArrivalDateFilter(date) {
   return {
     [`${VIEW_APPT}.scheduled_arrival`]: {
-      kind: 'TIME_FOR_UNIT_DURATION',
-      type: 'date',
-      ui_type: 'DAY',
-      isFiscal: false,
-      left_side: date,
-      is_negative: false,
+      kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+      isFiscal: false, left_side: date, is_negative: false,
       offset_interval_string: '0 days',
     },
   }
+}
+
+// Helper: parse a scheduled_arrival timestamp to UTC hour integer
+function tsToHour(ts) {
+  if (typeof ts === 'number') {
+    return new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
+  }
+  if (typeof ts === 'string') {
+    const m = ts.match(/[T ](\d{2}):/)
+    return m ? parseInt(m[1]) : 0
+  }
+  return 0
 }
 
 // ── Public API ───────────────────────────────────────────────────
@@ -237,12 +216,8 @@ export async function fetchHourlyData(facilityId, date) {
     filters: {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_H}.labor_shift_timestamp`]: {
-        kind: 'TIME_FOR_UNIT_DURATION',
-        type: 'date',
-        ui_type: 'DAY',
-        isFiscal: false,
-        left_side: date,
-        is_negative: false,
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false,
         offset_interval_string: '0 days',
       },
     },
@@ -255,20 +230,12 @@ export async function fetchHourlyData(facilityId, date) {
     const out   = Number(r[`${VIEW_H}.outbound_count`]) || 0
     const drops = Number(r[`${VIEW_H}.drops`]) || 0
     const ts    = r[`${VIEW_H}.hour_of_day_timestamp`]
-    let h = 0
-    if (typeof ts === 'number') {
-      h = new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
-    } else if (typeof ts === 'string') {
-      const m = ts.match(/[T ](\d{2}):/)
-      h = m ? parseInt(m[1]) : 0
-    }
+    const h = tsToHour(ts)
     return {
       h,
       req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
       avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
-      drops,
-      inb,
-      out,
+      drops, inb, out,
       appts: inb + drops + out,
     }
   })
@@ -310,6 +277,49 @@ export async function fetchProjectData(facilityId, date) {
     .map(p => ({ ...p, tot: p.inb + p.out + p.drops }))
     .filter(p => p.tot > 0)
     .sort((a, b) => b.tot - a.tot)
+}
+
+/**
+ * Fetch per-hour inbound + outbound counts for a specific set of projects.
+ * Used by CAL v2 side tabs to build accurate hourly appointment data per side.
+ *
+ * @param {string}   facilityId   - facility id (e.g. 'cal2')
+ * @param {string}   date         - ISO date string
+ * @param {string[]} projectNames - project names to include
+ * @returns {{ [hour: number]: { inb: number, out: number } }}
+ */
+export async function fetchProjectHourlyAppointments(facilityId, date, projectNames) {
+  const wh = CSW_WAREHOUSE[facilityId]
+  if (!wh || !projectNames?.length) return {}
+
+  const rows = await omniQuery({
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_APPT,
+    fields: [
+      `${VIEW_APPT}.scheduled_arrival`,
+      `${VIEW_APPT}.dock_appointment_type_name_groups`,
+      `${VIEW_APPT}.count`,
+    ],
+    filters: {
+      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: projectNames },
+      ...scheduledArrivalDateFilter(date),
+    },
+    sorts: [],
+    limit: 1000,
+  })
+
+  const hourMap = {}
+  for (const r of rows) {
+    const ts    = r[`${VIEW_APPT}.scheduled_arrival`]
+    const group = (r[`${VIEW_APPT}.dock_appointment_type_name_groups`] || '').toLowerCase()
+    const count = Number(r[`${VIEW_APPT}.count`]) || 0
+    const h     = tsToHour(ts)
+    if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
+    if (group === 'inbounds')  hourMap[h].inb += count
+    if (group === 'outbounds') hourMap[h].out += count
+  }
+  return hourMap
 }
 
 export async function fetchNetworkKpis(date) {
@@ -375,31 +385,21 @@ export async function fetchNetworkKpis(date) {
 export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBack = 4) {
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
-
   const pastDates = Array.from({ length: weeksBack }, (_, i) => {
     const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
     return d.toISOString().slice(0, 10)
   })
-
   const results = await Promise.all(pastDates.map(d => fetchHourlyData(facilityId, d).catch(() => [])))
-
   const sums = {}
   for (const rows of results) {
-    for (const row of rows) {
-      sums[row.h] = (sums[row.h] ?? 0) + row.drops
-    }
+    for (const row of rows) { sums[row.h] = (sums[row.h] ?? 0) + row.drops }
   }
-
-  return Object.entries(sums).map(([h, total]) => ({
-    h:   Number(h),
-    est: Math.round(total / weeksBack),
-  }))
+  return Object.entries(sums).map(([h, total]) => ({ h: Number(h), est: Math.round(total / weeksBack) }))
 }
 
 async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return 0
-
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID,
     table: VIEW_APPT,
@@ -412,19 +412,13 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
       [`${VIEW_APPT}.scheduled_arrival`]: {
-        kind: 'TIME_FOR_UNIT_DURATION',
-        type: 'date',
-        ui_type: 'DAY',
-        isFiscal: false,
-        left_side: date,
-        is_negative: false,
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false,
         offset_interval_string: '0 days',
       },
     },
-    sorts: [],
-    limit: 500,
+    sorts: [], limit: 500,
   })
-
   return rows
     .filter(r => {
       const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
@@ -443,7 +437,6 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
 async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
-
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID,
     table: VIEW_APPT,
@@ -457,19 +450,13 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
       [`${VIEW_APPT}.scheduled_arrival`]: {
-        kind: 'TIME_FOR_UNIT_DURATION',
-        type: 'date',
-        ui_type: 'DAY',
-        isFiscal: false,
-        left_side: date,
-        is_negative: false,
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false,
         offset_interval_string: '0 days',
       },
     },
-    sorts: [],
-    limit: 500,
+    sorts: [], limit: 500,
   })
-
   const hourCounts = {}
   for (const r of rows) {
     const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
@@ -480,14 +467,7 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
     } else if (rule.method === 'inbound_include_lookup') {
       if (!rule.includePatterns.some(p => code.includes(p.toUpperCase()))) continue
     }
-    const ts = r[`${VIEW_APPT}.scheduled_arrival`]
-    let h = 0
-    if (typeof ts === 'number') {
-      h = new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
-    } else if (typeof ts === 'string') {
-      const m = ts.match(/[T ](\d{2}):/)
-      h = m ? parseInt(m[1]) : 0
-    }
+    const h = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     hourCounts[h] = (hourCounts[h] ?? 0) + count
   }
@@ -495,22 +475,16 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
 }
 
 export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack = 4) {
-  // cal2 uses cal's historical data and rules
   const effectiveFacId = facilityId === 'cal2' ? 'cal' : facilityId
-
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
-
   const pastDates = Array.from({ length: weeksBack }, (_, i) => {
     const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
     return d.toISOString().slice(0, 10)
   })
-
   const results = await Promise.all(pastDates.map(d => fetchProjectData(effectiveFacId, d).catch(() => [])))
   const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === effectiveFacId))]
-
   const out = {}
-
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
     const weeklyHourCounts = await Promise.all(
@@ -527,25 +501,19 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     )
     if (Object.keys(avgs).length > 0) out[projectName] = avgs
   }
-
   return out
 }
 
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
   const effectiveFacId = facilityId === 'cal2' ? 'cal' : facilityId
-
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
-
   const pastDates = Array.from({ length: weeksBack }, (_, i) => {
     const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
     return d.toISOString().slice(0, 10)
   })
-
   const results = await Promise.all(pastDates.map(d => fetchProjectData(effectiveFacId, d).catch(() => [])))
-
   const sums = {}
-
   const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === effectiveFacId))]
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
@@ -554,7 +522,6 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
     )
     sums[projectName] = counts.reduce((s, c) => s + c, 0)
   }
-
   return Object.entries(sums).map(([project_name, total]) => ({
     project_name,
     est_drops: Math.round(total / weeksBack),
@@ -564,7 +531,6 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
-
   const refDate = date || new Date().toISOString().slice(0, 10)
   const isCal2  = facilityId === 'cal2'
 
@@ -572,10 +538,7 @@ export async function fetchB2eRoster(facilityId, date) {
     omniQuery({
       modelId: B2E_MODEL_ID,
       table: ROSTER,
-      fields: [
-        `${ROSTER}.employee_id`,
-        `${ROSTER}.employee_status`,
-      ],
+      fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
       filters: {
         [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
         [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
@@ -600,12 +563,8 @@ export async function fetchB2eRoster(facilityId, date) {
       filters: {
         [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
         [`${SCHEDULE}.entry_date`]: {
-          kind: 'TIME_FOR_UNIT_DURATION',
-          type: 'date',
-          ui_type: 'DAY',
-          isFiscal: false,
-          left_side: refDate,
-          is_negative: false,
+          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+          isFiscal: false, left_side: refDate, is_negative: false,
           offset_interval_string: '0 days',
         },
       },
@@ -615,8 +574,7 @@ export async function fetchB2eRoster(facilityId, date) {
   ])
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
-
-  const schedMap = new Map()
+  const schedMap  = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
@@ -634,19 +592,17 @@ export async function fetchB2eRoster(facilityId, date) {
       return allowedCodes.has(code)
     })
     .map(([id, { row: r }]) => {
-      const startTime  = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
-      const endTime    = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
-      const firstName  = r[`${SCHEDULE}.first_name`] || ''
-      const lastName   = r[`${SCHEDULE}.last_name`]  || ''
-      const fullName   = [firstName, lastName].filter(Boolean).join(' ')
-      const shiftLane  = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
-
+      const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
+      const endTime   = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
+      const firstName = r[`${SCHEDULE}.first_name`] || ''
+      const lastName  = r[`${SCHEDULE}.last_name`]  || ''
+      const fullName  = [firstName, lastName].filter(Boolean).join(' ')
+      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
       return {
         id,
         name:         fullName,
         role:         null,
         job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
-        // For cal2, map into side-prefixed lanes; otherwise use standard lane
         default_lane: isCal2 ? cal2DefaultLane(fullName, shiftLane) : shiftLane,
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),

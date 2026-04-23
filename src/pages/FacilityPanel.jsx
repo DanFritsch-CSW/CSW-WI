@@ -4,7 +4,7 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, isRuleProject } from '../lib/omni.js'
+import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments, isRuleProject } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
@@ -12,11 +12,10 @@ import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib
 // CAL v2 — projects that belong to the 3.5 side (Palermo's Finished FG)
 const CAL2_SIDE35_PROJECTS = new Set([
   'Palermos CALEDONIA finished',
-  'Palermo\'s CALEDONIA finished',
+  "Palermo's CALEDONIA finished",
   'PALERMOS CALEDONIA FINISHED',
 ])
 
-// CAL v2 — lane IDs per side
 const SIDE12_LANES = new Set(['side12_shift1','side12_mid','side12_shift2','side12_shift3'])
 const SIDE35_LANES = new Set(['side35_shift1','side35_mid','side35_shift2','side35_shift3'])
 
@@ -27,32 +26,39 @@ const CAL2_TABS = [
 ]
 
 export default function FacilityPanel({ facility, planDate, networkKpi }) {
-  const [rawHourly, setRawHourly]   = useState([])
-  const [hourlyErr, setHourlyErr]   = useState(null)
-  const [projects, setProjects]     = useState([])
-  const [laborCount, setLaborCount] = useState(0)
+  const [rawHourly, setRawHourly]     = useState([])
+  const [hourlyErr, setHourlyErr]     = useState(null)
+  const [projects, setProjects]       = useState([])
+  const [laborCount, setLaborCount]   = useState(0)
   const [rosterState, setRosterState] = useState({ employees: [], laneMap: {}, assignmentMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
 
-  // CAL v2 side tab — only active when facility.id === 'cal2'
+  // CAL v2 per-side hourly appointment data: { [hour]: { inb, out } }
+  const [sideHourlyAppts, setSideHourlyAppts] = useState({})
+
   const isCal2 = facility.id === 'cal2'
   const [sideTab, setSideTab] = useState('all')
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
+  // Main data fetch — fires on facility/date change
   useEffect(() => {
     setRawHourly([])
     setHourlyErr(null)
     setProjects([])
     setProjectHourlyDrops({})
     setHourlyAdjustments({})
+    setSideHourlyAppts({})
+
     fetchHourlyData(facility.id, planDate)
       .then(setRawHourly)
       .catch(e => setHourlyErr(e.message))
+
     fetchProjectData(facility.id, planDate).then(setProjects)
     fetchHourlyAdjustments(facility.id, planDate).then(setHourlyAdjustments)
+
     fetchProjectHourlyDrops(facility.id, planDate).then(async data => {
       const filtered = Object.fromEntries(
         Object.entries(data).filter(([name]) => isRuleProject(facility.id, name))
@@ -80,24 +86,43 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     })
   }, [facility.id, planDate])
 
+  // CAL v2: when side tab changes (and not 'all'), fetch per-side hourly appointments
+  useEffect(() => {
+    if (!isCal2 || sideTab === 'all') {
+      setSideHourlyAppts({})
+      return
+    }
+    // Determine which project names belong to this side
+    // We need all project names — wait for projects to load, then filter
+    if (!projects.length) return
+    const sideProjectNames = projects
+      .map(p => p.name)
+      .filter(n => sideTab === 'side35' ? CAL2_SIDE35_PROJECTS.has(n) : !CAL2_SIDE35_PROJECTS.has(n))
+    if (!sideProjectNames.length) {
+      setSideHourlyAppts({})
+      return
+    }
+    fetchProjectHourlyAppointments(facility.id, planDate, sideProjectNames)
+      .then(setSideHourlyAppts)
+      .catch(() => setSideHourlyAppts({}))
+  }, [isCal2, sideTab, projects, facility.id, planDate])
+
   const handleLaborCount   = useCallback(n => setLaborCount(n), [])
   const handleRosterChange = useCallback(state => setRosterState(state), [])
 
-  // ── CAL v2 side filtering ────────────────────────────────────────
-  // Determine which projects belong to the active side tab
+  // ── CAL v2 side filtering ──────────────────────────────────────
   const visibleProjects = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projects
     if (sideTab === 'side35') return projects.filter(p => CAL2_SIDE35_PROJECTS.has(p.name))
     return projects.filter(p => !CAL2_SIDE35_PROJECTS.has(p.name))
   }, [projects, isCal2, sideTab])
 
-  // Lane filter for roster availability calc
   const laneFilter = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return null
     return sideTab === 'side12' ? SIDE12_LANES : SIDE35_LANES
   }, [isCal2, sideTab])
 
-  // ── Roster availability ──────────────────────────────────────────
+  // ── Roster availability ────────────────────────────────────────
   const rosterAvail = useMemo(() => {
     if (!rosterState.employees.length) return null
     return buildRosterAvailability(
@@ -109,7 +134,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     )
   }, [rosterState, settings, laneFilter])
 
-  // ── EST drops — scoped to visible projects ───────────────────────
+  // ── EST drops scoped to visible projects ───────────────────────
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
     return Object.fromEntries(
@@ -139,29 +164,28 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
     return sums
   }, [visibleProjectHourlyDrops])
 
-  // ── Hourly data — filter inb/out to visible side ─────────────────
-  // For cal2 side tabs: zero out appointment counts for hours where the
-  // other side's projects dominate. We use raw project-level data to
-  // compute per-hour inb/out per side instead of trying to split Omni's
-  // aggregated numbers — keep it simple by using the appts from visible
-  // projects only (est drops already scoped above).
+  // ── Hourly data — merge side-filtered appointments ─────────────
   const rawWithEst = useMemo(() => {
     if (!rawHourly.length) return rawHourly
+
     if (!isCal2 || sideTab === 'all') {
+      // Standard path — use full Omni hourly data
       return rawHourly.map(row => {
         const est = estDrops[row.h] ?? 0
         return { ...row, appts: row.inb + est + row.out }
       })
     }
-    // For side tabs: scale inb/out proportionally based on project share
-    // Use raw total vs visible total ratio per hour
+
+    // Side tab path — replace inb/out with per-side project appointment counts
+    // sideHourlyAppts: { [hour]: { inb, out } } from fetchProjectHourlyAppointments
     return rawHourly.map(row => {
-      const est = estDrops[row.h] ?? 0
-      // For side tabs, appointments = est drops only (the only per-side signal we have hourly)
-      // inb/out from Omni is not split by side — show only est drops for req calc
-      return { ...row, inb: 0, out: 0, drops: est, appts: est }
+      const est      = estDrops[row.h] ?? 0
+      const sideAppt = sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }
+      const inb      = sideAppt.inb
+      const out      = sideAppt.out
+      return { ...row, inb, out, drops: est, appts: inb + est + out }
     })
-  }, [rawHourly, estDrops, isCal2, sideTab])
+  }, [rawHourly, estDrops, isCal2, sideTab, sideHourlyAppts])
 
   const hourly = useMemo(() => {
     const base = settingsLoading ? rawWithEst : applySettings(rawWithEst, settings)
@@ -204,12 +228,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi }) {
 
   return (
     <div>
-      {/* CAL v2 side tab switcher */}
       {isCal2 && (
         <div className="cal2-tab-row">
           {CAL2_TABS.map(t => (
             <button
               key={t.id}
+              data-side={t.id}
               className={`cal2-tab${sideTab === t.id ? ' active' : ''}`}
               onClick={() => setSideTab(t.id)}
             >
