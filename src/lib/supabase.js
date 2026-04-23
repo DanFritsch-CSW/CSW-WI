@@ -35,6 +35,36 @@ export async function fetchEmployees(facility) {
   return data ?? []
 }
 
+// Fetch all cal2 employees for the dock assignment editor.
+// Returns { id, name, default_lane } sorted by name.
+export async function fetchCal2Employees() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('employees')
+    .select('id, name, default_lane')
+    .eq('facility', 'cal2')
+    .order('name')
+  if (error) { console.error('fetchCal2Employees:', error); return [] }
+  return data ?? []
+}
+
+// Update the dock side for a single employee by writing the correct
+// side-prefixed lane into employees.default_lane.
+// side: 'side12' | 'side35'
+// Preserves the shift bucket (shift1/mid/shift2/shift3) from the current lane.
+export async function upsertEmployeeDockSide(employeeId, side, currentLane) {
+  if (!supabase) return
+  // Extract existing shift suffix, default to shift1 if lane not yet set
+  const shiftSuffix = (currentLane || '').replace(/^side(12|35)_/, '') || 'shift1'
+  const newLane = `${side}_${shiftSuffix}`
+  const { error } = await supabase
+    .from('employees')
+    .update({ default_lane: newLane })
+    .eq('id', employeeId)
+  if (error) console.error('upsertEmployeeDockSide:', error)
+  return newLane
+}
+
 // Syncs the employee list for a facility: upserts current B2E employees, then
 // deletes any stale facility employees not in the B2E result.
 export async function replaceEmployees(facilityId, employees) {
@@ -45,7 +75,6 @@ export async function replaceEmployees(facilityId, employees) {
       .upsert(employees, { onConflict: 'id' })
     if (error) { console.error('replaceEmployees upsert:', error); return error.message }
   }
-  // Fetch current facility employees and delete any not in the new B2E list
   const { data: current, error: fetchErr } = await supabase
     .from('employees').select('id').eq('facility', facilityId)
   if (fetchErr) { console.error('replaceEmployees fetch:', fetchErr); return fetchErr.message }
@@ -67,8 +96,6 @@ export async function upsertEmployees(employees) {
   return null
 }
 
-// Seeds roster_assignments from B2E data without overwriting manual edits.
-// ignoreDuplicates: true means existing rows (manual lane/time changes) are left intact.
 export async function seedRosterAssignments(employees, planDate) {
   if (!supabase || !employees.length) return null
   const rows = employees.map(e => ({
@@ -100,7 +127,6 @@ export async function deleteAssignment(facility, employeeId, planDate) {
   if (error) console.error('deleteAssignment:', error)
 }
 
-// Deletes all non-temp roster assignments for a facility+date, preserving manually-added temp employees.
 export async function resetAssignmentsForDate(facility, planDate) {
   if (!supabase) return 'Supabase not configured'
   const { error } = await supabase
@@ -115,12 +141,8 @@ export async function resetAssignmentsForDate(facility, planDate) {
 
 const SETTINGS_DEFAULTS = {
   hours_per_appt: 1.5,
-  shift1_start: 5,  shift1_hours: 8,
-  mid_start:    9,  mid_hours:    8,
-  shift2_start: 13, shift2_hours: 8,
-  shift3_start: 22, shift3_hours: 8,
-  break_hour_1: 83, break_hour_2: 100, break_hour_3: 75, break_hour_4: 100,
-  break_hour_5: 50, break_hour_6: 100, break_hour_7: 75, break_hour_8: 100,
+  break_hour_1: 83, break_hour_2: 100, break_hour_3: 75,  break_hour_4: 100,
+  break_hour_5: 50, break_hour_6: 100, break_hour_7: 75,  break_hour_8: 100,
 }
 
 export async function fetchFacilitySettings(facilityId) {
@@ -142,7 +164,6 @@ export async function upsertFacilitySettings(facilityId, values) {
   if (error) console.error('upsertFacilitySettings:', error)
 }
 
-// Returns { [hour]: est_drops } for the given facility + date
 export async function fetchEstDrops(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -154,7 +175,6 @@ export async function fetchEstDrops(facilityId, planDate) {
   return Object.fromEntries(data.map(r => [r.hour, r.est_drops]))
 }
 
-// hourlyValues: [{ h: number, est: number }] — one entry per shift hour
 export async function upsertEstDrops(facilityId, planDate, hourlyValues) {
   if (!supabase) return
   const rows = hourlyValues.map(({ h, est }) => ({
@@ -169,7 +189,6 @@ export async function upsertEstDrops(facilityId, planDate, hourlyValues) {
   if (error) console.error('upsertEstDrops:', error)
 }
 
-// Returns { [project_name]: est_drops } for the given facility + date
 export async function fetchProjectDrops(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -181,7 +200,6 @@ export async function fetchProjectDrops(facilityId, planDate) {
   return Object.fromEntries(data.map(r => [r.project_name, r.est_drops]))
 }
 
-// rows: [{ project_name: string, est_drops: number }]
 export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (!supabase) return
   const records = rows.map(({ project_name, est_drops }) => ({
@@ -196,7 +214,6 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
-// Returns { [facilityId]: activeHeadcount } — active roster employees (non-PTO/callin) per facility.
 export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -212,7 +229,6 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
   return result
 }
 
-// Returns { [projectName]: { [hour]: estDrops } } for the given facility + date
 export async function fetchProjectHourlyDrops(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -229,7 +245,6 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
   return result
 }
 
-// Returns { [hour]: adjustment } for the given facility + date
 export async function fetchHourlyAdjustments(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -250,8 +265,6 @@ export async function upsertHourlyAdjustment(facilityId, planDate, hour, adjustm
   if (error) console.error('upsertHourlyAdjustment:', error)
 }
 
-// Returns { [facilityId]: totalEstDrops } for all facilities on the given date.
-// Used by the ALL tab to include EST drops in the Appts KPI.
 export async function fetchAllFacilitiesEstDrops(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -266,7 +279,6 @@ export async function fetchAllFacilitiesEstDrops(planDate) {
   return result
 }
 
-// rows: [{ project_name: string, h: number, est_drops: number }]
 export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (!supabase) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
