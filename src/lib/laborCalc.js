@@ -11,16 +11,22 @@ const LANE_KEYS = {
   mid:    { start: 'mid_start',    hours: 'mid_hours'    },
   shift2: { start: 'shift2_start', hours: 'shift2_hours' },
   shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+  // CAL v2 side lanes — map to the same settings as their shift equivalent
+  side12_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
+  side12_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
+  side12_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
+  side12_shift3: { start: 'shift3_start', hours: 'shift3_hours' },
+  side35_shift1: { start: 'shift1_start', hours: 'shift1_hours' },
+  side35_mid:    { start: 'mid_start',    hours: 'mid_hours'    },
+  side35_shift2: { start: 'shift2_start', hours: 'shift2_hours' },
+  side35_shift3: { start: 'shift3_start', hours: 'shift3_hours' },
 }
 const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 
-// Returns an array of fractional multipliers (0–1) for each shift hour.
 function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
 }
 
-// Override req/avail in hourly data using facility settings.
-// req = appts * hours_per_appt (recalculated from raw appointment count)
 export function applySettings(hourlyData, settings) {
   const hpa = settings?.hours_per_appt ?? DEFAULTS.hours_per_appt
   return hourlyData.map(row => ({
@@ -29,7 +35,6 @@ export function applySettings(hourlyData, settings) {
   }))
 }
 
-// Compute daily util% and delta from transformed hourly rows.
 export function computeDailyKpis(hourly) {
   if (!hourly?.length) return { util: null, delta: null }
   const totalReq   = hourly.reduce((s, r) => s + (r.req   ?? 0), 0)
@@ -39,30 +44,34 @@ export function computeDailyKpis(hourly) {
   return { util, delta }
 }
 
-// Parse "HH:MM" or numeric hour string to integer hour (0-23), or null.
 function parseStartHour(shiftStart) {
   if (!shiftStart) return null
+  const val = Number(shiftStart)
+  if (!isNaN(val)) return Math.floor(val)
   const h = parseInt(String(shiftStart).split(':')[0], 10)
   return isNaN(h) ? null : h
 }
 
 /**
  * Build a 24-element array of roster-based available labor hours per hour of day.
- * Each employee contributes their per-shift-hour availability fraction to each clock
- * hour they work (shift hour 1 = first hour of their shift, regardless of start time).
  *
- * @param {Array}  employees     - employee objects (must have id, shift_start, default_lane)
- * @param {Object} laneMap       - { [employeeId]: laneId }
- * @param {Object} settings      - facility settings (shift1_hours, shift2_hours, shift1_start, shift2_start, break_hour_1…8)
- * @param {Object} assignmentMap - { [employeeId]: { shift_start?, shift_hours? } } day-specific overrides
+ * @param {Array}    employees     - employee objects
+ * @param {Object}   laneMap       - { [employeeId]: laneId }
+ * @param {Object}   settings      - facility settings
+ * @param {Object}   assignmentMap - day-specific overrides
+ * @param {Set|null} laneFilter    - if provided, only count employees in these lane IDs
  * @returns {Array<number>}  24-element array indexed by hour 0-23
  */
-export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}) {
+export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
   const hourlyAvail = new Array(24).fill(0)
 
   for (const emp of employees) {
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
+
+    // If a lane filter is provided, skip employees not in those lanes
+    if (laneFilter && !laneFilter.has(lane)) continue
+
     const keys = LANE_KEYS[lane]
     if (!keys) continue  // pto, callin — not counted
 
@@ -70,7 +79,6 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     const defaultStart = settings?.[keys.start] ?? DEFAULTS[keys.start]
     const defaultHours = settings?.[keys.hours]  ?? DEFAULTS[keys.hours]
 
-    // Day-specific override takes precedence over B2E shift_start
     const startHour  = assignment?.shift_start ?? parseStartHour(emp.shift_start) ?? defaultStart
     const shiftHours = assignment?.shift_hours ?? defaultHours
 
