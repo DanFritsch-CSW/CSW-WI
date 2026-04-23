@@ -10,6 +10,18 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10)
 }
 
+function tomorrowISO() {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
+function addDays(iso, n) {
+  const d = new Date(iso + 'T00:00:00')
+  d.setDate(d.getDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+
 const ALL_TAB = { id: 'all', code: 'ALL', name: 'All Facilities', color: '#8a9899' }
 const TABS = [ALL_TAB, ...FACILITY_LIST]
 
@@ -26,6 +38,10 @@ export default function LaborPlanning() {
 
   function setPlanDate(date) {
     setSearchParams(prev => { prev.set('date', date); return prev }, { replace: true })
+  }
+
+  function stepDay(n) {
+    setPlanDate(addDays(planDate, n))
   }
 
   const [networkData, setNetworkData]                 = useState(null)
@@ -76,6 +92,9 @@ export default function LaborPlanning() {
 
   const activeFac = FACILITY_LIST.find(f => f.id === activeTab) || null
 
+  const isToday    = planDate === todayISO()
+  const isTomorrow = planDate === tomorrowISO()
+
   return (
     <div className="page-content" ref={pageRef}>
       {/* Header */}
@@ -88,10 +107,23 @@ export default function LaborPlanning() {
         </div>
         <div className="day-selector">
           <button
-            className={`day-btn${planDate === todayISO() ? ' today' : ''}`}
+            className={`day-btn${isToday ? ' today' : ''}`}
             onClick={() => setPlanDate(todayISO())}
           >
             Today
+          </button>
+          <button
+            className={`day-btn${isTomorrow ? ' today' : ''}`}
+            onClick={() => setPlanDate(tomorrowISO())}
+          >
+            Tomorrow
+          </button>
+          <button
+            className="day-btn day-btn--next"
+            onClick={() => stepDay(1)}
+            title="Advance one day"
+          >
+            Next Day →
           </button>
           <input
             type="date"
