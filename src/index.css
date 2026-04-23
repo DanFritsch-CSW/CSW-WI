@@ -244,6 +244,33 @@ input, select { font: inherit; color: inherit; }
 }
 .cal2-side-spacer { }
 
+/* ─── CAL v2 lane side tints ────────────────────────────────────── */
+/* Applied to .lane elements in the 1-2 and 3.5 column groups */
+.lane-side12 {
+  background: rgba(42,114,184,0.05);
+  border-color: rgba(42,114,184,0.22);
+}
+.lane-side12 .lane-header {
+  background: rgba(42,114,184,0.07);
+  border-bottom-color: rgba(42,114,184,0.18);
+}
+.lane-side12.over {
+  background: rgba(42,114,184,0.12);
+  border-color: rgba(42,114,184,0.45);
+}
+.lane-side35 {
+  background: rgba(192,90,42,0.05);
+  border-color: rgba(192,90,42,0.20);
+}
+.lane-side35 .lane-header {
+  background: rgba(192,90,42,0.07);
+  border-bottom-color: rgba(192,90,42,0.16);
+}
+.lane-side35.over {
+  background: rgba(192,90,42,0.12);
+  border-color: rgba(192,90,42,0.42);
+}
+
 .lane { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-lg); min-height: 200px; display: flex; flex-direction: column; }
 .lane-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 8px; border-bottom: 1px solid var(--border-subtle); background: var(--bg1); border-radius: var(--r-lg) var(--r-lg) 0 0; }
 .lane-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); }
