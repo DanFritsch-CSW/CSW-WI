@@ -71,10 +71,64 @@ function sortEmployees(employees, sortOrder) {
   })
 }
 
+// Parse a shift_start string like "07:00" or "14:30" into a rounded hour integer (0–23).
+// Returns null if unparseable.
+function parseStartHour(shiftStart) {
+  if (!shiftStart) return null
+  // Handle "HH:MM" format
+  const match = String(shiftStart).match(/^(\d{1,2}):(\d{2})/)
+  if (!match) return null
+  const h = parseInt(match[1], 10)
+  const m = parseInt(match[2], 10)
+  return m >= 30 ? (h + 1) % 24 : h
+}
+
+function formatHour(h) {
+  if (h === 0)  return '12:00 AM'
+  if (h < 12)  return `${h}:00 AM`
+  if (h === 12) return '12:00 PM'
+  return `${h - 12}:00 PM`
+}
+
+// Group employees by rounded start hour. Returns array of { hour, label, employees }
+// sorted ascending. Employees with no parseable start go into an 'unknown' group
+// rendered last. Only returns grouped structure if there are 2+ distinct hours.
+function groupByStartHour(employees, assignmentMap) {
+  const groups = {}  // hour (number | 'unknown') → employees[]
+
+  for (const emp of employees) {
+    const asg = assignmentMap?.[emp.id]
+    const hour = parseStartHour(asg?.shift_start)
+    const key = hour !== null ? hour : 'unknown'
+    if (!groups[key]) groups[key] = []
+    groups[key].push(emp)
+  }
+
+  const keys = Object.keys(groups)
+  // If only one group (or zero), no sub-headers needed
+  if (keys.length <= 1) return null
+
+  // Sort numeric keys ascending, 'unknown' last
+  const sorted = keys
+    .filter(k => k !== 'unknown')
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map(h => ({ hour: h, label: formatHour(h), employees: groups[h] }))
+
+  if (groups['unknown']) {
+    sorted.push({ hour: null, label: 'No start time', employees: groups['unknown'] })
+  }
+
+  return sorted
+}
+
 function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, sortOrder }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const sorted = sortEmployees(employees, sortOrder)
   const ids = sorted.map(e => e.id)
+  const groups = groupByStartHour(sorted, assignmentMap)
+
+  const laneSettings = getLaneSettings(lane.id, settings)
 
   return (
     <div ref={setNodeRef} className={`lane${isOver ? ' over' : ''}`}>
@@ -84,16 +138,39 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
       </div>
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <div className="lane-body">
-          {sorted.map(emp => (
-            <EmployeeTile
-              key={emp.id}
-              employee={emp}
-              assignment={assignmentMap?.[emp.id]}
-              laneSettings={getLaneSettings(lane.id, settings)}
-              onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
-              onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
-            />
-          ))}
+          {groups ? (
+            // Grouped view — sub-headers by rounded start hour
+            groups.map(group => (
+              <div key={group.hour ?? 'unknown'} className="lane-group">
+                <div className="lane-group-header">
+                  <span className="lane-group-label">{group.label}</span>
+                  <span className="lane-group-count">{group.employees.length}</span>
+                </div>
+                {group.employees.map(emp => (
+                  <EmployeeTile
+                    key={emp.id}
+                    employee={emp}
+                    assignment={assignmentMap?.[emp.id]}
+                    laneSettings={laneSettings}
+                    onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
+                    onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
+                  />
+                ))}
+              </div>
+            ))
+          ) : (
+            // Flat view — all same start time, no sub-headers needed
+            sorted.map(emp => (
+              <EmployeeTile
+                key={emp.id}
+                employee={emp}
+                assignment={assignmentMap?.[emp.id]}
+                laneSettings={laneSettings}
+                onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
+                onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
+              />
+            ))
+          )}
         </div>
       </SortableContext>
     </div>
@@ -134,7 +211,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const date = planDate || todayISO()
       let assignments = await fetchTodayAssignments(facility, date)
 
-      // First visit to this date: no assignments yet — auto-seed from B2E
       if (assignments.length === 0) {
         const b2eEmployees = await fetchB2eRoster(facility, date)
         if (b2eEmployees.length > 0) {
@@ -145,7 +221,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         }
       }
 
-      // Build employee list entirely from assignment rows (no static table)
       let emps = assignments
         .filter(a => !a.is_temp)
         .map(a => ({
@@ -157,7 +232,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           default_lane: a.lane,
         }))
 
-      // Synthesize temp employee objects from is_temp assignment rows
       const tempEmps = assignments
         .filter(a => a.is_temp)
         .map(a => ({
@@ -169,7 +243,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           default_lane: a.lane,
         }))
 
-      // Fallback to stubs only if B2E returned nothing and no cached assignments exist
       if (emps.length === 0 && tempEmps.length === 0) {
         emps = STUB_EMPLOYEES.map(e => ({ ...e, facility }))
       }
@@ -191,7 +264,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     load()
   }, [facility, planDate])
 
-  // Tracked write — increments pendingWrites before, decrements after
   const trackedUpsert = useCallback(async (assignment) => {
     setPendingWrites(n => n + 1)
     try {
@@ -293,7 +365,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (!over) return
     const employeeId = active.id
     const targetLane = over.id
-
     const validLane = LANES.find(l => l.id === targetLane)
     if (!validLane) {
       const destLane = laneMap[targetLane]
