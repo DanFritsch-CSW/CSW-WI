@@ -804,6 +804,15 @@ input, select { font: inherit; color: inherit; }
   opacity: 0.5;
   cursor: default;
 }
+.b2e-reset-btn {
+  border-color: #5a3030;
+  color: #c07070;
+}
+.b2e-reset-btn:hover:not(:disabled) {
+  background: #2a1a1a;
+  color: #e08080;
+  border-color: #7a3030;
+}
 
 .b2e-sync-err {
   font-family: var(--font-mono);

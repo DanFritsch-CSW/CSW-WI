@@ -100,6 +100,19 @@ export async function deleteAssignment(facility, employeeId, planDate) {
   if (error) console.error('deleteAssignment:', error)
 }
 
+// Deletes all non-temp roster assignments for a facility+date, preserving manually-added temp employees.
+export async function resetAssignmentsForDate(facility, planDate) {
+  if (!supabase) return 'Supabase not configured'
+  const { error } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .eq('is_temp', false)
+  if (error) { console.error('resetAssignmentsForDate:', error); return error.message }
+  return null
+}
+
 const SETTINGS_DEFAULTS = {
   hours_per_appt: 1.5,
   shift1_start: 5,  shift1_hours: 8,
