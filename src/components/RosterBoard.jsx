@@ -15,7 +15,7 @@ import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
 import { LANES, ACTIVE_LANES } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, fetchEmployees, replaceEmployees, seedRosterAssignments, deleteAssignment, resetAssignmentsForDate } from '../lib/supabase.js'
+import { fetchTodayAssignments, upsertAssignment, replaceEmployees, seedRosterAssignments, deleteAssignment, resetAssignmentsForDate } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
@@ -72,7 +72,7 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
   )
 }
 
-// Stub employees used when Supabase is not configured
+// Stub employees used when B2E returns no data
 const STUB_EMPLOYEES = [
   { id: 'e1', name: 'Alex Rivera',    role: 'Lead',       default_lane: 'shift1' },
   { id: 'e2', name: 'Sam Torres',     role: 'Associate',  default_lane: 'shift1' },
@@ -86,26 +86,48 @@ const STUB_EMPLOYEES = [
 ]
 
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
-  const [laneMap, setLaneMap]           = useState({})
+  const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
-  const [employees, setEmployees]       = useState([])
-  const [activeId, setActiveId]         = useState(null)
-  const [syncState, setSyncState]       = useState(null)
-  const [resetState, setResetState]     = useState(null)
-  const [showAddTemp, setShowAddTemp]   = useState(false)
+  const [employees, setEmployees]         = useState([])
+  const [isLoading, setIsLoading]         = useState(true)
+  const [activeId, setActiveId]           = useState(null)
+  const [syncState, setSyncState]         = useState(null)
+  const [resetState, setResetState]       = useState(null)
+  const [showAddTemp, setShowAddTemp]     = useState(false)
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   useEffect(() => {
     async function load() {
-      let emps = await fetchEmployees(facility)
-      if (!emps.length) emps = STUB_EMPLOYEES.map(e => ({ ...e, facility }))
-
+      setIsLoading(true)
       const date = planDate || todayISO()
-      const assignments = await fetchTodayAssignments(facility, date)
+      let assignments = await fetchTodayAssignments(facility, date)
 
-      // Synthesize temp employee objects from roster_assignments rows
+      // First visit to this date: no assignments yet — auto-seed from B2E
+      if (assignments.length === 0) {
+        const b2eEmployees = await fetchB2eRoster(facility, date)
+        if (b2eEmployees.length > 0) {
+          const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+          await replaceEmployees(facility, empRows)
+          await seedRosterAssignments(b2eEmployees, date)
+          assignments = await fetchTodayAssignments(facility, date)
+        }
+      }
+
+      // Build employee list entirely from assignment rows (no static table)
+      let emps = assignments
+        .filter(a => !a.is_temp)
+        .map(a => ({
+          id:           a.employee_id,
+          name:         a.employee_name,
+          role:         a.role || null,
+          facility,
+          is_temp:      false,
+          default_lane: a.lane,
+        }))
+
+      // Synthesize temp employee objects from is_temp assignment rows
       const tempEmps = assignments
         .filter(a => a.is_temp)
         .map(a => ({
@@ -117,17 +139,23 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           default_lane: a.lane,
         }))
 
+      // Fallback to stubs only if B2E returned nothing and no cached assignments exist
+      if (emps.length === 0 && tempEmps.length === 0) {
+        emps = STUB_EMPLOYEES.map(e => ({ ...e, facility }))
+      }
+
       const allEmps = [...emps, ...tempEmps]
       setEmployees(allEmps)
 
       const map = {}
-      emps.forEach(e => { map[e.id] = e.default_lane || 'shift1' })
       assignments.forEach(a => { map[a.employee_id] = a.lane })
       setLaneMap(map)
 
       const asgMap = {}
       assignments.forEach(a => { asgMap[a.employee_id] = a })
       setAssignmentMap(asgMap)
+
+      setIsLoading(false)
     }
     loadRef.current = load
     load()
@@ -139,11 +167,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const date         = planDate || todayISO()
       const b2eEmployees = await fetchB2eRoster(facility, date)
       if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
-      // Strip shift_hours — employees table doesn't have that column
       const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
       if (err) { setSyncState(err); return }
-      // Seed assignments with B2E shift times; ignoreDuplicates preserves manual edits
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
       if (seedErr) { setSyncState(seedErr); return }
       await loadRef.current?.()
@@ -241,6 +267,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   function moveTo(employeeId, laneId) {
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
+    setAssignmentMap(prev => {
+      const existing = prev[employeeId] ?? {}
+      return { ...prev, [employeeId]: { ...existing, lane: laneId } }
+    })
     const emp = employees.find(e => e.id === employeeId)
     if (!emp) return
     const date    = planDate || todayISO()
@@ -267,6 +297,14 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     .reduce((n, l) => n + laneEmployees(l.id).length, 0)
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
+
+  if (isLoading) {
+    return (
+      <div className="roster-section">
+        <div className="roster-loading">Loading roster…</div>
+      </div>
+    )
+  }
 
   return (
     <div className="roster-section">
