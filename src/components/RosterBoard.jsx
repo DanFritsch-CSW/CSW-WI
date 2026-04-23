@@ -71,16 +71,30 @@ function sortEmployees(employees, sortOrder) {
   })
 }
 
-// Parse a shift_start string like "07:00" or "14:30" into a rounded hour integer (0–23).
-// Returns null if unparseable.
+// Parse shift_start into a rounded hour integer (0–23).
+// Handles: integer (7, 14), "HH:MM" string ("07:00", "14:30"), or decimal (7.5).
+// Returns null if unparseable or null/undefined.
 function parseStartHour(shiftStart) {
-  if (!shiftStart) return null
-  // Handle "HH:MM" format
+  if (shiftStart === null || shiftStart === undefined || shiftStart === '') return null
+
+  const val = Number(shiftStart)
+
+  // Integer or decimal number: e.g. 7 → 7, 7.5 → 8
+  if (!isNaN(val)) {
+    const h = Math.floor(val)
+    const m = Math.round((val - h) * 60)
+    return m >= 30 ? (h + 1) % 24 : h
+  }
+
+  // "HH:MM" string: e.g. "07:00", "14:30"
   const match = String(shiftStart).match(/^(\d{1,2}):(\d{2})/)
-  if (!match) return null
-  const h = parseInt(match[1], 10)
-  const m = parseInt(match[2], 10)
-  return m >= 30 ? (h + 1) % 24 : h
+  if (match) {
+    const h = parseInt(match[1], 10)
+    const m = parseInt(match[2], 10)
+    return m >= 30 ? (h + 1) % 24 : h
+  }
+
+  return null
 }
 
 function formatHour(h) {
@@ -94,7 +108,7 @@ function formatHour(h) {
 // sorted ascending. Employees with no parseable start go into an 'unknown' group
 // rendered last. Only returns grouped structure if there are 2+ distinct hours.
 function groupByStartHour(employees, assignmentMap) {
-  const groups = {}  // hour (number | 'unknown') → employees[]
+  const groups = {}
 
   for (const emp of employees) {
     const asg = assignmentMap?.[emp.id]
@@ -105,10 +119,8 @@ function groupByStartHour(employees, assignmentMap) {
   }
 
   const keys = Object.keys(groups)
-  // If only one group (or zero), no sub-headers needed
   if (keys.length <= 1) return null
 
-  // Sort numeric keys ascending, 'unknown' last
   const sorted = keys
     .filter(k => k !== 'unknown')
     .map(Number)
@@ -127,7 +139,6 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
   const sorted = sortEmployees(employees, sortOrder)
   const ids = sorted.map(e => e.id)
   const groups = groupByStartHour(sorted, assignmentMap)
-
   const laneSettings = getLaneSettings(lane.id, settings)
 
   return (
@@ -139,7 +150,6 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <div className="lane-body">
           {groups ? (
-            // Grouped view — sub-headers by rounded start hour
             groups.map(group => (
               <div key={group.hour ?? 'unknown'} className="lane-group">
                 <div className="lane-group-header">
@@ -159,7 +169,6 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
               </div>
             ))
           ) : (
-            // Flat view — all same start time, no sub-headers needed
             sorted.map(emp => (
               <EmployeeTile
                 key={emp.id}
@@ -177,7 +186,6 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
   )
 }
 
-// Stub employees used when B2E returns no data
 const STUB_EMPLOYEES = [
   { id: 'e1', name: 'Alex Rivera',    role: 'Lead',       default_lane: 'shift1' },
   { id: 'e2', name: 'Sam Torres',     role: 'Associate',  default_lane: 'shift1' },
