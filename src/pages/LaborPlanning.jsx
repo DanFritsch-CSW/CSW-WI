@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useReducer } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
@@ -28,15 +28,11 @@ export default function LaborPlanning() {
     setSearchParams(prev => { prev.set('date', date); return prev }, { replace: true })
   }
 
-  const [networkData, setNetworkData]               = [null, () => {}]
-  const [facilityEstDrops, setFacilityEstDrops]     = [{ }, () => {}]
-  const [facilityLaborCounts, setFacilityLaborCounts] = [{}, () => {}]
-
-  // Use refs for the data that doesn't need to trigger re-renders on its own
-  const networkDataRef       = useRef(null)
-  const facilityEstDropsRef  = useRef({})
-  const facilityLaborRef     = useRef({})
-  const [, forceUpdate]      = useReducer(x => x + 1, 0)
+  // Refs for async data — avoids stale state on navigation return
+  const networkDataRef      = useRef(null)
+  const facilityEstDropsRef = useRef({})
+  const facilityLaborRef    = useRef({})
+  const [, forceUpdate]     = useReducer(x => x + 1, 0)
 
   const snapLabelRef = useRef('Snapshot')
   const pageRef      = useRef(null)
