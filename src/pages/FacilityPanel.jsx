@@ -192,12 +192,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
       let inb, out
       if (isCal2 && sideTab !== 'all') {
-        // CAL v2 sub-tab: use side-filtered appts
         const sideAppt = sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }
         inb = sideAppt.inb
         out = sideAppt.out
       } else {
-        // All other cases: use full facility hourly appts from VIEW_APPT
         const appt = hourlyAppts[row.h] ?? { inb: 0, out: 0 }
         inb = appt.inb
         out = appt.out
@@ -225,14 +223,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount
 
-  // KPI pill totals — derived from project data (same source as project list)
-  // appts = inb + out only (drops are a separate column, not appointments)
-  const totalInb  = visibleProjects.reduce((s, p) => s + p.inb, 0)
-  const totalOut  = visibleProjects.reduce((s, p) => s + p.out, 0)
+  // KPI totals — inb + out from project data, drops from EST forecast
+  // Total appts = inb + out + drops, matching the hourly table Appts column total
+  const totalInb   = visibleProjects.reduce((s, p) => s + p.inb, 0)
+  const totalOut   = visibleProjects.reduce((s, p) => s + p.out, 0)
   const totalDrops = visibleProjects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0)
 
   const kpiData = {
-    appts:      totalInb + totalOut,   // scheduled appointments only, no drops mixed in
+    appts:      totalInb + totalOut + totalDrops,
     drops:      totalDrops,
     inb:        totalInb,
     out:        totalOut,
