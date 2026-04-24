@@ -511,13 +511,15 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 }
 
 // ── Active Inventory ─────────────────────────────────────────────
-// Returns active LP count by project for a given facility.
+// Returns active pallet count by project for a given facility.
 // Uses the LP topic's joined table field prefixes:
-//   - warehouse filter: silver__datex_slv_warehouses.warehouse_name
+//   - warehouse filter: silver__datex_slv_warehouses.warehouse_name (EQUALS exact match)
 //   - project group:    silver__datex_slv_projects.project_name
-//   - LP count measure: silver__datex_slv_licenseplates.lookup_code_count_distinct
+//   - pallet measure:   silver__datex_slv_licenseplates.pallet_fullness_count (summed per project)
 //   - status filter:    silver__datex_slv_licenseplates.status_name
-// Strips warehouse suffix from project names. Sorted highest LP count first.
+// NOTE: lookup_code_count_distinct is a cumulative historical distinct count, NOT current LP count.
+// pallet_fullness_count is the correct measure for active pallet positions on hand.
+// Strips warehouse suffix from project names. Sorted highest count first.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -526,21 +528,34 @@ export async function fetchActiveInventory(facilityId) {
     table: VIEW_LP,
     fields: [
       `${VIEW_LP_PROJ}.project_name`,
-      `${VIEW_LP}.lookup_code_count_distinct`,
+      `${VIEW_LP}.pallet_fullness_count`,
     ],
     filters: {
-      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
-      [`${VIEW_LP}.status_name`]:       { kind: 'EQUALS',   type: 'string', values: ['Active'] },
+      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      [`${VIEW_LP}.status_name`]:       { kind: 'EQUALS', type: 'string', values: ['Active'] },
+      [`${VIEW_LP_PROJ}.project_name`]: {
+        type: 'composite', conjunction: 'AND', is_negative: false,
+        filters: [
+          { type: 'null', is_negative: true },
+          { type: 'string', kind: 'IS_EMPTY', values: [], is_negative: true },
+        ],
+      },
     },
-    sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
+    sorts: [{ column_name: `${VIEW_LP}.pallet_fullness_count`, sort_descending: true }],
     limit: 200,
   })
-  return rows
-    .map(r => ({
-      name: stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || ''),
-      lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
-    }))
-    .filter(r => r.name && r.lps > 0)
+  // Sum pallet_fullness_count per project (rows may have multiple fullness categories per project)
+  const projectMap = new Map()
+  for (const r of rows) {
+    const name = stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || '')
+    if (!name) continue
+    const count = Number(r[`${VIEW_LP}.pallet_fullness_count`]) || 0
+    projectMap.set(name, (projectMap.get(name) ?? 0) + count)
+  }
+  return [...projectMap.entries()]
+    .map(([name, lps]) => ({ name, lps }))
+    .filter(r => r.lps > 0)
+    .sort((a, b) => b.lps - a.lps)
 }
 
 // Fetch cal2 employee dock assignments from Supabase.
