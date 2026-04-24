@@ -208,6 +208,7 @@ input, select { font: inherit; color: inherit; }
   width: 1px;
   align-self: stretch;
 }
+/* Sticky header + scrollable body — 15 rows × ~26px = 390px */
 .project-list-header--appt {
   display: grid;
   grid-template-columns: 1fr 44px 36px 36px 36px;
@@ -219,6 +220,7 @@ input, select { font: inherit; color: inherit; }
   letter-spacing: 0.08em;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg1);
+  flex-shrink: 0;
 }
 .project-list-header--inv {
   display: grid;
@@ -231,6 +233,11 @@ input, select { font: inherit; color: inherit; }
   letter-spacing: 0.08em;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg1);
+  flex-shrink: 0;
+}
+.project-list-body {
+  overflow-y: auto;
+  max-height: 390px;
 }
 .project-row--appt {
   display: grid;
