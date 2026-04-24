@@ -4,7 +4,7 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments, isRuleProject } from '../lib/omni.js'
+import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments, isRuleProject, fetchActiveInventory } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
@@ -34,10 +34,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
+  const [activeInventory, setActiveInventory]       = useState(null)
 
   const [sideHourlyAppts, setSideHourlyAppts] = useState({})
 
   const isCal2 = facility.id === 'cal2'
+  const isMad  = facility.id === 'mad'
   const [sideTab, setSideTab] = useState('all')
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
@@ -49,6 +51,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setProjectHourlyDrops({})
     setHourlyAdjustments({})
     setSideHourlyAppts({})
+    setActiveInventory(null)
 
     fetchHourlyData(facility.id, planDate)
       .then(setRawHourly)
@@ -56,6 +59,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
     fetchProjectData(facility.id, planDate).then(setProjects)
     fetchHourlyAdjustments(facility.id, planDate).then(setHourlyAdjustments)
+
+    // Fetch active inventory for MAD only
+    if (isMad) {
+      fetchActiveInventory(facility.id)
+        .then(setActiveInventory)
+        .catch(() => setActiveInventory([]))
+    }
 
     fetchProjectHourlyDrops(facility.id, planDate).then(async data => {
       const filtered = Object.fromEntries(
@@ -82,7 +92,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         setSeedingDrops(false)
       }
     })
-  }, [facility.id, planDate])
+  }, [facility.id, planDate, isMad])
 
   useEffect(() => {
     if (!isCal2 || sideTab === 'all') {
@@ -186,9 +196,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { util, delta } = computeDailyKpis(hourly)
 
-  // Bubble the break-adjusted delta up to LaborPlanning so the ALL tab scorecard
-  // shows the same number as the facility panel. Only fires for the 'all' sideTab
-  // (whole-facility delta, not a side-filtered one) and only when delta is real.
   useEffect(() => {
     if (onDeltaComputed && sideTab === 'all' && delta != null) {
       onDeltaComputed(facility.id, delta)
@@ -258,7 +265,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         <KpiPills data={kpiData} color={facility.color} />
         <div>
           <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
-          <ProjectList projects={visibleProjects} projectDrops={projectDrops} color={facility.color} />
+          <ProjectList
+            projects={visibleProjects}
+            projectDrops={projectDrops}
+            color={facility.color}
+            inventoryData={isMad ? activeInventory : null}
+          />
         </div>
       </div>
 

@@ -43,6 +43,7 @@ const VIEW_H        = 'labor_planning_app__hourly_labor_required_vs_available'
 const VIEW_P        = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
+const VIEW_LP       = 'silver__datex_slv_licenseplates'
 
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
@@ -191,6 +192,27 @@ function tsToHour(ts) {
   if (typeof ts === 'number') return new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
   if (typeof ts === 'string') { const m = ts.match(/[T ](\d{2}):/); return m ? parseInt(m[1]) : 0 }
   return 0
+}
+
+// Strip common warehouse suffixes from project names for compact display.
+// e.g. "Grassland WM - Cooler - CSW-Madison" → "Grassland WM - Cooler"
+const CSW_NAME_SUFFIXES = [
+  ' - CSW-Madison',
+  ' - CSW-Franksville',
+  ' - CSW-Kenosha',
+  ' - CSW-Wisconsin Rapids',
+  ' - CSW-Eau Claire',
+  ' - CSW-Madison',
+  '-CSW-Madison',
+  ' - Madison',
+]
+
+function stripWarehouseSuffix(name) {
+  if (!name) return name
+  for (const suffix of CSW_NAME_SUFFIXES) {
+    if (name.endsWith(suffix)) return name.slice(0, -suffix.length)
+  }
+  return name
 }
 
 // ── Public API ───────────────────────────────────────────────────
@@ -484,6 +506,35 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
     sums[projectName] = counts.reduce((s, c) => s + c, 0)
   }
   return Object.entries(sums).map(([project_name, total]) => ({ project_name, est_drops: Math.round(total / weeksBack) }))
+}
+
+// ── Active Inventory ─────────────────────────────────────────────
+// Returns active LP count by project for a given facility.
+// Strips warehouse suffix from project names (e.g. " - CSW-Madison").
+// Sorted highest LP count first.
+export async function fetchActiveInventory(facilityId) {
+  const wh = CSW_WAREHOUSE[facilityId]
+  if (!wh) return []
+  const rows = await omniQuery({
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_LP,
+    fields: [
+      `${VIEW_LP}.project_name`,
+      `${VIEW_LP}.lookup_code_count_distinct`,
+    ],
+    filters: {
+      [`${VIEW_LP}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
+      [`${VIEW_LP}.status_name`]:    { kind: 'EQUALS',   type: 'string', values: ['Active'] },
+    },
+    sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
+    limit: 200,
+  })
+  return rows
+    .map(r => ({
+      name: stripWarehouseSuffix(r[`${VIEW_LP}.project_name`] || ''),
+      lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
+    }))
+    .filter(r => r.name && r.lps > 0)
 }
 
 // Fetch cal2 employee dock assignments from Supabase.
