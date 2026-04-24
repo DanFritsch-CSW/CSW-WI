@@ -44,7 +44,7 @@ const VIEW_P        = 'labor_planning_app__hourly_inbound_outbound_drops_summary
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 const VIEW_LP       = 'silver__datex_slv_licenseplates'
-// Joined table names used in the LP topic — warehouse and project live in separate views
+// Joined table names used in the LP topic
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
@@ -90,8 +90,6 @@ const B2E_EXCLUDED_IDS = [
   5423, 5429, 5434, 5438, 5441, 5442, 5449, 5462, 5470, 5472, 5474,
 ]
 
-// Fallback name-based dock assignment for brand new cal2 employees
-// not yet in the Supabase employees table.
 const CAL2_DOCK_NAMES_35 = new Set([
   'Calvieon Howard',
   'Ethan Lindsey',
@@ -198,7 +196,6 @@ function tsToHour(ts) {
 }
 
 // Strip common warehouse suffixes from project names for compact display.
-// e.g. "Grassland WM - Cooler - CSW-Madison" → "Grassland WM - Cooler"
 const CSW_NAME_SUFFIXES = [
   ' - CSW-Madison',
   ' - CSW-Franksville',
@@ -511,15 +508,12 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 }
 
 // ── Active Inventory ─────────────────────────────────────────────
-// Returns active pallet count by project for a given facility.
-// Uses the LP topic's joined table field prefixes:
-//   - warehouse filter: silver__datex_slv_warehouses.warehouse_name (EQUALS exact match)
-//   - project group:    silver__datex_slv_projects.project_name
-//   - pallet measure:   silver__datex_slv_licenseplates.pallet_fullness_count (summed per project)
-//   - status filter:    silver__datex_slv_licenseplates.status_name
-// NOTE: lookup_code_count_distinct is a cumulative historical distinct count, NOT current LP count.
-// pallet_fullness_count is the correct measure for active pallet positions on hand.
-// Strips warehouse suffix from project names. Sorted highest count first.
+// Returns active LP count by project for a given facility.
+// Source: silver__datex_slv_licenseplates, grouped by silver__datex_slv_projects.project_name
+// Measure: lookup_code_count_distinct — confirmed correct by Omni MCP (1,563 for Grassland WM Cooler etc.)
+// Filters applied server-side: warehouse (CONTAINS on joined warehouse table) + status = Active
+// Blank project names filtered client-side (composite filter syntax unreliable through proxy).
+// Warehouse suffix stripped client-side. Sorted highest → lowest.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -528,38 +522,23 @@ export async function fetchActiveInventory(facilityId) {
     table: VIEW_LP,
     fields: [
       `${VIEW_LP_PROJ}.project_name`,
-      `${VIEW_LP}.pallet_fullness_count`,
+      `${VIEW_LP}.lookup_code_count_distinct`,
     ],
     filters: {
-      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      [`${VIEW_LP}.status_name`]:       { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      [`${VIEW_LP_PROJ}.project_name`]: {
-        type: 'composite', conjunction: 'AND', is_negative: false,
-        filters: [
-          { type: 'null', is_negative: true },
-          { type: 'string', kind: 'IS_EMPTY', values: [], is_negative: true },
-        ],
-      },
+      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
+      [`${VIEW_LP}.status_name`]:       { kind: 'EQUALS',   type: 'string', values: ['Active'] },
     },
-    sorts: [{ column_name: `${VIEW_LP}.pallet_fullness_count`, sort_descending: true }],
+    sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
     limit: 200,
   })
-  // Sum pallet_fullness_count per project (rows may have multiple fullness categories per project)
-  const projectMap = new Map()
-  for (const r of rows) {
-    const name = stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || '')
-    if (!name) continue
-    const count = Number(r[`${VIEW_LP}.pallet_fullness_count`]) || 0
-    projectMap.set(name, (projectMap.get(name) ?? 0) + count)
-  }
-  return [...projectMap.entries()]
-    .map(([name, lps]) => ({ name, lps }))
-    .filter(r => r.lps > 0)
-    .sort((a, b) => b.lps - a.lps)
+  return rows
+    .map(r => ({
+      name: stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || ''),
+      lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
+    }))
+    .filter(r => r.name && r.name.trim() !== '' && r.lps > 0)
 }
-
 // Fetch cal2 employee dock assignments from Supabase.
-// Returns Map<employeeId, defaultLane> for employees already assigned.
 async function fetchCal2DockAssignments() {
   if (!supabase) return new Map()
   const { data, error } = await supabase
@@ -576,7 +555,6 @@ export async function fetchB2eRoster(facilityId, date) {
   const refDate = date || new Date().toISOString().slice(0, 10)
   const isCal2  = facilityId === 'cal2'
 
-  // For cal2, pre-load Supabase dock assignments so we can use them per employee
   const dockAssignments = isCal2 ? await fetchCal2DockAssignments() : new Map()
 
   const [rosterRows, scheduleRows] = await Promise.all([
@@ -638,11 +616,9 @@ export async function fetchB2eRoster(facilityId, date) {
       if (isCal2) {
         const savedLane = dockAssignments.get(id)
         if (savedLane) {
-          // Employee already has a Supabase dock assignment — preserve side, update shift bucket
           const side = savedLane.startsWith('side35') ? 'side35' : 'side12'
           defaultLane = `${side}_${shiftLane}`
         } else {
-          // New employee — use name-based fallback
           defaultLane = cal2FallbackLane(fullName, shiftLane)
         }
       } else {
