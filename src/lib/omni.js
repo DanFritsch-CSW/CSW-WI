@@ -44,7 +44,6 @@ const VIEW_P        = 'labor_planning_app__hourly_inbound_outbound_drops_summary
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 const VIEW_LP       = 'silver__datex_slv_licenseplates'
-// Joined table names used in the LP topic
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
@@ -70,7 +69,6 @@ export function isRuleProject(facilityId, projectName) {
   return rule.facility === effectiveFac
 }
 
-// ── B2E Roster ───────────────────────────────────────────────────
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
 const ROSTER       = 'silver__b2e_slv_employeeroster'
 const SCHEDULE     = 'silver__b2e_slv_futurescheduleentries'
@@ -195,7 +193,6 @@ function tsToHour(ts) {
   return 0
 }
 
-// Strip common warehouse suffixes from project names for compact display.
 const CSW_NAME_SUFFIXES = [
   ' - CSW-Madison',
   ' - CSW-Franksville',
@@ -508,13 +505,10 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 }
 
 // ── Active Inventory ─────────────────────────────────────────────
-// Returns active LP count by project for a given facility.
-// Strategy: fetch all active LPs with warehouse_name + project_name fields,
-// then filter by warehouse client-side. The joined VIEW_LP_WH warehouse filter
-// is silently ignored by the Omni proxy — warehouse_name on the LP record itself
-// is the reliable field. Blank projects also filtered client-side.
-// Measure: lookup_code_count_distinct — confirmed correct via Omni MCP.
-// Sorted highest → lowest after client-side aggregation per project.
+// Logs raw row keys on first call so we can confirm Arrow field naming.
+// Include VIEW_LP_WH.warehouse_name as a FIELD (dimension) so Omni groups by it,
+// producing one row per warehouse+project instead of aggregating all warehouses.
+// Client-side filter isolates target warehouse after confirming actual key names.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -522,7 +516,7 @@ export async function fetchActiveInventory(facilityId) {
     modelId: GOLD_MODEL_ID,
     table: VIEW_LP,
     fields: [
-      `${VIEW_LP}.warehouse_name`,
+      `${VIEW_LP_WH}.warehouse_name`,
       `${VIEW_LP_PROJ}.project_name`,
       `${VIEW_LP}.lookup_code_count_distinct`,
     ],
@@ -532,12 +526,29 @@ export async function fetchActiveInventory(facilityId) {
     sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
     limit: 500,
   })
+
+  // DEBUG: log first row keys so we can confirm Arrow field naming once and remove this
+  if (rows.length > 0) {
+    console.log('[fetchActiveInventory] row keys:', Object.keys(rows[0]))
+    console.log('[fetchActiveInventory] first row:', JSON.stringify(rows[0]))
+  }
+
   const projectMap = new Map()
   for (const r of rows) {
-    const rowWh   = (r[`${VIEW_LP}.warehouse_name`] || '').trim()
-    const project = (r[`${VIEW_LP_PROJ}.project_name`] || '').trim()
-    const count   = Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0
-    // Client-side warehouse filter — exact match
+    // Try all plausible key variants for warehouse name
+    const rowWh = (
+      r[`${VIEW_LP_WH}.warehouse_name`] ||
+      r[`${VIEW_LP}.warehouse_name`] ||
+      r['warehouse_name'] ||
+      ''
+    ).trim()
+    const project = (
+      r[`${VIEW_LP_PROJ}.project_name`] ||
+      r[`${VIEW_LP}.project_name`] ||
+      r['project_name'] ||
+      ''
+    ).trim()
+    const count = Number(r[`${VIEW_LP}.lookup_code_count_distinct`] ?? r['lookup_code_count_distinct']) || 0
     if (rowWh !== wh) continue
     if (!project) continue
     const name = stripWarehouseSuffix(project)
@@ -549,7 +560,6 @@ export async function fetchActiveInventory(facilityId) {
     .sort((a, b) => b.lps - a.lps)
 }
 
-// Fetch cal2 employee dock assignments from Supabase.
 async function fetchCal2DockAssignments() {
   if (!supabase) return new Map()
   const { data, error } = await supabase
@@ -565,7 +575,6 @@ export async function fetchB2eRoster(facilityId, date) {
   if (!location) return []
   const refDate = date || new Date().toISOString().slice(0, 10)
   const isCal2  = facilityId === 'cal2'
-
   const dockAssignments = isCal2 ? await fetchCal2DockAssignments() : new Map()
 
   const [rosterRows, scheduleRows] = await Promise.all([
