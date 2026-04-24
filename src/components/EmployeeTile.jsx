@@ -88,6 +88,7 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
       ref={setNodeRef}
       style={style}
       className={`emp-tile${isDragging ? ' dragging' : ''}${isTemp ? ' emp-temp' : ''}`}
+      title={employee.name}
       {...attributes}
       {...listeners}
     >

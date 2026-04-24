@@ -65,6 +65,11 @@ function parseStartHour(shiftStart) {
  *  2. B2E schedule data stored on the employee object (emp.shift_start)
  *  3. Hardcoded SHIFT_DEFAULTS for the employee's shift bucket
  *
+ * Break multipliers reduce each person's contribution per shift hour:
+ *  Hour 1: 83%, Hour 2: 100%, Hour 3: 75%, Hour 4: 100%,
+ *  Hour 5: 50%, Hour 6: 100%, Hour 7: 75%, Hour 8: 100%
+ * These match the Omni labor model break deductions.
+ *
  * @param {Array}    employees     - employee objects
  * @param {Object}   laneMap       - { [employeeId]: laneId }
  * @param {Object}   settings      - facility settings (only break_hour_* used now)
@@ -100,4 +105,38 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
   }
 
   return hourlyAvail.map(v => Math.round(v * 10) / 10)
+}
+
+/**
+ * Compute break-adjusted total hours for a set of employees.
+ * Used for the "Total Hrs Available" KPI pill — should match the
+ * sum of buildRosterAvailability across all hours.
+ *
+ * @param {Array}    employees     - employee objects
+ * @param {Object}   laneMap       - { [employeeId]: laneId }
+ * @param {Object}   settings      - facility settings
+ * @param {Object}   assignmentMap - day-specific overrides
+ * @param {Set|null} laneFilter    - optional lane filter
+ * @returns {number}  break-adjusted total hours
+ */
+export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
+  const breakMuls = getBreakMultipliers(settings)
+  let total = 0
+
+  for (const emp of employees) {
+    const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
+    if (laneFilter && !laneFilter.has(lane)) continue
+    const shiftKey = LANE_TO_SHIFT[lane]
+    if (!shiftKey) continue  // pto, callin
+
+    const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
+    const assignment    = assignmentMap?.[emp.id]
+    const shiftHours    = assignment?.shift_hours ?? shiftDefaults.hours
+
+    for (let i = 0; i < shiftHours; i++) {
+      total += breakMuls[i] ?? 1
+    }
+  }
+
+  return Math.round(total * 10) / 10
 }

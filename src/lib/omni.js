@@ -47,6 +47,9 @@ const VIEW_LP       = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
+// Appointment statuses to exclude — cancelled/deleted appts should not count
+const CANCELLED_STATUSES = ['CANCELLED', 'DELETED', 'Cancelled', 'Deleted', 'cancelled', 'deleted']
+
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
     facility: 'cal',
@@ -187,6 +190,18 @@ function scheduledArrivalDateFilter(date) {
   }
 }
 
+// Filter out cancelled/deleted appointments
+function apptStatusFilter() {
+  return {
+    [`${VIEW_APPT}.status`]: {
+      kind: 'EQUALS',
+      type: 'string',
+      values: CANCELLED_STATUSES,
+      is_negative: true,
+    },
+  }
+}
+
 function tsToHour(ts) {
   if (typeof ts === 'number') return new Date(ts > 1e12 ? ts / 1000 : ts).getUTCHours()
   if (typeof ts === 'string') { const m = ts.match(/[T ](\d{2}):/); return m ? parseInt(m[1]) : 0 }
@@ -267,6 +282,7 @@ export async function fetchProjectData(facilityId, date) {
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       ...scheduledArrivalDateFilter(date),
+      ...apptStatusFilter(),
     },
     sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
     limit: 500,
@@ -303,6 +319,7 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: projectNames },
       ...scheduledArrivalDateFilter(date),
+      ...apptStatusFilter(),
     },
     sorts: [],
     limit: 1000,
@@ -341,7 +358,10 @@ export async function fetchNetworkKpis(date) {
         `${VIEW_APPT}.dock_appointment_type_name_groups`,
         `${VIEW_APPT}.count`,
       ],
-      filters: { ...scheduledArrivalDateFilter(date) },
+      filters: {
+        ...scheduledArrivalDateFilter(date),
+        ...apptStatusFilter(),
+      },
       sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
       limit: 1000,
     }),
@@ -403,6 +423,7 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
         isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
       },
+      ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
   })
@@ -439,6 +460,7 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
         isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
       },
+      ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
   })
@@ -505,13 +527,6 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 }
 
 // ── Active Inventory ─────────────────────────────────────────────
-// Matches the Omni workbook baseline exactly:
-//   Filter: silver__datex_slv_licenseplates.archived = false
-//           (boolean, is_negative:true means "not archived")
-//   Filter: silver__datex_slv_warehouses.warehouse_name CONTAINS "CSW-Madison"
-//   Dimension: silver__datex_slv_projects.project_name
-//   Measure: silver__datex_slv_licenseplates.lookup_code_count_distinct
-// Expected values: Grassland WM Cooler ~1,708, Saputo ~1,547, Grassland Sam's ~1,305 etc.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []

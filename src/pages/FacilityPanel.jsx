@@ -7,7 +7,7 @@ import RosterBoard from '../components/RosterBoard.jsx'
 import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments, isRuleProject, fetchActiveInventory } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
-import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
+import { applySettings, computeDailyKpis, buildRosterAvailability, computeBreakAdjustedTotalHours } from '../lib/laborCalc.js'
 
 const CAL2_SIDE35_PROJECTS = new Set([
   'Palermos CALEDONIA finished',
@@ -29,7 +29,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [hourlyErr, setHourlyErr]     = useState(null)
   const [projects, setProjects]       = useState([])
   const [laborCount, setLaborCount]   = useState(0)
-  const [totalHours, setTotalHours]   = useState(0)
   const [rosterState, setRosterState] = useState({ employees: [], laneMap: {}, assignmentMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
@@ -112,10 +111,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       .catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
-  const handleLaborCount   = useCallback((count, hours) => {
-    setLaborCount(count)
-    setTotalHours(hours)
-  }, [])
+  const handleLaborCount   = useCallback((count) => setLaborCount(count), [])
   const handleRosterChange = useCallback(state => setRosterState(state), [])
 
   const visibleProjects = useMemo(() => {
@@ -139,6 +135,18 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       laneFilter
     )
   }, [rosterState, settings, laneFilter])
+
+  // Break-adjusted total hours — matches what the hourly avail array sums to
+  const breakAdjustedTotalHours = useMemo(() => {
+    if (!rosterState.employees.length || settingsLoading) return 0
+    return computeBreakAdjustedTotalHours(
+      rosterState.employees,
+      rosterState.laneMap,
+      settings,
+      rosterState.assignmentMap,
+      laneFilter
+    )
+  }, [rosterState, settings, settingsLoading, laneFilter])
 
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
@@ -202,17 +210,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     }
   }, [delta, facility.id, sideTab, onDeltaComputed])
 
-  const sideHeadcount  = isCal2 && sideTab !== 'all'
+  const sideHeadcount = isCal2 && sideTab !== 'all'
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount
-  const sideTotalHours = isCal2 && sideTab !== 'all'
-    ? Object.entries(rosterState.laneMap)
-        .filter(([, l]) => laneFilter?.has(l))
-        .reduce((sum, [id]) => {
-          const asg = rosterState.assignmentMap[id]
-          return sum + (asg?.shift_hours != null ? Number(asg.shift_hours) : 8)
-        }, 0)
-    : totalHours
 
   const kpiData = {
     appts:      visibleProjects.reduce((s, p) => s + p.inb + p.out + (projectDrops[p.name] ?? 0), 0),
@@ -220,7 +220,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     inb:        visibleProjects.reduce((s, p) => s + p.inb, 0),
     out:        visibleProjects.reduce((s, p) => s + p.out, 0),
     labor:      sideHeadcount,
-    totalHours: Math.round(sideTotalHours * 10) / 10,
+    totalHours: breakAdjustedTotalHours,
     util:       util  ?? networkKpi?.util,
     delta:      delta ?? networkKpi?.delta,
   }

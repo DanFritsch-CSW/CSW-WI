@@ -141,7 +141,11 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
   const sideClass    = laneSideClass(lane.id)
 
   return (
-    <div ref={setNodeRef} className={`lane${sideClass ? ` ${sideClass}` : ''}${isOver ? ' over' : ''}`}>
+    <div
+      ref={setNodeRef}
+      className={`lane${sideClass ? ` ${sideClass}` : ''}${isOver ? ' over' : ''}`}
+      style={{ touchAction: 'none' }}
+    >
       <div className="lane-header">
         <span className="lane-title">{lane.label}</span>
         <span className="lane-count">{employees.length}</span>
@@ -224,63 +228,64 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
-  useEffect(() => {
-    async function load() {
-      setIsLoading(true)
-      const date = planDate || todayISO()
-      let assignments = await fetchTodayAssignments(facility, date)
+  async function load(facId, date) {
+    setIsLoading(true)
+    let assignments = await fetchTodayAssignments(facId, date)
 
-      if (assignments.length === 0) {
-        const b2eEmployees = await fetchB2eRoster(facility, date)
-        if (b2eEmployees.length > 0) {
-          const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
-          await replaceEmployees(facility, empRows)
-          await seedRosterAssignments(b2eEmployees, date)
-          assignments = await fetchTodayAssignments(facility, date)
-        }
+    if (assignments.length === 0) {
+      const b2eEmployees = await fetchB2eRoster(facId, date)
+      if (b2eEmployees.length > 0) {
+        const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+        await replaceEmployees(facId, empRows)
+        await seedRosterAssignments(b2eEmployees, date)
+        assignments = await fetchTodayAssignments(facId, date)
       }
-
-      let emps = assignments
-        .filter(a => !a.is_temp)
-        .map(a => ({
-          id:           a.employee_id,
-          name:         a.employee_name,
-          role:         a.role || null,
-          facility,
-          is_temp:      false,
-          default_lane: a.lane,
-        }))
-
-      const tempEmps = assignments
-        .filter(a => a.is_temp)
-        .map(a => ({
-          id:           a.employee_id,
-          name:         a.employee_name,
-          role:         a.role || 'Temp',
-          facility,
-          is_temp:      true,
-          default_lane: a.lane,
-        }))
-
-      if (emps.length === 0 && tempEmps.length === 0) {
-        emps = STUB_EMPLOYEES.map(e => ({ ...e, facility }))
-      }
-
-      const allEmps = [...emps, ...tempEmps]
-      setEmployees(allEmps)
-
-      const map = {}
-      assignments.forEach(a => { map[a.employee_id] = a.lane })
-      setLaneMap(map)
-
-      const asgMap = {}
-      assignments.forEach(a => { asgMap[a.employee_id] = a })
-      setAssignmentMap(asgMap)
-
-      setIsLoading(false)
     }
-    loadRef.current = load
-    load()
+
+    let emps = assignments
+      .filter(a => !a.is_temp)
+      .map(a => ({
+        id:           a.employee_id,
+        name:         a.employee_name,
+        role:         a.role || null,
+        facility:     facId,
+        is_temp:      false,
+        default_lane: a.lane,
+      }))
+
+    const tempEmps = assignments
+      .filter(a => a.is_temp)
+      .map(a => ({
+        id:           a.employee_id,
+        name:         a.employee_name,
+        role:         a.role || 'Temp',
+        facility:     facId,
+        is_temp:      true,
+        default_lane: a.lane,
+      }))
+
+    if (emps.length === 0 && tempEmps.length === 0) {
+      emps = STUB_EMPLOYEES.map(e => ({ ...e, facility: facId }))
+    }
+
+    const allEmps = [...emps, ...tempEmps]
+    setEmployees(allEmps)
+
+    const map = {}
+    assignments.forEach(a => { map[a.employee_id] = a.lane })
+    setLaneMap(map)
+
+    const asgMap = {}
+    assignments.forEach(a => { asgMap[a.employee_id] = a })
+    setAssignmentMap(asgMap)
+
+    setIsLoading(false)
+  }
+
+  useEffect(() => {
+    const date = planDate || todayISO()
+    loadRef.current = () => load(facility, date)
+    load(facility, date)
   }, [facility, planDate])
 
   const trackedUpsert = useCallback(async (assignment) => {
@@ -303,7 +308,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       if (err) { setSyncState(err); return }
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
       if (seedErr) { setSyncState(seedErr); return }
-      await loadRef.current?.()
+      await load(facility, date)
       setSyncState('ok')
       setTimeout(() => setSyncState(null), 3000)
     } catch (e) {
@@ -316,16 +321,21 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setResetState('loading')
     try {
       const date = planDate || todayISO()
+      // Delete non-temp assignments for this date
       const err = await resetAssignmentsForDate(facility, date)
-      if (err) { setResetState(err); return }
+      if (err) { setResetState(`Delete failed: ${err}`); return }
+      // Re-fetch from B2E
       const b2eEmployees = await fetchB2eRoster(facility, date)
       if (!b2eEmployees.length) { setResetState('No B2E data found'); return }
+      // Replace employee records
       const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
       const replErr = await replaceEmployees(facility, empRows)
-      if (replErr) { setResetState(replErr); return }
+      if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
+      // Re-seed assignments (ignoreDuplicates:false so updated shifts write through)
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
-      if (seedErr) { setResetState(seedErr); return }
-      await loadRef.current?.()
+      if (seedErr) { setResetState(`Seed failed: ${seedErr}`); return }
+      // Reload UI
+      await load(facility, date)
       setResetState('ok')
       setTimeout(() => setResetState(null), 3000)
     } catch (e) {
@@ -368,15 +378,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
-  // Fire onLaborCount with both headcount and total hours whenever roster changes
+  // Fire onLaborCount with headcount only (total hours now computed in FacilityPanel via break-adjusted calc)
   useEffect(() => {
     const activeEmps = employees.filter(e => activeLaneSet_.has(laneMap[e.id] || e.default_lane))
-    const headcount  = activeEmps.length
-    const totalHours = activeEmps.reduce((sum, emp) => {
-      const asg = assignmentMap[emp.id]
-      return sum + (asg?.shift_hours != null ? Number(asg.shift_hours) : 8)
-    }, 0)
-    onLaborCount?.(headcount, totalHours)
+    onLaborCount?.(activeEmps.length)
   }, [laneMap, assignmentMap, employees, onLaborCount, activeLaneSet_])
 
   useEffect(() => {
@@ -389,17 +394,21 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setActiveId(null)
     if (!over) return
     const employeeId = active.id
-    const targetLane = over.id
-    const validLane  = activeLaneSet.find(l => l.id === targetLane)
-    if (!validLane) {
-      const destLane = laneMap[targetLane]
-      if (!destLane || destLane === laneMap[employeeId]) return
-      moveTo(employeeId, destLane)
-    } else {
-      if (laneMap[employeeId] === targetLane) return
-      moveTo(employeeId, targetLane)
+    const overId     = over.id
+
+    // Check if dropping directly onto a lane droppable
+    const isLane = activeLaneSet.some(l => l.id === overId)
+    if (isLane) {
+      if (laneMap[employeeId] !== overId) moveTo(employeeId, overId)
+      return
     }
-  }, [laneMap, activeLaneSet])
+
+    // Dropping onto another employee tile — move to that employee's lane
+    const destLane = laneMap[overId] || employees.find(e => e.id === overId)?.default_lane
+    if (destLane && destLane !== laneMap[employeeId]) {
+      moveTo(employeeId, destLane)
+    }
+  }, [laneMap, activeLaneSet, employees])
 
   function moveTo(employeeId, laneId) {
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
@@ -478,7 +487,12 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
             {syncState === 'loading' ? 'Syncing…' : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
           </button>
           {syncState && syncState !== 'loading' && syncState !== 'ok' && <span className="b2e-sync-err">{syncState}</span>}
-          <button className="b2e-sync-btn b2e-reset-btn" onClick={handleReset} disabled={resetState === 'loading'}>
+          <button
+            className="b2e-sync-btn b2e-reset-btn"
+            onClick={handleReset}
+            disabled={resetState === 'loading'}
+            title="Discard all manual lane/shift changes for today and reload fresh from B2E. Temp employees are preserved."
+          >
             {resetState === 'loading' ? 'Resetting…' : resetState === 'ok' ? 'Reset ✓' : 'Reset to B2E'}
           </button>
           {resetState && resetState !== 'loading' && resetState !== 'ok' && <span className="b2e-sync-err">{resetState}</span>}
