@@ -505,10 +505,13 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 }
 
 // ── Active Inventory ─────────────────────────────────────────────
-// Logs raw row keys on first call so we can confirm Arrow field naming.
-// Include VIEW_LP_WH.warehouse_name as a FIELD (dimension) so Omni groups by it,
-// producing one row per warehouse+project instead of aggregating all warehouses.
-// Client-side filter isolates target warehouse after confirming actual key names.
+// Matches the Omni workbook baseline exactly:
+//   Filter: silver__datex_slv_licenseplates.archived = false
+//           (boolean, is_negative:true means "not archived")
+//   Filter: silver__datex_slv_warehouses.warehouse_name CONTAINS "CSW-Madison"
+//   Dimension: silver__datex_slv_projects.project_name
+//   Measure: silver__datex_slv_licenseplates.lookup_code_count_distinct
+// Expected values: Grassland WM Cooler ~1,708, Saputo ~1,547, Grassland Sam's ~1,305 etc.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -516,48 +519,22 @@ export async function fetchActiveInventory(facilityId) {
     modelId: GOLD_MODEL_ID,
     table: VIEW_LP,
     fields: [
-      `${VIEW_LP_WH}.warehouse_name`,
       `${VIEW_LP_PROJ}.project_name`,
       `${VIEW_LP}.lookup_code_count_distinct`,
     ],
     filters: {
-      [`${VIEW_LP}.status_name`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+      [`${VIEW_LP}.archived`]:          { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
+      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
     },
     sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
-    limit: 500,
+    limit: 200,
   })
-
-  // DEBUG: log first row keys so we can confirm Arrow field naming once and remove this
-  if (rows.length > 0) {
-    console.log('[fetchActiveInventory] row keys:', Object.keys(rows[0]))
-    console.log('[fetchActiveInventory] first row:', JSON.stringify(rows[0]))
-  }
-
-  const projectMap = new Map()
-  for (const r of rows) {
-    // Try all plausible key variants for warehouse name
-    const rowWh = (
-      r[`${VIEW_LP_WH}.warehouse_name`] ||
-      r[`${VIEW_LP}.warehouse_name`] ||
-      r['warehouse_name'] ||
-      ''
-    ).trim()
-    const project = (
-      r[`${VIEW_LP_PROJ}.project_name`] ||
-      r[`${VIEW_LP}.project_name`] ||
-      r['project_name'] ||
-      ''
-    ).trim()
-    const count = Number(r[`${VIEW_LP}.lookup_code_count_distinct`] ?? r['lookup_code_count_distinct']) || 0
-    if (rowWh !== wh) continue
-    if (!project) continue
-    const name = stripWarehouseSuffix(project)
-    projectMap.set(name, (projectMap.get(name) ?? 0) + count)
-  }
-  return [...projectMap.entries()]
-    .map(([name, lps]) => ({ name, lps }))
-    .filter(r => r.lps > 0)
-    .sort((a, b) => b.lps - a.lps)
+  return rows
+    .map(r => ({
+      name: stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || ''),
+      lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
+    }))
+    .filter(r => r.name && r.name.trim() !== '' && r.lps > 0)
 }
 
 async function fetchCal2DockAssignments() {
