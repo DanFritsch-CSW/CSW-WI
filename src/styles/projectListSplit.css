@@ -1,0 +1,87 @@
+/* ─── Project List — split layout (MAD: appointments + inventory) ── */
+.project-list--split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) 1px minmax(0, 0.95fr);
+  align-items: stretch;
+}
+.project-list-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.project-list-col--appt .project-list-header--appt,
+.project-list-col--inv  .project-list-header--inv {
+  flex-shrink: 0;
+}
+.project-list-col--appt .project-list-body,
+.project-list-col--inv  .project-list-body {
+  overflow-y: auto;
+  max-height: 390px;
+}
+.project-list-divider {
+  background: var(--border);
+  width: 1px;
+  align-self: stretch;
+}
+.project-list-header--appt {
+  display: grid;
+  grid-template-columns: 1fr 44px 36px 36px 36px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg1);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.project-list-header--inv {
+  display: grid;
+  grid-template-columns: 1fr 56px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg1);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.project-row--appt {
+  display: grid;
+  grid-template-columns: 1fr 44px 36px 36px 36px;
+  align-items: center;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  transition: background 0.1s;
+}
+.project-row--appt:last-child { border-bottom: none; }
+.project-row--appt:hover { background: var(--bg3); }
+.project-row--inv {
+  display: grid;
+  grid-template-columns: 1fr 56px;
+  align-items: center;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  transition: background 0.1s;
+}
+.project-row--inv:last-child { border-bottom: none; }
+.project-row--inv:hover { background: var(--bg3); }
+.project-num--lp {
+  color: var(--blue);
+  font-weight: 500;
+}
+.project-inv-loading {
+  padding: 12px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
