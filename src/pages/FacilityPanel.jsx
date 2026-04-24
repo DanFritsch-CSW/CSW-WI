@@ -4,7 +4,15 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import { fetchHourlyData, fetchProjectData, fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments, isRuleProject, fetchActiveInventory } from '../lib/omni.js'
+import {
+  fetchHourlyData,
+  fetchHourlyAppointments,
+  fetchProjectData,
+  fetchHistoricalProjectHourlyDrops,
+  fetchProjectHourlyAppointments,
+  isRuleProject,
+  fetchActiveInventory,
+} from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, computeBreakAdjustedTotalHours } from '../lib/laborCalc.js'
@@ -25,17 +33,17 @@ const CAL2_TABS = [
 ]
 
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
-  const [rawHourly, setRawHourly]     = useState([])
-  const [hourlyErr, setHourlyErr]     = useState(null)
-  const [projects, setProjects]       = useState([])
-  const [laborCount, setLaborCount]   = useState(0)
-  const [rosterState, setRosterState] = useState({ employees: [], laneMap: {}, assignmentMap: {} })
+  const [rawHourly, setRawHourly]           = useState([])
+  const [hourlyAppts, setHourlyAppts]       = useState({}) // { [hour]: { inb, out } } from VIEW_APPT
+  const [hourlyErr, setHourlyErr]           = useState(null)
+  const [projects, setProjects]             = useState([])
+  const [laborCount, setLaborCount]         = useState(0)
+  const [rosterState, setRosterState]       = useState({ employees: [], laneMap: {}, assignmentMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
   const [activeInventory, setActiveInventory]       = useState(null)
-
-  const [sideHourlyAppts, setSideHourlyAppts] = useState({})
+  const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
 
   const isCal2 = facility.id === 'cal2'
   const isMad  = facility.id === 'mad'
@@ -45,6 +53,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   useEffect(() => {
     setRawHourly([])
+    setHourlyAppts({})
     setHourlyErr(null)
     setProjects([])
     setProjectHourlyDrops({})
@@ -52,14 +61,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setSideHourlyAppts({})
     setActiveInventory(null)
 
+    // Labor model — req/avail only
     fetchHourlyData(facility.id, planDate)
       .then(setRawHourly)
       .catch(e => setHourlyErr(e.message))
 
+    // Appointment counts — single source of truth for inb/out everywhere
+    fetchHourlyAppointments(facility.id, planDate)
+      .then(setHourlyAppts)
+      .catch(() => setHourlyAppts({}))
+
     fetchProjectData(facility.id, planDate).then(setProjects)
     fetchHourlyAdjustments(facility.id, planDate).then(setHourlyAdjustments)
 
-    // Fetch active inventory for MAD only
     if (isMad) {
       fetchActiveInventory(facility.id)
         .then(setActiveInventory)
@@ -93,6 +107,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     })
   }, [facility.id, planDate, isMad])
 
+  // CAL v2 side-specific hourly appts (sub-tab filtering)
   useEffect(() => {
     if (!isCal2 || sideTab === 'all') {
       setSideHourlyAppts({})
@@ -128,23 +143,16 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const rosterAvail = useMemo(() => {
     if (!rosterState.employees.length) return null
     return buildRosterAvailability(
-      rosterState.employees,
-      rosterState.laneMap,
-      settings,
-      rosterState.assignmentMap,
-      laneFilter
+      rosterState.employees, rosterState.laneMap, settings,
+      rosterState.assignmentMap, laneFilter
     )
   }, [rosterState, settings, laneFilter])
 
-  // Break-adjusted total hours — matches what the hourly avail array sums to
   const breakAdjustedTotalHours = useMemo(() => {
     if (!rosterState.employees.length || settingsLoading) return 0
     return computeBreakAdjustedTotalHours(
-      rosterState.employees,
-      rosterState.laneMap,
-      settings,
-      rosterState.assignmentMap,
-      laneFilter
+      rosterState.employees, rosterState.laneMap, settings,
+      rosterState.assignmentMap, laneFilter
     )
   }, [rosterState, settings, settingsLoading, laneFilter])
 
@@ -152,9 +160,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
     return Object.fromEntries(
       Object.entries(projectHourlyDrops).filter(([name]) =>
-        sideTab === 'side35'
-          ? CAL2_SIDE35_PROJECTS.has(name)
-          : !CAL2_SIDE35_PROJECTS.has(name)
+        sideTab === 'side35' ? CAL2_SIDE35_PROJECTS.has(name) : !CAL2_SIDE35_PROJECTS.has(name)
       )
     )
   }, [projectHourlyDrops, isCal2, sideTab])
@@ -177,30 +183,35 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return sums
   }, [visibleProjectHourlyDrops])
 
-  const rawWithEst = useMemo(() => {
+  // Merge labor rows with appointment counts from VIEW_APPT (single source)
+  const rawWithAppts = useMemo(() => {
     if (!rawHourly.length) return rawHourly
 
-    if (!isCal2 || sideTab === 'all') {
-      return rawHourly.map(row => {
-        const est = estDrops[row.h] ?? 0
-        return { ...row, appts: row.inb + est + row.out }
-      })
-    }
-
     return rawHourly.map(row => {
-      const est      = estDrops[row.h] ?? 0
-      const sideAppt = sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }
-      const inb      = sideAppt.inb
-      const out      = sideAppt.out
+      const est = estDrops[row.h] ?? 0
+
+      let inb, out
+      if (isCal2 && sideTab !== 'all') {
+        // CAL v2 sub-tab: use side-filtered appts
+        const sideAppt = sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }
+        inb = sideAppt.inb
+        out = sideAppt.out
+      } else {
+        // All other cases: use full facility hourly appts from VIEW_APPT
+        const appt = hourlyAppts[row.h] ?? { inb: 0, out: 0 }
+        inb = appt.inb
+        out = appt.out
+      }
+
       return { ...row, inb, out, drops: est, appts: inb + est + out }
     })
-  }, [rawHourly, estDrops, isCal2, sideTab, sideHourlyAppts])
+  }, [rawHourly, hourlyAppts, estDrops, isCal2, sideTab, sideHourlyAppts])
 
   const hourly = useMemo(() => {
-    const base = settingsLoading ? rawWithEst : applySettings(rawWithEst, settings)
+    const base = settingsLoading ? rawWithAppts : applySettings(rawWithAppts, settings)
     if (!rosterAvail) return base
     return base.map(row => ({ ...row, avail: rosterAvail[row.h] ?? 0 }))
-  }, [rawWithEst, settings, settingsLoading, rosterAvail])
+  }, [rawWithAppts, settings, settingsLoading, rosterAvail])
 
   const { util, delta } = computeDailyKpis(hourly)
 
@@ -214,11 +225,17 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount
 
+  // KPI pill totals — derived from project data (same source as project list)
+  // appts = inb + out only (drops are a separate column, not appointments)
+  const totalInb  = visibleProjects.reduce((s, p) => s + p.inb, 0)
+  const totalOut  = visibleProjects.reduce((s, p) => s + p.out, 0)
+  const totalDrops = visibleProjects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0)
+
   const kpiData = {
-    appts:      visibleProjects.reduce((s, p) => s + p.inb + p.out + (projectDrops[p.name] ?? 0), 0),
-    drops:      visibleProjects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0),
-    inb:        visibleProjects.reduce((s, p) => s + p.inb, 0),
-    out:        visibleProjects.reduce((s, p) => s + p.out, 0),
+    appts:      totalInb + totalOut,   // scheduled appointments only, no drops mixed in
+    drops:      totalDrops,
+    inb:        totalInb,
+    out:        totalOut,
     labor:      sideHeadcount,
     totalHours: breakAdjustedTotalHours,
     util:       util  ?? networkKpi?.util,

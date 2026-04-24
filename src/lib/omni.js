@@ -40,16 +40,31 @@ const CSW_WAREHOUSE_TO_FAC = {
 }
 
 const VIEW_H        = 'labor_planning_app__hourly_labor_required_vs_available'
-const VIEW_P        = 'labor_planning_app__hourly_inbound_outbound_drops_summary'
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 const VIEW_LP       = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
-// Exclude cancelled appointments from all appt queries.
-// Field confirmed via MotherDuck: gold.truck_appointments.dock_status_name
-// Valid values: Open, In-Yard, Door Assigned, In-Process, Completed, Cancelled
+// ── Appointment type classification ─────────────────────────────
+// Single source of truth for inbound/outbound grouping.
+// Uses dock_appointment_type_name directly (not the Omni-computed _groups field)
+// to ensure consistent classification everywhere in the app.
+//
+// Confirmed types in production_db.gold.truck_appointments:
+//   Inbound, Inbound/Drop, Inbound/Reload  → 'inbound'
+//   Outbound, Outbound/Drop, Outbound/Work-In → 'outbound'
+// Matches Omni's _groups field behavior (Drop types belong to their direction).
+function classifyApptType(typeName) {
+  const t = (typeName || '').toLowerCase()
+  if (t.startsWith('inbound'))  return 'inbound'
+  if (t.startsWith('outbound')) return 'outbound'
+  return null
+}
+
+// Exclude cancelled appointments. Field confirmed via MotherDuck:
+// gold.truck_appointments.dock_status_name values: Open, In-Yard, Door Assigned,
+// In-Process, Completed, Cancelled
 function apptStatusFilter() {
   return {
     [`${VIEW_APPT}.dock_status_name`]: {
@@ -227,6 +242,9 @@ function stripWarehouseSuffix(name) {
 
 // ── Public API ───────────────────────────────────────────────────
 
+// fetchHourlyData: returns labor req/avail from the labor model (VIEW_H).
+// inb/out/drops here come from the labor model and are NOT used for appointment
+// counts in the UI — fetchHourlyAppointments() is used for that instead.
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -237,9 +255,6 @@ export async function fetchHourlyData(facilityId, date) {
       `${VIEW_H}.hour_of_day_timestamp`,
       `${VIEW_H}.labor_required`,
       `${VIEW_H}.labor_available_aw_update_`,
-      `${VIEW_H}.inbound_count`,
-      `${VIEW_H}.outbound_count`,
-      `${VIEW_H}.drops`,
     ],
     filters: {
       [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
@@ -252,21 +267,51 @@ export async function fetchHourlyData(facilityId, date) {
     sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
     limit: 100,
   })
-  return rows.map(r => {
-    const inb   = Number(r[`${VIEW_H}.inbound_count`]) || 0
-    const out   = Number(r[`${VIEW_H}.outbound_count`]) || 0
-    const drops = Number(r[`${VIEW_H}.drops`]) || 0
-    const h     = tsToHour(r[`${VIEW_H}.hour_of_day_timestamp`])
-    return {
-      h,
-      req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
-      avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
-      drops, inb, out,
-      appts: inb + drops + out,
-    }
-  })
+  return rows.map(r => ({
+    h:     tsToHour(r[`${VIEW_H}.hour_of_day_timestamp`]),
+    req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
+    avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
+    // inb/out/drops intentionally omitted — use fetchHourlyAppointments() instead
+    inb: 0, out: 0, drops: 0, appts: 0,
+  }))
 }
 
+// fetchHourlyAppointments: per-hour inbound/outbound counts from VIEW_APPT.
+// This is the single source of truth for appointment counts in the hourly table,
+// KPI pills, and everywhere else. Uses classifyApptType() for consistent grouping.
+export async function fetchHourlyAppointments(facilityId, date) {
+  const wh = CSW_WAREHOUSE[facilityId]
+  if (!wh) return {}
+  const rows = await omniQuery({
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_APPT,
+    fields: [
+      `${VIEW_APPT}.scheduled_arrival`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
+      `${VIEW_APPT}.count`,
+    ],
+    filters: {
+      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      ...scheduledArrivalDateFilter(date),
+      ...apptStatusFilter(),
+    },
+    sorts: [],
+    limit: 1000,
+  })
+  const hourMap = {}
+  for (const r of rows) {
+    const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
+    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
+    const count = Number(r[`${VIEW_APPT}.count`]) || 0
+    if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
+    if (dir === 'inbound')  hourMap[h].inb += count
+    if (dir === 'outbound') hourMap[h].out += count
+  }
+  return hourMap
+}
+
+// fetchProjectData: per-project inbound/outbound counts.
+// Uses dock_appointment_type_name + classifyApptType() — same logic as fetchHourlyAppointments.
 export async function fetchProjectData(facilityId, date) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -275,7 +320,7 @@ export async function fetchProjectData(facilityId, date) {
     table: VIEW_APPT,
     fields: [
       `${VIEW_APPT}.project_name`,
-      `${VIEW_APPT}.dock_appointment_type_name_groups`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
       `${VIEW_APPT}.count`,
     ],
     filters: {
@@ -290,12 +335,12 @@ export async function fetchProjectData(facilityId, date) {
   for (const r of rows) {
     const name = r[`${VIEW_APPT}.project_name`] || ''
     if (!name) continue
-    const typeGroup = (r[`${VIEW_APPT}.dock_appointment_type_name_groups`] || '').toLowerCase()
+    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
     const p = projectMap.get(name)
-    if (typeGroup === 'inbounds') p.inb += count
-    else if (typeGroup === 'outbounds') p.out += count
+    if (dir === 'inbound')  p.inb += count
+    if (dir === 'outbound') p.out += count
   }
   return [...projectMap.values()]
     .map(p => ({ ...p, tot: p.inb + p.out + p.drops }))
@@ -303,6 +348,8 @@ export async function fetchProjectData(facilityId, date) {
     .sort((a, b) => b.tot - a.tot)
 }
 
+// fetchProjectHourlyAppointments: per-hour inb/out for a specific set of projects.
+// Used for CAL v2 side tabs. Same classification as everything else.
 export async function fetchProjectHourlyAppointments(facilityId, date, projectNames) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh || !projectNames?.length) return {}
@@ -311,7 +358,7 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
     table: VIEW_APPT,
     fields: [
       `${VIEW_APPT}.scheduled_arrival`,
-      `${VIEW_APPT}.dock_appointment_type_name_groups`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
       `${VIEW_APPT}.count`,
     ],
     filters: {
@@ -326,11 +373,11 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
   const hourMap = {}
   for (const r of rows) {
     const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
-    const group = (r[`${VIEW_APPT}.dock_appointment_type_name_groups`] || '').toLowerCase()
+    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
-    if (group === 'inbounds')  hourMap[h].inb += count
-    if (group === 'outbounds') hourMap[h].out += count
+    if (dir === 'inbound')  hourMap[h].inb += count
+    if (dir === 'outbound') hourMap[h].out += count
   }
   return hourMap
 }
@@ -354,7 +401,7 @@ export async function fetchNetworkKpis(date) {
       table: VIEW_APPT,
       fields: [
         `${VIEW_APPT}.warehouse_name`,
-        `${VIEW_APPT}.dock_appointment_type_name_groups`,
+        `${VIEW_APPT}.dock_appointment_type_name`,
         `${VIEW_APPT}.count`,
       ],
       filters: {
@@ -385,11 +432,11 @@ export async function fetchNetworkKpis(date) {
     const facId = CSW_WAREHOUSE_TO_FAC[wh]
     if (!facId) continue
     if (!result[facId]) result[facId] = { labor: 0, util: 0, delta: 0 }
-    const typeGroup = (r[`${VIEW_APPT}.dock_appointment_type_name_groups`] || '').toLowerCase()
+    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     result[facId].appts = (result[facId].appts || 0) + count
-    if (typeGroup === 'inbounds')  result[facId].inb = (result[facId].inb || 0) + count
-    if (typeGroup === 'outbounds') result[facId].out = (result[facId].out || 0) + count
+    if (dir === 'inbound')  result[facId].inb = (result[facId].inb || 0) + count
+    if (dir === 'outbound') result[facId].out = (result[facId].out || 0) + count
   }
   return result
 }
