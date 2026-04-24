@@ -47,11 +47,19 @@ const VIEW_LP       = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
-// TODO: Add cancelled appointment filter once exact Omni field name is confirmed.
-// The field is likely something like `gold__truck_appointments.appointment_status`
-// or `gold__truck_appointments.status_name` — needs verification against Omni schema.
-// Do NOT add the filter until the field name is confirmed — a wrong field name
-// causes the query to return 0 rows (blocks everything instead of just cancelled).
+// Exclude cancelled appointments from all appt queries.
+// Field confirmed via MotherDuck: gold.truck_appointments.dock_status_name
+// Valid values: Open, In-Yard, Door Assigned, In-Process, Completed, Cancelled
+function apptStatusFilter() {
+  return {
+    [`${VIEW_APPT}.dock_status_name`]: {
+      kind: 'EQUALS',
+      type: 'string',
+      values: ['Cancelled'],
+      is_negative: true,
+    },
+  }
+}
 
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
@@ -273,6 +281,7 @@ export async function fetchProjectData(facilityId, date) {
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       ...scheduledArrivalDateFilter(date),
+      ...apptStatusFilter(),
     },
     sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
     limit: 500,
@@ -309,6 +318,7 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: projectNames },
       ...scheduledArrivalDateFilter(date),
+      ...apptStatusFilter(),
     },
     sorts: [],
     limit: 1000,
@@ -347,7 +357,10 @@ export async function fetchNetworkKpis(date) {
         `${VIEW_APPT}.dock_appointment_type_name_groups`,
         `${VIEW_APPT}.count`,
       ],
-      filters: { ...scheduledArrivalDateFilter(date) },
+      filters: {
+        ...scheduledArrivalDateFilter(date),
+        ...apptStatusFilter(),
+      },
       sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
       limit: 1000,
     }),
@@ -409,6 +422,7 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
         isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
       },
+      ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
   })
@@ -445,6 +459,7 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
         isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
       },
+      ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
   })
