@@ -44,6 +44,9 @@ const VIEW_P        = 'labor_planning_app__hourly_inbound_outbound_drops_summary
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT     = 'gold__truck_appointments'
 const VIEW_LP       = 'silver__datex_slv_licenseplates'
+// Joined table names used in the LP topic — warehouse and project live in separate views
+const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
+const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
@@ -202,7 +205,6 @@ const CSW_NAME_SUFFIXES = [
   ' - CSW-Kenosha',
   ' - CSW-Wisconsin Rapids',
   ' - CSW-Eau Claire',
-  ' - CSW-Madison',
   '-CSW-Madison',
   ' - Madison',
 ]
@@ -510,8 +512,12 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 
 // ── Active Inventory ─────────────────────────────────────────────
 // Returns active LP count by project for a given facility.
-// Strips warehouse suffix from project names (e.g. " - CSW-Madison").
-// Sorted highest LP count first.
+// Uses the LP topic's joined table field prefixes:
+//   - warehouse filter: silver__datex_slv_warehouses.warehouse_name
+//   - project group:    silver__datex_slv_projects.project_name
+//   - LP count measure: silver__datex_slv_licenseplates.lookup_code_count_distinct
+//   - status filter:    silver__datex_slv_licenseplates.status_name
+// Strips warehouse suffix from project names. Sorted highest LP count first.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -519,19 +525,19 @@ export async function fetchActiveInventory(facilityId) {
     modelId: GOLD_MODEL_ID,
     table: VIEW_LP,
     fields: [
-      `${VIEW_LP}.project_name`,
+      `${VIEW_LP_PROJ}.project_name`,
       `${VIEW_LP}.lookup_code_count_distinct`,
     ],
     filters: {
-      [`${VIEW_LP}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
-      [`${VIEW_LP}.status_name`]:    { kind: 'EQUALS',   type: 'string', values: ['Active'] },
+      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
+      [`${VIEW_LP}.status_name`]:       { kind: 'EQUALS',   type: 'string', values: ['Active'] },
     },
     sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
     limit: 200,
   })
   return rows
     .map(r => ({
-      name: stripWarehouseSuffix(r[`${VIEW_LP}.project_name`] || ''),
+      name: stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || ''),
       lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
     }))
     .filter(r => r.name && r.lps > 0)
