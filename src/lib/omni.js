@@ -509,11 +509,12 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 
 // ── Active Inventory ─────────────────────────────────────────────
 // Returns active LP count by project for a given facility.
-// Source: silver__datex_slv_licenseplates, grouped by silver__datex_slv_projects.project_name
-// Measure: lookup_code_count_distinct — confirmed correct by Omni MCP (1,563 for Grassland WM Cooler etc.)
-// Filters applied server-side: warehouse (CONTAINS on joined warehouse table) + status = Active
-// Blank project names filtered client-side (composite filter syntax unreliable through proxy).
-// Warehouse suffix stripped client-side. Sorted highest → lowest.
+// Strategy: fetch all active LPs with warehouse_name + project_name fields,
+// then filter by warehouse client-side. The joined VIEW_LP_WH warehouse filter
+// is silently ignored by the Omni proxy — warehouse_name on the LP record itself
+// is the reliable field. Blank projects also filtered client-side.
+// Measure: lookup_code_count_distinct — confirmed correct via Omni MCP.
+// Sorted highest → lowest after client-side aggregation per project.
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -521,23 +522,33 @@ export async function fetchActiveInventory(facilityId) {
     modelId: GOLD_MODEL_ID,
     table: VIEW_LP,
     fields: [
+      `${VIEW_LP}.warehouse_name`,
       `${VIEW_LP_PROJ}.project_name`,
       `${VIEW_LP}.lookup_code_count_distinct`,
     ],
     filters: {
-      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
-      [`${VIEW_LP}.status_name`]:       { kind: 'EQUALS',   type: 'string', values: ['Active'] },
+      [`${VIEW_LP}.status_name`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
     },
     sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
-    limit: 200,
+    limit: 500,
   })
-  return rows
-    .map(r => ({
-      name: stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || ''),
-      lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
-    }))
-    .filter(r => r.name && r.name.trim() !== '' && r.lps > 0)
+  const projectMap = new Map()
+  for (const r of rows) {
+    const rowWh   = (r[`${VIEW_LP}.warehouse_name`] || '').trim()
+    const project = (r[`${VIEW_LP_PROJ}.project_name`] || '').trim()
+    const count   = Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0
+    // Client-side warehouse filter — exact match
+    if (rowWh !== wh) continue
+    if (!project) continue
+    const name = stripWarehouseSuffix(project)
+    projectMap.set(name, (projectMap.get(name) ?? 0) + count)
+  }
+  return [...projectMap.entries()]
+    .map(([name, lps]) => ({ name, lps }))
+    .filter(r => r.lps > 0)
+    .sort((a, b) => b.lps - a.lps)
 }
+
 // Fetch cal2 employee dock assignments from Supabase.
 async function fetchCal2DockAssignments() {
   if (!supabase) return new Map()
