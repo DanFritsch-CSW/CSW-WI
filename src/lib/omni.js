@@ -618,7 +618,11 @@ export async function fetchB2eRoster(facilityId, date) {
   const [rosterRows, scheduleRows] = await Promise.all([
     omniQuery({
       modelId: B2E_MODEL_ID, table: ROSTER,
-      fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
+      fields: [
+        `${ROSTER}.employee_id`,
+        `${ROSTER}.employee_status`,
+        `${ROSTER}.default_job_code`,
+      ],
       filters: {
         [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
         [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
@@ -646,6 +650,13 @@ export async function fetchB2eRoster(facilityId, date) {
   ])
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
+  // Roster reflects current job code; schedule entries may be stale after a job-code change.
+  const rosterJobCodeMap = new Map(
+    rosterRows.map(r => [
+      String(r[`${ROSTER}.employee_id`]),
+      String(r[`${ROSTER}.default_job_code`] ?? ''),
+    ])
+  )
   const schedMap  = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
@@ -660,7 +671,9 @@ export async function fetchB2eRoster(facilityId, date) {
     .filter(([id, { row: r }]) => {
       if (!activeIds.has(id)) return false
       if (excluded.has(id)) return false
-      return allowedCodes.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))
+      // Prefer roster job code (current) over schedule entry job code (may lag after a job change)
+      const jobCode = rosterJobCodeMap.get(id) || String(r[`${SCHEDULE}.default_job_code`] ?? '')
+      return allowedCodes.has(jobCode)
     })
     .map(([id, { row: r }]) => {
       const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
@@ -669,6 +682,7 @@ export async function fetchB2eRoster(facilityId, date) {
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
       const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+      const jobCode   = rosterJobCodeMap.get(id) || String(r[`${SCHEDULE}.default_job_code`] ?? '')
 
       let defaultLane
       if (isCal2) {
@@ -687,7 +701,7 @@ export async function fetchB2eRoster(facilityId, date) {
         id,
         name:         fullName,
         role:         null,
-        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
+        job_code:     jobCode,
         default_lane: defaultLane,
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),

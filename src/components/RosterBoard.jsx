@@ -331,8 +331,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
       const replErr = await replaceEmployees(facility, empRows)
       if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
-      // Re-seed assignments (ignoreDuplicates:false so updated shifts write through)
-      const seedErr = await seedRosterAssignments(b2eEmployees, date)
+      // Re-seed assignments; pass ignoreDuplicates=false so updated shifts write through
+      const seedErr = await seedRosterAssignments(b2eEmployees, date, false)
       if (seedErr) { setResetState(`Seed failed: ${seedErr}`); return }
       // Reload UI
       await load(facility, date)

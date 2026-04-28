@@ -96,7 +96,7 @@ export async function upsertEmployees(employees) {
   return null
 }
 
-export async function seedRosterAssignments(employees, planDate) {
+export async function seedRosterAssignments(employees, planDate, ignoreDuplicates = true) {
   if (!supabase || !employees.length) return null
   const rows = employees.map(e => ({
     facility:      e.facility,
@@ -111,7 +111,7 @@ export async function seedRosterAssignments(employees, planDate) {
   }))
   const { error } = await supabase
     .from('roster_assignments')
-    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: true })
+    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates })
   if (error) { console.error('seedRosterAssignments:', error); return error.message }
   return null
 }
