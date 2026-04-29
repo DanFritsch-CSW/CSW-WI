@@ -125,7 +125,6 @@ function groupByStartHour(employees, assignmentMap) {
   return sorted
 }
 
-// Derive side tint class from lane ID (cal2 only)
 function laneSideClass(laneId) {
   if (laneId.startsWith('side12_')) return 'lane-side12'
   if (laneId.startsWith('side35_')) return 'lane-side35'
@@ -201,18 +200,18 @@ const STUB_EMPLOYEES = [
   { id: 'e9', name: 'Quinn Adams',    role: 'Associate',  default_lane: 'callin' },
 ]
 
-// Active lane IDs for standard and cal2 facilities
 const STANDARD_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2', 'shift3'])
-const CAL2_ACTIVE_LANES = new Set([
+const CAL_ACTIVE_LANES = new Set([
   'side12_shift1','side12_mid','side12_shift2','side12_shift3',
   'side35_shift1','side35_mid','side35_shift2','side35_shift3',
 ])
 
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
-  const isCal2         = facility === 'cal2'
-  const activeLaneSet  = isCal2 ? LANES_CAL2     : LANES
-  const activeLaneIds  = isCal2 ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
-  const activeLaneSet_ = isCal2 ? CAL2_ACTIVE_LANES : STANDARD_ACTIVE_LANES
+  // 'cal' is the Caledonia split-view (formerly cal2)
+  const isCal         = facility === 'cal'
+  const activeLaneSet  = isCal ? LANES_CAL2     : LANES
+  const activeLaneIds  = isCal ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
+  const activeLaneSet_ = isCal ? CAL_ACTIVE_LANES : STANDARD_ACTIVE_LANES
 
   const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
@@ -321,20 +320,15 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setResetState('loading')
     try {
       const date = planDate || todayISO()
-      // Delete non-temp assignments for this date
       const err = await resetAssignmentsForDate(facility, date)
       if (err) { setResetState(`Delete failed: ${err}`); return }
-      // Re-fetch from B2E
       const b2eEmployees = await fetchB2eRoster(facility, date)
       if (!b2eEmployees.length) { setResetState('No B2E data found'); return }
-      // Replace employee records
       const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
       const replErr = await replaceEmployees(facility, empRows)
       if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
-      // Re-seed assignments (ignoreDuplicates:false so updated shifts write through)
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
       if (seedErr) { setResetState(`Seed failed: ${seedErr}`); return }
-      // Reload UI
       await load(facility, date)
       setResetState('ok')
       setTimeout(() => setResetState(null), 3000)
@@ -378,7 +372,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
-  // Fire onLaborCount with headcount only (total hours now computed in FacilityPanel via break-adjusted calc)
   useEffect(() => {
     const activeEmps = employees.filter(e => activeLaneSet_.has(laneMap[e.id] || e.default_lane))
     onLaborCount?.(activeEmps.length)
@@ -395,15 +388,11 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (!over) return
     const employeeId = active.id
     const overId     = over.id
-
-    // Check if dropping directly onto a lane droppable
     const isLane = activeLaneSet.some(l => l.id === overId)
     if (isLane) {
       if (laneMap[employeeId] !== overId) moveTo(employeeId, overId)
       return
     }
-
-    // Dropping onto another employee tile — move to that employee's lane
     const destLane = laneMap[overId] || employees.find(e => e.id === overId)?.default_lane
     if (destLane && destLane !== laneMap[employeeId]) {
       moveTo(employeeId, destLane)
@@ -442,10 +431,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
 
-  const side12Count = isCal2
+  const side12Count = isCal
     ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
     : null
-  const side35Count = isCal2
+  const side35Count = isCal
     ? ['side35_shift1','side35_mid','side35_shift2','side35_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
     : null
 
@@ -455,8 +444,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
   }
 
-  // Shared grid template — 10 equal columns for cal2, 6 for others
-  const gridCols   = isCal2 ? 'repeat(10, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))'
+  const gridCols   = isCal ? 'repeat(10, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))'
   const gridStyle  = { gridTemplateColumns: gridCols }
 
   if (isLoading) {
@@ -471,7 +459,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     <div className="roster-section">
       <div className="roster-header">
         <span className="section-label">
-          {isCal2
+          {isCal
             ? <>Shift Roster &nbsp;<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>1-2 side: <strong style={{ color: 'var(--brand)' }}>{side12Count}</strong> &nbsp;·&nbsp; 3.5 side: <strong style={{ color: 'var(--brand)' }}>{side35Count}</strong></span></>
             : 'Shift Roster'
           }
@@ -499,7 +487,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         </div>
       </div>
 
-      {isCal2 && (
+      {isCal && (
         <div className="roster-lanes" style={{ ...gridStyle, marginBottom: 6 }}>
           <div className="cal2-side-label cal2-side-12" style={{ gridColumn: '1 / 5' }}>1-2 Side</div>
           <div className="cal2-side-label cal2-side-35" style={{ gridColumn: '5 / 9' }}>3.5 Side</div>
