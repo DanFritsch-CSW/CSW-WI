@@ -364,19 +364,21 @@ input, select { font: inherit; color: inherit; }
 .lane-group-label { font-family: var(--font-mono); font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--brand); }
 .lane-group-count { font-family: var(--font-mono); font-size: 9px; color: var(--text-dim); }
 
-.emp-tile { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--r-md); cursor: grab; user-select: none; transition: background 0.1s, border-color 0.1s, transform 0.1s; }
+/* ─── Employee tile ─────────────────────────────────────────────── */
+.emp-tile { display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--r-md); cursor: grab; user-select: none; transition: background 0.1s, border-color 0.1s, transform 0.1s; }
 .emp-tile:hover { background: var(--bg4); border-color: var(--brand-dim); }
 .emp-tile.dragging { opacity: 0.45; transform: scale(0.97); }
-.emp-avatar { width: 26px; height: 26px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; color: #fff; opacity: 0.9; }
+.emp-avatar { width: 22px; height: 22px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; flex-shrink: 0; color: #fff; opacity: 0.9; }
 .emp-info { flex: 1; min-width: 0; }
-.emp-name { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.emp-name { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .emp-role { font-family: var(--font-mono); font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
 .drag-handle { color: var(--text-dim); flex-shrink: 0; }
 .emp-tile.emp-temp { border-style: dashed; border-color: var(--brand-dim); }
 .emp-temp-badge { font-size: 8px; font-weight: 700; letter-spacing: 0.08em; color: var(--brand); background: var(--brand-bg); border: 1px solid var(--brand-dim); border-radius: 3px; padding: 0 4px; margin-right: 4px; vertical-align: middle; }
 .emp-delete-btn { font-size: 14px; line-height: 1; color: var(--text-dim); flex-shrink: 0; padding: 0 2px; border-radius: var(--r-sm); }
 .emp-delete-btn:hover { color: #e05a5a; background: rgba(224,90,90,0.12); }
-.emp-shift-label { font-family: var(--font-mono); font-size: 9px; color: var(--brand); margin-top: 2px; cursor: pointer; letter-spacing: 0.03em; }
+/* Shift label: single line, no wrap — critical for narrow CAL v2 columns */
+.emp-shift-label { font-family: var(--font-mono); font-size: 8px; color: var(--brand); margin-top: 1px; cursor: pointer; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .emp-shift-label:hover { text-decoration: underline; }
 .emp-shift-edit { display: flex; align-items: center; gap: 4px; margin-top: 3px; flex-wrap: nowrap; }
 .emp-shift-time { width: 80px; padding: 1px 4px; font-size: 10px; font-family: var(--font-mono); background: var(--bg4); border: 1px solid var(--border); border-radius: 3px; color: var(--text); color-scheme: light; }
