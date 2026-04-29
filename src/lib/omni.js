@@ -46,7 +46,6 @@ const VIEW_LP       = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
-// ── Appointment type classification ─────────────────────────────
 function classifyApptType(typeName) {
   const t = (typeName || '').toLowerCase()
   if (t.startsWith('inbound'))  return 'inbound'
@@ -157,9 +156,14 @@ function parseB2eTime(s) {
   return isNaN(plain) ? null : plain
 }
 
+// Returns the start time as a decimal hour (e.g. 7.75 for 7:45 AM).
+// Preserves minute-level precision so the UI can display the exact B2E shift.
+// Labor calc rounds to nearest hour bucket downstream in laborCalc.js.
 function normalizeShiftStart(startTime) {
   const h = parseB2eTime(startTime)
-  return h != null ? Math.floor(h) : null
+  if (h == null) return null
+  // Round to nearest 0.25 (15 min) to keep storage clean
+  return Math.round(h * 4) / 4
 }
 
 function computeShiftHours(startTime, endTime) {
@@ -549,7 +553,6 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
   return Object.entries(sums).map(([project_name, total]) => ({ project_name, est_drops: Math.round(total / weeksBack) }))
 }
 
-// ── Active Inventory ─────────────────────────────────────────────
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []

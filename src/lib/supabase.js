@@ -30,13 +30,11 @@ export async function fetchEmployees(facility) {
     .from('employees')
     .select('*')
     .eq('facility', facility)
-    .in('job_code', ['205', '209'])
+    .eq('job_code', '205')
   if (error) { console.error('fetchEmployees:', error); return [] }
   return data ?? []
 }
 
-// Fetch all cal2 employees for the dock assignment editor.
-// Returns { id, name, default_lane } sorted by name.
 export async function fetchCal2Employees() {
   if (!supabase) return []
   const { data, error } = await supabase
@@ -48,13 +46,8 @@ export async function fetchCal2Employees() {
   return data ?? []
 }
 
-// Update the dock side for a single employee by writing the correct
-// side-prefixed lane into employees.default_lane.
-// side: 'side12' | 'side35'
-// Preserves the shift bucket (shift1/mid/shift2/shift3) from the current lane.
 export async function upsertEmployeeDockSide(employeeId, side, currentLane) {
   if (!supabase) return
-  // Extract existing shift suffix, default to shift1 if lane not yet set
   const shiftSuffix = (currentLane || '').replace(/^side(12|35)_/, '') || 'shift1'
   const newLane = `${side}_${shiftSuffix}`
   const { error } = await supabase
@@ -65,8 +58,6 @@ export async function upsertEmployeeDockSide(employeeId, side, currentLane) {
   return newLane
 }
 
-// Syncs the employee list for a facility: upserts current B2E employees, then
-// deletes any stale facility employees not in the B2E result.
 export async function replaceEmployees(facilityId, employees) {
   if (!supabase) return 'Supabase not configured'
   if (employees.length) {
@@ -96,6 +87,10 @@ export async function upsertEmployees(employees) {
   return null
 }
 
+// Seeds roster_assignments from B2E data.
+// Uses ignoreDuplicates: false so that a fresh B2E pull overwrites existing
+// rows with the latest shift_start / shift_hours — critical for Reset to B2E
+// to actually pull fresh schedule changes.
 export async function seedRosterAssignments(employees, planDate) {
   if (!supabase || !employees.length) return null
   const rows = employees.map(e => ({
@@ -111,7 +106,7 @@ export async function seedRosterAssignments(employees, planDate) {
   }))
   const { error } = await supabase
     .from('roster_assignments')
-    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: true })
+    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: false })
   if (error) { console.error('seedRosterAssignments:', error); return error.message }
   return null
 }
@@ -214,9 +209,6 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
-// Returns per-facility: { [facilityId]: { headcount, totalHours } }
-// headcount  = # of active-lane (shift1/mid/shift2/shift3) employees
-// totalHours = sum of shift_hours for those employees (fallback 8 hrs if null)
 export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -229,7 +221,6 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (error || !data) return {}
   const result = {}
   for (const r of data) {
-    // Normalise cal2 → cal for the scorecards (cal2 is excluded from the ALL grid anyway)
     const fac = r.facility
     if (!result[fac]) result[fac] = { headcount: 0, totalHours: 0 }
     result[fac].headcount  += 1
