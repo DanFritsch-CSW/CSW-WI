@@ -47,14 +47,6 @@ const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
 // ── Appointment type classification ─────────────────────────────
-// Single source of truth for inbound/outbound grouping.
-// Uses dock_appointment_type_name directly (not the Omni-computed _groups field)
-// to ensure consistent classification everywhere in the app.
-//
-// Confirmed types in production_db.gold.truck_appointments:
-//   Inbound, Inbound/Drop, Inbound/Reload  → 'inbound'
-//   Outbound, Outbound/Drop, Outbound/Work-In → 'outbound'
-// Matches Omni's _groups field behavior (Drop types belong to their direction).
 function classifyApptType(typeName) {
   const t = (typeName || '').toLowerCase()
   if (t.startsWith('inbound'))  return 'inbound'
@@ -62,9 +54,6 @@ function classifyApptType(typeName) {
   return null
 }
 
-// Exclude cancelled appointments. Field confirmed via MotherDuck:
-// gold.truck_appointments.dock_status_name values: Open, In-Yard, Door Assigned,
-// In-Process, Completed, Cancelled
 function apptStatusFilter() {
   return {
     [`${VIEW_APPT}.dock_status_name`]: {
@@ -111,11 +100,10 @@ const B2E_LOCATION = {
   wr:   '023 - Wisconsin Rapids',
 }
 
-const B2E_EXCLUDED_IDS = [
-  192, 566, 619, 621, 650, 727, 750, 800, 826, 964, 966,
-  5282, 5333, 5343, 5350, 5381, 5389, 5405, 5407, 5414,
-  5423, 5429, 5434, 5438, 5441, 5442, 5449, 5462, 5470, 5472, 5474,
-]
+// Only job code 205 (Warehouseman) appears on the roster board.
+// Supervisors (209), leads (208), inventory control (207), order selectors (206),
+// and all other codes are excluded via this filter — no hardcoded ID lists needed.
+const ALLOWED_JOB_CODES = new Set(['205'])
 
 const CAL2_DOCK_NAMES_35 = new Set([
   'Calvieon Howard',
@@ -242,9 +230,6 @@ function stripWarehouseSuffix(name) {
 
 // ── Public API ───────────────────────────────────────────────────
 
-// fetchHourlyData: returns labor req/avail from the labor model (VIEW_H).
-// inb/out/drops here come from the labor model and are NOT used for appointment
-// counts in the UI — fetchHourlyAppointments() is used for that instead.
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -271,14 +256,10 @@ export async function fetchHourlyData(facilityId, date) {
     h:     tsToHour(r[`${VIEW_H}.hour_of_day_timestamp`]),
     req:   Number(r[`${VIEW_H}.labor_required`]) || 0,
     avail: Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
-    // inb/out/drops intentionally omitted — use fetchHourlyAppointments() instead
     inb: 0, out: 0, drops: 0, appts: 0,
   }))
 }
 
-// fetchHourlyAppointments: per-hour inbound/outbound counts from VIEW_APPT.
-// This is the single source of truth for appointment counts in the hourly table,
-// KPI pills, and everywhere else. Uses classifyApptType() for consistent grouping.
 export async function fetchHourlyAppointments(facilityId, date) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
@@ -310,8 +291,6 @@ export async function fetchHourlyAppointments(facilityId, date) {
   return hourMap
 }
 
-// fetchProjectData: per-project inbound/outbound counts.
-// Uses dock_appointment_type_name + classifyApptType() — same logic as fetchHourlyAppointments.
 export async function fetchProjectData(facilityId, date) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
@@ -348,8 +327,6 @@ export async function fetchProjectData(facilityId, date) {
     .sort((a, b) => b.tot - a.tot)
 }
 
-// fetchProjectHourlyAppointments: per-hour inb/out for a specific set of projects.
-// Used for CAL v2 side tabs. Same classification as everything else.
 export async function fetchProjectHourlyAppointments(facilityId, date, projectNames) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh || !projectNames?.length) return {}
@@ -653,14 +630,10 @@ export async function fetchB2eRoster(facilityId, date) {
     if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
-  const excluded     = new Set(B2E_EXCLUDED_IDS.map(String))
-  const allowedCodes = new Set(['205', '209'])
-
   return [...schedMap.entries()]
     .filter(([id, { row: r }]) => {
       if (!activeIds.has(id)) return false
-      if (excluded.has(id)) return false
-      return allowedCodes.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))
+      return ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))
     })
     .map(([id, { row: r }]) => {
       const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
