@@ -87,10 +87,6 @@ export async function upsertEmployees(employees) {
   return null
 }
 
-// Seeds roster_assignments from B2E data.
-// Uses ignoreDuplicates: false so that a fresh B2E pull overwrites existing
-// rows with the latest shift_start / shift_hours — critical for Reset to B2E
-// to actually pull fresh schedule changes.
 export async function seedRosterAssignments(employees, planDate) {
   if (!supabase || !employees.length) return null
   const rows = employees.map(e => ({
@@ -209,29 +205,26 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
-// Default break multipliers — must stay in sync with laborCalc.js BREAK_DEFAULTS.
-// [83,100,75,100,50,100,75,100] / 100 per shift hour.
-// Applied here so the ALL tab scorecard Total Hrs Avail matches the facility panel.
+// Break multipliers — identical to BREAK_DEFAULTS in laborCalc.js.
+// Loop mirrors computeBreakAdjustedTotalHours exactly:
+//   for (let i = 0; i < shiftHours; i++) total += breakMuls[i] ?? 1
+// Note: fractional shift hours (e.g. 8.5) are truncated by the loop —
+// the 0.5 is NOT counted, matching laborCalc.js behavior.
 const BREAK_MULS = [0.83, 1.00, 0.75, 1.00, 0.50, 1.00, 0.75, 1.00]
 
 function breakAdjustedHours(rawHours) {
   const h = rawHours != null ? Number(rawHours) : 8
   let total = 0
+  // Mirrors: for (let i = 0; i < shiftHours; i++) total += breakMuls[i] ?? 1
   for (let i = 0; i < h; i++) {
     total += BREAK_MULS[i] ?? 1
-  }
-  // Handle fractional hours (e.g. 8.5h): add partial contribution of the last partial hour
-  const frac = h % 1
-  if (frac > 0) {
-    const idx = Math.floor(h)
-    total += (BREAK_MULS[idx] ?? 1) * frac
   }
   return total
 }
 
 // Returns per-facility: { [facilityId]: { headcount, totalHours } }
-// headcount  = # of active-lane (shift1/mid/shift2/shift3) employees
-// totalHours = break-adjusted available hours (matches facility panel KPI pill)
+// headcount  = # of active-lane employees
+// totalHours = break-adjusted hours — matches facility panel KPI pill exactly
 export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -249,7 +242,6 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
     result[fac].headcount  += 1
     result[fac].totalHours += breakAdjustedHours(r.shift_hours)
   }
-  // Round totalHours to 1 decimal
   for (const fac of Object.keys(result)) {
     result[fac].totalHours = Math.round(result[fac].totalHours * 10) / 10
   }
