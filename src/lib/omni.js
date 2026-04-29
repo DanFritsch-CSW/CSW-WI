@@ -8,7 +8,6 @@ const MODEL_ID = '79a98af2-a904-4b5d-b25f-7f6a2c7ef467'
 
 const LABOR_WAREHOUSE = {
   cal:  'franksville',
-  cal2: 'franksville',
   mad:  'madison',
   ken:  'kenosha',
   wr:   'wisconsin rapids',
@@ -17,7 +16,6 @@ const LABOR_WAREHOUSE = {
 
 const CSW_WAREHOUSE = {
   cal:  'CSW-Franksville',
-  cal2: 'CSW-Franksville',
   mad:  'CSW-Madison',
   ken:  'CSW-Kenosha',
   wr:   'CSW-Wisconsin Rapids',
@@ -82,8 +80,7 @@ const PROJECT_DROP_RULES = {
 export function isRuleProject(facilityId, projectName) {
   const rule = PROJECT_DROP_RULES[projectName]
   if (!rule) return false
-  const effectiveFac = facilityId === 'cal2' ? 'cal' : facilityId
-  return rule.facility === effectiveFac
+  return rule.facility === facilityId
 }
 
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
@@ -92,7 +89,6 @@ const SCHEDULE     = 'silver__b2e_slv_futurescheduleentries'
 
 const B2E_LOCATION = {
   cal:  '019 - Caledonia',
-  cal2: '019 - Caledonia',
   mad:  '011 - Madison',
   ec:   '012 - Eau Claire',
   ken:  '015 - Kenosha',
@@ -100,8 +96,6 @@ const B2E_LOCATION = {
 }
 
 // Only job code 205 (Warehouseman) appears on the roster board.
-// Supervisors (209), leads (208), inventory control (207), order selectors (206),
-// and all other codes are excluded via this filter — no hardcoded ID lists needed.
 const ALLOWED_JOB_CODES = new Set(['205'])
 
 const CAL2_DOCK_NAMES_35 = new Set([
@@ -158,11 +152,9 @@ function parseB2eTime(s) {
 
 // Returns the start time as a decimal hour (e.g. 7.75 for 7:45 AM).
 // Preserves minute-level precision so the UI can display the exact B2E shift.
-// Labor calc rounds to nearest hour bucket downstream in laborCalc.js.
 function normalizeShiftStart(startTime) {
   const h = parseB2eTime(startTime)
   if (h == null) return null
-  // Round to nearest 0.25 (15 min) to keep storage clean
   return Math.round(h * 4) / 4
 }
 
@@ -509,20 +501,19 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
 }
 
 export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack = 4) {
-  const effectiveFacId = facilityId === 'cal2' ? 'cal' : facilityId
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
   const pastDates = Array.from({ length: weeksBack }, (_, i) => {
     const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
     return d.toISOString().slice(0, 10)
   })
-  const results = await Promise.all(pastDates.map(d => fetchProjectData(effectiveFacId, d).catch(() => [])))
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === effectiveFacId))]
+  const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
   const out = {}
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
     const weeklyHourCounts = await Promise.all(
-      pastDates.map(d => fetchProjectHourlyDropsByRule(effectiveFacId, d, projectName, rule).catch(() => ({})))
+      pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
     )
     const sums = {}
     for (const hourMap of weeklyHourCounts) {
@@ -535,19 +526,18 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
 }
 
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
-  const effectiveFacId = facilityId === 'cal2' ? 'cal' : facilityId
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
   const pastDates = Array.from({ length: weeksBack }, (_, i) => {
     const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
     return d.toISOString().slice(0, 10)
   })
-  const results = await Promise.all(pastDates.map(d => fetchProjectData(effectiveFacId, d).catch(() => [])))
+  const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
   const sums = {}
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === effectiveFacId))]
+  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
-    const counts = await Promise.all(pastDates.map(d => fetchProjectDropsByRule(effectiveFacId, d, projectName, rule).catch(() => 0)))
+    const counts = await Promise.all(pastDates.map(d => fetchProjectDropsByRule(facilityId, d, projectName, rule).catch(() => 0)))
     sums[projectName] = counts.reduce((s, c) => s + c, 0)
   }
   return Object.entries(sums).map(([project_name, total]) => ({ project_name, est_drops: Math.round(total / weeksBack) }))
@@ -583,7 +573,7 @@ async function fetchCal2DockAssignments() {
   const { data, error } = await supabase
     .from('employees')
     .select('id, default_lane')
-    .eq('facility', 'cal2')
+    .eq('facility', 'cal')
   if (error || !data) return new Map()
   return new Map(data.map(e => [String(e.id), e.default_lane]))
 }
@@ -592,8 +582,8 @@ export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
   const refDate = date || new Date().toISOString().slice(0, 10)
-  const isCal2  = facilityId === 'cal2'
-  const dockAssignments = isCal2 ? await fetchCal2DockAssignments() : new Map()
+  const isCal   = facilityId === 'cal'
+  const dockAssignments = isCal ? await fetchCal2DockAssignments() : new Map()
 
   const [rosterRows, scheduleRows] = await Promise.all([
     omniQuery({
@@ -647,7 +637,7 @@ export async function fetchB2eRoster(facilityId, date) {
       const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
 
       let defaultLane
-      if (isCal2) {
+      if (isCal) {
         const savedLane = dockAssignments.get(id)
         if (savedLane) {
           const side = savedLane.startsWith('side35') ? 'side35' : 'side12'

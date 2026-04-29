@@ -1,10 +1,11 @@
+// CAL v2 split view is now the canonical CAL tab.
+// The old single-panel 'cal' view has been removed.
 export const FACILITIES = {
-  cal: { id: 'cal', code: 'CAL', name: 'Caledonia',         color: '#e07b4d' },
-  ken: { id: 'ken', code: 'KEN', name: 'Kenosha',           color: '#3dba7e' },
-  wr:  { id: 'wr',  code: 'WR',  name: 'Wisconsin Rapids',  color: '#d4b84a' },
-  mad: { id: 'mad', code: 'MAD', name: 'Madison',           color: '#4d9de0' },
-  ec:  { id: 'ec',  code: 'EC',  name: 'Eau Claire',        color: '#c084fc' },
-  cal2:{ id: 'cal2',code: 'CAL v2', name: 'Caledonia v2',  color: '#e07b4d' },
+  cal: { id: 'cal', code: 'CAL', name: 'Caledonia',        color: '#e07b4d' },
+  ken: { id: 'ken', code: 'KEN', name: 'Kenosha',          color: '#3dba7e' },
+  wr:  { id: 'wr',  code: 'WR',  name: 'Wisconsin Rapids', color: '#d4b84a' },
+  mad: { id: 'mad', code: 'MAD', name: 'Madison',          color: '#4d9de0' },
+  ec:  { id: 'ec',  code: 'EC',  name: 'Eau Claire',       color: '#c084fc' },
 }
 
 export const FACILITY_LIST = Object.values(FACILITIES)
@@ -18,7 +19,7 @@ export const LANES = [
   { id: 'callin', label: 'Call-In'   },
 ]
 
-// CAL v2 split lanes — 1-2 side and 3.5 side each with 4 shift lanes + shared PTO/Call-In
+// CAL split lanes — 1-2 side and 3.5 side each with 4 shift lanes + shared PTO/Call-In
 export const LANES_CAL2 = [
   { id: 'side12_shift1', label: '1-2 · 1st' },
   { id: 'side12_mid',    label: '1-2 · Mid'  },
@@ -34,16 +35,11 @@ export const LANES_CAL2 = [
 
 export const ACTIVE_LANES = ['shift1', 'mid', 'shift2', 'shift3']
 
-// Active lanes for CAL v2 (all shift lanes on both sides)
 export const ACTIVE_LANES_CAL2 = [
   'side12_shift1', 'side12_mid', 'side12_shift2', 'side12_shift3',
   'side35_shift1', 'side35_mid', 'side35_shift2', 'side35_shift3',
 ]
 
-// Dock assignment map: employee name → default lane for CAL v2.
-// Based on Omni warehouse_dock_assignment custom field.
-// Employees not listed default to 1-2 side (largest side).
-// Users can drag to correct side after initial seed.
 export const CAL2_DOCK_MAP = {
   // 3.5 side
   'Calvieon Howard':           'side35_shift1',

@@ -1,8 +1,8 @@
 import CompareChart from '../components/CompareChart.jsx'
 import { FACILITY_LIST } from '../lib/constants.js'
 
-// Exclude cal2 from the ALL-tab scorecards grid — same facility as CAL
-const SCORECARD_FACILITIES = FACILITY_LIST.filter(f => f.id !== 'cal2')
+// All facilities in FACILITY_LIST now map 1:1 to tabs — no exclusion needed.
+const SCORECARD_FACILITIES = FACILITY_LIST
 
 export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, facilityDeltas = {}, planDate, onFacilityClick }) {
   if (!networkData) return null
@@ -22,10 +22,6 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
             ? Math.round(laborData.totalHours * 10) / 10
             : '--'
 
-          // Use the facility-computed delta (break-adjusted hourly avail - req)
-          // if available — matches exactly what the facility panel shows.
-          // Falls back to flat (totalHours - labor) if the facility hasn’t been
-          // visited this session yet.
           const facilityDelta = facilityDeltas[fac.id]
           const flatDelta = (typeof totalHours === 'number' && labor != null)
             ? Math.round((totalHours - labor) * 10) / 10
