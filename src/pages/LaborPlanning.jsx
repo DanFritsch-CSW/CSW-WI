@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
-import { fetchAllFacilitiesEstDrops, fetchAllFacilitiesLaborCounts } from '../lib/supabase.js'
+import { fetchAllFacilitiesEstDrops, fetchAllFacilitiesLaborCounts, fetchAllFacilitiesSettings } from '../lib/supabase.js'
 import AllFacilities from './AllFacilities.jsx'
 import FacilityPanel from './FacilityPanel.jsx'
 
@@ -46,12 +46,11 @@ export default function LaborPlanning() {
   const [networkData, setNetworkData]                 = useState(null)
   const [facilityEstDrops, setFacilityEstDrops]       = useState({})
   const [facilityLaborCounts, setFacilityLaborCounts] = useState({})
-  // Facility-computed deltas (break-adjusted hourly avail - req) bubbled up from FacilityPanel
+  const [facilitySettings, setFacilitySettings]       = useState({})
   const [facilityDeltas, setFacilityDeltas]           = useState({})
   const [snapLabel, setSnapLabel]                     = useState('Snapshot')
   const pageRef = useRef(null)
 
-  // Reset deltas when date changes so stale values don’t linger
   useEffect(() => {
     setFacilityDeltas({})
   }, [planDate])
@@ -98,6 +97,9 @@ export default function LaborPlanning() {
     fetchNetworkKpis(planDate).then(setNetworkData)
     fetchAllFacilitiesEstDrops(planDate).then(setFacilityEstDrops)
     fetchAllFacilitiesLaborCounts(planDate).then(setFacilityLaborCounts)
+    // Settings don't change per-date — fetch once on mount, re-fetch on date change
+    // is fine since it's a cheap query with no date filter
+    fetchAllFacilitiesSettings().then(setFacilitySettings)
   }, [planDate])
 
   const activeFac = FACILITY_LIST.find(f => f.id === activeTab) || null
@@ -107,7 +109,6 @@ export default function LaborPlanning() {
 
   return (
     <div className="page-content" ref={pageRef}>
-      {/* Header */}
       <div className="page-header">
         <div>
           <div className="page-title">
@@ -149,7 +150,6 @@ export default function LaborPlanning() {
         </div>
       </div>
 
-      {/* Facility Tabs */}
       <div className="facility-tabs">
         {TABS.map(tab => (
           <button
@@ -166,12 +166,12 @@ export default function LaborPlanning() {
         ))}
       </div>
 
-      {/* Content */}
       {activeTab === 'all' ? (
         <AllFacilities
           networkData={networkData}
           facilityEstDrops={facilityEstDrops}
           facilityLaborCounts={facilityLaborCounts}
+          facilitySettings={facilitySettings}
           facilityDeltas={facilityDeltas}
           planDate={planDate}
           onFacilityClick={setActiveTab}

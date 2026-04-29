@@ -1,29 +1,32 @@
 import CompareChart from '../components/CompareChart.jsx'
 import { FACILITY_LIST } from '../lib/constants.js'
 
-// All facilities in FACILITY_LIST now map 1:1 to tabs — no exclusion needed.
-const SCORECARD_FACILITIES = FACILITY_LIST
+const DEFAULT_HPA = 1.5
 
-export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, facilityDeltas = {}, planDate, onFacilityClick }) {
+export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, facilitySettings = {}, facilityDeltas = {}, planDate, onFacilityClick }) {
   if (!networkData) return null
 
   return (
     <div>
       <CompareChart networkData={networkData} facilityEstDrops={facilityEstDrops} />
       <div className="scorecards-grid">
-        {SCORECARD_FACILITIES.map(fac => {
+        {FACILITY_LIST.map(fac => {
           const d          = networkData[fac.id] || {}
           const estDrops   = facilityEstDrops[fac.id] ?? 0
           const appts      = (d.inb ?? 0) + (d.out ?? 0) + estDrops
-          const labor      = d.labor != null ? Math.round(d.labor * 10) / 10 : null
           const laborData  = facilityLaborCounts[fac.id]
           const headcount  = laborData?.headcount  ?? '--'
           const totalHours = laborData?.totalHours != null
             ? Math.round(laborData.totalHours * 10) / 10
             : '--'
 
+          // Labor Req = appts × hours_per_appt — same formula as facility panel applySettings().
+          // Uses per-facility setting from Supabase, falling back to default 1.5.
+          const hpa   = facilitySettings[fac.id] ?? DEFAULT_HPA
+          const labor = Math.round(appts * hpa * 10) / 10
+
           const facilityDelta = facilityDeltas[fac.id]
-          const flatDelta = (typeof totalHours === 'number' && labor != null)
+          const flatDelta = (typeof totalHours === 'number')
             ? Math.round((totalHours - labor) * 10) / 10
             : null
           const delta = facilityDelta != null
@@ -72,7 +75,7 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Labor Req</span>
                   <span className="scorecard-kpi-value" style={{ color: fac.color }}>
-                    {labor ?? '--'}
+                    {labor}
                   </span>
                 </div>
                 <div className="scorecard-kpi scorecard-kpi--delta">

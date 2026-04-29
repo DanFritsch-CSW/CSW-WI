@@ -155,6 +155,26 @@ export async function upsertFacilitySettings(facilityId, values) {
   if (error) console.error('upsertFacilitySettings:', error)
 }
 
+// Returns { [facilityId]: hours_per_appt } for all facilities.
+// Used by the ALL tab to compute Labor Req = appts × hours_per_appt,
+// matching the per-facility panel calculation exactly.
+// Facilities without a settings row fall back to the default 1.5.
+export async function fetchAllFacilitiesSettings() {
+  const defaults = {}
+  for (const key of ['cal', 'ken', 'mad', 'wr', 'ec']) {
+    defaults[key] = SETTINGS_DEFAULTS.hours_per_appt
+  }
+  if (!supabase) return defaults
+  const { data, error } = await supabase
+    .from('facility_settings')
+    .select('facility, hours_per_appt')
+  if (error || !data) return defaults
+  for (const row of data) {
+    defaults[row.facility] = Number(row.hours_per_appt) || SETTINGS_DEFAULTS.hours_per_appt
+  }
+  return defaults
+}
+
 export async function fetchEstDrops(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -215,7 +235,6 @@ const BREAK_MULS = [0.83, 1.00, 0.75, 1.00, 0.50, 1.00, 0.75, 1.00]
 function breakAdjustedHours(rawHours) {
   const h = rawHours != null ? Number(rawHours) : 8
   let total = 0
-  // Mirrors: for (let i = 0; i < shiftHours; i++) total += breakMuls[i] ?? 1
   for (let i = 0; i < h; i++) {
     total += BREAK_MULS[i] ?? 1
   }
