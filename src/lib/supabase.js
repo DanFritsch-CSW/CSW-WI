@@ -40,7 +40,7 @@ export async function fetchCal2Employees() {
   const { data, error } = await supabase
     .from('employees')
     .select('id, name, default_lane')
-    .eq('facility', 'cal2')
+    .eq('facility', 'cal')
     .order('name')
   if (error) { console.error('fetchCal2Employees:', error); return [] }
   return data ?? []
@@ -209,6 +209,29 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
+// Default break multipliers — must stay in sync with laborCalc.js BREAK_DEFAULTS.
+// [83,100,75,100,50,100,75,100] / 100 per shift hour.
+// Applied here so the ALL tab scorecard Total Hrs Avail matches the facility panel.
+const BREAK_MULS = [0.83, 1.00, 0.75, 1.00, 0.50, 1.00, 0.75, 1.00]
+
+function breakAdjustedHours(rawHours) {
+  const h = rawHours != null ? Number(rawHours) : 8
+  let total = 0
+  for (let i = 0; i < h; i++) {
+    total += BREAK_MULS[i] ?? 1
+  }
+  // Handle fractional hours (e.g. 8.5h): add partial contribution of the last partial hour
+  const frac = h % 1
+  if (frac > 0) {
+    const idx = Math.floor(h)
+    total += (BREAK_MULS[idx] ?? 1) * frac
+  }
+  return total
+}
+
+// Returns per-facility: { [facilityId]: { headcount, totalHours } }
+// headcount  = # of active-lane (shift1/mid/shift2/shift3) employees
+// totalHours = break-adjusted available hours (matches facility panel KPI pill)
 export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -224,7 +247,11 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
     const fac = r.facility
     if (!result[fac]) result[fac] = { headcount: 0, totalHours: 0 }
     result[fac].headcount  += 1
-    result[fac].totalHours += r.shift_hours != null ? Number(r.shift_hours) : 8
+    result[fac].totalHours += breakAdjustedHours(r.shift_hours)
+  }
+  // Round totalHours to 1 decimal
+  for (const fac of Object.keys(result)) {
+    result[fac].totalHours = Math.round(result[fac].totalHours * 10) / 10
   }
   return result
 }
