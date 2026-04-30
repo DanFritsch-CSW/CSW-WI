@@ -151,7 +151,6 @@ function parseB2eTime(s) {
 }
 
 // Returns the start time as a decimal hour (e.g. 7.75 for 7:45 AM).
-// Preserves minute-level precision so the UI can display the exact B2E shift.
 function normalizeShiftStart(startTime) {
   const h = parseB2eTime(startTime)
   if (h == null) return null
@@ -166,11 +165,12 @@ function computeShiftHours(startTime, endTime) {
   return hours > 0 ? Math.round(hours * 2) / 2 : null
 }
 
+// Central query wrapper — injects version: 5 on every call per Omni API spec.
 async function omniQuery(query) {
   const res = await fetch('/.netlify/functions/omni-query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query: { version: 5, ...query } }),
   })
   if (!res.ok) {
     const text = await res.text()
@@ -356,35 +356,36 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
 }
 
 export async function fetchNetworkKpis(date) {
-  const [laborRows, apptRows] = await Promise.all([
-    omniQuery({
-      modelId: MODEL_ID,
-      table: VIEW_H,
-      fields: [
-        `${VIEW_H}.warehouse_name`,
-        `${VIEW_H}.labor_required_sum`,
-        `${VIEW_H}.adjusted_staffed_employee_sum`,
-      ],
-      filters: { ...activityDateFilter(date, VIEW_H) },
-      sorts: [{ column_name: `${VIEW_H}.warehouse_name`, sort_descending: false }],
-      limit: 100,
-    }),
-    omniQuery({
-      modelId: GOLD_MODEL_ID,
-      table: VIEW_APPT,
-      fields: [
-        `${VIEW_APPT}.warehouse_name`,
-        `${VIEW_APPT}.dock_appointment_type_name`,
-        `${VIEW_APPT}.count`,
-      ],
-      filters: {
-        ...scheduledArrivalDateFilter(date),
-        ...apptStatusFilter(),
-      },
-      sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
-      limit: 1000,
-    }),
-  ])
+  // Sequential to avoid parallel Omni query contention on initial page load
+  const laborRows = await omniQuery({
+    modelId: MODEL_ID,
+    table: VIEW_H,
+    fields: [
+      `${VIEW_H}.warehouse_name`,
+      `${VIEW_H}.labor_required_sum`,
+      `${VIEW_H}.adjusted_staffed_employee_sum`,
+    ],
+    filters: { ...activityDateFilter(date, VIEW_H) },
+    sorts: [{ column_name: `${VIEW_H}.warehouse_name`, sort_descending: false }],
+    limit: 100,
+  })
+
+  const apptRows = await omniQuery({
+    modelId: GOLD_MODEL_ID,
+    table: VIEW_APPT,
+    fields: [
+      `${VIEW_APPT}.warehouse_name`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
+      `${VIEW_APPT}.count`,
+    ],
+    filters: {
+      ...scheduledArrivalDateFilter(date),
+      ...apptStatusFilter(),
+    },
+    sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
+    limit: 1000,
+  })
+
   const result = {}
   for (const r of laborRows) {
     const wh    = r[`${VIEW_H}.warehouse_name`]
@@ -585,35 +586,35 @@ export async function fetchB2eRoster(facilityId, date) {
   const isCal   = facilityId === 'cal'
   const dockAssignments = isCal ? await fetchCal2DockAssignments() : new Map()
 
-  const [rosterRows, scheduleRows] = await Promise.all([
-    omniQuery({
-      modelId: B2E_MODEL_ID, table: ROSTER,
-      fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
-      filters: {
-        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+  // Sequential to reduce concurrent Omni query load
+  const rosterRows = await omniQuery({
+    modelId: B2E_MODEL_ID, table: ROSTER,
+    fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
+    filters: {
+      [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+      [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+    },
+    limit: 500,
+  })
+
+  const scheduleRows = await omniQuery({
+    modelId: B2E_MODEL_ID, table: SCHEDULE,
+    fields: [
+      `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
+      `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
+      `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
+      `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`,
+    ],
+    filters: {
+      [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+      [`${SCHEDULE}.entry_date`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: refDate, is_negative: false, offset_interval_string: '0 days',
       },
-      limit: 500,
-    }),
-    omniQuery({
-      modelId: B2E_MODEL_ID, table: SCHEDULE,
-      fields: [
-        `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
-        `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
-        `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
-        `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`,
-      ],
-      filters: {
-        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${SCHEDULE}.entry_date`]: {
-          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-          isFiscal: false, left_side: refDate, is_negative: false, offset_interval_string: '0 days',
-        },
-      },
-      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-      limit: 500,
-    }),
-  ])
+    },
+    sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
+    limit: 500,
+  })
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
   const schedMap  = new Map()
