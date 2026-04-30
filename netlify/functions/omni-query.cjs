@@ -19,7 +19,7 @@ function arrowToRows(table) {
 }
 
 const RETRY_ATTEMPTS = 2
-const RETRY_DELAY_MS = 1500
+const RETRY_DELAY_MS = 500
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
