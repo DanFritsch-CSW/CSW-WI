@@ -45,7 +45,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [activeInventory, setActiveInventory]       = useState(null)
   const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
 
-  // CAL (id:'cal') is now the split-view facility (formerly cal2)
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
   const [sideTab, setSideTab] = useState('all')
@@ -53,6 +52,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
   useEffect(() => {
+    let cancelled = false
+
     setRawHourly([])
     setHourlyAppts({})
     setHourlyErr(null)
@@ -62,48 +63,73 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setSideHourlyAppts({})
     setActiveInventory(null)
 
-    fetchHourlyData(facility.id, planDate)
-      .then(setRawHourly)
-      .catch(e => setHourlyErr(e.message))
+    async function loadData() {
+      // Phase 1: hourly labor + appointments (parallel — same model, low collision risk)
+      const [hourlyResult, apptsResult] = await Promise.allSettled([
+        fetchHourlyData(facility.id, planDate),
+        fetchHourlyAppointments(facility.id, planDate),
+      ])
+      if (cancelled) return
 
-    fetchHourlyAppointments(facility.id, planDate)
-      .then(setHourlyAppts)
-      .catch(() => setHourlyAppts({}))
+      if (hourlyResult.status === 'fulfilled') setRawHourly(hourlyResult.value)
+      else setHourlyErr(hourlyResult.reason?.message ?? 'Failed to load hourly data')
 
-    fetchProjectData(facility.id, planDate).then(setProjects)
-    fetchHourlyAdjustments(facility.id, planDate).then(setHourlyAdjustments)
+      if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
 
-    if (isMad) {
-      fetchActiveInventory(facility.id)
-        .then(setActiveInventory)
-        .catch(() => setActiveInventory([]))
+      // Phase 2: project list (sequential — waits for phase 1)
+      let fetchedProjects = []
+      try {
+        fetchedProjects = await fetchProjectData(facility.id, planDate)
+        if (!cancelled) setProjects(fetchedProjects)
+      } catch {
+        // non-fatal
+      }
+      if (cancelled) return
+
+      // Phase 2b: MAD inventory + hourly adjustments (Supabase, no Omni load)
+      if (isMad) {
+        fetchActiveInventory(facility.id)
+          .then(d => { if (!cancelled) setActiveInventory(d) })
+          .catch(() => { if (!cancelled) setActiveInventory([]) })
+      }
+      fetchHourlyAdjustments(facility.id, planDate)
+        .then(d => { if (!cancelled) setHourlyAdjustments(d) })
+
+      // Phase 3: EST drops seed (heaviest — always last)
+      try {
+        const data = await fetchProjectHourlyDrops(facility.id, planDate)
+        if (cancelled) return
+        const filtered = Object.fromEntries(
+          Object.entries(data).filter(([name]) => isRuleProject(facility.id, name))
+        )
+        if (Object.keys(filtered).length > 0) {
+          setProjectHourlyDrops(filtered)
+          return
+        }
+        setSeedingDrops(true)
+        try {
+          const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+          if (cancelled) return
+          if (Object.keys(historical).length) {
+            const rows = []
+            for (const [project_name, hourMap] of Object.entries(historical)) {
+              for (const [h, est_drops] of Object.entries(hourMap)) {
+                rows.push({ project_name, h: Number(h), est_drops })
+              }
+            }
+            await upsertProjectHourlyDrops(facility.id, planDate, rows)
+            if (!cancelled) setProjectHourlyDrops(historical)
+          }
+        } finally {
+          if (!cancelled) setSeedingDrops(false)
+        }
+      } catch {
+        if (!cancelled) setSeedingDrops(false)
+      }
     }
 
-    fetchProjectHourlyDrops(facility.id, planDate).then(async data => {
-      const filtered = Object.fromEntries(
-        Object.entries(data).filter(([name]) => isRuleProject(facility.id, name))
-      )
-      if (Object.keys(filtered).length > 0) {
-        setProjectHourlyDrops(filtered)
-        return
-      }
-      setSeedingDrops(true)
-      try {
-        const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
-        if (Object.keys(historical).length) {
-          const rows = []
-          for (const [project_name, hourMap] of Object.entries(historical)) {
-            for (const [h, est_drops] of Object.entries(hourMap)) {
-              rows.push({ project_name, h: Number(h), est_drops })
-            }
-          }
-          await upsertProjectHourlyDrops(facility.id, planDate, rows)
-          setProjectHourlyDrops(historical)
-        }
-      } finally {
-        setSeedingDrops(false)
-      }
-    })
+    loadData()
+    return () => { cancelled = true }
   }, [facility.id, planDate, isMad])
 
   useEffect(() => {
