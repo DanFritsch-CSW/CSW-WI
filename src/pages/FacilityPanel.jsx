@@ -95,7 +95,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       fetchHourlyAdjustments(facility.id, planDate)
         .then(d => { if (!cancelled) setHourlyAdjustments(d) })
 
-      // Phase 3: EST drops seed (heaviest — always last)
+      // Phase 3: EST drops seed — skip entirely if no projects for this date
+      // (prevents 24+ Omni queries firing for future dates with no appointment data)
+      if (fetchedProjects.length === 0) return
+
       try {
         const data = await fetchProjectHourlyDrops(facility.id, planDate)
         if (cancelled) return
