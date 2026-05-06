@@ -12,6 +12,7 @@ import {
   fetchProjectHourlyAppointments,
   isRuleProject,
   fetchActiveInventory,
+  KEN_GUARANTEED_PROJECTS,
 } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
@@ -47,6 +48,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
+  const isKen  = facility.id === 'ken'
   const [sideTab, setSideTab] = useState('all')
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
@@ -95,9 +97,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       fetchHourlyAdjustments(facility.id, planDate)
         .then(d => { if (!cancelled) setHourlyAdjustments(d) })
 
-      // Phase 3: EST drops seed — skip entirely if no projects for this date
-      // (prevents 24+ Omni queries firing for future dates with no appointment data)
-      if (fetchedProjects.length === 0) return
+      // Phase 3: EST drops seed
+      // For KEN: always run seeding — guaranteed projects need to appear even on empty-appointment days.
+      // For other facilities: skip if no projects returned (avoids 24+ Omni queries on future empty dates).
+      const shouldSeed = isKen || fetchedProjects.length > 0
+      if (!shouldSeed) return
 
       try {
         const data = await fetchProjectHourlyDrops(facility.id, planDate)
@@ -133,7 +137,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
     loadData()
     return () => { cancelled = true }
-  }, [facility.id, planDate, isMad])
+  }, [facility.id, planDate, isMad, isKen])
 
   useEffect(() => {
     if (!isCal2 || sideTab === 'all') {

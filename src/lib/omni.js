@@ -62,6 +62,22 @@ function apptStatusFilter() {
   }
 }
 
+// Projects that are always guaranteed to appear in EST drops seeding for KEN,
+// even if they have no appointment history in the past 4 weeks.
+// Keys here must match the display name used in PROJECT_DROP_RULES.
+export const KEN_GUARANTEED_PROJECTS = [
+  'CROWN BAKERIES',
+  'Pretzilla Kenosha',
+  'Birchwood Foods Kenosha',
+  'Fair Oaks Farms',
+  'RICHELIEU KENOSHA',
+  'RICHELIEU RAW MATERIALS KENOSHA',
+]
+
+// Fair Oaks Farms (All) merges both Omni project names into one display row.
+// The seed key in Supabase is 'Fair Oaks Farms' (merged).
+const FAIR_OAKS_OMNI_NAMES = ['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST']
+
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
     facility: 'cal',
@@ -70,9 +86,14 @@ const PROJECT_DROP_RULES = {
   },
   'CROWN BAKERIES':          { facility: 'ken', method: 'inbound_all' },
   'Pretzilla Kenosha':       { facility: 'ken', method: 'inbound_all' },
-  'BIRCHWOOD FOODS KENOSHA': { facility: 'ken', method: 'inbound_all' },
-  'FAIR OAKS FARMS':         { facility: 'ken', method: 'inbound_all' },
-  'FAIR OAKS FARMS WEST':    { facility: 'ken', method: 'inbound_all' },
+  // Birchwood Foods Kenosha: stored under this display name in Omni and Supabase
+  'Birchwood Foods Kenosha': { facility: 'ken', method: 'inbound_all' },
+  // Fair Oaks Farms: merged display row — queries both FAIR OAKS FARMS + FAIR OAKS FARMS WEST
+  'Fair Oaks Farms': {
+    facility: 'ken',
+    method: 'inbound_all_merged',
+    omniNames: FAIR_OAKS_OMNI_NAMES,
+  },
   'RICHELIEU KENOSHA':               { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
   'RICHELIEU RAW MATERIALS KENOSHA': { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
 }
@@ -308,8 +329,10 @@ export async function fetchProjectData(facilityId, date) {
   })
   const projectMap = new Map()
   for (const r of rows) {
-    const name = r[`${VIEW_APPT}.project_name`] || ''
-    if (!name) continue
+    const rawName = r[`${VIEW_APPT}.project_name`] || ''
+    if (!rawName) continue
+    // Merge Fair Oaks Farms West into the unified display name
+    const name = FAIR_OAKS_OMNI_NAMES.includes(rawName) ? 'Fair Oaks Farms' : rawName
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
@@ -433,12 +456,14 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
 async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return 0
+  // For merged rules, query all underlying Omni project names
+  const omniNames = rule.omniNames ?? [projectName]
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID, table: VIEW_APPT,
     fields: [`${VIEW_APPT}.lookup_code`, `${VIEW_APPT}.dock_appointment_type_name`, `${VIEW_APPT}.count`],
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
+      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: omniNames },
       [`${VIEW_APPT}.scheduled_arrival`]: {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
         isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
@@ -452,7 +477,7 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
       const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
       const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
       if (!type.startsWith('inbound')) return false
-      if (rule.method === 'inbound_all') return true
+      if (rule.method === 'inbound_all' || rule.method === 'inbound_all_merged') return true
       if (rule.method === 'inbound_exclude_lookup')
         return !rule.excludeWhenAll.some(group => group.every(p => code.includes(p.toUpperCase())))
       if (rule.method === 'inbound_include_lookup')
@@ -465,6 +490,8 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
 async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
+  // For merged rules, query all underlying Omni project names
+  const omniNames = rule.omniNames ?? [projectName]
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID, table: VIEW_APPT,
     fields: [
@@ -475,7 +502,7 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
     ],
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: [projectName] },
+      [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: omniNames },
       [`${VIEW_APPT}.scheduled_arrival`]: {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
         isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
@@ -494,6 +521,7 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
     } else if (rule.method === 'inbound_include_lookup') {
       if (!rule.includePatterns.some(p => code.includes(p.toUpperCase()))) continue
     }
+    // inbound_all and inbound_all_merged: include everything inbound
     const h = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     hourCounts[h] = (hourCounts[h] ?? 0) + count
@@ -508,8 +536,19 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
     return d.toISOString().slice(0, 10)
   })
+
+  // Collect rule projects that appeared in historical appointment data
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
-  const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))]
+  const seenProjects = new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))
+
+  // For KEN: also include guaranteed projects even if not seen in history
+  const guaranteedForFacility = facilityId === 'ken' ? KEN_GUARANTEED_PROJECTS : []
+  for (const p of guaranteedForFacility) {
+    if (PROJECT_DROP_RULES[p]?.facility === facilityId) seenProjects.add(p)
+  }
+
+  const ruleProjects = [...seenProjects]
+
   const out = {}
   for (const projectName of ruleProjects) {
     const rule = PROJECT_DROP_RULES[projectName]
@@ -521,7 +560,13 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
       for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
     }
     const avgs = Object.fromEntries(Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)]))
-    if (Object.keys(avgs).length > 0) out[projectName] = avgs
+    // Always include guaranteed projects even with no history — seed a zero row at hour 17 (5pm, typical 2nd shift start)
+    // so the editable column appears. User can then set actual values.
+    if (Object.keys(avgs).length > 0) {
+      out[projectName] = avgs
+    } else if (guaranteedForFacility.includes(projectName)) {
+      out[projectName] = { 17: 0 }
+    }
   }
   return out
 }
