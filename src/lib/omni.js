@@ -74,9 +74,17 @@ export const KEN_GUARANTEED_PROJECTS = [
   'RICHELIEU RAW MATERIALS KENOSHA',
 ]
 
-// Fair Oaks Farms (All) merges both Omni project names into one display row.
-// The seed key in Supabase is 'Fair Oaks Farms' (merged).
+// Omni project name mappings for KEN — raw Omni names → display/Supabase key
+// Fair Oaks: two Omni projects merged into one display row
 const FAIR_OAKS_OMNI_NAMES = ['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST']
+// Birchwood: Omni uses 'BIRCHWOOD FOODS  KENOSHA' (double space), display key is 'Birchwood Foods Kenosha'
+const BIRCHWOOD_OMNI_NAMES = ['BIRCHWOOD FOODS  KENOSHA']
+
+// Map of raw Omni project names → display/Supabase key (for fetchProjectData normalization)
+const KEN_OMNI_NAME_MAP = new Map([
+  ...FAIR_OAKS_OMNI_NAMES.map(n => [n, 'Fair Oaks Farms']),
+  ...BIRCHWOOD_OMNI_NAMES.map(n => [n, 'Birchwood Foods Kenosha']),
+])
 
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
@@ -84,11 +92,15 @@ const PROJECT_DROP_RULES = {
     method: 'inbound_exclude_lookup',
     excludeWhenAll: [['PUR', 'CMM'], ['PUR', 'PETER BROTHERS']],
   },
-  'CROWN BAKERIES':          { facility: 'ken', method: 'inbound_all' },
-  'Pretzilla Kenosha':       { facility: 'ken', method: 'inbound_all' },
-  // Birchwood Foods Kenosha: stored under this display name in Omni and Supabase
-  'Birchwood Foods Kenosha': { facility: 'ken', method: 'inbound_all' },
-  // Fair Oaks Farms: merged display row — queries both FAIR OAKS FARMS + FAIR OAKS FARMS WEST
+  'CROWN BAKERIES':    { facility: 'ken', method: 'inbound_all' },
+  'Pretzilla Kenosha': { facility: 'ken', method: 'inbound_all' },
+  // Birchwood: Omni name is 'BIRCHWOOD FOODS  KENOSHA' (double space) — queried via omniNames
+  'Birchwood Foods Kenosha': {
+    facility: 'ken',
+    method: 'inbound_all_merged',
+    omniNames: BIRCHWOOD_OMNI_NAMES,
+  },
+  // Fair Oaks: merged display row — queries both FAIR OAKS FARMS + FAIR OAKS FARMS WEST
   'Fair Oaks Farms': {
     facility: 'ken',
     method: 'inbound_all_merged',
@@ -331,8 +343,8 @@ export async function fetchProjectData(facilityId, date) {
   for (const r of rows) {
     const rawName = r[`${VIEW_APPT}.project_name`] || ''
     if (!rawName) continue
-    // Merge Fair Oaks Farms West into the unified display name
-    const name = FAIR_OAKS_OMNI_NAMES.includes(rawName) ? 'Fair Oaks Farms' : rawName
+    // Normalize KEN Omni names to display/Supabase keys (handles double-space, casing, merges)
+    const name = KEN_OMNI_NAME_MAP.get(rawName) ?? rawName
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
@@ -456,7 +468,6 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
 async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return 0
-  // For merged rules, query all underlying Omni project names
   const omniNames = rule.omniNames ?? [projectName]
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID, table: VIEW_APPT,
@@ -490,7 +501,6 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
 async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
-  // For merged rules, query all underlying Omni project names
   const omniNames = rule.omniNames ?? [projectName]
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID, table: VIEW_APPT,
@@ -537,7 +547,6 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     return d.toISOString().slice(0, 10)
   })
 
-  // Collect rule projects that appeared in historical appointment data
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
   const seenProjects = new Set(results.flat().map(r => r.name).filter(n => PROJECT_DROP_RULES[n]?.facility === facilityId))
 
@@ -560,8 +569,6 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
       for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
     }
     const avgs = Object.fromEntries(Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)]))
-    // Always include guaranteed projects even with no history — seed a zero row at hour 17 (5pm, typical 2nd shift start)
-    // so the editable column appears. User can then set actual values.
     if (Object.keys(avgs).length > 0) {
       out[projectName] = avgs
     } else if (guaranteedForFacility.includes(projectName)) {
@@ -631,7 +638,6 @@ export async function fetchB2eRoster(facilityId, date) {
   const isCal   = facilityId === 'cal'
   const dockAssignments = isCal ? await fetchCal2DockAssignments() : new Map()
 
-  // Sequential to reduce concurrent Omni query load
   const rosterRows = await omniQuery({
     modelId: B2E_MODEL_ID, table: ROSTER,
     fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
