@@ -10,6 +10,9 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
+// cellRefs[projIdx][rowIdx] = DOM element to click to open that cell
+// Navigation: Tab = down same column, Shift+Tab = up same column
+// End of column wraps to top of next column; top going back wraps to bottom of prev column
 function EditableCell({ value, onSave, onNavigate }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
@@ -24,14 +27,35 @@ function EditableCell({ value, onSave, onNavigate }) {
   }
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter')  { e.preventDefault(); commit(); onNavigate?.('down') }
-    else if (e.key === 'Escape') setEditing(false)
-    else if (e.key === 'Tab') { e.preventDefault(); commit(); onNavigate?.(e.shiftKey ? 'prev' : 'next') }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      commit()
+      onNavigate?.(e.shiftKey ? 'up' : 'down')
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      commit()
+      onNavigate?.('down')
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      commit()
+      onNavigate?.('down')
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      commit()
+      onNavigate?.('up')
+    } else if (e.key === 'Escape') {
+      setEditing(false)
+    }
   }
 
   if (editing) {
     return (
-      <input className="ht-cell-input" type="number" step={1} value={draft} autoFocus
+      <input
+        className="ht-cell-input"
+        type="number"
+        step={1}
+        value={draft}
+        autoFocus
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={handleKeyDown}
@@ -41,9 +65,11 @@ function EditableCell({ value, onSave, onNavigate }) {
   }
 
   return (
-    <span className="ht-cell-editable"
-      title="Click to edit. Tab = next project. Enter = same project next row."
-      onClick={open}>
+    <span
+      className="ht-cell-editable"
+      title="Click to edit. Tab/Enter/Arrow Down = next hour. Shift+Tab/Arrow Up = prev hour. Wraps to next/prev project at end of column."
+      onClick={open}
+    >
       {value ?? 0}
     </span>
   )
@@ -51,21 +77,30 @@ function EditableCell({ value, onSave, onNavigate }) {
 
 export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
+  // cellRefs[projIdx][rowIdx] = clickable span element
   const cellRefs = useRef({})
 
-  const setCellRef = useCallback((rowIdx, projIdx, el) => {
-    if (!cellRefs.current[rowIdx]) cellRefs.current[rowIdx] = {}
-    cellRefs.current[rowIdx][projIdx] = el
+  const setCellRef = useCallback((projIdx, rowIdx, el) => {
+    if (!cellRefs.current[projIdx]) cellRefs.current[projIdx] = {}
+    cellRefs.current[projIdx][rowIdx] = el
   }, [])
 
-  function focusCell(rowIdx, projIdx, projects) {
-    const maxRow  = Object.keys(cellRefs.current).length - 1
-    const maxProj = projects.length - 1
-    let r = rowIdx, p = projIdx
-    if (p < 0)       { r -= 1; p = maxProj }
-    if (p > maxProj) { r += 1; p = 0 }
-    r = Math.max(0, Math.min(r, maxRow))
-    cellRefs.current[r]?.[p]?.click()
+  function navigate(projIdx, rowIdx, dir, numProjects, numRows) {
+    let p = projIdx
+    let r = rowIdx
+
+    if (dir === 'down') {
+      r += 1
+      if (r >= numRows) { r = 0; p += 1 }   // wrap to top of next column
+      if (p >= numProjects) p = numProjects - 1  // clamp at last column
+    } else if (dir === 'up') {
+      r -= 1
+      if (r < 0) { r = numRows - 1; p -= 1 }  // wrap to bottom of prev column
+      if (p < 0) p = 0  // clamp at first column
+    }
+
+    const el = cellRefs.current[p]?.[r]
+    if (el) el.click()
   }
 
   if (!hourlyData?.length) return null
@@ -102,6 +137,9 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
   for (const p of projects)
     projectTotals[p] = Object.values(projectHourlyDrops[p] ?? {}).reduce((s, v) => s + v, 0)
 
+  const numRows = rows.length
+  const numProjects = projects.length
+
   return (
     <div className="hourly-table-wrap">
       <table className="hourly-table">
@@ -123,7 +161,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
               : <th className="ht-est-col">
                   EST Drops
                   {multiProject && (
-                    <button className="ht-expand-btn" onClick={() => setExpanded(true)} title="Show per-project breakdown">Expand</button>
+                    <button className="ht-expand-btn" onClick={() => setExpanded(true)}>Expand</button>
                   )}
                 </th>
             }
@@ -148,13 +186,13 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
                         <EditableCell
                           value={projectHourlyDrops[p]?.[r.h] ?? 0}
                           onSave={val => onProjectHourlyChange?.(p, r.h, val)}
-                          onNavigate={dir => {
-                            if (dir === 'next') focusCell(rowIdx, projIdx + 1, projects)
-                            else if (dir === 'prev') focusCell(rowIdx, projIdx - 1, projects)
-                            else if (dir === 'down') focusCell(rowIdx + 1, projIdx, projects)
-                          }}
+                          onNavigate={dir => navigate(projIdx, rowIdx, dir, numProjects, numRows)}
                         />
-                        <span ref={el => setCellRef(rowIdx, projIdx, el)} style={{ display: 'none' }} />
+                        {/* hidden element used as click target for programmatic focus */}
+                        <span
+                          ref={el => setCellRef(projIdx, rowIdx, el)}
+                          style={{ display: 'none' }}
+                        />
                       </td>
                     ))}
                     <td className="ht-est-col">
