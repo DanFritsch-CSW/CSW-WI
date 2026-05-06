@@ -10,9 +10,6 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
-// cellRefs[projIdx][rowIdx] = DOM element to click to open that cell
-// Navigation: Tab = down same column, Shift+Tab = up same column
-// End of column wraps to top of next column; top going back wraps to bottom of prev column
 function EditableCell({ value, onSave, onNavigate }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
@@ -34,15 +31,21 @@ function EditableCell({ value, onSave, onNavigate }) {
     } else if (e.key === 'Enter') {
       e.preventDefault()
       commit()
-      onNavigate?.('down')
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      commit()
-      onNavigate?.('down')
+      // stay on same cell — do not navigate
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
-      commit()
-      onNavigate?.('up')
+      // increment value, do not navigate
+      setDraft(prev => {
+        const n = Number(prev)
+        return isNaN(n) ? 1 : n + 1
+      })
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      // decrement value (floor at 0), do not navigate
+      setDraft(prev => {
+        const n = Number(prev)
+        return isNaN(n) ? 0 : Math.max(0, n - 1)
+      })
     } else if (e.key === 'Escape') {
       setEditing(false)
     }
@@ -67,7 +70,7 @@ function EditableCell({ value, onSave, onNavigate }) {
   return (
     <span
       className="ht-cell-editable"
-      title="Click to edit. Tab/Enter/Arrow Down = next hour. Shift+Tab/Arrow Up = prev hour. Wraps to next/prev project at end of column."
+      title="Click to edit. Tab = next hour. Shift+Tab = prev hour. Up/Down arrow = +/-1. Enter = commit."
       onClick={open}
     >
       {value ?? 0}
@@ -77,7 +80,6 @@ function EditableCell({ value, onSave, onNavigate }) {
 
 export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
-  // cellRefs[projIdx][rowIdx] = clickable span element
   const cellRefs = useRef({})
 
   const setCellRef = useCallback((projIdx, rowIdx, el) => {
@@ -88,19 +90,16 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
   function navigate(projIdx, rowIdx, dir, numProjects, numRows) {
     let p = projIdx
     let r = rowIdx
-
     if (dir === 'down') {
       r += 1
-      if (r >= numRows) { r = 0; p += 1 }   // wrap to top of next column
-      if (p >= numProjects) p = numProjects - 1  // clamp at last column
+      if (r >= numRows) { r = 0; p += 1 }
+      if (p >= numProjects) p = numProjects - 1
     } else if (dir === 'up') {
       r -= 1
-      if (r < 0) { r = numRows - 1; p -= 1 }  // wrap to bottom of prev column
-      if (p < 0) p = 0  // clamp at first column
+      if (r < 0) { r = numRows - 1; p -= 1 }
+      if (p < 0) p = 0
     }
-
-    const el = cellRefs.current[p]?.[r]
-    if (el) el.click()
+    cellRefs.current[p]?.[r]?.click()
   }
 
   if (!hourlyData?.length) return null
@@ -188,11 +187,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
                           onSave={val => onProjectHourlyChange?.(p, r.h, val)}
                           onNavigate={dir => navigate(projIdx, rowIdx, dir, numProjects, numRows)}
                         />
-                        {/* hidden element used as click target for programmatic focus */}
-                        <span
-                          ref={el => setCellRef(projIdx, rowIdx, el)}
-                          style={{ display: 'none' }}
-                        />
+                        <span ref={el => setCellRef(projIdx, rowIdx, el)} style={{ display: 'none' }} />
                       </td>
                     ))}
                     <td className="ht-est-col">
