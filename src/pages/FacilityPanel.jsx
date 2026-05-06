@@ -13,6 +13,7 @@ import {
   isRuleProject,
   fetchActiveInventory,
   KEN_GUARANTEED_PROJECTS,
+  loadCustomDropRules,
 } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
@@ -33,7 +34,6 @@ const CAL2_TABS = [
   { id: 'side35', label: '3.5 Side' },
 ]
 
-// Stale Fair Oaks split keys that should be stripped from DB results for KEN
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
@@ -48,6 +48,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
   const [activeInventory, setActiveInventory]       = useState(null)
   const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
+  const [customDropProjects, setCustomDropProjects] = useState([])
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -69,7 +70,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setActiveInventory(null)
 
     async function loadData() {
-      // Phase 1: hourly labor + appointments (parallel — same model, low collision risk)
+      // Load custom drop rules first so normalizeProjectName is ready
+      const customRows = await loadCustomDropRules(facility.id)
+      if (!cancelled) setCustomDropProjects(customRows)
+
+      // Phase 1: hourly labor + appointments
       const [hourlyResult, apptsResult] = await Promise.allSettled([
         fetchHourlyData(facility.id, planDate),
         fetchHourlyAppointments(facility.id, planDate),
@@ -81,17 +86,15 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
       if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
 
-      // Phase 2: project list (sequential — waits for phase 1)
+      // Phase 2: project list
       let fetchedProjects = []
       try {
         fetchedProjects = await fetchProjectData(facility.id, planDate)
         if (!cancelled) setProjects(fetchedProjects)
-      } catch {
-        // non-fatal
-      }
+      } catch { /* non-fatal */ }
       if (cancelled) return
 
-      // Phase 2b: MAD inventory + hourly adjustments (Supabase, no Omni load)
+      // Phase 2b: MAD inventory + hourly adjustments
       if (isMad) {
         fetchActiveInventory(facility.id)
           .then(d => { if (!cancelled) setActiveInventory(d) })
@@ -101,42 +104,37 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         .then(d => { if (!cancelled) setHourlyAdjustments(d) })
 
       // Phase 3: EST drops seed
-      // For KEN: always run — guaranteed projects must appear even on empty-appointment days.
-      // For other facilities: skip if no projects (avoids 24+ Omni queries on future empty dates).
-      const shouldSeed = isKen || fetchedProjects.length > 0
+      // KEN always seeds (guaranteed projects). Others skip if no appointments.
+      const hasCustom = customRows.length > 0
+      const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
 
       try {
         const data = await fetchProjectHourlyDrops(facility.id, planDate)
         if (cancelled) return
 
-        // Strip stale split Fair Oaks keys from DB results before applying
+        // Strip stale split Fair Oaks keys
         const filtered = Object.fromEntries(
           Object.entries(data).filter(([name]) => isRuleProject(facility.id, name) && !KEN_STALE_KEYS.has(name))
         )
 
-        if (isKen) {
-          // Determine which guaranteed projects are missing from DB
-          const missingProjects = KEN_GUARANTEED_PROJECTS.filter(p => !(p in filtered))
+        if (isKen || hasCustom) {
+          // All guaranteed + custom projects must be present
+          const allRequired = [
+            ...(isKen ? KEN_GUARANTEED_PROJECTS : []),
+            ...customRows.map(r => r.project_name),
+          ]
+          const missingProjects = allRequired.filter(p => !(p in filtered))
 
           if (missingProjects.length > 0) {
             setSeedingDrops(true)
             try {
               const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
               if (cancelled) return
-
-              // Build patch: start from historical for missing projects
-              const patch = Object.fromEntries(
-                Object.entries(historical).filter(([name]) => missingProjects.includes(name))
-              )
-
-              // Guarantee every missing project has at least a zero row at hour 17
-              // even if historical returned nothing (e.g. Birchwood with no recent appts)
+              const patch = {}
               for (const p of missingProjects) {
-                if (!(p in patch)) patch[p] = { 17: 0 }
+                patch[p] = historical[p] ?? { 17: 0 }
               }
-
-              // Write all patch rows to Supabase
               const rows = []
               for (const [project_name, hourMap] of Object.entries(patch)) {
                 for (const [h, est_drops] of Object.entries(hourMap)) {
@@ -149,13 +147,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
               if (!cancelled) setSeedingDrops(false)
             }
           } else {
-            // All guaranteed projects present — use DB rows as-is
             setProjectHourlyDrops(filtered)
           }
           return
         }
 
-        // Non-KEN: original behavior — full seed if nothing in DB
+        // Non-KEN, no custom: full seed if nothing in DB
         if (Object.keys(filtered).length > 0) {
           setProjectHourlyDrops(filtered)
           return
@@ -316,11 +313,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setSeedingDrops(true)
     try {
       const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
-      // For KEN: ensure all guaranteed projects present even if history is empty
+      // Ensure all guaranteed + custom projects present
       if (isKen) {
         for (const p of KEN_GUARANTEED_PROJECTS) {
           if (!(p in historical)) historical[p] = { 17: 0 }
         }
+      }
+      for (const row of customDropProjects) {
+        if (!(row.project_name in historical)) historical[row.project_name] = { 17: 0 }
       }
       if (Object.keys(historical).length) {
         const rows = []

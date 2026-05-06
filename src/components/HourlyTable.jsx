@@ -10,7 +10,6 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
-// Adjustment column: allows negative numbers (negative = reduce labor available)
 function EditableCell({ value, onSave }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
@@ -21,7 +20,6 @@ function EditableCell({ value, onSave }) {
   }
 
   function commit() {
-    // Allow negative values — no Math.max(0, ...) clamping
     const parsed = Number(draft)
     const val = isNaN(parsed) ? 0 : Math.round(parsed)
     setEditing(false)
@@ -47,7 +45,7 @@ function EditableCell({ value, onSave }) {
   return (
     <span
       className="ht-cell-editable"
-      title="Click to edit. Positive = extra labor needed (reduces +/-). Negative = extra labor available (increases +/-). "
+      title="Click to edit"
       onClick={open}
     >
       {value ?? 0}
@@ -60,7 +58,8 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
 
   if (!hourlyData?.length) return null
 
-  const projects = Object.keys(projectHourlyDrops)
+  // Sort project columns alphabetically for consistent ordering
+  const projects = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
   const multiProject = projects.length >= 1
 
   const sorted = [...hourlyData].sort((a, b) => {
@@ -72,11 +71,6 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
   let cumul = 0
   const rows = sorted.map(r => {
     const adj = hourlyAdjustments[r.h] ?? 0
-    // adj is ADDED to labor available: positive adj = extra labor needed (reduces final +/-)
-    // negative adj = extra labor available (increases final +/-)
-    // final = avail + adj - req  → when adj > 0 it increases avail, when adj < 0 it decreases avail
-    // Wait — Hill said "add to labor available": adj > 0 means more people available
-    // So: final = (avail + adj) - req
     const final = r1((r.avail + adj) - r.req)
     cumul = r1(cumul + final)
     return { ...r, adj, final, cumul, est: estDrops[r.h] ?? null }
@@ -128,7 +122,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
             <th>Appts</th>
             <th>Labor Req</th>
             <th>Labor Avail</th>
-            <th className="ht-adj-col" title="Adjustment to labor available this hour. Positive = more labor available (e.g. extra help). Negative = less labor available (e.g. difficult appointments). Adjusts Final +/-.">Adj</th>
+            <th className="ht-adj-col" title="Adjustment to labor available this hour.">Adj</th>
             <th>Final +/-</th>
             <th>Cumul +/-</th>
           </tr>

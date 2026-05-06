@@ -155,10 +155,6 @@ export async function upsertFacilitySettings(facilityId, values) {
   if (error) console.error('upsertFacilitySettings:', error)
 }
 
-// Returns { [facilityId]: hours_per_appt } for all facilities.
-// Used by the ALL tab to compute Labor Req = appts × hours_per_appt,
-// matching the per-facility panel calculation exactly.
-// Facilities without a settings row fall back to the default 1.5.
 export async function fetchAllFacilitiesSettings() {
   const defaults = {}
   for (const key of ['cal', 'ken', 'mad', 'wr', 'ec']) {
@@ -225,11 +221,6 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectDrops:', error)
 }
 
-// Break multipliers — identical to BREAK_DEFAULTS in laborCalc.js.
-// Loop mirrors computeBreakAdjustedTotalHours exactly:
-//   for (let i = 0; i < shiftHours; i++) total += breakMuls[i] ?? 1
-// Note: fractional shift hours (e.g. 8.5) are truncated by the loop —
-// the 0.5 is NOT counted, matching laborCalc.js behavior.
 const BREAK_MULS = [0.83, 1.00, 0.75, 1.00, 0.50, 1.00, 0.75, 1.00]
 
 function breakAdjustedHours(rawHours) {
@@ -241,9 +232,6 @@ function breakAdjustedHours(rawHours) {
   return total
 }
 
-// Returns per-facility: { [facilityId]: { headcount, totalHours } }
-// headcount  = # of active-lane employees
-// totalHours = break-adjusted hours — matches facility panel KPI pill exactly
 export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
@@ -330,4 +318,38 @@ export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
     .from('project_hourly_drops_forecast')
     .upsert(records, { onConflict: 'facility,plan_date,project_name,hour' })
   if (error) console.error('upsertProjectHourlyDrops:', error)
+}
+
+// ── Custom EST Drop Projects ────────────────────────────────────
+// Managed via Settings > EST Drop Projects tab.
+// Returns [{ id, facility, project_name, omni_name }]
+export async function fetchCustomDropProjects(facilityId) {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('facility_custom_drop_projects')
+    .select('id, facility, project_name, omni_name')
+    .eq('facility', facilityId)
+    .order('project_name')
+  if (error) { console.error('fetchCustomDropProjects:', error); return [] }
+  return data ?? []
+}
+
+export async function addCustomDropProject(facilityId, projectName, omniName) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('facility_custom_drop_projects')
+    .insert({ facility: facilityId, project_name: projectName.trim(), omni_name: omniName.trim() })
+    .select()
+    .single()
+  if (error) { console.error('addCustomDropProject:', error); return null }
+  return data
+}
+
+export async function deleteCustomDropProject(id) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('facility_custom_drop_projects')
+    .delete()
+    .eq('id', id)
+  if (error) console.error('deleteCustomDropProject:', error)
 }

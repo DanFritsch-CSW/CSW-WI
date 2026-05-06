@@ -1,16 +1,21 @@
 import { useState, useEffect } from 'react'
 import { FACILITY_LIST } from '../lib/constants.js'
-import { fetchFacilitySettings, upsertFacilitySettings, fetchCal2Employees, upsertEmployeeDockSide } from '../lib/supabase.js'
+import {
+  fetchFacilitySettings, upsertFacilitySettings,
+  fetchCal2Employees, upsertEmployeeDockSide,
+  fetchCustomDropProjects, addCustomDropProject, deleteCustomDropProject,
+} from '../lib/supabase.js'
 
 // ── Tab nav ────────────────────────────────────────────────
 
 const TABS = [
-  { id: 'labor',   label: 'Labor Planning' },
-  { id: 'breaks',  label: 'Break Assumptions' },
-  { id: 'dock',    label: 'CAL v2 Dock Assignment' },
+  { id: 'labor',    label: 'Labor Planning' },
+  { id: 'breaks',   label: 'Break Assumptions' },
+  { id: 'dock',     label: 'CAL Dock Assignment' },
+  { id: 'estdrops', label: 'EST Drop Projects' },
 ]
 
-// ── Labor Settings ────────────────────────────────────────────
+// ── Labor Settings ─────────────────────────────────────────
 
 const DEFAULTS = { hours_per_appt: 1.5 }
 
@@ -44,7 +49,7 @@ function FacilitySettingsCard({ facility }) {
         <span className="settings-facility-code">{facility.code}</span>
       </div>
       <div className="settings-fields">
-        <label className="settings-field" title="Labor hours required per appointment — drives the Labor Required calculation">
+        <label className="settings-field" title="Labor hours required per appointment">
           <span className="settings-field-label">Hours / Appt</span>
           <input
             type="number"
@@ -64,7 +69,7 @@ function FacilitySettingsCard({ facility }) {
   )
 }
 
-// ── Break Schedule Editor ───────────────────────────────────────
+// ── Break Schedule Editor ───────────────────────────────────
 
 const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 
@@ -110,7 +115,7 @@ function BreakScheduleEditor() {
           <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
             {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save breaks'}
           </button>
-          <button className="settings-save-btn" onClick={() => setValues(BREAK_DEFAULTS)}>Clear</button>
+          <button className="settings-save-btn" onClick={() => setValues(BREAK_DEFAULTS)}>Reset</button>
         </div>
       </div>
       <div className="break-schedule-grid">
@@ -127,7 +132,7 @@ function BreakScheduleEditor() {
   )
 }
 
-// ── Dock Assignment Editor ───────────────────────────────────────
+// ── Dock Assignment Editor ──────────────────────────────────
 
 function getSide(lane) {
   if (!lane) return null
@@ -149,54 +154,43 @@ function DockAssignmentEditor() {
   }, [])
 
   async function handleToggle(emp, side) {
-    if (getSide(emp.default_lane) === side) return  // already on this side
+    if (getSide(emp.default_lane) === side) return
     setSaving(prev => ({ ...prev, [emp.id]: true }))
     const newLane = await upsertEmployeeDockSide(emp.id, side, emp.default_lane)
     setEmployees(prev => prev.map(e => e.id === emp.id ? { ...e, default_lane: newLane } : e))
     setSaving(prev => ({ ...prev, [emp.id]: false }))
   }
 
-  const side12 = employees.filter(e => getSide(e.default_lane) === 'side12')
-  const side35 = employees.filter(e => getSide(e.default_lane) === 'side35')
+  const side12     = employees.filter(e => getSide(e.default_lane) === 'side12')
+  const side35     = employees.filter(e => getSide(e.default_lane) === 'side35')
   const unassigned = employees.filter(e => !getSide(e.default_lane))
 
   if (loading) return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>Loading employees…</div>
   if (!employees.length) return (
     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>
-      No CAL v2 employees found. Run a B2E sync from the CAL v2 roster tab first.
+      No CAL employees found. Run a B2E sync from the CAL roster tab first.
     </div>
   )
 
   return (
     <div className="dock-assignment-editor">
       <p className="settings-page-sub" style={{ marginBottom: 16 }}>
-        Set each employee’s default side. Changes take effect on the next B2E sync or when the page is refreshed.
+        Set each employee's default side. Changes take effect on next B2E sync or page refresh.
       </p>
-
       <div className="dock-assignment-grid">
-        {/* 1-2 Side column */}
         <div className="dock-col">
           <div className="dock-col-header dock-col-12">1-2 Side <span className="dock-col-count">{side12.length}</span></div>
-          {side12.map(emp => (
-            <DockEmployeeRow key={emp.id} emp={emp} activeSide="side12" saving={!!saving[emp.id]} onToggle={handleToggle} />
-          ))}
+          {side12.map(emp => <DockEmployeeRow key={emp.id} emp={emp} activeSide="side12" saving={!!saving[emp.id]} onToggle={handleToggle} />)}
         </div>
-
-        {/* 3.5 Side column */}
         <div className="dock-col">
           <div className="dock-col-header dock-col-35">3.5 Side <span className="dock-col-count">{side35.length}</span></div>
-          {side35.map(emp => (
-            <DockEmployeeRow key={emp.id} emp={emp} activeSide="side35" saving={!!saving[emp.id]} onToggle={handleToggle} />
-          ))}
+          {side35.map(emp => <DockEmployeeRow key={emp.id} emp={emp} activeSide="side35" saving={!!saving[emp.id]} onToggle={handleToggle} />)}
         </div>
       </div>
-
       {unassigned.length > 0 && (
         <div style={{ marginTop: 16 }}>
-          <div className="section-label" style={{ marginBottom: 8 }}>Unassigned — assign a side</div>
-          {unassigned.map(emp => (
-            <DockEmployeeRow key={emp.id} emp={emp} activeSide={null} saving={!!saving[emp.id]} onToggle={handleToggle} />
-          ))}
+          <div className="section-label" style={{ marginBottom: 8 }}>Unassigned</div>
+          {unassigned.map(emp => <DockEmployeeRow key={emp.id} emp={emp} activeSide={null} saving={!!saving[emp.id]} onToggle={handleToggle} />)}
         </div>
       )}
     </div>
@@ -210,34 +204,145 @@ function DockEmployeeRow({ emp, activeSide, saving, onToggle }) {
       <div className="dock-emp-avatar">{initials}</div>
       <span className="dock-emp-name">{emp.name}</span>
       <div className="dock-emp-actions">
-        <button
-          className={`dock-side-btn dock-side-12${activeSide === 'side12' ? ' active' : ''}`}
-          onClick={() => onToggle(emp, 'side12')}
-          disabled={saving || activeSide === 'side12'}
-        >
-          1-2
-        </button>
-        <button
-          className={`dock-side-btn dock-side-35${activeSide === 'side35' ? ' active' : ''}`}
-          onClick={() => onToggle(emp, 'side35')}
-          disabled={saving || activeSide === 'side35'}
-        >
-          3.5
-        </button>
+        <button className={`dock-side-btn dock-side-12${activeSide === 'side12' ? ' active' : ''}`}
+          onClick={() => onToggle(emp, 'side12')} disabled={saving || activeSide === 'side12'}>1-2</button>
+        <button className={`dock-side-btn dock-side-35${activeSide === 'side35' ? ' active' : ''}`}
+          onClick={() => onToggle(emp, 'side35')} disabled={saving || activeSide === 'side35'}>3.5</button>
       </div>
       {saving && <span className="dock-saving">…</span>}
     </div>
   )
 }
 
-// ── Page ──────────────────────────────────────────────────────────
+// ── EST Drop Projects Editor ────────────────────────────────
+
+function EstDropProjectsEditor() {
+  const [facility, setFacility]   = useState(FACILITY_LIST[0].id)
+  const [projects, setProjects]   = useState([])
+  const [loading, setLoading]     = useState(false)
+  const [newName, setNewName]     = useState('')
+  const [newOmni, setNewOmni]     = useState('')
+  const [adding, setAdding]       = useState(false)
+  const [error, setError]         = useState(null)
+
+  useEffect(() => {
+    setLoading(true)
+    setProjects([])
+    fetchCustomDropProjects(facility)
+      .then(data => { setProjects(data); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [facility])
+
+  async function handleAdd() {
+    if (!newName.trim() || !newOmni.trim()) { setError('Both fields required.'); return }
+    setAdding(true)
+    setError(null)
+    const row = await addCustomDropProject(facility, newName, newOmni)
+    if (row) {
+      setProjects(prev => [...prev, row].sort((a, b) => a.project_name.localeCompare(b.project_name)))
+      setNewName('')
+      setNewOmni('')
+    } else {
+      setError('Failed to add — check that the project name is unique for this facility.')
+    }
+    setAdding(false)
+  }
+
+  async function handleDelete(id) {
+    await deleteCustomDropProject(id)
+    setProjects(prev => prev.filter(p => p.id !== id))
+  }
+
+  return (
+    <div className="est-drops-editor">
+      <div className="break-schedule-controls" style={{ marginBottom: 16 }}>
+        <div className="break-schedule-warehouse">
+          <span className="break-schedule-warehouse-label">Facility</span>
+          <select className="est-drops-select" value={facility} onChange={e => { setFacility(e.target.value); setError(null) }}>
+            {FACILITY_LIST.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Existing projects */}
+      {loading
+        ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>Loading…</div>
+        : projects.length === 0
+          ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>No custom EST drop projects configured for this facility.</div>
+          : (
+            <table className="hourly-table" style={{ marginBottom: 16 }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left' }}>Display Name</th>
+                  <th style={{ textAlign: 'left' }}>Omni Project Name (exact)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {projects.map(p => (
+                  <tr key={p.id}>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{p.project_name}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{p.omni_name}</td>
+                    <td>
+                      <button
+                        className="settings-save-btn"
+                        style={{ color: '#e05a5a', borderColor: '#e05a5a' }}
+                        onClick={() => handleDelete(p.id)}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+      }
+
+      {/* Add new */}
+      <div className="settings-page-sub" style={{ marginBottom: 8, fontWeight: 600 }}>Add a project</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 8 }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Display name (shown in app)</span>
+          <input
+            className="settings-field-input"
+            style={{ width: 200 }}
+            placeholder="e.g. Good Foods Group"
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+          />
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Exact Omni project name</span>
+          <input
+            className="settings-field-input"
+            style={{ width: 260 }}
+            placeholder="e.g. GOOD FOODS GROUP"
+            value={newOmni}
+            onChange={e => setNewOmni(e.target.value)}
+          />
+        </label>
+        <button className="settings-save-btn" onClick={handleAdd} disabled={adding}>
+          {adding ? 'Adding…' : '+ Add'}
+        </button>
+      </div>
+      {error && <div style={{ fontSize: 11, color: '#e05a5a', fontFamily: 'var(--font-mono)' }}>{error}</div>}
+      <p className="settings-page-sub" style={{ marginTop: 12 }}>
+        The Omni project name must match exactly what appears in the scheduling system (case-sensitive, including spaces).
+        Once added, this project will appear in EST drops on the next page load for that facility.
+        Use ↺ Reset EST Drops on the facility tab to immediately pull the 4-week historical average.
+      </p>
+    </div>
+  )
+}
+
+// ── Page ───────────────────────────────────────────────────
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState('labor')
 
   return (
     <div className="page-content">
-      {/* Tab row */}
       <div className="settings-tab-row">
         {TABS.map(t => (
           <button
@@ -250,7 +355,6 @@ export default function Settings() {
         ))}
       </div>
 
-      {/* Labor Planning */}
       {activeTab === 'labor' && (
         <>
           <div className="settings-page-header">
@@ -263,25 +367,33 @@ export default function Settings() {
         </>
       )}
 
-      {/* Break Assumptions */}
       {activeTab === 'breaks' && (
         <>
           <div className="settings-page-header">
             <h2 className="settings-page-title">Employee Break Assumptions</h2>
-            <p className="settings-page-sub">Set the % of employees available during each hour of their shift. Used to account for lunches, breaks, and startup time.</p>
+            <p className="settings-page-sub">% of employees available during each hour of their shift. Accounts for lunches, breaks, and startup time.</p>
           </div>
           <BreakScheduleEditor />
         </>
       )}
 
-      {/* Dock Assignment */}
       {activeTab === 'dock' && (
         <>
           <div className="settings-page-header">
-            <h2 className="settings-page-title">CAL v2 Dock Assignment</h2>
+            <h2 className="settings-page-title">CAL Dock Assignment</h2>
             <p className="settings-page-sub">Assign each Caledonia employee to their default side. Persists across B2E syncs.</p>
           </div>
           <DockAssignmentEditor />
+        </>
+      )}
+
+      {activeTab === 'estdrops' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">EST Drop Projects</h2>
+            <p className="settings-page-sub">Add or remove customers tracked in the hourly EST drops table. Each project requires the exact Omni project name to pull historical data correctly.</p>
+          </div>
+          <EstDropProjectsEditor />
         </>
       )}
     </div>
