@@ -111,25 +111,32 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         if (cancelled) return
 
         // Strip stale split Fair Oaks keys from DB results before applying
-        let filtered = Object.fromEntries(
+        const filtered = Object.fromEntries(
           Object.entries(data).filter(([name]) => isRuleProject(facility.id, name) && !KEN_STALE_KEYS.has(name))
         )
 
         if (isKen) {
-          // Check if any guaranteed projects are missing from the DB rows
+          // Determine which guaranteed projects are missing from DB
           const missingProjects = KEN_GUARANTEED_PROJECTS.filter(p => !(p in filtered))
 
           if (missingProjects.length > 0) {
-            // Some guaranteed projects are absent — seed them from history
             setSeedingDrops(true)
             try {
               const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
               if (cancelled) return
-              // Merge: existing DB rows take precedence; only add missing ones from history
+
+              // Build patch: start from historical for missing projects
               const patch = Object.fromEntries(
                 Object.entries(historical).filter(([name]) => missingProjects.includes(name))
               )
-              // Write patch rows to Supabase
+
+              // Guarantee every missing project has at least a zero row at hour 17
+              // even if historical returned nothing (e.g. Birchwood with no recent appts)
+              for (const p of missingProjects) {
+                if (!(p in patch)) patch[p] = { 17: 0 }
+              }
+
+              // Write all patch rows to Supabase
               const rows = []
               for (const [project_name, hourMap] of Object.entries(patch)) {
                 for (const [h, est_drops] of Object.entries(hourMap)) {
@@ -309,6 +316,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setSeedingDrops(true)
     try {
       const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+      // For KEN: ensure all guaranteed projects present even if history is empty
+      if (isKen) {
+        for (const p of KEN_GUARANTEED_PROJECTS) {
+          if (!(p in historical)) historical[p] = { 17: 0 }
+        }
+      }
       if (Object.keys(historical).length) {
         const rows = []
         for (const [project_name, hourMap] of Object.entries(historical)) {
