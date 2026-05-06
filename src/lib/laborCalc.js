@@ -1,6 +1,5 @@
 // Hardcoded shift defaults — used as fallback when an employee has no
 // personal shift_start / shift_hours in their roster_assignments row.
-// These are no longer stored in or read from facility_settings.
 const SHIFT_DEFAULTS = {
   shift1: { start: 5,  hours: 8 },
   mid:    { start: 9,  hours: 8 },
@@ -8,7 +7,6 @@ const SHIFT_DEFAULTS = {
   shift3: { start: 22, hours: 8 },
 }
 
-// Map any lane ID → the shift bucket whose defaults apply
 const LANE_TO_SHIFT = {
   shift1:        'shift1',
   mid:           'mid',
@@ -30,8 +28,6 @@ function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
 }
 
-// Override req using facility hours_per_appt setting.
-// req is rounded to exactly 1 decimal to avoid floating-point noise.
 export function applySettings(hourlyData, settings) {
   const hpa = settings?.hours_per_appt ?? 1.5
   return hourlyData.map(row => ({
@@ -65,17 +61,8 @@ function parseStartHour(shiftStart) {
  *  2. B2E schedule data stored on the employee object (emp.shift_start)
  *  3. Hardcoded SHIFT_DEFAULTS for the employee's shift bucket
  *
- * Break multipliers reduce each person's contribution per shift hour:
- *  Hour 1: 83%, Hour 2: 100%, Hour 3: 75%, Hour 4: 100%,
- *  Hour 5: 50%, Hour 6: 100%, Hour 7: 75%, Hour 8: 100%
- * These match the Omni labor model break deductions.
- *
- * @param {Array}    employees     - employee objects
- * @param {Object}   laneMap       - { [employeeId]: laneId }
- * @param {Object}   settings      - facility settings (only break_hour_* used now)
- * @param {Object}   assignmentMap - day-specific overrides
- * @param {Set|null} laneFilter    - if provided, only count employees in these lane IDs
- * @returns {Array<number>}  24-element array indexed by hour 0-23
+ * IMPORTANT: Supabase returns NUMERIC columns as strings in JS.
+ * All shift_start and shift_hours values are coerced to Number before use.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
@@ -84,7 +71,6 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
   for (const emp of employees) {
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
 
-    // Skip employees not in the filtered lane set
     if (laneFilter && !laneFilter.has(lane)) continue
 
     const shiftKey = LANE_TO_SHIFT[lane]
@@ -93,14 +79,20 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
     const assignment    = assignmentMap?.[emp.id]
 
-    // Resolve start hour: assignment override → B2E schedule → hardcoded default
-    const startHour  = assignment?.shift_start  ?? parseStartHour(emp.shift_start)  ?? shiftDefaults.start
-    // Resolve hours: assignment override → hardcoded default (B2E doesn't reliably provide duration)
-    const shiftHours = assignment?.shift_hours  ?? shiftDefaults.hours
+    // Coerce to Number — Supabase returns NUMERIC as strings, causing
+    // string concatenation bugs in the hour index arithmetic below.
+    const rawStart = assignment?.shift_start ?? emp.shift_start
+    const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
+    const rawHours   = assignment?.shift_hours ?? shiftDefaults.hours
+    const shiftHours = rawHours != null ? Number(rawHours) : shiftDefaults.hours
 
-    for (let i = 0; i < shiftHours; i++) {
+    // Guard against NaN (bad data) — fall back to shift default
+    const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
+    const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
+
+    for (let i = 0; i < resolvedHours; i++) {
       const mul = breakMuls[i] ?? 1
-      hourlyAvail[(startHour + i) % 24] += mul
+      hourlyAvail[(resolvedStart + i) % 24] += mul
     }
   }
 
@@ -109,15 +101,7 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
 
 /**
  * Compute break-adjusted total hours for a set of employees.
- * Used for the "Total Hrs Available" KPI pill — should match the
- * sum of buildRosterAvailability across all hours.
- *
- * @param {Array}    employees     - employee objects
- * @param {Object}   laneMap       - { [employeeId]: laneId }
- * @param {Object}   settings      - facility settings
- * @param {Object}   assignmentMap - day-specific overrides
- * @param {Set|null} laneFilter    - optional lane filter
- * @returns {number}  break-adjusted total hours
+ * Used for the "Total Hrs Available" KPI pill.
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
@@ -127,13 +111,15 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
     if (laneFilter && !laneFilter.has(lane)) continue
     const shiftKey = LANE_TO_SHIFT[lane]
-    if (!shiftKey) continue  // pto, callin
+    if (!shiftKey) continue
 
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
     const assignment    = assignmentMap?.[emp.id]
-    const shiftHours    = assignment?.shift_hours ?? shiftDefaults.hours
+    const rawHours      = assignment?.shift_hours ?? shiftDefaults.hours
+    const shiftHours    = rawHours != null ? Number(rawHours) : shiftDefaults.hours
+    const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
-    for (let i = 0; i < shiftHours; i++) {
+    for (let i = 0; i < resolvedHours; i++) {
       total += breakMuls[i] ?? 1
     }
   }
