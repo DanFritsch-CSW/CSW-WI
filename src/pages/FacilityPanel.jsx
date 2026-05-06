@@ -33,6 +33,9 @@ const CAL2_TABS = [
   { id: 'side35', label: '3.5 Side' },
 ]
 
+// Stale Fair Oaks split keys that should be stripped from DB results for KEN
+const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
+
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
@@ -98,17 +101,54 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         .then(d => { if (!cancelled) setHourlyAdjustments(d) })
 
       // Phase 3: EST drops seed
-      // For KEN: always run seeding — guaranteed projects need to appear even on empty-appointment days.
-      // For other facilities: skip if no projects returned (avoids 24+ Omni queries on future empty dates).
+      // For KEN: always run — guaranteed projects must appear even on empty-appointment days.
+      // For other facilities: skip if no projects (avoids 24+ Omni queries on future empty dates).
       const shouldSeed = isKen || fetchedProjects.length > 0
       if (!shouldSeed) return
 
       try {
         const data = await fetchProjectHourlyDrops(facility.id, planDate)
         if (cancelled) return
-        const filtered = Object.fromEntries(
-          Object.entries(data).filter(([name]) => isRuleProject(facility.id, name))
+
+        // Strip stale split Fair Oaks keys from DB results before applying
+        let filtered = Object.fromEntries(
+          Object.entries(data).filter(([name]) => isRuleProject(facility.id, name) && !KEN_STALE_KEYS.has(name))
         )
+
+        if (isKen) {
+          // Check if any guaranteed projects are missing from the DB rows
+          const missingProjects = KEN_GUARANTEED_PROJECTS.filter(p => !(p in filtered))
+
+          if (missingProjects.length > 0) {
+            // Some guaranteed projects are absent — seed them from history
+            setSeedingDrops(true)
+            try {
+              const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+              if (cancelled) return
+              // Merge: existing DB rows take precedence; only add missing ones from history
+              const patch = Object.fromEntries(
+                Object.entries(historical).filter(([name]) => missingProjects.includes(name))
+              )
+              // Write patch rows to Supabase
+              const rows = []
+              for (const [project_name, hourMap] of Object.entries(patch)) {
+                for (const [h, est_drops] of Object.entries(hourMap)) {
+                  rows.push({ project_name, h: Number(h), est_drops })
+                }
+              }
+              if (rows.length) await upsertProjectHourlyDrops(facility.id, planDate, rows)
+              if (!cancelled) setProjectHourlyDrops({ ...filtered, ...patch })
+            } finally {
+              if (!cancelled) setSeedingDrops(false)
+            }
+          } else {
+            // All guaranteed projects present — use DB rows as-is
+            setProjectHourlyDrops(filtered)
+          }
+          return
+        }
+
+        // Non-KEN: original behavior — full seed if nothing in DB
         if (Object.keys(filtered).length > 0) {
           setProjectHourlyDrops(filtered)
           return
