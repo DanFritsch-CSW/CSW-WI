@@ -52,6 +52,8 @@ function classifyApptType(typeName) {
   return null
 }
 
+// Exclude cancelled/deleted appointments — applied consistently across ALL queries
+// so facility panel and ALL tab always show identical counts.
 function apptStatusFilter() {
   return {
     [`${VIEW_APPT}.dock_status_name`]: {
@@ -61,21 +63,6 @@ function apptStatusFilter() {
       is_negative: true,
     },
   }
-}
-
-// Run async tasks with a concurrency cap.
-// Each task is a zero-arg function returning a Promise.
-async function batchedRun(tasks, concurrency = 2) {
-  const results = []
-  let i = 0
-  async function runNext() {
-    if (i >= tasks.length) return
-    const idx = i++
-    results[idx] = await tasks[idx]()
-    await runNext()
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, runNext))
-  return results
 }
 
 // Hardcoded KEN guaranteed projects — always seeded even with no Omni history.
@@ -176,14 +163,8 @@ const B2E_LOCATION = {
 const ALLOWED_JOB_CODES = new Set(['205'])
 
 const CAL2_DOCK_NAMES_35 = new Set([
-  'Calvieon Howard',
-  'Ethan Lindsey',
-  'Jose Cuevas',
-  'Nicholas J. Free',
-  'Nicholas Free',
-  'Zarious Brinner',
-  'Juan Bido',
-  'Eduardo Ramon',
+  'Calvieon Howard', 'Ethan Lindsey', 'Jose Cuevas', 'Nicholas J. Free',
+  'Nicholas Free', 'Zarious Brinner', 'Juan Bido', 'Eduardo Ramon',
 ])
 
 function cal2FallbackLane(name, shiftLane) {
@@ -282,13 +263,8 @@ function tsToHour(ts) {
 }
 
 const CSW_NAME_SUFFIXES = [
-  ' - CSW-Madison',
-  ' - CSW-Franksville',
-  ' - CSW-Kenosha',
-  ' - CSW-Wisconsin Rapids',
-  ' - CSW-Eau Claire',
-  '-CSW-Madison',
-  ' - Madison',
+  ' - CSW-Madison', ' - CSW-Franksville', ' - CSW-Kenosha',
+  ' - CSW-Wisconsin Rapids', ' - CSW-Eau Claire', '-CSW-Madison', ' - Madison',
 ]
 
 function stripWarehouseSuffix(name) {
@@ -385,7 +361,7 @@ export async function fetchProjectData(facilityId, date) {
   for (const r of rows) {
     const rawName = r[`${VIEW_APPT}.project_name`] || ''
     if (!rawName) continue
-    const name = normalizeProjectName(facilityId, rawName)
+    const name = normalizeProjectName('ken', rawName)  // normalizes KEN names; safe no-op for others
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
@@ -431,6 +407,9 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
   return hourMap
 }
 
+// fetchNetworkKpis: used by the ALL tab scorecards.
+// IMPORTANT: apptStatusFilter() is applied here so cancelled appointments are excluded,
+// matching the facility panel counts exactly.
 export async function fetchNetworkKpis(date) {
   const laborRows = await omniQuery({
     modelId: MODEL_ID,
@@ -455,7 +434,7 @@ export async function fetchNetworkKpis(date) {
     ],
     filters: {
       ...scheduledArrivalDateFilter(date),
-      ...apptStatusFilter(),
+      ...apptStatusFilter(),  // exclude cancelled — matches facility panel counts
     },
     sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
     limit: 1000,
@@ -490,6 +469,20 @@ export async function fetchNetworkKpis(date) {
   return result
 }
 
+// Run async tasks with a concurrency cap.
+async function batchedRun(tasks, concurrency = 2) {
+  const results = []
+  let i = 0
+  async function runNext() {
+    if (i >= tasks.length) return
+    const idx = i++
+    results[idx] = await tasks[idx]()
+    await runNext()
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, runNext))
+  return results
+}
+
 export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBack = 4) {
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
@@ -499,9 +492,8 @@ export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBa
   })
   const results = await Promise.all(pastDates.map(d => fetchHourlyData(facilityId, d).catch(() => [])))
   const sums = {}
-  for (const rows of results) {
+  for (const rows of results)
     for (const row of rows) { sums[row.h] = (sums[row.h] ?? 0) + row.drops }
-  }
   return Object.entries(sums).map(([h, total]) => ({ h: Number(h), est: Math.round(total / weeksBack) }))
 }
 
@@ -586,11 +578,9 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     return d.toISOString().slice(0, 10)
   })
 
-  // Fetch project lists for past 4 weeks sequentially to avoid collision
   const results = []
-  for (const d of pastDates) {
+  for (const d of pastDates)
     results.push(await fetchProjectData(facilityId, d).catch(() => []))
-  }
 
   const seenProjects = new Set(
     results.flat().map(r => r.name).filter(n => isRuleProject(facilityId, n))
@@ -598,25 +588,21 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
   if (facilityId === 'ken') {
     for (const p of KEN_GUARANTEED_PROJECTS) seenProjects.add(p)
   }
-  for (const row of (CUSTOM_DROP_RULES_CACHE[facilityId] ?? [])) {
+  for (const row of (CUSTOM_DROP_RULES_CACHE[facilityId] ?? []))
     seenProjects.add(row.project_name)
-  }
 
   const ruleProjects = [...seenProjects]
   const guaranteedForFacility = facilityId === 'ken' ? KEN_GUARANTEED_PROJECTS : []
 
-  // Process projects 2 at a time — each fires 4 week queries internally (max 8 concurrent)
   const projectTasks = ruleProjects.map(projectName => async () => {
     const rule = PROJECT_DROP_RULES[projectName]
     if (!rule) return [projectName, {}]
-    // Inner week queries run in parallel — only 4 at once per project
     const weeklyHourCounts = await Promise.all(
       pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
     )
     const sums = {}
-    for (const hourMap of weeklyHourCounts) {
+    for (const hourMap of weeklyHourCounts)
       for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
-    }
     const avgs = Object.fromEntries(
       Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)])
     )
@@ -629,7 +615,10 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
   for (const [projectName, avgs] of projectResults) {
     if (Object.keys(avgs).length > 0) {
       out[projectName] = avgs
-    } else if (guaranteedForFacility.includes(projectName) || (CUSTOM_DROP_RULES_CACHE[facilityId] ?? []).some(r => r.project_name === projectName)) {
+    } else if (
+      guaranteedForFacility.includes(projectName) ||
+      (CUSTOM_DROP_RULES_CACHE[facilityId] ?? []).some(r => r.project_name === projectName)
+    ) {
       out[projectName] = { 17: 0 }
     }
   }
