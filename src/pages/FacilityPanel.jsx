@@ -70,11 +70,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setActiveInventory(null)
 
     async function loadData() {
-      // Load custom drop rules first so normalizeProjectName is ready
       const customRows = await loadCustomDropRules(facility.id)
       if (!cancelled) setCustomDropProjects(customRows)
 
-      // Phase 1: hourly labor + appointments
       const [hourlyResult, apptsResult] = await Promise.allSettled([
         fetchHourlyData(facility.id, planDate),
         fetchHourlyAppointments(facility.id, planDate),
@@ -86,7 +84,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
       if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
 
-      // Phase 2: project list
       let fetchedProjects = []
       try {
         fetchedProjects = await fetchProjectData(facility.id, planDate)
@@ -94,7 +91,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       } catch { /* non-fatal */ }
       if (cancelled) return
 
-      // Phase 2b: MAD inventory + hourly adjustments
       if (isMad) {
         fetchActiveInventory(facility.id)
           .then(d => { if (!cancelled) setActiveInventory(d) })
@@ -103,8 +99,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       fetchHourlyAdjustments(facility.id, planDate)
         .then(d => { if (!cancelled) setHourlyAdjustments(d) })
 
-      // Phase 3: EST drops seed
-      // KEN always seeds (guaranteed projects). Others skip if no appointments.
       const hasCustom = customRows.length > 0
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
@@ -113,13 +107,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         const data = await fetchProjectHourlyDrops(facility.id, planDate)
         if (cancelled) return
 
-        // Strip stale split Fair Oaks keys
         const filtered = Object.fromEntries(
           Object.entries(data).filter(([name]) => isRuleProject(facility.id, name) && !KEN_STALE_KEYS.has(name))
         )
 
         if (isKen || hasCustom) {
-          // All guaranteed + custom projects must be present
           const allRequired = [
             ...(isKen ? KEN_GUARANTEED_PROJECTS : []),
             ...customRows.map(r => r.project_name),
@@ -152,7 +144,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           return
         }
 
-        // Non-KEN, no custom: full seed if nothing in DB
         if (Object.keys(filtered).length > 0) {
           setProjectHourlyDrops(filtered)
           return
@@ -248,15 +239,22 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return result
   }, [visibleProjectHourlyDrops])
 
+  // estDrops: summed per hour across all projects, with numeric keys.
+  // This is the single source of truth for drops — both the KPI pill and
+  // the hourly table derive from this to guarantee they always match.
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops)) {
       for (const [h, v] of Object.entries(hourMap)) {
-        sums[h] = (sums[h] ?? 0) + v
+        const hour = Number(h)
+        sums[hour] = (sums[hour] ?? 0) + v
       }
     }
     return sums
   }, [visibleProjectHourlyDrops])
+
+  // totalDrops derived from estDrops (same source as table total) to guarantee pill === table
+  const totalDrops = useMemo(() => Object.values(estDrops).reduce((s, v) => s + v, 0), [estDrops])
 
   const rawWithAppts = useMemo(() => {
     if (!rawHourly.length) return rawHourly
@@ -294,9 +292,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount
 
-  const totalInb   = visibleProjects.reduce((s, p) => s + p.inb, 0)
-  const totalOut   = visibleProjects.reduce((s, p) => s + p.out, 0)
-  const totalDrops = visibleProjects.reduce((s, p) => s + (projectDrops[p.name] ?? 0), 0)
+  const totalInb = visibleProjects.reduce((s, p) => s + p.inb, 0)
+  const totalOut = visibleProjects.reduce((s, p) => s + p.out, 0)
 
   const kpiData = {
     appts:      totalInb + totalOut + totalDrops,
@@ -313,7 +310,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setSeedingDrops(true)
     try {
       const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
-      // Ensure all guaranteed + custom projects present
       if (isKen) {
         for (const p of KEN_GUARANTEED_PROJECTS) {
           if (!(p in historical)) historical[p] = { 17: 0 }
