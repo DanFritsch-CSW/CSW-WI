@@ -41,7 +41,7 @@ function addDays(iso, n) {
   const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
 }
 
-export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
+export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed, onKpiComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
   const [hourlyErr, setHourlyErr]           = useState(null)
@@ -253,16 +253,24 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { util, delta } = computeDailyKpis(hourly)
 
+  // Bubble up delta to ALL tab
   useEffect(() => {
     if (onDeltaComputed && sideTab === 'all' && delta != null) onDeltaComputed(facility.id, delta)
   }, [delta, facility.id, sideTab, onDeltaComputed])
 
+  // Bubble up inb/out/drops to ALL tab so scorecards show identical numbers
+  const totalInb = visibleProjects.reduce((s, p) => s + p.inb, 0)
+  const totalOut = visibleProjects.reduce((s, p) => s + p.out, 0)
+
+  useEffect(() => {
+    if (onKpiComputed && sideTab === 'all') {
+      onKpiComputed(facility.id, { inb: totalInb, out: totalOut, drops: totalDrops })
+    }
+  }, [totalInb, totalOut, totalDrops, facility.id, sideTab, onKpiComputed])
+
   const sideHeadcount = isCal2 && sideTab !== 'all'
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount
-
-  const totalInb = visibleProjects.reduce((s, p) => s + p.inb, 0)
-  const totalOut = visibleProjects.reduce((s, p) => s + p.out, 0)
 
   const kpiData = {
     appts: totalInb + totalOut + totalDrops, drops: totalDrops,
@@ -320,18 +328,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
           : <>
               <button className="est-reset-btn" title="Recalculate from 4-week average" onClick={resetEstDrops}>Reset EST Drops</button>
-              {hasDropData && (
-                <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
-              )}
+              {hasDropData && <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>}
             </>
         }
       </div>
 
       {copyOpen && (
-        <div style={{
-          background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8,
-          padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)',
-        }}>
+        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
             <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Copy EST drops from {planDate} to:</span>
             <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -345,7 +348,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
                 value={copyTo} onChange={e => setCopyTo(e.target.value)} />
             </label>
           </div>
-
           <div style={{ marginBottom: 10 }}>
             <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
               <span>Projects to copy:</span>
@@ -365,11 +367,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
               ))}
             </div>
           </div>
-
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>
-              {copying ? 'Copying...' : 'Copy'}
-            </button>
+            <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>{copying ? 'Copying...' : 'Copy'}</button>
             <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
             {copyMsg && <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>}
           </div>

@@ -3,7 +3,7 @@ import { FACILITY_LIST } from '../lib/constants.js'
 
 const DEFAULT_HPA = 1.5
 
-export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, facilitySettings = {}, facilityDeltas = {}, planDate, onFacilityClick }) {
+export default function AllFacilities({ networkData, facilityEstDrops = {}, facilityLaborCounts = {}, facilitySettings = {}, facilityDeltas = {}, facilityKpis = {}, planDate, onFacilityClick }) {
   if (!networkData) return null
 
   return (
@@ -11,17 +11,23 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
       <CompareChart networkData={networkData} facilityEstDrops={facilityEstDrops} />
       <div className="scorecards-grid">
         {FACILITY_LIST.map(fac => {
-          const d          = networkData[fac.id] || {}
-          const estDrops   = facilityEstDrops[fac.id] ?? 0
-          const appts      = (d.inb ?? 0) + (d.out ?? 0) + estDrops
+          const d        = networkData[fac.id] || {}
+          const panelKpi = facilityKpis[fac.id]  // set when user has visited facility tab this session
+
+          // Use facility-panel-computed inb/out/drops when available (user visited that tab).
+          // These come from the same query path as the facility panel, so numbers are identical.
+          // Fall back to networkData (fetchNetworkKpis) for unvisited facilities.
+          const inb      = panelKpi?.inb      ?? d.inb ?? 0
+          const out      = panelKpi?.out      ?? d.out ?? 0
+          const estDrops = panelKpi?.drops    ?? facilityEstDrops[fac.id] ?? 0
+          const appts    = inb + out + estDrops
+
           const laborData  = facilityLaborCounts[fac.id]
           const headcount  = laborData?.headcount  ?? '--'
           const totalHours = laborData?.totalHours != null
             ? Math.round(laborData.totalHours * 10) / 10
             : '--'
 
-          // Labor Req = appts × hours_per_appt — same formula as facility panel applySettings().
-          // Uses per-facility setting from Supabase, falling back to default 1.5.
           const hpa   = facilitySettings[fac.id] ?? DEFAULT_HPA
           const labor = Math.round(appts * hpa * 10) / 10
 
@@ -34,13 +40,10 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
             : flatDelta
 
           const deltaPositive = delta != null && delta >= 0
-          const deltaLabel    = delta != null
-            ? `${delta >= 0 ? '+' : ''}${delta}`
-            : '--'
+          const deltaLabel    = delta != null ? `${delta >= 0 ? '+' : ''}${delta}` : '--'
 
           return (
-            <div
-              key={fac.id}
+            <div key={fac.id}
               className="scorecard scorecard--clickable"
               style={{ '--accent': fac.color }}
               onClick={() => onFacilityClick?.(fac.id)}
@@ -54,11 +57,11 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                 </div>
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Inbound</span>
-                  <span className="scorecard-kpi-value">{d.inb ?? '--'}</span>
+                  <span className="scorecard-kpi-value">{inb}</span>
                 </div>
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Outbound</span>
-                  <span className="scorecard-kpi-value">{d.out ?? '--'}</span>
+                  <span className="scorecard-kpi-value">{out}</span>
                 </div>
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Est Drops</span>
@@ -74,16 +77,12 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
                 </div>
                 <div className="scorecard-kpi">
                   <span className="scorecard-kpi-label">Labor Req</span>
-                  <span className="scorecard-kpi-value" style={{ color: fac.color }}>
-                    {labor}
-                  </span>
+                  <span className="scorecard-kpi-value" style={{ color: fac.color }}>{labor}</span>
                 </div>
                 <div className="scorecard-kpi scorecard-kpi--delta">
-                  <span className="scorecard-kpi-label">Daily +/−</span>
-                  <span
-                    className="scorecard-kpi-value scorecard-delta-value"
-                    style={{ color: delta == null ? 'var(--text-dim)' : deltaPositive ? 'var(--green)' : 'var(--red)' }}
-                  >
+                  <span className="scorecard-kpi-label">Daily +/-</span>
+                  <span className="scorecard-kpi-value scorecard-delta-value"
+                    style={{ color: delta == null ? 'var(--text-dim)' : deltaPositive ? 'var(--green)' : 'var(--red)' }}>
                     {deltaLabel}
                   </span>
                 </div>
