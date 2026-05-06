@@ -63,6 +63,21 @@ function apptStatusFilter() {
   }
 }
 
+// Run async tasks with a concurrency cap.
+// Each task is a zero-arg function returning a Promise.
+async function batchedRun(tasks, concurrency = 2) {
+  const results = []
+  let i = 0
+  async function runNext() {
+    if (i >= tasks.length) return
+    const idx = i++
+    results[idx] = await tasks[idx]()
+    await runNext()
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, runNext))
+  return results
+}
+
 // Hardcoded KEN guaranteed projects — always seeded even with no Omni history.
 export const KEN_GUARANTEED_PROJECTS = [
   'CROWN BAKERIES',
@@ -77,16 +92,13 @@ export const KEN_GUARANTEED_PROJECTS = [
 const FAIR_OAKS_OMNI_NAMES  = ['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST']
 const BIRCHWOOD_OMNI_NAMES  = ['BIRCHWOOD FOODS  KENOSHA']
 
-// Built at startup; extended at runtime with custom projects from Supabase
 const KEN_OMNI_NAME_MAP = new Map([
   ...FAIR_OAKS_OMNI_NAMES.map(n => [n, 'Fair Oaks Farms']),
   ...BIRCHWOOD_OMNI_NAMES.map(n => [n, 'Birchwood Foods Kenosha']),
 ])
 
-// Per-facility runtime omni-name maps (populated by loadCustomDropRules)
 const CUSTOM_OMNI_NAME_MAPS = {}
 
-// Hardcoded drop rules (facility, method, optional omniNames)
 const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
     facility: 'cal',
@@ -109,19 +121,14 @@ const PROJECT_DROP_RULES = {
   'RICHELIEU RAW MATERIALS KENOSHA': { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
 }
 
-// Cache of custom rules loaded from Supabase per facility
 const CUSTOM_DROP_RULES_CACHE = {}
 
-// Load custom drop projects from Supabase and merge into runtime rules.
-// Called by FacilityPanel on mount. Safe to call multiple times.
 export async function loadCustomDropRules(facilityId) {
   const rows = await fetchCustomDropProjects(facilityId)
   CUSTOM_DROP_RULES_CACHE[facilityId] = rows
-  // Build omni-name map for this facility
   if (!CUSTOM_OMNI_NAME_MAPS[facilityId]) CUSTOM_OMNI_NAME_MAPS[facilityId] = new Map()
   for (const row of rows) {
     CUSTOM_OMNI_NAME_MAPS[facilityId].set(row.omni_name, row.project_name)
-    // Register in PROJECT_DROP_RULES if not already there
     if (!PROJECT_DROP_RULES[row.project_name]) {
       PROJECT_DROP_RULES[row.project_name] = {
         facility: facilityId,
@@ -137,14 +144,10 @@ export function getCustomDropProjects(facilityId) {
   return CUSTOM_DROP_RULES_CACHE[facilityId] ?? []
 }
 
-// Normalize a raw Omni project name to its display/Supabase key.
-// Handles hardcoded maps (KEN double-space, Fair Oaks) + custom project maps.
 function normalizeProjectName(facilityId, rawName) {
-  // Check facility-specific custom map first
   if (CUSTOM_OMNI_NAME_MAPS[facilityId]?.has(rawName)) {
     return CUSTOM_OMNI_NAME_MAPS[facilityId].get(rawName)
   }
-  // KEN hardcoded map
   if (facilityId === 'ken' && KEN_OMNI_NAME_MAP.has(rawName)) {
     return KEN_OMNI_NAME_MAP.get(rawName)
   }
@@ -154,7 +157,6 @@ function normalizeProjectName(facilityId, rawName) {
 export function isRuleProject(facilityId, projectName) {
   const rule = PROJECT_DROP_RULES[projectName]
   if (rule) return rule.facility === facilityId
-  // Also check custom rules cache
   const custom = CUSTOM_DROP_RULES_CACHE[facilityId] ?? []
   return custom.some(r => r.project_name === projectName)
 }
@@ -584,50 +586,50 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     return d.toISOString().slice(0, 10)
   })
 
-  const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
+  // Fetch project lists for past 4 weeks sequentially to avoid collision
+  const results = []
+  for (const d of pastDates) {
+    results.push(await fetchProjectData(facilityId, d).catch(() => []))
+  }
+
   const seenProjects = new Set(
     results.flat().map(r => r.name).filter(n => isRuleProject(facilityId, n))
   )
-
-  // KEN: always include hardcoded guaranteed projects
   if (facilityId === 'ken') {
     for (const p of KEN_GUARANTEED_PROJECTS) seenProjects.add(p)
   }
-  // All facilities: include custom projects from Supabase
   for (const row of (CUSTOM_DROP_RULES_CACHE[facilityId] ?? [])) {
     seenProjects.add(row.project_name)
   }
 
   const ruleProjects = [...seenProjects]
-
-  // Fetch all projects in parallel (was sequential — major load time improvement)
-  const projectResults = await Promise.all(
-    ruleProjects.map(async projectName => {
-      const rule = PROJECT_DROP_RULES[projectName]
-      if (!rule) return [projectName, {}]
-      const weeklyHourCounts = await Promise.all(
-        pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
-      )
-      const sums = {}
-      for (const hourMap of weeklyHourCounts) {
-        for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
-      }
-      const avgs = Object.fromEntries(
-        Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)])
-      )
-      return [projectName, avgs]
-    })
-  )
-
   const guaranteedForFacility = facilityId === 'ken' ? KEN_GUARANTEED_PROJECTS : []
+
+  // Process projects 2 at a time — each fires 4 week queries internally (max 8 concurrent)
+  const projectTasks = ruleProjects.map(projectName => async () => {
+    const rule = PROJECT_DROP_RULES[projectName]
+    if (!rule) return [projectName, {}]
+    // Inner week queries run in parallel — only 4 at once per project
+    const weeklyHourCounts = await Promise.all(
+      pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
+    )
+    const sums = {}
+    for (const hourMap of weeklyHourCounts) {
+      for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
+    }
+    const avgs = Object.fromEntries(
+      Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)])
+    )
+    return [projectName, avgs]
+  })
+
+  const projectResults = await batchedRun(projectTasks, 2)
+
   const out = {}
   for (const [projectName, avgs] of projectResults) {
     if (Object.keys(avgs).length > 0) {
       out[projectName] = avgs
-    } else if (guaranteedForFacility.includes(projectName)) {
-      out[projectName] = { 17: 0 }
-    } else {
-      // Custom projects with no history still get a zero row
+    } else if (guaranteedForFacility.includes(projectName) || (CUSTOM_DROP_RULES_CACHE[facilityId] ?? []).some(r => r.project_name === projectName)) {
       out[projectName] = { 17: 0 }
     }
   }
@@ -644,14 +646,13 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
   const sums = {}
   const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => isRuleProject(facilityId, n)))]
-  const counts = await Promise.all(
-    ruleProjects.map(async projectName => {
-      const rule = PROJECT_DROP_RULES[projectName]
-      if (!rule) return [projectName, 0]
-      const weekCounts = await Promise.all(pastDates.map(d => fetchProjectDropsByRule(facilityId, d, projectName, rule).catch(() => 0)))
-      return [projectName, weekCounts.reduce((s, c) => s + c, 0)]
-    })
-  )
+  const tasks = ruleProjects.map(projectName => async () => {
+    const rule = PROJECT_DROP_RULES[projectName]
+    if (!rule) return [projectName, 0]
+    const weekCounts = await Promise.all(pastDates.map(d => fetchProjectDropsByRule(facilityId, d, projectName, rule).catch(() => 0)))
+    return [projectName, weekCounts.reduce((s, c) => s + c, 0)]
+  })
+  const counts = await batchedRun(tasks, 2)
   for (const [name, total] of counts) sums[name] = total
   return Object.entries(sums).map(([project_name, total]) => ({ project_name, est_drops: Math.round(total / weeksBack) }))
 }
