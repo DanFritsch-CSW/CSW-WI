@@ -15,6 +15,25 @@ const TABS = [
   { id: 'estdrops', label: 'EST Drop Projects' },
 ]
 
+// Hardcoded EST drop projects per facility (mirrors PROJECT_DROP_RULES in omni.js).
+// These are system-managed and cannot be removed from the UI.
+const SYSTEM_DROP_PROJECTS = {
+  cal: [
+    { project_name: 'Palermos CALEDONIA finished', omni_name: 'Palermos CALEDONIA finished', note: 'Inbound only, excludes PUR+CMM and PUR+Peter Brothers' },
+  ],
+  ken: [
+    { project_name: 'CROWN BAKERIES',                  omni_name: 'CROWN BAKERIES',                  note: 'All inbounds' },
+    { project_name: 'Pretzilla Kenosha',               omni_name: 'Pretzilla Kenosha',               note: 'All inbounds' },
+    { project_name: 'Birchwood Foods Kenosha',         omni_name: 'BIRCHWOOD FOODS  KENOSHA',         note: 'All inbounds (Omni name has double space)' },
+    { project_name: 'Fair Oaks Farms',                 omni_name: 'FAIR OAKS FARMS + FAIR OAKS FARMS WEST', note: 'Merged — both Omni projects combined into one display row' },
+    { project_name: 'RICHELIEU KENOSHA',               omni_name: 'RICHELIEU KENOSHA',               note: 'Inbounds with TOP or PSH lookup code' },
+    { project_name: 'RICHELIEU RAW MATERIALS KENOSHA', omni_name: 'RICHELIEU RAW MATERIALS KENOSHA', note: 'Inbounds with TOP or PSH lookup code' },
+  ],
+  mad: [],
+  wr:  [],
+  ec:  [],
+}
+
 // ── Labor Settings ─────────────────────────────────────────
 
 const DEFAULTS = { hours_per_appt: 1.5 }
@@ -132,7 +151,7 @@ function BreakScheduleEditor() {
   )
 }
 
-// ── Dock Assignment Editor ──────────────────────────────────
+// ── Dock Assignment Editor ────────────────────────────────
 
 function getSide(lane) {
   if (!lane) return null
@@ -175,7 +194,7 @@ function DockAssignmentEditor() {
   return (
     <div className="dock-assignment-editor">
       <p className="settings-page-sub" style={{ marginBottom: 16 }}>
-        Set each employee's default side. Changes take effect on next B2E sync or page refresh.
+        Set each employee’s default side. Changes take effect on next B2E sync or page refresh.
       </p>
       <div className="dock-assignment-grid">
         <div className="dock-col">
@@ -218,7 +237,7 @@ function DockEmployeeRow({ emp, activeSide, saving, onToggle }) {
 
 function EstDropProjectsEditor() {
   const [facility, setFacility]   = useState(FACILITY_LIST[0].id)
-  const [projects, setProjects]   = useState([])
+  const [custom, setCustom]       = useState([])
   const [loading, setLoading]     = useState(false)
   const [newName, setNewName]     = useState('')
   const [newOmni, setNewOmni]     = useState('')
@@ -227,35 +246,38 @@ function EstDropProjectsEditor() {
 
   useEffect(() => {
     setLoading(true)
-    setProjects([])
+    setCustom([])
     fetchCustomDropProjects(facility)
-      .then(data => { setProjects(data); setLoading(false) })
+      .then(data => { setCustom(data); setLoading(false) })
       .catch(() => setLoading(false))
   }, [facility])
 
   async function handleAdd() {
-    if (!newName.trim() || !newOmni.trim()) { setError('Both fields required.'); return }
+    if (!newName.trim() || !newOmni.trim()) { setError('Both fields are required.'); return }
     setAdding(true)
     setError(null)
     const row = await addCustomDropProject(facility, newName, newOmni)
     if (row) {
-      setProjects(prev => [...prev, row].sort((a, b) => a.project_name.localeCompare(b.project_name)))
+      setCustom(prev => [...prev, row].sort((a, b) => a.project_name.localeCompare(b.project_name)))
       setNewName('')
       setNewOmni('')
     } else {
-      setError('Failed to add — check that the project name is unique for this facility.')
+      setError('Failed to add — check that the display name is unique for this facility.')
     }
     setAdding(false)
   }
 
   async function handleDelete(id) {
     await deleteCustomDropProject(id)
-    setProjects(prev => prev.filter(p => p.id !== id))
+    setCustom(prev => prev.filter(p => p.id !== id))
   }
+
+  const systemProjects = SYSTEM_DROP_PROJECTS[facility] ?? []
+  const hasAny = systemProjects.length > 0 || custom.length > 0
 
   return (
     <div className="est-drops-editor">
-      <div className="break-schedule-controls" style={{ marginBottom: 16 }}>
+      <div className="break-schedule-controls" style={{ marginBottom: 20 }}>
         <div className="break-schedule-warehouse">
           <span className="break-schedule-warehouse-label">Facility</span>
           <select className="est-drops-select" value={facility} onChange={e => { setFacility(e.target.value); setError(null) }}>
@@ -264,25 +286,39 @@ function EstDropProjectsEditor() {
         </div>
       </div>
 
-      {/* Existing projects */}
+      {/* Unified project table */}
       {loading
         ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>Loading…</div>
-        : projects.length === 0
-          ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>No custom EST drop projects configured for this facility.</div>
+        : !hasAny
+          ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>No EST drop projects configured for this facility yet.</div>
           : (
-            <table className="hourly-table" style={{ marginBottom: 16 }}>
+            <table className="hourly-table" style={{ marginBottom: 20 }}>
               <thead>
                 <tr>
                   <th style={{ textAlign: 'left' }}>Display Name</th>
-                  <th style={{ textAlign: 'left' }}>Omni Project Name (exact)</th>
+                  <th style={{ textAlign: 'left' }}>Omni Project Name</th>
+                  <th style={{ textAlign: 'left' }}>Notes</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {projects.map(p => (
+                {/* System (hardcoded) projects — read-only */}
+                {systemProjects.map(p => (
+                  <tr key={p.project_name}>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{p.project_name}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{p.omni_name}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic' }}>{p.note}</td>
+                    <td>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', padding: '2px 6px' }}>system</span>
+                    </td>
+                  </tr>
+                ))}
+                {/* Custom (user-managed) projects — removable */}
+                {custom.map(p => (
                   <tr key={p.id}>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{p.project_name}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{p.omni_name}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic' }}>All inbounds</td>
                     <td>
                       <button
                         className="settings-save-btn"
@@ -326,11 +362,12 @@ function EstDropProjectsEditor() {
           {adding ? 'Adding…' : '+ Add'}
         </button>
       </div>
-      {error && <div style={{ fontSize: 11, color: '#e05a5a', fontFamily: 'var(--font-mono)' }}>{error}</div>}
-      <p className="settings-page-sub" style={{ marginTop: 12 }}>
-        The Omni project name must match exactly what appears in the scheduling system (case-sensitive, including spaces).
-        Once added, this project will appear in EST drops on the next page load for that facility.
-        Use ↺ Reset EST Drops on the facility tab to immediately pull the 4-week historical average.
+      {error && <div style={{ fontSize: 11, color: '#e05a5a', fontFamily: 'var(--font-mono)', marginBottom: 8 }}>{error}</div>}
+      <p className="settings-page-sub" style={{ marginTop: 4 }}>
+        <strong>System projects</strong> are hardcoded and cannot be removed here — contact your developer to modify them.
+        <br />
+        <strong>Custom projects</strong> count all inbound appointments for the given Omni project name.
+        The Omni name must match exactly (case-sensitive, including spaces). After adding, use ↺ Reset EST Drops on the facility tab to pull the 4-week historical average immediately.
       </p>
     </div>
   )
@@ -391,7 +428,7 @@ export default function Settings() {
         <>
           <div className="settings-page-header">
             <h2 className="settings-page-title">EST Drop Projects</h2>
-            <p className="settings-page-sub">Add or remove customers tracked in the hourly EST drops table. Each project requires the exact Omni project name to pull historical data correctly.</p>
+            <p className="settings-page-sub">All customers tracked in the hourly EST drops table, by facility. System projects are managed in code. Custom projects can be added or removed here.</p>
           </div>
           <EstDropProjectsEditor />
         </>
