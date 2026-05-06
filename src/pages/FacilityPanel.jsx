@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
@@ -36,6 +36,32 @@ const CAL2_TABS = [
 
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
+// Generate ISO date strings for a range [from, to] inclusive
+function dateRange(from, to) {
+  const dates = []
+  const cur = new Date(from + 'T00:00:00Z')
+  const end = new Date(to   + 'T00:00:00Z')
+  while (cur <= end) {
+    dates.push(cur.toISOString().slice(0, 10))
+    cur.setUTCDate(cur.getUTCDate() + 1)
+  }
+  return dates
+}
+
+// Mon–Fri of the ISO week containing a given date
+function weekOf(isoDate) {
+  const d = new Date(isoDate + 'T00:00:00Z')
+  const day = d.getUTCDay() || 7  // Mon=1 … Sun=7
+  const mon = new Date(d)
+  mon.setUTCDate(d.getUTCDate() - (day - 1))
+  const fri = new Date(mon)
+  fri.setUTCDate(mon.getUTCDate() + 4)
+  return {
+    from: mon.toISOString().slice(0, 10),
+    to:   fri.toISOString().slice(0, 10),
+  }
+}
+
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
@@ -49,6 +75,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [activeInventory, setActiveInventory]       = useState(null)
   const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
   const [customDropProjects, setCustomDropProjects] = useState([])
+
+  // Copy-to-dates state
+  const [copyOpen, setCopyOpen]   = useState(false)
+  const [copyFrom, setCopyFrom]   = useState('')
+  const [copyTo, setCopyTo]       = useState('')
+  const [copying, setCopying]     = useState(false)
+  const [copyMsg, setCopyMsg]     = useState(null)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -174,6 +207,49 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return () => { cancelled = true }
   }, [facility.id, planDate, isMad, isKen])
 
+  // Open copy panel: default to Mon–Fri of planDate's week, excluding planDate itself
+  function openCopy() {
+    const { from, to } = weekOf(planDate)
+    setCopyFrom(from === planDate ? addDays(from, 1) : from)
+    setCopyTo(to)
+    setCopyMsg(null)
+    setCopyOpen(true)
+  }
+
+  function addDays(iso, n) {
+    const d = new Date(iso + 'T00:00:00Z')
+    d.setUTCDate(d.getUTCDate() + n)
+    return d.toISOString().slice(0, 10)
+  }
+
+  async function handleCopy() {
+    if (!copyFrom || !copyTo || copyFrom > copyTo) {
+      setCopyMsg({ err: true, text: 'Invalid date range.' })
+      return
+    }
+    const dates = dateRange(copyFrom, copyTo).filter(d => d !== planDate)
+    if (!dates.length) { setCopyMsg({ err: true, text: 'No dates to copy to.' }); return }
+
+    setCopying(true)
+    setCopyMsg(null)
+    try {
+      // Build rows from current projectHourlyDrops state
+      const rows = []
+      for (const [project_name, hourMap] of Object.entries(projectHourlyDrops)) {
+        for (const [h, est_drops] of Object.entries(hourMap)) {
+          rows.push({ project_name, h: Number(h), est_drops })
+        }
+      }
+      // Write to each target date
+      await Promise.all(dates.map(d => upsertProjectHourlyDrops(facility.id, d, rows)))
+      setCopyMsg({ err: false, text: `Copied to ${dates.length} date${dates.length > 1 ? 's' : ''}.` })
+    } catch {
+      setCopyMsg({ err: true, text: 'Copy failed — try again.' })
+    } finally {
+      setCopying(false)
+    }
+  }
+
   useEffect(() => {
     if (!isCal2 || sideTab === 'all') {
       setSideHourlyAppts({})
@@ -239,9 +315,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return result
   }, [visibleProjectHourlyDrops])
 
-  // estDrops: summed per hour across all projects, with numeric keys.
-  // This is the single source of truth for drops — both the KPI pill and
-  // the hourly table derive from this to guarantee they always match.
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops)) {
@@ -253,7 +326,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return sums
   }, [visibleProjectHourlyDrops])
 
-  // totalDrops derived from estDrops (same source as table total) to guarantee pill === table
   const totalDrops = useMemo(() => Object.values(estDrops).reduce((s, v) => s + v, 0), [estDrops])
 
   const rawWithAppts = useMemo(() => {
@@ -333,6 +405,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     }
   }
 
+  const hasDropData = Object.keys(projectHourlyDrops).length > 0
+
   return (
     <div>
       {isCal2 && (
@@ -365,14 +439,49 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
       <HourlyChart hourlyData={hourly} color={facility.color} />
 
-      <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span>Hourly Breakdown</span>
         {seedingDrops
-          ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast…</span>
-          : <button className="est-reset-btn" title="Recalculate EST drops from last 4-week historical average" onClick={resetEstDrops}>
-              ↺ Reset EST Drops
-            </button>
+          ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast\u2026</span>
+          : <>
+              <button className="est-reset-btn" title="Recalculate EST drops from last 4-week historical average" onClick={resetEstDrops}>
+                \u21ba Reset EST Drops
+              </button>
+              {hasDropData && (
+                <button className="est-reset-btn" title="Copy current EST drop values to other dates" onClick={openCopy}>
+                  \u29c9 Copy to dates\u2026
+                </button>
+              )}
+            </>
         }
+
+        {/* Inline copy panel */}
+        {copyOpen && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            background: 'var(--bg2)', borderRadius: 6, padding: '6px 10px',
+            border: '1px solid var(--border)', fontSize: 11, fontFamily: 'var(--font-mono)',
+          }}>
+            <span style={{ color: 'var(--text-secondary)' }}>Copy EST drops from <strong>{planDate}</strong> to:</span>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              From
+              <input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }}
+                value={copyFrom} onChange={e => setCopyFrom(e.target.value)} />
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              To
+              <input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }}
+                value={copyTo} onChange={e => setCopyTo(e.target.value)} />
+            </label>
+            <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>
+              {copying ? 'Copying\u2026' : 'Copy'}
+            </button>
+            <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
+            {copyMsg && (
+              <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>
+            )}
+          </div>
+        )}
       </div>
 
       {hourlyErr

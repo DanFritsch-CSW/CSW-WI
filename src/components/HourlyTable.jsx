@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 
 function fmtHour(h) {
   if (h === 0) return '12am'
@@ -10,7 +10,9 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
-function EditableCell({ value, onSave }) {
+// EditableCell with Tab/Shift-Tab navigation.
+// onNavigate(direction) is called after commit to move focus.
+function EditableCell({ value, onSave, onNavigate }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
 
@@ -26,6 +28,20 @@ function EditableCell({ value, onSave }) {
     if (val !== (value ?? 0)) onSave(val)
   }
 
+  function handleKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      commit()
+      onNavigate?.('down')
+    } else if (e.key === 'Escape') {
+      setEditing(false)
+    } else if (e.key === 'Tab') {
+      e.preventDefault()
+      commit()
+      onNavigate?.(e.shiftKey ? 'prev' : 'next')
+    }
+  }
+
   if (editing) {
     return (
       <input
@@ -36,7 +52,7 @@ function EditableCell({ value, onSave }) {
         autoFocus
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
-        onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+        onKeyDown={handleKeyDown}
         onClick={e => e.stopPropagation()}
       />
     )
@@ -45,7 +61,7 @@ function EditableCell({ value, onSave }) {
   return (
     <span
       className="ht-cell-editable"
-      title="Click to edit"
+      title="Click to edit. Tab = next project. Enter = same project next row."
       onClick={open}
     >
       {value ?? 0}
@@ -55,10 +71,29 @@ function EditableCell({ value, onSave }) {
 
 export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
+  // cellRefs[rowIdx][projIdx] = ref to the span/input for focus navigation
+  const cellRefs = useRef({})
+
+  const setCellRef = useCallback((rowIdx, projIdx, el) => {
+    if (!cellRefs.current[rowIdx]) cellRefs.current[rowIdx] = {}
+    cellRefs.current[rowIdx][projIdx] = el
+  }, [])
+
+  function focusCell(rowIdx, projIdx, projects) {
+    // Clamp indices
+    const maxRow  = Object.keys(cellRefs.current).length - 1
+    const maxProj = projects.length - 1
+    let r = rowIdx, p = projIdx
+    if (p < 0) { r -= 1; p = maxProj }
+    if (p > maxProj) { r += 1; p = 0 }
+    if (r < 0) r = 0
+    if (r > maxRow) r = maxRow
+    const el = cellRefs.current[r]?.[p]
+    if (el) el.click()  // trigger open() on the span
+  }
 
   if (!hourlyData?.length) return null
 
-  // Sort project columns alphabetically for consistent ordering
   const projects = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
   const multiProject = projects.length >= 1
 
@@ -102,18 +137,18 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
               ? <>
                   {projects.map(p => (
                     <th key={p} className="ht-est-col ht-proj-col" title={p}>
-                      {p.length > 12 ? p.slice(0, 12) + '…' : p}
+                      {p.length > 12 ? p.slice(0, 12) + '\u2026' : p}
                     </th>
                   ))}
                   <th className="ht-est-col">
                     Total EST
-                    <button className="ht-expand-btn" onClick={() => setExpanded(false)} title="Collapse project columns">▾</button>
+                    <button className="ht-expand-btn" onClick={() => setExpanded(false)} title="Collapse">\u25be</button>
                   </th>
                 </>
               : <th className="ht-est-col">
                   EST Drops
                   {multiProject && (
-                    <button className="ht-expand-btn" onClick={() => setExpanded(true)} title="Show per-project breakdown">▸</button>
+                    <button className="ht-expand-btn" onClick={() => setExpanded(true)} title="Show per-project breakdown">\u25b8</button>
                   )}
                 </th>
             }
@@ -128,25 +163,32 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className={r.final < 0 ? 'ht-deficit' : ''}>
+          {rows.map((r, rowIdx) => (
+            <tr key={rowIdx} className={r.final < 0 ? 'ht-deficit' : ''}>
               <td className="ht-hour">{fmtHour(r.h)}</td>
               {multiProject && expanded
                 ? <>
-                    {projects.map(p => (
+                    {projects.map((p, projIdx) => (
                       <td key={p} className="ht-est-col ht-proj-col">
                         <EditableCell
                           value={projectHourlyDrops[p]?.[r.h] ?? 0}
                           onSave={val => onProjectHourlyChange?.(p, r.h, val)}
+                          onNavigate={dir => {
+                            if (dir === 'next') focusCell(rowIdx, projIdx + 1, projects)
+                            else if (dir === 'prev') focusCell(rowIdx, projIdx - 1, projects)
+                            else if (dir === 'down') focusCell(rowIdx + 1, projIdx, projects)
+                          }}
                         />
+                        {/* invisible span used as focus target */}
+                        <span ref={el => setCellRef(rowIdx, projIdx, el)} style={{ display: 'none' }} />
                       </td>
                     ))}
                     <td className="ht-est-col">
-                      {r.est !== null ? r.est : <span className="ht-est-empty">—</span>}
+                      {r.est !== null ? r.est : <span className="ht-est-empty">\u2014</span>}
                     </td>
                   </>
                 : <td className="ht-est-col">
-                    {r.est !== null ? r.est : <span className="ht-est-empty">—</span>}
+                    {r.est !== null ? r.est : <span className="ht-est-empty">\u2014</span>}
                   </td>
               }
               <td>{r.inb}</td>
@@ -187,7 +229,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
                 <span className={tot.adj > 0 ? 'ht-pos' : 'ht-neg'}>
                   {tot.adj > 0 ? `+${tot.adj}` : tot.adj}
                 </span>
-              ) : '—'
+              ) : '\u2014'
             }</td>
             <td></td>
             <td className={tot.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(tot.cumul)}</td>
