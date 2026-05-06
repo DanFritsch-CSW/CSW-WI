@@ -10,16 +10,11 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
-// EditableCell with Tab/Shift-Tab navigation.
-// onNavigate(direction) is called after commit to move focus.
 function EditableCell({ value, onSave, onNavigate }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
 
-  function open() {
-    setDraft(value ?? 0)
-    setEditing(true)
-  }
+  function open() { setDraft(value ?? 0); setEditing(true) }
 
   function commit() {
     const parsed = Number(draft)
@@ -29,27 +24,14 @@ function EditableCell({ value, onSave, onNavigate }) {
   }
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      commit()
-      onNavigate?.('down')
-    } else if (e.key === 'Escape') {
-      setEditing(false)
-    } else if (e.key === 'Tab') {
-      e.preventDefault()
-      commit()
-      onNavigate?.(e.shiftKey ? 'prev' : 'next')
-    }
+    if (e.key === 'Enter')  { e.preventDefault(); commit(); onNavigate?.('down') }
+    else if (e.key === 'Escape') setEditing(false)
+    else if (e.key === 'Tab') { e.preventDefault(); commit(); onNavigate?.(e.shiftKey ? 'prev' : 'next') }
   }
 
   if (editing) {
     return (
-      <input
-        className="ht-cell-input"
-        type="number"
-        step={1}
-        value={draft}
-        autoFocus
+      <input className="ht-cell-input" type="number" step={1} value={draft} autoFocus
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={handleKeyDown}
@@ -59,11 +41,9 @@ function EditableCell({ value, onSave, onNavigate }) {
   }
 
   return (
-    <span
-      className="ht-cell-editable"
+    <span className="ht-cell-editable"
       title="Click to edit. Tab = next project. Enter = same project next row."
-      onClick={open}
-    >
+      onClick={open}>
       {value ?? 0}
     </span>
   )
@@ -71,7 +51,6 @@ function EditableCell({ value, onSave, onNavigate }) {
 
 export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
-  // cellRefs[rowIdx][projIdx] = ref to the span/input for focus navigation
   const cellRefs = useRef({})
 
   const setCellRef = useCallback((rowIdx, projIdx, el) => {
@@ -80,16 +59,13 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
   }, [])
 
   function focusCell(rowIdx, projIdx, projects) {
-    // Clamp indices
     const maxRow  = Object.keys(cellRefs.current).length - 1
     const maxProj = projects.length - 1
     let r = rowIdx, p = projIdx
-    if (p < 0) { r -= 1; p = maxProj }
+    if (p < 0)       { r -= 1; p = maxProj }
     if (p > maxProj) { r += 1; p = 0 }
-    if (r < 0) r = 0
-    if (r > maxRow) r = maxRow
-    const el = cellRefs.current[r]?.[p]
-    if (el) el.click()  // trigger open() on the span
+    r = Math.max(0, Math.min(r, maxRow))
+    cellRefs.current[r]?.[p]?.click()
   }
 
   if (!hourlyData?.length) return null
@@ -123,9 +99,8 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
   }
 
   const projectTotals = {}
-  for (const p of projects) {
+  for (const p of projects)
     projectTotals[p] = Object.values(projectHourlyDrops[p] ?? {}).reduce((s, v) => s + v, 0)
-  }
 
   return (
     <div className="hourly-table-wrap">
@@ -137,18 +112,18 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
               ? <>
                   {projects.map(p => (
                     <th key={p} className="ht-est-col ht-proj-col" title={p}>
-                      {p.length > 12 ? p.slice(0, 12) + '\u2026' : p}
+                      {p.length > 12 ? p.slice(0, 12) + '...' : p}
                     </th>
                   ))}
                   <th className="ht-est-col">
                     Total EST
-                    <button className="ht-expand-btn" onClick={() => setExpanded(false)} title="Collapse">\u25be</button>
+                    <button className="ht-expand-btn" onClick={() => setExpanded(false)}>Collapse</button>
                   </th>
                 </>
               : <th className="ht-est-col">
                   EST Drops
                   {multiProject && (
-                    <button className="ht-expand-btn" onClick={() => setExpanded(true)} title="Show per-project breakdown">\u25b8</button>
+                    <button className="ht-expand-btn" onClick={() => setExpanded(true)} title="Show per-project breakdown">Expand</button>
                   )}
                 </th>
             }
@@ -179,16 +154,15 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
                             else if (dir === 'down') focusCell(rowIdx + 1, projIdx, projects)
                           }}
                         />
-                        {/* invisible span used as focus target */}
                         <span ref={el => setCellRef(rowIdx, projIdx, el)} style={{ display: 'none' }} />
                       </td>
                     ))}
                     <td className="ht-est-col">
-                      {r.est !== null ? r.est : <span className="ht-est-empty">\u2014</span>}
+                      {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
                     </td>
                   </>
                 : <td className="ht-est-col">
-                    {r.est !== null ? r.est : <span className="ht-est-empty">\u2014</span>}
+                    {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
                   </td>
               }
               <td>{r.inb}</td>
@@ -197,10 +171,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
               <td>{r.req}</td>
               <td>{r1(r.avail)}</td>
               <td className="ht-adj-col">
-                <EditableCell
-                  value={r.adj}
-                  onSave={val => onAdjustmentChange?.(r.h, val)}
-                />
+                <EditableCell value={r.adj} onSave={val => onAdjustmentChange?.(r.h, val)} />
               </td>
               <td className={r.final < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.final)}</td>
               <td className={r.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(r.cumul)}</td>
@@ -225,11 +196,9 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
             <td>{tot.req}</td>
             <td>{tot.avail}</td>
             <td className="ht-adj-col">{
-              tot.adj !== 0 ? (
-                <span className={tot.adj > 0 ? 'ht-pos' : 'ht-neg'}>
-                  {tot.adj > 0 ? `+${tot.adj}` : tot.adj}
-                </span>
-              ) : '\u2014'
+              tot.adj !== 0
+                ? <span className={tot.adj > 0 ? 'ht-pos' : 'ht-neg'}>{tot.adj > 0 ? `+${tot.adj}` : tot.adj}</span>
+                : '--'
             }</td>
             <td></td>
             <td className={tot.cumul < 0 ? 'ht-neg' : 'ht-pos'}>{fmtDelta(tot.cumul)}</td>

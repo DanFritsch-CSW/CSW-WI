@@ -5,62 +5,40 @@ import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import {
-  fetchHourlyData,
-  fetchHourlyAppointments,
-  fetchProjectData,
-  fetchHistoricalProjectHourlyDrops,
-  fetchProjectHourlyAppointments,
-  isRuleProject,
-  fetchActiveInventory,
-  KEN_GUARANTEED_PROJECTS,
-  loadCustomDropRules,
+  fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
+  fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments,
+  isRuleProject, fetchActiveInventory, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
 } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, computeBreakAdjustedTotalHours } from '../lib/laborCalc.js'
 
 const CAL2_SIDE35_PROJECTS = new Set([
-  'Palermos CALEDONIA finished',
-  "Palermo's CALEDONIA finished",
-  'PALERMOS CALEDONIA FINISHED',
+  'Palermos CALEDONIA finished', "Palermo's CALEDONIA finished", 'PALERMOS CALEDONIA FINISHED',
 ])
-
 const SIDE12_LANES = new Set(['side12_shift1','side12_mid','side12_shift2','side12_shift3'])
 const SIDE35_LANES = new Set(['side35_shift1','side35_mid','side35_shift2','side35_shift3'])
-
 const CAL2_TABS = [
-  { id: 'all',    label: 'All' },
-  { id: 'side12', label: '1-2 Side' },
-  { id: 'side35', label: '3.5 Side' },
+  { id: 'all', label: 'All' }, { id: 'side12', label: '1-2 Side' }, { id: 'side35', label: '3.5 Side' },
 ]
-
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
 function dateRange(from, to) {
   const dates = []
   const cur = new Date(from + 'T00:00:00Z')
   const end = new Date(to   + 'T00:00:00Z')
-  while (cur <= end) {
-    dates.push(cur.toISOString().slice(0, 10))
-    cur.setUTCDate(cur.getUTCDate() + 1)
-  }
+  while (cur <= end) { dates.push(cur.toISOString().slice(0, 10)); cur.setUTCDate(cur.getUTCDate() + 1) }
   return dates
 }
-
 function weekOf(isoDate) {
   const d = new Date(isoDate + 'T00:00:00Z')
   const day = d.getUTCDay() || 7
-  const mon = new Date(d)
-  mon.setUTCDate(d.getUTCDate() - (day - 1))
-  const fri = new Date(mon)
-  fri.setUTCDate(mon.getUTCDate() + 4)
+  const mon = new Date(d); mon.setUTCDate(d.getUTCDate() - (day - 1))
+  const fri = new Date(mon); fri.setUTCDate(mon.getUTCDate() + 4)
   return { from: mon.toISOString().slice(0, 10), to: fri.toISOString().slice(0, 10) }
 }
-
 function addDays(iso, n) {
-  const d = new Date(iso + 'T00:00:00Z')
-  d.setUTCDate(d.getUTCDate() + n)
-  return d.toISOString().slice(0, 10)
+  const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
 }
 
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed }) {
@@ -76,8 +54,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [activeInventory, setActiveInventory]       = useState(null)
   const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
   const [customDropProjects, setCustomDropProjects] = useState([])
-
-  // Copy-to-dates state
   const [copyOpen, setCopyOpen]         = useState(false)
   const [copyFrom, setCopyFrom]         = useState('')
   const [copyTo, setCopyTo]             = useState('')
@@ -89,7 +65,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const isMad  = facility.id === 'mad'
   const isKen  = facility.id === 'ken'
   const [sideTab, setSideTab] = useState('all')
-
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
   useEffect(() => {
@@ -111,16 +86,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
 
       let fetchedProjects = []
-      try {
-        fetchedProjects = await fetchProjectData(facility.id, planDate)
-        if (!cancelled) setProjects(fetchedProjects)
-      } catch { /* non-fatal */ }
+      try { fetchedProjects = await fetchProjectData(facility.id, planDate); if (!cancelled) setProjects(fetchedProjects) }
+      catch { /* non-fatal */ }
       if (cancelled) return
 
       if (isMad) {
-        fetchActiveInventory(facility.id)
-          .then(d => { if (!cancelled) setActiveInventory(d) })
-          .catch(() => { if (!cancelled) setActiveInventory([]) })
+        fetchActiveInventory(facility.id).then(d => { if (!cancelled) setActiveInventory(d) }).catch(() => { if (!cancelled) setActiveInventory([]) })
       }
       fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) })
 
@@ -135,10 +106,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           Object.entries(data).filter(([name]) => isRuleProject(facility.id, name) && !KEN_STALE_KEYS.has(name))
         )
         if (isKen || hasCustom) {
-          const allRequired = [
-            ...(isKen ? KEN_GUARANTEED_PROJECTS : []),
-            ...customRows.map(r => r.project_name),
-          ]
+          const allRequired = [...(isKen ? KEN_GUARANTEED_PROJECTS : []), ...customRows.map(r => r.project_name)]
           const missingProjects = allRequired.filter(p => !(p in filtered))
           if (missingProjects.length > 0) {
             setSeedingDrops(true)
@@ -154,9 +122,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
               if (rows.length) await upsertProjectHourlyDrops(facility.id, planDate, rows)
               if (!cancelled) setProjectHourlyDrops({ ...filtered, ...patch })
             } finally { if (!cancelled) setSeedingDrops(false) }
-          } else {
-            setProjectHourlyDrops(filtered)
-          }
+          } else { setProjectHourlyDrops(filtered) }
           return
         }
         if (Object.keys(filtered).length > 0) { setProjectHourlyDrops(filtered); return }
@@ -181,39 +147,25 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   }, [facility.id, planDate, isMad, isKen])
 
   function openCopy() {
-    const projectNames = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
+    const names = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
     const { from, to } = weekOf(planDate)
-    const defaultFrom = from === planDate ? addDays(from, 1) : from
-    setCopyFrom(defaultFrom)
+    setCopyFrom(from === planDate ? addDays(from, 1) : from)
     setCopyTo(to)
-    setCopyProjects(new Set(projectNames)) // all selected by default
+    setCopyProjects(new Set(names))
     setCopyMsg(null)
     setCopyOpen(true)
   }
 
   function toggleCopyProject(name) {
-    setCopyProjects(prev => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
+    setCopyProjects(prev => { const next = new Set(prev); next.has(name) ? next.delete(name) : next.add(name); return next })
   }
 
   async function handleCopy() {
-    if (!copyFrom || !copyTo || copyFrom > copyTo) {
-      setCopyMsg({ err: true, text: 'Invalid date range.' })
-      return
-    }
-    if (copyProjects.size === 0) {
-      setCopyMsg({ err: true, text: 'Select at least one project.' })
-      return
-    }
+    if (!copyFrom || !copyTo || copyFrom > copyTo) { setCopyMsg({ err: true, text: 'Invalid date range.' }); return }
+    if (copyProjects.size === 0) { setCopyMsg({ err: true, text: 'Select at least one project.' }); return }
     const dates = dateRange(copyFrom, copyTo).filter(d => d !== planDate)
-    if (!dates.length) { setCopyMsg({ err: true, text: 'No dates to copy to (source date excluded).' }); return }
-
-    setCopying(true)
-    setCopyMsg(null)
+    if (!dates.length) { setCopyMsg({ err: true, text: 'No dates to copy to.' }); return }
+    setCopying(true); setCopyMsg(null)
     try {
       const rows = []
       for (const [project_name, hourMap] of Object.entries(projectHourlyDrops)) {
@@ -223,21 +175,16 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       }
       await Promise.all(dates.map(d => upsertProjectHourlyDrops(facility.id, d, rows)))
       setCopyMsg({ err: false, text: `Copied ${copyProjects.size} project${copyProjects.size > 1 ? 's' : ''} to ${dates.length} date${dates.length > 1 ? 's' : ''}.` })
-    } catch {
-      setCopyMsg({ err: true, text: 'Copy failed — try again.' })
-    } finally {
-      setCopying(false)
-    }
+    } catch { setCopyMsg({ err: true, text: 'Copy failed -- try again.' }) }
+    finally { setCopying(false) }
   }
 
   useEffect(() => {
     if (!isCal2 || sideTab === 'all') { setSideHourlyAppts({}); return }
     if (!projects.length) return
-    const sideProjectNames = projects.map(p => p.name)
-      .filter(n => sideTab === 'side35' ? CAL2_SIDE35_PROJECTS.has(n) : !CAL2_SIDE35_PROJECTS.has(n))
-    if (!sideProjectNames.length) { setSideHourlyAppts({}); return }
-    fetchProjectHourlyAppointments(facility.id, planDate, sideProjectNames)
-      .then(setSideHourlyAppts).catch(() => setSideHourlyAppts({}))
+    const names = projects.map(p => p.name).filter(n => sideTab === 'side35' ? CAL2_SIDE35_PROJECTS.has(n) : !CAL2_SIDE35_PROJECTS.has(n))
+    if (!names.length) { setSideHourlyAppts({}); return }
+    fetchProjectHourlyAppointments(facility.id, planDate, names).then(setSideHourlyAppts).catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
   const handleLaborCount   = useCallback((count) => setLaborCount(count), [])
@@ -283,10 +230,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops))
-      for (const [h, v] of Object.entries(hourMap)) {
-        const hour = Number(h)
-        sums[hour] = (sums[hour] ?? 0) + v
-      }
+      for (const [h, v] of Object.entries(hourMap)) { const hour = Number(h); sums[hour] = (sums[hour] ?? 0) + v }
     return sums
   }, [visibleProjectHourlyDrops])
 
@@ -296,15 +240,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     if (!rawHourly.length) return rawHourly
     return rawHourly.map(row => {
       const est = estDrops[row.h] ?? 0
-      let inb, out
-      if (isCal2 && sideTab !== 'all') {
-        const sideAppt = sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }
-        inb = sideAppt.inb; out = sideAppt.out
-      } else {
-        const appt = hourlyAppts[row.h] ?? { inb: 0, out: 0 }
-        inb = appt.inb; out = appt.out
-      }
-      return { ...row, inb, out, drops: est, appts: inb + est + out }
+      const apptSrc = (isCal2 && sideTab !== 'all') ? (sideHourlyAppts[row.h] ?? { inb: 0, out: 0 }) : (hourlyAppts[row.h] ?? { inb: 0, out: 0 })
+      return { ...row, inb: apptSrc.inb, out: apptSrc.out, drops: est, appts: apptSrc.inb + est + apptSrc.out }
     })
   }, [rawHourly, hourlyAppts, estDrops, isCal2, sideTab, sideHourlyAppts])
 
@@ -380,21 +317,16 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span>Hourly Breakdown</span>
         {seedingDrops
-          ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast…</span>
+          ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
           : <>
-              <button className="est-reset-btn" title="Recalculate EST drops from 4-week average" onClick={resetEstDrops}>
-                ↺ Reset EST Drops
-              </button>
+              <button className="est-reset-btn" title="Recalculate from 4-week average" onClick={resetEstDrops}>Reset EST Drops</button>
               {hasDropData && (
-                <button className="est-reset-btn" title="Copy EST drops to other dates" onClick={openCopy}>
-                  Copy to dates…
-                </button>
+                <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
               )}
             </>
         }
       </div>
 
-      {/* Copy to dates panel */}
       {copyOpen && (
         <div style={{
           background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8,
@@ -414,21 +346,20 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
             </label>
           </div>
 
-          {/* Per-project checkboxes */}
           <div style={{ marginBottom: 10 }}>
-            <div style={{ color: 'var(--text-secondary)', marginBottom: 6 }}>
-              Projects to copy
-              <button style={{ marginLeft: 8, background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10 }}
-                onClick={() => setCopyProjects(new Set(copyProjectNames))}>All</button>
-              <button style={{ marginLeft: 4, background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10 }}
-                onClick={() => setCopyProjects(new Set())}>None</button>
+            <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>Projects to copy:</span>
+              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }}
+                onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
+              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }}
+                onClick={() => setCopyProjects(new Set())}>Clear</button>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px' }}>
               {copyProjectNames.map(name => (
                 <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
                   <input type="checkbox" checked={copyProjects.has(name)} onChange={() => toggleCopyProject(name)} />
                   <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>
-                    {name.length > 24 ? name.slice(0, 24) + '…' : name}
+                    {name.length > 28 ? name.slice(0, 28) + '...' : name}
                   </span>
                 </label>
               ))}
@@ -437,12 +368,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>
-              {copying ? 'Copying…' : 'Copy'}
+              {copying ? 'Copying...' : 'Copy'}
             </button>
             <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
-            {copyMsg && (
-              <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>
-            )}
+            {copyMsg && <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>}
           </div>
         </div>
       )}
@@ -450,8 +379,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       {hourlyErr
         ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
         : <HourlyTable
-            hourlyData={hourly}
-            estDrops={estDrops}
+            hourlyData={hourly} estDrops={estDrops}
             projectHourlyDrops={visibleProjectHourlyDrops}
             hourlyAdjustments={hourlyAdjustments}
             onProjectHourlyChange={(projectName, h, val) => {
