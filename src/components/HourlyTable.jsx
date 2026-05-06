@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, forwardRef } from 'react'
 
 function fmtHour(h) {
   if (h === 0) return '12am'
@@ -10,7 +10,9 @@ function fmtHour(h) {
 function r1(n) { return Math.round(n * 10) / 10 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 
-function EditableCell({ value, onSave, onNavigate }) {
+// EditableCell forwards its outer ref so the table can programmatically
+// call .click() on the visible span to open the cell.
+const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigate }, ref) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
 
@@ -31,21 +33,12 @@ function EditableCell({ value, onSave, onNavigate }) {
     } else if (e.key === 'Enter') {
       e.preventDefault()
       commit()
-      // stay on same cell — do not navigate
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
-      // increment value, do not navigate
-      setDraft(prev => {
-        const n = Number(prev)
-        return isNaN(n) ? 1 : n + 1
-      })
+      setDraft(prev => { const n = Number(prev); return isNaN(n) ? 1 : n + 1 })
     } else if (e.key === 'ArrowDown') {
       e.preventDefault()
-      // decrement value (floor at 0), do not navigate
-      setDraft(prev => {
-        const n = Number(prev)
-        return isNaN(n) ? 0 : Math.max(0, n - 1)
-      })
+      setDraft(prev => { const n = Number(prev); return isNaN(n) ? 0 : Math.max(0, n - 1) })
     } else if (e.key === 'Escape') {
       setEditing(false)
     }
@@ -69,32 +62,33 @@ function EditableCell({ value, onSave, onNavigate }) {
 
   return (
     <span
+      ref={ref}
       className="ht-cell-editable"
-      title="Click to edit. Tab = next hour. Shift+Tab = prev hour. Up/Down arrow = +/-1. Enter = commit."
+      title="Tab = next hour. Shift+Tab = prev hour. Up/Down = +/-1. Enter = commit."
       onClick={open}
     >
       {value ?? 0}
     </span>
   )
-}
+})
 
 export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
+  // cellRefs[projIdx][rowIdx] = ref to the visible EditableCell span
   const cellRefs = useRef({})
 
-  const setCellRef = useCallback((projIdx, rowIdx, el) => {
+  const getCellRef = useCallback((projIdx, rowIdx) => el => {
     if (!cellRefs.current[projIdx]) cellRefs.current[projIdx] = {}
     cellRefs.current[projIdx][rowIdx] = el
   }, [])
 
   function navigate(projIdx, rowIdx, dir, numProjects, numRows) {
-    let p = projIdx
-    let r = rowIdx
+    let p = projIdx, r = rowIdx
     if (dir === 'down') {
       r += 1
       if (r >= numRows) { r = 0; p += 1 }
       if (p >= numProjects) p = numProjects - 1
-    } else if (dir === 'up') {
+    } else {
       r -= 1
       if (r < 0) { r = numRows - 1; p -= 1 }
       if (p < 0) p = 0
@@ -183,11 +177,11 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
                     {projects.map((p, projIdx) => (
                       <td key={p} className="ht-est-col ht-proj-col">
                         <EditableCell
+                          ref={getCellRef(projIdx, rowIdx)}
                           value={projectHourlyDrops[p]?.[r.h] ?? 0}
                           onSave={val => onProjectHourlyChange?.(p, r.h, val)}
                           onNavigate={dir => navigate(projIdx, rowIdx, dir, numProjects, numRows)}
                         />
-                        <span ref={el => setCellRef(projIdx, rowIdx, el)} style={{ display: 'none' }} />
                       </td>
                     ))}
                     <td className="ht-est-col">
