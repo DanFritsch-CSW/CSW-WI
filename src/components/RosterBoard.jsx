@@ -14,8 +14,12 @@ import {
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
-import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2 } from '../lib/constants.js'
-import { fetchTodayAssignments, upsertAssignment, replaceEmployees, seedRosterAssignments, deleteAssignment, resetAssignmentsForDate } from '../lib/supabase.js'
+import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, FACILITIES, FACILITY_LIST } from '../lib/constants.js'
+import {
+  fetchTodayAssignments, upsertAssignment, replaceEmployees,
+  seedRosterAssignments, deleteAssignment, resetAssignmentsForDate,
+  sendEmployeeOnLoan, recallLoan,
+} from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
@@ -44,6 +48,12 @@ const SORT_MODES = [
   { key: 'first',   label: 'A–Z First' },
   { key: 'last',    label: 'A–Z Last' },
 ]
+
+// Droppable ID for the send-to-facility zone — encodes source lane
+const SEND_ZONE_PREFIX = '__send__'
+function sendZoneId(laneId) { return `${SEND_ZONE_PREFIX}${laneId}` }
+function isSendZone(id)     { return String(id).startsWith(SEND_ZONE_PREFIX) }
+function laneFromSendZone(id) { return String(id).slice(SEND_ZONE_PREFIX.length) }
 
 function getLaneSettings(laneId, settings) {
   const keys = LANE_SETTING_KEYS[laneId]
@@ -131,7 +141,84 @@ function laneSideClass(laneId) {
   return ''
 }
 
-function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, sortOrder }) {
+// ── Send-to-Facility Drop Zone ───────────────────────────────────
+function SendZone({ laneId }) {
+  const { setNodeRef, isOver } = useDroppable({ id: sendZoneId(laneId) })
+  return (
+    <div
+      ref={setNodeRef}
+      className={`send-zone${isOver ? ' send-zone--over' : ''}`}
+      title="Drop here to send employee to another facility"
+    >
+      ✈ Send to facility
+    </div>
+  )
+}
+
+// ── Loan Modal ───────────────────────────────────────────────────
+function LoanModal({ employee, sourceFacility, onConfirm, onCancel }) {
+  const otherFacilities = FACILITY_LIST.filter(f => f.id !== sourceFacility)
+  const [destFacility, setDestFacility] = useState(otherFacilities[0]?.id ?? '')
+  const [destLane, setDestLane]         = useState('shift1')
+
+  const destLanes = destFacility === 'cal'
+    ? [
+        { id: 'side12_shift1', label: '1-2 · 1st' }, { id: 'side12_mid', label: '1-2 · Mid' },
+        { id: 'side12_shift2', label: '1-2 · 2nd' }, { id: 'side12_shift3', label: '1-2 · 3rd' },
+        { id: 'side35_shift1', label: '3.5 · 1st' }, { id: 'side35_mid', label: '3.5 · Mid' },
+        { id: 'side35_shift2', label: '3.5 · 2nd' }, { id: 'side35_shift3', label: '3.5 · 3rd' },
+      ]
+    : [
+        { id: 'shift1', label: '1st Shift' }, { id: 'mid', label: 'Mid Shift' },
+        { id: 'shift2', label: '2nd Shift' }, { id: 'shift3', label: '3rd Shift' },
+      ]
+
+  function handleFacilityChange(fac) {
+    setDestFacility(fac)
+    setDestLane(fac === 'cal' ? 'side12_shift1' : 'shift1')
+  }
+
+  return (
+    <div className="modal-overlay" onPointerDown={e => e.stopPropagation()}>
+      <div className="modal-box">
+        <div className="modal-header">
+          <span className="modal-title">Send to Facility</span>
+          <button className="modal-close" onClick={onCancel}>×</button>
+        </div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
+          Sending: <strong style={{ color: 'var(--text-primary)' }}>{employee.name}</strong>
+        </div>
+        <div className="modal-form">
+          <label className="modal-label">
+            Destination Facility
+            <select className="modal-select" value={destFacility} onChange={e => handleFacilityChange(e.target.value)}>
+              {otherFacilities.map(f => (
+                <option key={f.id} value={f.id}>{f.code} — {f.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="modal-label">
+            Assign to Lane
+            <select className="modal-select" value={destLane} onChange={e => setDestLane(e.target.value)}>
+              {destLanes.map(l => (
+                <option key={l.id} value={l.id}>{l.label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="modal-actions">
+          <button className="modal-btn-cancel" onClick={onCancel}>Cancel</button>
+          <button className="modal-btn-submit" onClick={() => onConfirm(destFacility, destLane)}>
+            Send ✈
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── DroppableLane ────────────────────────────────────────────────
+function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, onRecall, sortOrder, isActiveLane }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const sorted       = sortEmployees(employees, sortOrder)
   const ids          = sorted.map(e => e.id)
@@ -166,6 +253,7 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
                     laneSettings={laneSettings}
                     onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
                     onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
+                    onRecall={assignmentMap?.[emp.id]?.on_loan_to ? () => onRecall(emp) : undefined}
                   />
                 ))}
               </div>
@@ -179,9 +267,12 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
                 laneSettings={laneSettings}
                 onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
                 onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
+                onRecall={assignmentMap?.[emp.id]?.on_loan_to ? () => onRecall(emp) : undefined}
               />
             ))
           )}
+          {/* Send zone — only shown on active (labor-counting) lanes */}
+          {isActiveLane && <SendZone laneId={lane.id} />}
         </div>
       </SortableContext>
     </div>
@@ -207,11 +298,11 @@ const CAL_ACTIVE_LANES = new Set([
 ])
 
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
-  // 'cal' is the Caledonia split-view (formerly cal2)
-  const isCal         = facility === 'cal'
+  const isCal          = facility === 'cal'
   const activeLaneSet  = isCal ? LANES_CAL2     : LANES
   const activeLaneIds  = isCal ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
   const activeLaneSet_ = isCal ? CAL_ACTIVE_LANES : STANDARD_ACTIVE_LANES
+  const activeLaneIdSet = new Set(activeLaneIds)
 
   const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
@@ -223,6 +314,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [showAddTemp, setShowAddTemp]     = useState(false)
   const [pendingWrites, setPendingWrites] = useState(0)
   const [sortOrder, setSortOrder]         = useState('default')
+  // Loan modal state
+  const [loanEmployee, setLoanEmployee]   = useState(null) // emp being sent
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -372,8 +465,70 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
+  // ── Loan: drop on send zone → open modal
+  const handleSendConfirm = useCallback(async (destFacility, destLane) => {
+    if (!loanEmployee) return
+    const date     = planDate || todayISO()
+    const emp      = loanEmployee
+    const existing = assignmentMap[emp.id] ?? {}
+    setPendingWrites(n => n + 1)
+    try {
+      const err = await sendEmployeeOnLoan({
+        employeeId:     emp.id,
+        employeeName:   emp.name,
+        role:           emp.role,
+        sourceFacility: facility,
+        destFacility,
+        destLane,
+        planDate:       date,
+        shiftStart:     existing.shift_start ?? null,
+        shiftHours:     existing.shift_hours ?? null,
+      })
+      if (!err) {
+        // Update local state: mark as on loan
+        setAssignmentMap(prev => ({
+          ...prev,
+          [emp.id]: { ...(prev[emp.id] ?? {}), on_loan_to: destFacility },
+        }))
+      }
+    } finally {
+      setPendingWrites(n => n - 1)
+    }
+    setLoanEmployee(null)
+  }, [loanEmployee, assignmentMap, facility, planDate])
+
+  // ── Recall: ↩ button on ON LOAN tile
+  const handleRecall = useCallback(async (emp) => {
+    const date       = planDate || todayISO()
+    const assignment = assignmentMap[emp.id]
+    if (!assignment?.on_loan_to) return
+    const destFacility = assignment.on_loan_to
+    setPendingWrites(n => n + 1)
+    try {
+      const err = await recallLoan({
+        employeeId:     emp.id,
+        sourceFacility: facility,
+        destFacility,
+        planDate:       date,
+      })
+      if (!err) {
+        setAssignmentMap(prev => ({
+          ...prev,
+          [emp.id]: { ...(prev[emp.id] ?? {}), on_loan_to: null },
+        }))
+      }
+    } finally {
+      setPendingWrites(n => n - 1)
+    }
+  }, [assignmentMap, facility, planDate])
+
   useEffect(() => {
-    const activeEmps = employees.filter(e => activeLaneSet_.has(laneMap[e.id] || e.default_lane))
+    // Exclude on-loan employees from active headcount
+    const activeEmps = employees.filter(e => {
+      if (!activeLaneSet_.has(laneMap[e.id] || e.default_lane)) return false
+      if (assignmentMap[e.id]?.on_loan_to) return false
+      return true
+    })
     onLaborCount?.(activeEmps.length)
   }, [laneMap, assignmentMap, employees, onLaborCount, activeLaneSet_])
 
@@ -387,7 +542,17 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setActiveId(null)
     if (!over) return
     const employeeId = active.id
-    const overId     = over.id
+    const overId     = String(over.id)
+
+    // Dropped on the send zone → open loan modal
+    if (isSendZone(overId)) {
+      const emp = employees.find(e => e.id === employeeId)
+      if (emp && !assignmentMap[emp.id]?.on_loan_to) {
+        setLoanEmployee(emp)
+      }
+      return
+    }
+
     const isLane = activeLaneSet.some(l => l.id === overId)
     if (isLane) {
       if (laneMap[employeeId] !== overId) moveTo(employeeId, overId)
@@ -397,7 +562,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (destLane && destLane !== laneMap[employeeId]) {
       moveTo(employeeId, destLane)
     }
-  }, [laneMap, activeLaneSet, employees])
+  }, [laneMap, activeLaneSet, employees, assignmentMap])
 
   function moveTo(employeeId, laneId) {
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
@@ -427,15 +592,17 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   const activeCount = activeLaneSet
     .filter(l => activeLaneIds.includes(l.id))
-    .reduce((n, l) => n + laneEmployees(l.id).length, 0)
+    .reduce((n, l) => n + laneEmployees(l.id).filter(e => !assignmentMap[e.id]?.on_loan_to).length, 0)
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
 
   const side12Count = isCal
-    ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
+    ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3']
+        .reduce((n, l) => n + laneEmployees(l).filter(e => !assignmentMap[e.id]?.on_loan_to).length, 0)
     : null
   const side35Count = isCal
-    ? ['side35_shift1','side35_mid','side35_shift2','side35_shift3'].reduce((n, l) => n + laneEmployees(l).length, 0)
+    ? ['side35_shift1','side35_mid','side35_shift2','side35_shift3']
+        .reduce((n, l) => n + laneEmployees(l).filter(e => !assignmentMap[e.id]?.on_loan_to).length, 0)
     : null
 
   const currentSort = SORT_MODES.find(m => m.key === sortOrder)
@@ -444,8 +611,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
   }
 
-  const gridCols   = isCal ? 'repeat(10, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))'
-  const gridStyle  = { gridTemplateColumns: gridCols }
+  const gridCols  = isCal ? 'repeat(10, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))'
+  const gridStyle = { gridTemplateColumns: gridCols }
 
   if (isLoading) {
     return (
@@ -509,8 +676,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
               assignmentMap={assignmentMap}
               settings={settings}
               sortOrder={sortOrder}
+              isActiveLane={activeLaneIdSet.has(lane.id)}
               onDeleteTemp={handleDeleteTemp}
               onShiftChange={handleShiftChange}
+              onRecall={handleRecall}
             />
           ))}
         </div>
@@ -525,6 +694,15 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           planDate={planDate || todayISO()}
           onAdd={handleAddTemp}
           onClose={() => setShowAddTemp(false)}
+        />
+      )}
+
+      {loanEmployee && (
+        <LoanModal
+          employee={loanEmployee}
+          sourceFacility={facility}
+          onConfirm={handleSendConfirm}
+          onCancel={() => setLoanEmployee(null)}
         />
       )}
     </div>

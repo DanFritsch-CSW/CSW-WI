@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import { FACILITIES } from '../lib/constants.js'
 
 function initials(name) {
   return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
@@ -28,7 +29,6 @@ function fmtShift(start, hours) {
   return `${fmtHour(start)} – ${fmtHour(end)}`
 }
 
-// Decimal hour (e.g. 7.5) → "07:30"
 function decToTimeStr(dec) {
   const norm = ((dec % 24) + 24) % 24
   const h = Math.floor(norm)
@@ -36,24 +36,29 @@ function decToTimeStr(dec) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 }
 
-// "HH:MM" → decimal hour
 function timeStrToDec(t) {
   const [h, m] = (t || '00:00').split(':').map(Number)
   return h + m / 60
 }
 
-export default function EmployeeTile({ employee, assignment, laneSettings, onShiftChange, onDelete }) {
+function facilityCode(facId) {
+  return FACILITIES[facId]?.code ?? facId?.toUpperCase() ?? '?'
+}
+
+export default function EmployeeTile({ employee, assignment, laneSettings, onShiftChange, onDelete, onRecall }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: employee.id,
   })
-  const [editing, setEditing]       = useState(false)
-  const [editStart, setEditStart]   = useState('00:00')
-  const [editEnd, setEditEnd]       = useState('00:00')
+  const [editing, setEditing]     = useState(false)
+  const [editStart, setEditStart] = useState('00:00')
+  const [editEnd, setEditEnd]     = useState('00:00')
 
   const style = { transform: CSS.Transform.toString(transform), transition }
 
-  const color  = avatarColor(employee.name)
-  const isTemp = !!employee.is_temp
+  const color      = avatarColor(employee.name)
+  const isTemp     = !!employee.is_temp
+  const isOnLoan   = !!assignment?.on_loan_to       // source: employee sent away
+  const isFromLoan = !!assignment?.from_facility     // destination: employee received
 
   const effectiveStart = assignment?.shift_start ?? laneSettings?.defaultStart ?? null
   const effectiveHours = assignment?.shift_hours ?? laneSettings?.defaultHours ?? 8
@@ -73,8 +78,8 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
     const startDec = timeStrToDec(editStart)
     let   endDec   = timeStrToDec(editEnd)
     let   hours    = endDec - startDec
-    if (hours <= 0) hours += 24  // overnight shift
-    onShiftChange?.(startDec, Math.round(hours * 4) / 4)  // round to nearest 15 min
+    if (hours <= 0) hours += 24
+    onShiftChange?.(startDec, Math.round(hours * 4) / 4)
     setEditing(false)
   }
 
@@ -87,35 +92,31 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
     <div
       ref={setNodeRef}
       style={style}
-      className={`emp-tile${isDragging ? ' dragging' : ''}${isTemp ? ' emp-temp' : ''}`}
+      className={`emp-tile${
+        isDragging ? ' dragging' : ''}${
+        isTemp     ? ' emp-temp' : ''}${
+        isOnLoan   ? ' emp-on-loan' : ''}${
+        isFromLoan ? ' emp-from-loan' : ''}`}
       title={employee.name}
       {...attributes}
       {...listeners}
     >
-      <div className="emp-avatar" style={{ background: color }}>
+      <div className="emp-avatar" style={{ background: color, opacity: isOnLoan ? 0.45 : 0.9 }}>
         {initials(employee.name)}
       </div>
       <div className="emp-info">
         <div className="emp-name">{employee.name}</div>
         <div className="emp-role">
-          {isTemp && <span className="emp-temp-badge">TEMP</span>}
-          {employee.role}
+          {isTemp     && <span className="emp-temp-badge">TEMP</span>}
+          {isOnLoan   && <span className="emp-loan-badge emp-loan-badge--out">ON LOAN → {facilityCode(assignment.on_loan_to)}</span>}
+          {isFromLoan && <span className="emp-loan-badge emp-loan-badge--in">FROM: {facilityCode(assignment.from_facility)}</span>}
+          {!isOnLoan && !isFromLoan && employee.role}
         </div>
         {editing ? (
           <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
-            <input
-              type="time"
-              className="emp-shift-time"
-              value={editStart}
-              onChange={e => setEditStart(e.target.value)}
-            />
+            <input type="time" className="emp-shift-time" value={editStart} onChange={e => setEditStart(e.target.value)} />
             <span className="emp-shift-sep">–</span>
-            <input
-              type="time"
-              className="emp-shift-time"
-              value={editEnd}
-              onChange={e => setEditEnd(e.target.value)}
-            />
+            <input type="time" className="emp-shift-time" value={editEnd}   onChange={e => setEditEnd(e.target.value)} />
             <button className="emp-shift-save"   onClick={handleSave}>✓</button>
             <button className="emp-shift-cancel" onClick={handleCancel}>✕</button>
           </div>
@@ -132,13 +133,15 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
           )
         )}
       </div>
+      {/* Action button: delete temp | recall loan | drag handle */}
       {onDelete ? (
-        <button
-          className="emp-delete-btn"
-          onClick={e => { e.stopPropagation(); onDelete() }}
-          title="Remove temp employee"
-          onPointerDown={e => e.stopPropagation()}
-        >×</button>
+        <button className="emp-delete-btn" onClick={e => { e.stopPropagation(); onDelete() }}
+          title="Remove temp employee" onPointerDown={e => e.stopPropagation()}>×</button>
+      ) : isOnLoan && onRecall ? (
+        <button className="emp-delete-btn emp-recall-btn"
+          onClick={e => { e.stopPropagation(); onRecall() }}
+          title="Recall employee back from loan"
+          onPointerDown={e => e.stopPropagation()}>↩</button>
       ) : (
         <svg className="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
           <rect x="2" y="2" width="2" height="2" rx="1"/>

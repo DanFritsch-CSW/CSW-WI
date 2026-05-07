@@ -99,6 +99,8 @@ export async function seedRosterAssignments(employees, planDate) {
     shift_start:   e.shift_start ?? null,
     shift_hours:   e.shift_hours ?? null,
     is_temp:       false,
+    from_facility: null,
+    on_loan_to:    null,
   }))
   const { error } = await supabase
     .from('roster_assignments')
@@ -127,6 +129,78 @@ export async function resetAssignmentsForDate(facility, planDate) {
     .eq('plan_date', planDate)
     .eq('is_temp', false)
   if (error) { console.error('resetAssignmentsForDate:', error); return error.message }
+  return null
+}
+
+/**
+ * Send an employee on loan from sourceFacility to destFacility.
+ *
+ * Writes two rows:
+ *  1. Updates the source row: sets on_loan_to = destFacility
+ *  2. Creates a destination row: from_facility = sourceFacility, lane = destLane
+ *
+ * Returns null on success, error message on failure.
+ */
+export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourceFacility, destFacility, destLane, planDate, shiftStart, shiftHours }) {
+  if (!supabase) return 'Supabase not configured'
+
+  // 1. Mark the source row as on loan
+  const { error: srcErr } = await supabase
+    .from('roster_assignments')
+    .update({ on_loan_to: destFacility })
+    .eq('facility', sourceFacility)
+    .eq('employee_id', employeeId)
+    .eq('plan_date', planDate)
+  if (srcErr) { console.error('sendEmployeeOnLoan src:', srcErr); return srcErr.message }
+
+  // 2. Create the destination row
+  const { error: dstErr } = await supabase
+    .from('roster_assignments')
+    .upsert({
+      facility:      destFacility,
+      employee_id:   employeeId,
+      employee_name: employeeName,
+      role:          role ?? null,
+      lane:          destLane,
+      plan_date:     planDate,
+      shift_start:   shiftStart ?? null,
+      shift_hours:   shiftHours ?? null,
+      is_temp:       false,
+      from_facility: sourceFacility,
+      on_loan_to:    null,
+    }, { onConflict: 'facility,employee_id,plan_date' })
+  if (dstErr) { console.error('sendEmployeeOnLoan dst:', dstErr); return dstErr.message }
+
+  return null
+}
+
+/**
+ * Recall a loaned employee back to their source facility.
+ *
+ * Clears on_loan_to on the source row and deletes the destination row.
+ * Returns null on success, error message on failure.
+ */
+export async function recallLoan({ employeeId, sourceFacility, destFacility, planDate }) {
+  if (!supabase) return 'Supabase not configured'
+
+  // 1. Clear on_loan_to on source
+  const { error: srcErr } = await supabase
+    .from('roster_assignments')
+    .update({ on_loan_to: null })
+    .eq('facility', sourceFacility)
+    .eq('employee_id', employeeId)
+    .eq('plan_date', planDate)
+  if (srcErr) { console.error('recallLoan src:', srcErr); return srcErr.message }
+
+  // 2. Delete the destination row
+  const { error: dstErr } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .eq('facility', destFacility)
+    .eq('employee_id', employeeId)
+    .eq('plan_date', planDate)
+  if (dstErr) { console.error('recallLoan dst:', dstErr); return dstErr.message }
+
   return null
 }
 
@@ -236,7 +310,7 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
     .from('roster_assignments')
-    .select('facility, lane, shift_hours')
+    .select('facility, lane, shift_hours, on_loan_to')
     .eq('plan_date', planDate)
     .in('lane', ['shift1', 'mid', 'shift2', 'shift3',
                  'side12_shift1','side12_mid','side12_shift2','side12_shift3',
@@ -244,6 +318,8 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (error || !data) return {}
   const result = {}
   for (const r of data) {
+    // Exclude employees who are on loan — they count at destination, not source
+    if (r.on_loan_to) continue
     const fac = r.facility
     if (!result[fac]) result[fac] = { headcount: 0, totalHours: 0 }
     result[fac].headcount  += 1
@@ -320,9 +396,6 @@ export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectHourlyDrops:', error)
 }
 
-// ── Custom EST Drop Projects ────────────────────────────────────
-// Managed via Settings > EST Drop Projects tab.
-// Returns [{ id, facility, project_name, omni_name }]
 export async function fetchCustomDropProjects(facilityId) {
   if (!supabase) return []
   const { data, error } = await supabase

@@ -56,19 +56,19 @@ function parseStartHour(shiftStart) {
 /**
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
- * Priority for each employee's start/hours:
- *  1. Day-specific assignment override (shift_start / shift_hours from roster_assignments)
- *  2. B2E schedule data stored on the employee object (emp.shift_start)
- *  3. Hardcoded SHIFT_DEFAULTS for the employee's shift bucket
- *
- * IMPORTANT: Supabase returns NUMERIC columns as strings in JS.
- * All shift_start and shift_hours values are coerced to Number before use.
+ * Excludes employees where assignment.on_loan_to is set — they are physically
+ * at another facility and should not count toward this facility's availability.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
   const hourlyAvail = new Array(24).fill(0)
 
   for (const emp of employees) {
+    const assignment = assignmentMap?.[emp.id]
+
+    // Exclude employees on loan to another facility
+    if (assignment?.on_loan_to) continue
+
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
 
     if (laneFilter && !laneFilter.has(lane)) continue
@@ -77,16 +77,12 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     if (!shiftKey) continue  // pto, callin — not counted
 
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
-    const assignment    = assignmentMap?.[emp.id]
 
-    // Coerce to Number — Supabase returns NUMERIC as strings, causing
-    // string concatenation bugs in the hour index arithmetic below.
-    const rawStart = assignment?.shift_start ?? emp.shift_start
+    const rawStart  = assignment?.shift_start ?? emp.shift_start
     const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
     const rawHours   = assignment?.shift_hours ?? shiftDefaults.hours
     const shiftHours = rawHours != null ? Number(rawHours) : shiftDefaults.hours
 
-    // Guard against NaN (bad data) — fall back to shift default
     const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
@@ -101,20 +97,24 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
 
 /**
  * Compute break-adjusted total hours for a set of employees.
- * Used for the "Total Hrs Available" KPI pill.
+ * Excludes employees on loan (on_loan_to set).
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
   let total = 0
 
   for (const emp of employees) {
+    const assignment = assignmentMap?.[emp.id]
+
+    // Exclude employees on loan
+    if (assignment?.on_loan_to) continue
+
     const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
     if (laneFilter && !laneFilter.has(lane)) continue
     const shiftKey = LANE_TO_SHIFT[lane]
     if (!shiftKey) continue
 
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
-    const assignment    = assignmentMap?.[emp.id]
     const rawHours      = assignment?.shift_hours ?? shiftDefaults.hours
     const shiftHours    = rawHours != null ? Number(rawHours) : shiftDefaults.hours
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
