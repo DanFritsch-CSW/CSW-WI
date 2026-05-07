@@ -29,12 +29,17 @@ export default function LaborPlanning() {
   const [facilityDeltas, setFacilityDeltas]           = useState({})
   const [facilityKpis, setFacilityKpis]               = useState({})
   const [snapLabel, setSnapLabel]                     = useState('Snapshot')
-
-  // ── Pickline state lives here — survives facility tab switches and WR sub-tab switches
-  const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
-  const [picklineOverrides, setPicklineOverrides] = useState({})
+  // Track which facility tabs have ever been visited so we only mount them on first visit
+  const [mountedFacs, setMountedFacs]                 = useState(() => new Set())
 
   const pageRef = useRef(null)
+
+  // Mount a facility panel the first time it's visited
+  useEffect(() => {
+    if (activeTab !== 'all') {
+      setMountedFacs(prev => prev.has(activeTab) ? prev : new Set([...prev, activeTab]))
+    }
+  }, [activeTab])
 
   useEffect(() => {
     setFacilityDeltas({})
@@ -78,7 +83,6 @@ export default function LaborPlanning() {
     fetchAllFacilitiesSettings().then(setFacilitySettings)
   }, [planDate])
 
-  const activeFac  = FACILITY_LIST.find(f => f.id === activeTab) || null
   const isToday    = planDate === todayISO()
   const isTomorrow = planDate === tomorrowISO()
 
@@ -113,7 +117,8 @@ export default function LaborPlanning() {
         ))}
       </div>
 
-      {activeTab === 'all' ? (
+      {/* ALL tab */}
+      <div style={{ display: activeTab === 'all' ? undefined : 'none' }}>
         <AllFacilities
           networkData={networkData}
           facilityEstDrops={facilityEstDrops}
@@ -124,25 +129,26 @@ export default function LaborPlanning() {
           planDate={planDate}
           onFacilityClick={setActiveTab}
         />
-      ) : activeFac ? (
-        <FacilityPanel
-          // WR omits key so the component is never remounted on tab switch,
-          // preserving pickline state. All other facilities use key so their
-          // data resets cleanly when switching between them.
-          key={activeFac.id === 'wr' ? undefined : activeFac.id}
-          facility={activeFac}
-          planDate={planDate}
-          networkKpi={networkData?.[activeFac.id]}
-          onDeltaComputed={handleDeltaComputed}
-          onKpiComputed={handleKpiComputed}
-          // Pickline props — only used by WR, ignored by all other facilities
-          picklineSnapshot={picklineSnapshot}
-          picklineOverrides={picklineOverrides}
-          onPicklineSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
-          onPicklineOverridesChange={setPicklineOverrides}
-          onPicklineClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
-        />
-      ) : null}
+      </div>
+
+      {/* Facility panels — rendered once on first visit, hidden via CSS when inactive.
+          This keeps component state (including WR pickline snapshot) alive across tab switches. */}
+      {FACILITY_LIST.map(fac => {
+        const isActive = activeTab === fac.id
+        // Don't mount until first visited — avoids 5x Omni queries on page load
+        if (!mountedFacs.has(fac.id)) return null
+        return (
+          <div key={fac.id} style={{ display: isActive ? undefined : 'none' }}>
+            <FacilityPanel
+              facility={fac}
+              planDate={planDate}
+              networkKpi={networkData?.[fac.id]}
+              onDeltaComputed={handleDeltaComputed}
+              onKpiComputed={handleKpiComputed}
+            />
+          </div>
+        )
+      })}
     </div>
   )
 }

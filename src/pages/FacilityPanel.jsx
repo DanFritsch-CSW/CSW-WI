@@ -45,12 +45,9 @@ function addDays(iso, n) {
   const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
 }
 
-export default function FacilityPanel({
-  facility, planDate, networkKpi, onDeltaComputed, onKpiComputed,
-  // Pickline props — passed from LaborPlanning, only used when facility.id === 'wr'
-  picklineSnapshot, picklineOverrides,
-  onPicklineSnapshot, onPicklineOverridesChange, onPicklineClear,
-}) {
+// FacilityPanel no longer receives pickline props — WR owns its own pickline state
+// since the panel is now kept mounted (display:none when inactive) by LaborPlanning.
+export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed, onKpiComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
   const [hourlyErr, setHourlyErr]           = useState(null)
@@ -77,6 +74,10 @@ export default function FacilityPanel({
 
   const [sideTab, setSideTab] = useState('all')
   const [wrTab, setWrTab]     = useState('warehouse')
+
+  // WR pickline state — lives here since this component stays mounted
+  const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
+  const [picklineOverrides, setPicklineOverrides] = useState({})
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
@@ -410,7 +411,7 @@ export default function FacilityPanel({
     </div>
   )
 
-  // ── WR: sub-tab switcher, pickline state passed in from LaborPlanning
+  // ── WR: sub-tab switcher, pickline state lives here (component stays mounted)
   if (isWr) {
     return (
       <div>
@@ -428,9 +429,9 @@ export default function FacilityPanel({
           : <PicklinePanel
               snapshot={picklineSnapshot}
               hourOverrides={picklineOverrides}
-              onSnapshot={onPicklineSnapshot}
-              onOverridesChange={onPicklineOverridesChange}
-              onClear={onPicklineClear}
+              onSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
+              onOverridesChange={setPicklineOverrides}
+              onClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
             />
         }
       </div>
