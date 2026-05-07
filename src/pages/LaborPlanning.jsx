@@ -27,10 +27,13 @@ export default function LaborPlanning() {
   const [facilityLaborCounts, setFacilityLaborCounts] = useState({})
   const [facilitySettings, setFacilitySettings]       = useState({})
   const [facilityDeltas, setFacilityDeltas]           = useState({})
-  // facilityKpis: bubble up inb/out/drops from each FacilityPanel so ALL tab
-  // shows identical numbers to the facility tab (same query path, same filters).
   const [facilityKpis, setFacilityKpis]               = useState({})
   const [snapLabel, setSnapLabel]                     = useState('Snapshot')
+
+  // ── Pickline state lives here — survives facility tab switches and WR sub-tab switches
+  const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
+  const [picklineOverrides, setPicklineOverrides] = useState({})
+
   const pageRef = useRef(null)
 
   useEffect(() => {
@@ -123,12 +126,21 @@ export default function LaborPlanning() {
         />
       ) : activeFac ? (
         <FacilityPanel
-          key={activeFac.id}
+          // WR omits key so the component is never remounted on tab switch,
+          // preserving pickline state. All other facilities use key so their
+          // data resets cleanly when switching between them.
+          key={activeFac.id === 'wr' ? undefined : activeFac.id}
           facility={activeFac}
           planDate={planDate}
           networkKpi={networkData?.[activeFac.id]}
           onDeltaComputed={handleDeltaComputed}
           onKpiComputed={handleKpiComputed}
+          // Pickline props — only used by WR, ignored by all other facilities
+          picklineSnapshot={picklineSnapshot}
+          picklineOverrides={picklineOverrides}
+          onPicklineSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
+          onPicklineOverridesChange={setPicklineOverrides}
+          onPicklineClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
         />
       ) : null}
     </div>
