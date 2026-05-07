@@ -4,6 +4,7 @@ import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
+import PicklinePanel from '../components/PicklinePanel.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments,
@@ -20,6 +21,9 @@ const SIDE12_LANES = new Set(['side12_shift1','side12_mid','side12_shift2','side
 const SIDE35_LANES = new Set(['side35_shift1','side35_mid','side35_shift2','side35_shift3'])
 const CAL2_TABS = [
   { id: 'all', label: 'All' }, { id: 'side12', label: '1-2 Side' }, { id: 'side35', label: '3.5 Side' },
+]
+const WR_TABS = [
+  { id: 'warehouse', label: 'Warehouse' }, { id: 'pickline', label: 'Pickline' },
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
@@ -64,7 +68,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
   const isKen  = facility.id === 'ken'
+  const isWr   = facility.id === 'wr'
+
+  // CAL split-view sub-tab
   const [sideTab, setSideTab] = useState('all')
+  // WR warehouse/pickline sub-tab
+  const [wrTab, setWrTab] = useState('warehouse')
+
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
   useEffect(() => {
@@ -253,12 +263,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { util, delta } = computeDailyKpis(hourly)
 
-  // Bubble up delta to ALL tab
   useEffect(() => {
     if (onDeltaComputed && sideTab === 'all' && delta != null) onDeltaComputed(facility.id, delta)
   }, [delta, facility.id, sideTab, onDeltaComputed])
 
-  // Bubble up inb/out/drops to ALL tab so scorecards show identical numbers
   const totalInb = visibleProjects.reduce((s, p) => s + p.inb, 0)
   const totalOut = visibleProjects.reduce((s, p) => s + p.out, 0)
 
@@ -299,7 +307,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const hasDropData = Object.keys(projectHourlyDrops).length > 0
   const copyProjectNames = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
 
-  return (
+  // ── Warehouse content (shared by all facilities, including WR warehouse sub-tab)
+  const warehouseContent = (
     <div>
       {isCal2 && (
         <div className="cal2-tab-row">
@@ -397,4 +406,25 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} />
     </div>
   )
+
+  // ── WR: render sub-tab switcher + conditional content
+  if (isWr) {
+    return (
+      <div>
+        <div className="cal2-tab-row">
+          {WR_TABS.map(t => (
+            <button key={t.id} data-side={t.id}
+              className={`cal2-tab${wrTab === t.id ? ' active' : ''}`}
+              onClick={() => setWrTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {wrTab === 'warehouse' ? warehouseContent : <PicklinePanel />}
+      </div>
+    )
+  }
+
+  // ── All other facilities: render warehouse content directly
+  return warehouseContent
 }
