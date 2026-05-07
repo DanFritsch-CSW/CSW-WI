@@ -70,10 +70,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const isKen  = facility.id === 'ken'
   const isWr   = facility.id === 'wr'
 
-  // CAL split-view sub-tab
   const [sideTab, setSideTab] = useState('all')
-  // WR warehouse/pickline sub-tab
-  const [wrTab, setWrTab] = useState('warehouse')
+  const [wrTab, setWrTab]     = useState('warehouse')
+
+  // ── Pickline state lifted here so it survives WR sub-tab switches
+  const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
+  const [picklineOverrides, setPicklineOverrides] = useState({})
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
@@ -307,7 +309,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const hasDropData = Object.keys(projectHourlyDrops).length > 0
   const copyProjectNames = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
 
-  // ── Warehouse content (shared by all facilities, including WR warehouse sub-tab)
+  // ── Warehouse content
   const warehouseContent = (
     <div>
       {isCal2 && (
@@ -407,7 +409,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     </div>
   )
 
-  // ── WR: render sub-tab switcher + conditional content
+  // ── WR: sub-tab switcher — pickline state lives here, passed as props
   if (isWr) {
     return (
       <div>
@@ -420,11 +422,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
             </button>
           ))}
         </div>
-        {wrTab === 'warehouse' ? warehouseContent : <PicklinePanel />}
+        {wrTab === 'warehouse'
+          ? warehouseContent
+          : <PicklinePanel
+              snapshot={picklineSnapshot}
+              hourOverrides={picklineOverrides}
+              onSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
+              onOverridesChange={setPicklineOverrides}
+              onClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
+            />
+        }
       </div>
     )
   }
 
-  // ── All other facilities: render warehouse content directly
   return warehouseContent
 }
