@@ -156,21 +156,54 @@ input, select { font: inherit; color: inherit; }
 .legend-item { display: flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); }
 .legend-dot { width: 7px; height: 7px; border-radius: 50%; }
 
-.hourly-table-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-xl); overflow-x: auto; margin-bottom: 16px; }
+/* ─── Hourly Table ──────────────────────────────────────────────── */
+.hourly-table-wrap { background: var(--bg1); border: 1px solid var(--border); border-radius: var(--r-xl); overflow-x: auto; margin-bottom: 16px; }
+/* Toolbar sits above the table inside the card */
+.ht-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 6px 12px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ht-compact-toggle {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ht-compact-toggle:hover { background: var(--bg3); color: var(--text-secondary); border-color: var(--bg5); }
+.ht-compact-toggle--active { background: var(--brand-bg); border-color: var(--brand-dim); color: var(--brand); }
+.ht-compact-toggle--active:hover { background: var(--brand-bg); color: var(--brand-light); }
+
 .hourly-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
-.hourly-table thead tr { background: var(--bg1); border-bottom: 1px solid var(--border); }
-.hourly-table th { padding: 5px 10px; text-align: right; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+/* Header: slightly darker background for contrast vs body rows */
+.hourly-table thead tr { background: var(--bg0); border-bottom: 2px solid var(--border); }
+.hourly-table th { padding: 5px 10px; text-align: right; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-secondary); }
 .hourly-table th:first-child { text-align: left; }
-.hourly-table td { padding: 4px 10px; text-align: right; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); }
-.hourly-table td:first-child { text-align: left; color: var(--text-primary); }
+/* Body rows: stronger border + primary text color for readability */
+.hourly-table td { padding: 4px 10px; text-align: right; border-bottom: 1px solid var(--border); color: var(--text-primary); }
+.hourly-table td:first-child { text-align: left; color: var(--text-primary); font-weight: 600; }
 .hourly-table tbody tr:last-child td { border-bottom: none; }
+/* Alternating rows for easier row tracking */
+.hourly-table tbody tr:nth-child(even) { background: var(--bg2); }
 .hourly-table tbody tr:hover { background: var(--bg3); }
-.hourly-table tr.ht-deficit { background: rgba(224, 90, 90, 0.07); }
-.hourly-table tr.ht-deficit:hover { background: rgba(224, 90, 90, 0.12); }
-.hourly-table .ht-hour { font-weight: 600; color: var(--text-primary); }
-.hourly-table .ht-neg { color: #e05a5a; }
-.hourly-table .ht-pos { color: #3dba7e; }
-.hourly-table tfoot tr.ht-total td { padding: 5px 10px; border-top: 1px solid var(--border); border-bottom: none; font-weight: 700; color: var(--text-primary); background: var(--bg1); }
+.hourly-table tr.ht-deficit { background: rgba(224, 90, 90, 0.08) !important; }
+.hourly-table tr.ht-deficit:hover { background: rgba(224, 90, 90, 0.14) !important; }
+.hourly-table .ht-neg { color: #c8352b; font-weight: 600; }
+.hourly-table .ht-pos { color: #1a8a52; font-weight: 600; }
+.hourly-table tfoot tr.ht-total td { padding: 6px 10px; border-top: 2px solid var(--border); border-bottom: none; font-weight: 700; color: var(--text-primary); background: var(--bg0); }
+
+/* Hour column — narrow fixed width */
+.ht-hour-col { width: 48px; min-width: 48px; }
 
 /* ─── Project List — default single-column ──────────────────────── */
 .project-list { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-xl); overflow: hidden; margin-bottom: 16px; }
