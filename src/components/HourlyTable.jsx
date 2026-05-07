@@ -74,6 +74,8 @@ const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigat
 
 export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
   const [expanded, setExpanded] = useState(false)
+  // compact=true hides EST Drops, Inb, Out columns (default for screenshots)
+  const [compact, setCompact] = useState(true)
   // cellRefs[projIdx][rowIdx] = ref to the visible EditableCell span
   const cellRefs = useRef({})
 
@@ -135,31 +137,41 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
 
   return (
     <div className="hourly-table-wrap">
+      <div className="ht-toolbar">
+        <button
+          className={`ht-compact-toggle${compact ? ' ht-compact-toggle--active' : ''}`}
+          onClick={() => setCompact(c => !c)}
+          title={compact ? 'Show all columns (EST Drops, Inb, Out)' : 'Hide EST Drops, Inb, Out columns'}
+        >
+          {compact ? 'Full View' : 'Compact'}
+        </button>
+      </div>
       <table className="hourly-table">
         <thead>
           <tr>
-            <th>Hour</th>
-            {multiProject && expanded
-              ? <>
-                  {projects.map(p => (
-                    <th key={p} className="ht-est-col ht-proj-col" title={p}>
-                      {p.length > 12 ? p.slice(0, 12) + '...' : p}
+            <th className="ht-hour-col">Hour</th>
+            {!compact && (
+              multiProject && expanded
+                ? <>
+                    {projects.map(p => (
+                      <th key={p} className="ht-est-col ht-proj-col" title={p}>
+                        {p.length > 12 ? p.slice(0, 12) + '...' : p}
+                      </th>
+                    ))}
+                    <th className="ht-est-col">
+                      Total EST
+                      <button className="ht-expand-btn" onClick={() => setExpanded(false)}>Collapse</button>
                     </th>
-                  ))}
-                  <th className="ht-est-col">
-                    Total EST
-                    <button className="ht-expand-btn" onClick={() => setExpanded(false)}>Collapse</button>
+                  </>
+                : <th className="ht-est-col">
+                    EST Drops
+                    {multiProject && (
+                      <button className="ht-expand-btn" onClick={() => setExpanded(true)}>Expand</button>
+                    )}
                   </th>
-                </>
-              : <th className="ht-est-col">
-                  EST Drops
-                  {multiProject && (
-                    <button className="ht-expand-btn" onClick={() => setExpanded(true)}>Expand</button>
-                  )}
-                </th>
-            }
-            <th>Inb</th>
-            <th>Out</th>
+            )}
+            {!compact && <th>Inb</th>}
+            {!compact && <th>Out</th>}
             <th>Appts</th>
             <th>Labor Req</th>
             <th>Labor Avail</th>
@@ -171,29 +183,30 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
         <tbody>
           {rows.map((r, rowIdx) => (
             <tr key={rowIdx} className={r.final < 0 ? 'ht-deficit' : ''}>
-              <td className="ht-hour">{fmtHour(r.h)}</td>
-              {multiProject && expanded
-                ? <>
-                    {projects.map((p, projIdx) => (
-                      <td key={p} className="ht-est-col ht-proj-col">
-                        <EditableCell
-                          ref={getCellRef(projIdx, rowIdx)}
-                          value={projectHourlyDrops[p]?.[r.h] ?? 0}
-                          onSave={val => onProjectHourlyChange?.(p, r.h, val)}
-                          onNavigate={dir => navigate(projIdx, rowIdx, dir, numProjects, numRows)}
-                        />
+              <td className="ht-hour ht-hour-col">{fmtHour(r.h)}</td>
+              {!compact && (
+                multiProject && expanded
+                  ? <>
+                      {projects.map((p, projIdx) => (
+                        <td key={p} className="ht-est-col ht-proj-col">
+                          <EditableCell
+                            ref={getCellRef(projIdx, rowIdx)}
+                            value={projectHourlyDrops[p]?.[r.h] ?? 0}
+                            onSave={val => onProjectHourlyChange?.(p, r.h, val)}
+                            onNavigate={dir => navigate(projIdx, rowIdx, dir, numProjects, numRows)}
+                          />
+                        </td>
+                      ))}
+                      <td className="ht-est-col">
+                        {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
                       </td>
-                    ))}
-                    <td className="ht-est-col">
+                    </>
+                  : <td className="ht-est-col">
                       {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
                     </td>
-                  </>
-                : <td className="ht-est-col">
-                    {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
-                  </td>
-              }
-              <td>{r.inb}</td>
-              <td>{r.out}</td>
+              )}
+              {!compact && <td>{r.inb}</td>}
+              {!compact && <td>{r.out}</td>}
               <td style={{ color }}>{r.appts}</td>
               <td>{r.req}</td>
               <td>{r1(r.avail)}</td>
@@ -207,18 +220,19 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
         </tbody>
         <tfoot>
           <tr className="ht-total">
-            <td>Total</td>
-            {multiProject && expanded
-              ? <>
-                  {projects.map(p => (
-                    <td key={p} className="ht-est-col ht-proj-col">{projectTotals[p] ?? 0}</td>
-                  ))}
-                  <td className="ht-est-col">{tot.est}</td>
-                </>
-              : <td className="ht-est-col">{tot.est}</td>
-            }
-            <td>{tot.inb}</td>
-            <td>{tot.out}</td>
+            <td className="ht-hour-col">Total</td>
+            {!compact && (
+              multiProject && expanded
+                ? <>
+                    {projects.map(p => (
+                      <td key={p} className="ht-est-col ht-proj-col">{projectTotals[p] ?? 0}</td>
+                    ))}
+                    <td className="ht-est-col">{tot.est}</td>
+                  </>
+                : <td className="ht-est-col">{tot.est}</td>
+            )}
+            {!compact && <td>{tot.inb}</td>}
+            {!compact && <td>{tot.out}</td>}
             <td style={{ color }}>{tot.appts}</td>
             <td>{tot.req}</td>
             <td>{tot.avail}</td>
