@@ -1,8 +1,4 @@
 import { useState, useMemo, useRef } from 'react'
-import { parsePicklineXlsx } from './PicklinePanel.jsx'
-
-// Re-export so FacilityPanel can tree-shake if needed — parser lives in this file
-export { parsePicklineXlsx }
 
 // ─── Pickline constants ───────────────────────────────────────────────────────
 const HRS = 8.0
@@ -714,9 +710,9 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
   )
 }
 
-// ─── PicklinePanel (controlled) ───────────────────────────────────────────────
-// Props from FacilityPanel (state lives there, survives sub-tab switches):
-//   snapshot, hourOverrides, onSnapshot, onOverridesChange, onClear
+// ─── PicklinePanel ────────────────────────────────────────────────────────────
+// State (snapshot + overrides) lives in FacilityPanel which stays mounted
+// via display:none, so it survives all tab switches for the session.
 export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onOverridesChange, onClear }) {
   const [pickers,  setPickers]  = useState(9)
   const [cpmh,     setCpmh]     = useState(150)
