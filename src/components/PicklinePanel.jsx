@@ -1,7 +1,6 @@
-import { useState, useMemo, useRef, useCallback } from 'react'
-import { parsePicklineCSV } from '../lib/parsePicklineCSV.js'
+import { useState, useMemo, useRef } from 'react'
 
-// ─── Pickline constants (same as CSW-Pickline app) ────────────────────────────
+// ─── Pickline constants ───────────────────────────────────────────────────────
 const HRS = 8.0
 const PACE = [
   { label: '5–5:59am',   clockStart: 5*60,  pickMins: 50 },
@@ -27,6 +26,290 @@ const CREW_PALETTE = [
   { color: '#EDE7F6', border: '#B39DDB' },
   { color: '#FBE9E7', border: '#FFAB91' },
 ]
+
+// Known route metadata fallbacks
+const ROUTE_NAMES = {
+  '1':'Sioux Falls','2':'Eau Claire','6':'Eau Claire','13':'Maple Lake',
+  '16':'Rochester','19':'Maple Lake','23':'Des Moines','39':'Superior',
+  '41':'Oak Creek','45':'Maple Lake','60':'Greenville','63':'Lodi',
+  '70':'Superior','74':'Oak Creek','79':'Grand Forks','81':'Maple Lake',
+  '82':'Maple Lake','84':'St Paul','85':'St Paul','86':'St Paul','87':'St Paul',
+  '90':'Oak Creek','98':'Kansas City','99':'Kansas City','600':'Kewaskum',
+  '605':'Des Moines','612':'Greenville','618':'Glendale Hts','621':'Glendale Hts',
+  '624':'Glendale Hts','627':'Glendale Hts','630':'Glendale Hts','639':'Kansas City',
+  '640':'Mitchell','642':'Glendale Hts','651':'Lodi','661':'Wis Rapids','667':'Kewaskum',
+}
+const ROUTE_LIVE = new Set(['98','99','639','39','70','16','23','605'])
+
+// ─── XLSX Parser ──────────────────────────────────────────────────────────────
+// Reads the 4-sheet workbook (SheetJS workbook object) and returns a snapshot.
+// Sheet names (case-insensitive prefix match):
+//   "Cases In Created Status" → cases
+//   "Bernatello Pick Schedule" → schedule (route sort + appt times)
+//   "TieHigh and Pickline Layout" → tiehigh (zone + pallet threshold)
+//   "Shortage Report"            → shortage
+//
+// Cases columns:    Status Name | Requested Delivery Date Date | Route Number (Bernatello's) | Lookup Code | Material Lookup Code | Packaged Amount Sum
+// TieHigh columns:  Location Container Name | Pickline Zones | Material Lookup Code | Material Name | Full Pallet (t x h)
+// Schedule columns: Day Of Week | Pick Seq | Route Number | Route Name | ... | Appointment Time | Appointment End Time | ...
+// Shortage columns: Requested Delivery Date Date | Item Number | ... | Total Available Cases | ...
+//
+// Appointment times are stored as nanosecond-style integers where
+//   value / 1_000_000 / 60 = minutes from midnight  (e.g. 19_800_000_000 → 330 min → 5:30am)
+function sheetToRows(wb, nameHint) {
+  const key = Object.keys(wb.Sheets).find(k =>
+    k.toLowerCase().includes(nameHint.toLowerCase())
+  )
+  if (!key) return []
+  const XLSX = wb._XLSX
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[key], { defval: '' })
+  return rows
+}
+
+function normalizeRouteNum(raw) {
+  return String(raw ?? '').trim().replace(/^0+(\d)/, '$1')
+}
+
+function normalizeDate(val) {
+  if (!val) return ''
+  if (val instanceof Date) return val.toISOString().slice(0, 10)
+  // SheetJS may parse as JS Date already
+  const s = String(val).trim()
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10)
+  // M/D/YYYY
+  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (mdy) return `${mdy[3]}-${mdy[1].padStart(2,'0')}-${mdy[2].padStart(2,'0')}`
+  return s
+}
+
+const DAYS_OF_WEEK = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+function dateToDow(dateStr) {
+  if (!dateStr) return null
+  const parts = dateStr.split('-').map(Number)
+  if (parts.length < 3 || parts.some(isNaN)) return null
+  return DAYS_OF_WEEK[new Date(parts[0], parts[1]-1, parts[2]).getDay()]
+}
+
+function parseApptMinutes(val) {
+  // Stored as e.g. 19800000000 where / 1e6 / 60 = minutes from midnight
+  if (!val) return null
+  const n = typeof val === 'number' ? val : parseFloat(String(val))
+  if (isNaN(n) || n <= 0) return null
+  const mins = Math.round(n / 1e6 / 60)
+  // Sanity: must be within a single day (0–1439 minutes)
+  if (mins < 0 || mins > 1439) return null
+  return mins
+}
+
+export function parsePicklineXlsx(wb) {
+  // ── 1. TieHigh: build skuMap { matCode → { zone, fullPallet } } ────────────
+  const tieHighRows = sheetToRows(wb, 'TieHigh')
+  const skuMap = {}
+  for (const row of tieHighRows) {
+    const code = String(row['Material Lookup Code'] ?? '').trim()
+    if (!code) continue
+    const zoneStr = String(row['Pickline Zones'] ?? '')
+    const zone    = parseInt(zoneStr.replace(/\D/g, ''), 10) || 0
+    const fp      = parseInt(String(row['Full Pallet (t x h)'] ?? '0'), 10) || 0
+    skuMap[code]  = { zone, fullPallet: fp }
+  }
+  const hasTieHigh = Object.keys(skuMap).length > 0
+
+  // ── 2. Schedule: build daySeqMap { dow → { routeNum → { seq, name, apptStart, apptEnd } } } ──
+  const schedRows = sheetToRows(wb, 'Bernatello')
+  const daySeqMap = {}
+  for (const row of schedRows) {
+    const rt   = normalizeRouteNum(row['Route Number'])
+    const day  = String(row['Day Of Week'] ?? '').trim()
+    const seq  = parseInt(String(row['Pick Seq'] ?? ''), 10)
+    const name = String(row['Route Name'] ?? '').trim()
+    const apptStart = parseApptMinutes(row['Appointment Time'])
+    const apptEnd   = parseApptMinutes(row['Appointment End Time'])
+    const live = String(row['Drop Or Live'] ?? '').toLowerCase().includes('live')
+    if (!rt || !day || isNaN(seq)) continue
+    if (!daySeqMap[day]) daySeqMap[day] = {}
+    daySeqMap[day][rt] = { seq, name: name || null, apptStart, apptEnd, live }
+  }
+
+  // ── 3. Shortage: build shortageMap { date → { itemNum → available } } ──────
+  const shortageRows = sheetToRows(wb, 'Shortage')
+  const shortageMap = {}
+  for (const row of shortageRows) {
+    // Date column
+    let dateVal = row['Requested Delivery Date Date'] || row['Pick Up Date'] || row['Date'] || ''
+    if (dateVal instanceof Date) dateVal = dateVal.toISOString().slice(0, 10)
+    const date = normalizeDate(String(dateVal))
+    // Item number
+    const itemNum = String(row['Item Number'] ?? row['Material Lookup Code'] ?? '').trim()
+    if (!itemNum) continue
+    const avail = Math.max(0, parseInt(String(row['Total Available Cases'] ?? '0'), 10) || 0)
+    const key = date || '__any__'
+    if (!shortageMap[key]) shortageMap[key] = {}
+    shortageMap[key][itemNum] = avail
+  }
+  const hasShortages = Object.keys(shortageMap).length > 0
+
+  // ── 4. Cases: aggregate into dateRtSkuOrig + dateRtSkuLines ───────────────
+  const casesRows = sheetToRows(wb, 'Cases')
+  const dateRtSkuOrig  = {}  // date → rt → matCode → total
+  const dateRtSkuLines = {}  // date → rt → matCode → [line amounts]
+
+  for (const row of casesRows) {
+    const route   = String(row["Route Number (Bernatello's)"] ?? '').trim()
+    const cases   = parseInt(parseFloat(String(row['Packaged Amount Sum'] ?? '0')), 10) || 0
+    const matCode = String(row['Material Lookup Code'] ?? '').trim()
+
+    // Date: may be a JS Date object from SheetJS
+    let dateVal = row['Requested Delivery Date Date']
+    if (dateVal instanceof Date) dateVal = dateVal.toISOString().slice(0, 10)
+    const date = normalizeDate(String(dateVal ?? ''))
+
+    if (!date || !route || cases <= 0) continue
+    const rt = normalizeRouteNum(route)
+
+    if (!dateRtSkuOrig[date])             dateRtSkuOrig[date] = {}
+    if (!dateRtSkuOrig[date][rt])         dateRtSkuOrig[date][rt] = {}
+    dateRtSkuOrig[date][rt][matCode] = (dateRtSkuOrig[date][rt][matCode] || 0) + cases
+
+    if (!dateRtSkuLines[date])            dateRtSkuLines[date] = {}
+    if (!dateRtSkuLines[date][rt])        dateRtSkuLines[date][rt] = {}
+    if (!dateRtSkuLines[date][rt][matCode]) dateRtSkuLines[date][rt][matCode] = []
+    dateRtSkuLines[date][rt][matCode].push(cases)
+  }
+
+  const allDates     = Object.keys(dateRtSkuOrig).sort()
+  const snapshotDate = allDates[0] ?? new Date().toISOString().slice(0, 10)
+
+  // ── 5. Apply shortages (per-date, in pick-seq order) ──────────────────────
+  const rtSkuShorted = {}
+  if (hasShortages) {
+    for (const date of allDates) {
+      rtSkuShorted[date] = {}
+      const rtSkuOrig  = dateRtSkuOrig[date]
+      const dow        = dateToDow(date)
+      const seqForDay  = (dow && daySeqMap[dow]) ? daySeqMap[dow] : {}
+      const sortedRts  = Object.keys(rtSkuOrig).sort((a, b) => {
+        const sa = seqForDay[a]?.seq ?? null, sb = seqForDay[b]?.seq ?? null
+        if (sa !== null && sb !== null) return sa - sb
+        if (sa !== null) return -1
+        if (sb !== null) return 1
+        return parseInt(a, 10) - parseInt(b, 10)
+      })
+      for (const rt of sortedRts) rtSkuShorted[date][rt] = {}
+      const dateShortages = shortageMap[date] ?? shortageMap['__any__'] ?? {}
+      for (const [itemNum, available] of Object.entries(dateShortages)) {
+        const totalOrdered = sortedRts.reduce((s, rt) => s + (rtSkuOrig[rt][itemNum] || 0), 0)
+        if (totalOrdered === 0 || available >= totalOrdered) continue
+        let remaining = available
+        for (const rt of sortedRts) {
+          const ordered = rtSkuOrig[rt][itemNum] || 0
+          if (ordered === 0) continue
+          const allocated = Math.min(ordered, remaining)
+          rtSkuShorted[date][rt][itemNum] = ordered - allocated
+          remaining = Math.max(0, remaining - allocated)
+        }
+      }
+    }
+  }
+
+  // ── 6. Build per-date route maps ──────────────────────────────────────────
+  const dateRouteMaps = {}
+  for (const date of allDates) {
+    dateRouteMaps[date] = {}
+    const rtSkuLines     = dateRtSkuLines[date]
+    const rtSkuOrig      = dateRtSkuOrig[date]
+    const shortedForDate = rtSkuShorted[date] ?? {}
+
+    for (const rt of Object.keys(rtSkuLines)) {
+      const rtShorted = shortedForDate[rt] ?? {}
+      const rm = { gross: 0, alloc: 0, net: 0, shorted: 0, z: {} }
+
+      for (const [matCode, lines] of Object.entries(rtSkuLines[rt])) {
+        const origTotal    = rtSkuOrig[rt][matCode] || 0
+        const shortedTotal = rtShorted[matCode] || 0
+        rm.gross   += origTotal
+        rm.shorted += shortedTotal
+        if (shortedTotal >= origTotal) continue
+
+        let remainingShortage = shortedTotal
+        const adjLines = [...lines].sort((a, b) => b - a).map(c => {
+          if (remainingShortage <= 0) return c
+          const cut = Math.min(c, remainingShortage)
+          remainingShortage -= cut
+          return c - cut
+        })
+
+        if (hasTieHigh) {
+          const sku = skuMap[matCode]
+          for (const adjCases of adjLines) {
+            if (adjCases <= 0) continue
+            if (sku && adjCases >= sku.fullPallet / 2) {
+              rm.alloc += adjCases
+            } else {
+              rm.net += adjCases
+              if (sku && sku.zone > 0) rm.z[sku.zone] = (rm.z[sku.zone] || 0) + adjCases
+            }
+          }
+        } else {
+          rm.net += origTotal - shortedTotal
+        }
+      }
+      dateRouteMaps[date][rt] = rm
+    }
+  }
+
+  // ── 7. Summarize into routes arrays ───────────────────────────────────────
+  function summarize(routeMap, date) {
+    const dow       = dateToDow(date)
+    const seqForDay = (dow && daySeqMap[dow]) ? daySeqMap[dow] : {}
+
+    const routes = Object.keys(routeMap)
+      .sort((a, b) => {
+        const sa = seqForDay[a]?.seq ?? null, sb = seqForDay[b]?.seq ?? null
+        if (sa !== null && sb !== null) return sa - sb
+        if (sa !== null) return -1
+        if (sb !== null) return 1
+        return parseInt(a, 10) - parseInt(b, 10)
+      })
+      .map(rt => {
+        const sched = seqForDay[rt]
+        return {
+          rt,
+          nm:      sched?.name ?? ROUTE_NAMES[rt] ?? `Rt ${rt}`,
+          cs:      routeMap[rt].net,
+          gross:   routeMap[rt].gross,
+          alloc:   routeMap[rt].alloc,
+          shorted: routeMap[rt].shorted,
+          ready:   sched?.apptStart ?? null,
+          apptEnd: sched?.apptEnd   ?? null,
+          live:    sched?.live ?? ROUTE_LIVE.has(rt),
+          z:       routeMap[rt].z,
+        }
+      })
+    return {
+      routes,
+      net_cs:     routes.reduce((s, r) => s + r.cs,      0),
+      alloc_cs:   routes.reduce((s, r) => s + r.alloc,   0),
+      shorted_cs: routes.reduce((s, r) => s + r.shorted, 0),
+      gross_cs:   routes.reduce((s, r) => s + r.gross,   0),
+    }
+  }
+
+  const primary    = summarize(dateRouteMaps[snapshotDate] ?? {}, snapshotDate)
+  const next_dates = allDates.slice(1).map(date => {
+    const s = summarize(dateRouteMaps[date], date)
+    return { date, gross_cs: s.gross_cs, alloc_cs: s.alloc_cs, shorted_cs: s.shorted_cs, net_cs: s.net_cs }
+  })
+
+  return {
+    snapshot_date: snapshotDate,
+    generated_at:  new Date().toISOString(),
+    source: 'manual',
+    ...primary,
+    next_dates,
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt(m) {
@@ -107,14 +390,14 @@ function buildCrews(pickers, routes, mode = 'spread') {
   const zoneDemand = getZoneDemand(routes)
   const adjDemand = {}
   for (let z = 1; z <= 12; z++) adjDemand[z] = (zoneDemand[z] || 0) + WALK_WEIGHT * (ZONE_LOCS[z] || 0)
-  const rawCs  = (zones) => zones.reduce((a, z) => a + (zoneDemand[z] || 0), 0)
-  const adjCs  = (zones) => zones.reduce((a, z) => a + adjDemand[z], 0)
-  const locs   = (zones) => zones.reduce((a, z) => a + (ZONE_LOCS[z] || 0), 0)
+  const rawCs = (zones) => zones.reduce((a, z) => a + (zoneDemand[z] || 0), 0)
+  const adjCs = (zones) => zones.reduce((a, z) => a + adjDemand[z], 0)
+  const locs  = (zones) => zones.reduce((a, z) => a + (ZONE_LOCS[z] || 0), 0)
 
-  const palletCs  = rawCs([1, 2])
-  const z34Cs     = rawCs([3, 4])
-  const z34People = Math.min(2, working)
-  const z5Cs      = zoneDemand[5] || 0
+  const palletCs   = rawCs([1, 2])
+  const z34Cs      = rawCs([3, 4])
+  const z34People  = Math.min(2, working)
+  const z5Cs       = zoneDemand[5] || 0
   const z5Assigned = working > z34People ? 1 : 0
 
   const remainZones = [6,7,8,9,10,11,12]
@@ -217,47 +500,27 @@ function buildCrews(pickers, routes, mode = 'spread') {
     crews.push({ label: '1 person — Z5', zones: [5], ...CREW_PALETTE[2], flex: 'flex ↔ Z4 / Z6', count: 1, cs: z5Cs })
   }
   groups.forEach((g, i) => {
-    const zFirst = g.zones[0], zLast = g.zones[g.zones.length - 1]
-    const zLabel = g.zones.length === 1 ? `Z${zFirst}` : `Z${zFirst}–${zLast}`
-    const prevZ  = i === 0 ? 5 : groups[i-1].zones[groups[i-1].zones.length-1]
-    const nextZ  = i < groups.length - 1 ? groups[i+1].zones[0] : null
+    const zFirst  = g.zones[0], zLast = g.zones[g.zones.length - 1]
+    const zLabel  = g.zones.length === 1 ? `Z${zFirst}` : `Z${zFirst}–${zLast}`
+    const prevZ   = i === 0 ? 5 : groups[i-1].zones[groups[i-1].zones.length-1]
+    const nextZ   = i < groups.length - 1 ? groups[i+1].zones[0] : null
     const flexStr = nextZ ? `flex ↔ Z${prevZ} / Z${nextZ}` : `flex → Z${prevZ}`
     crews.push({ label: `${p(g.count)} — ${zLabel}`, zones: g.zones, ...CREW_PALETTE[(i+3) % CREW_PALETTE.length], flex: flexStr, count: g.count, cs: g.cs })
   })
   return crews
 }
 
-// ─── CSV Upload Area ──────────────────────────────────────────────────────────
-function CsvUploadArea({ onSnapshot }) {
+// ─── Upload Area ──────────────────────────────────────────────────────────────
+function UploadArea({ onSnapshot }) {
   const [dragging, setDragging]     = useState(false)
-  const [files, setFiles]           = useState({ cases: null, tiehigh: null, pickseq: null, shortage: null })
+  const [file, setFile]             = useState(null)
   const [parsing, setParsing]       = useState(false)
   const [parseError, setParseError] = useState(null)
   const inputRef = useRef(null)
 
-  const FILE_LABELS = [
-    { key: 'cases',    label: 'Cases CSV',     hint: 'Required — Bernatello\'s order export', required: true },
-    { key: 'tiehigh',  label: 'TieHigh CSV',   hint: 'Optional — enables pallet allocation', required: false },
-    { key: 'pickseq',  label: 'Pick Seq CSV',  hint: 'Optional — route sort order by day',   required: false },
-    { key: 'shortage', label: 'Shortage CSV',  hint: 'Optional — inventory shortage report', required: false },
-  ]
-
-  function classifyFile(filename) {
-    const n = filename.toLowerCase()
-    if (/tie.?high|pickline/.test(n)) return 'tiehigh'
-    if (/shortage/.test(n)) return 'shortage'
-    if (/bernatello|pick.?sched|pick.?seq/.test(n)) return 'pickseq'
-    return 'cases'
-  }
-
   function handleFiles(fileList) {
-    const next = { ...files }
-    for (const f of Array.from(fileList)) {
-      const key = classifyFile(f.name)
-      next[key] = f
-    }
-    setFiles(next)
-    setParseError(null)
+    const f = Array.from(fileList).find(f => /\.(xlsx|xls|csv)$/i.test(f.name))
+    if (f) { setFile(f); setParseError(null) }
   }
 
   function onDrop(e) {
@@ -265,37 +528,28 @@ function CsvUploadArea({ onSnapshot }) {
     handleFiles(e.dataTransfer.files)
   }
 
-  async function readText(file) {
-    return new Promise((res, rej) => {
-      const r = new FileReader()
-      r.onload = e => res(e.target.result)
-      r.onerror = () => rej(new Error('Failed to read file'))
-      r.readAsText(file)
-    })
-  }
-
-  async function handleParse() {
-    if (!files.cases) return
+  async function handleLoad() {
+    if (!file) return
     setParsing(true); setParseError(null)
     try {
-      const casesText    = await readText(files.cases)
-      const tieHighText  = files.tiehigh  ? await readText(files.tiehigh)  : null
-      const pickSeqText  = files.pickseq  ? await readText(files.pickseq)  : null
-      const shortageText = files.shortage ? await readText(files.shortage) : null
-      const snap = parsePicklineCSV(casesText, 'manual', tieHighText, pickSeqText, shortageText)
-      if (!snap.routes || snap.routes.length === 0) throw new Error('No routes found — check column mapping')
+      // Dynamically import SheetJS from CDN so it doesn't bloat the main bundle
+      const XLSX = await import('https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs')
+      const buf  = await file.arrayBuffer()
+      const wb   = XLSX.read(buf, { type: 'array', cellDates: true })
+      wb._XLSX   = XLSX  // pass reference so sheetToRows can use it
+      const snap = parsePicklineXlsx(wb)
+      if (!snap.routes || snap.routes.length === 0)
+        throw new Error('No routes found — check that the Cases sheet has data for today')
       onSnapshot(snap)
     } catch (err) {
-      setParseError(err.message ?? 'Parse failed')
+      setParseError(err.message ?? 'Failed to parse file')
     } finally {
       setParsing(false)
     }
   }
 
-  const hasRequired = !!files.cases
-
   return (
-    <div style={{ maxWidth: 640, margin: '40px auto', fontFamily: 'Arial, sans-serif' }}>
+    <div style={{ maxWidth: 540, margin: '40px auto', fontFamily: 'Arial, sans-serif' }}>
       {/* Drop zone */}
       <div
         onDragOver={e => { e.preventDefault(); setDragging(true) }}
@@ -303,85 +557,80 @@ function CsvUploadArea({ onSnapshot }) {
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
         style={{
-          border: `2px dashed ${dragging ? '#1565C0' : '#b0c4f0'}`,
-          borderRadius: 8,
-          padding: '32px 24px',
-          textAlign: 'center',
-          background: dragging ? '#e8f0fe' : '#f5f8ff',
-          cursor: 'pointer',
-          marginBottom: 20,
-          transition: 'all 0.15s',
+          border: `2px dashed ${dragging ? '#1565C0' : file ? '#43a047' : '#b0c4f0'}`,
+          borderRadius: 8, padding: '36px 24px', textAlign: 'center',
+          background: dragging ? '#e8f0fe' : file ? '#f1f8e9' : '#f5f8ff',
+          cursor: 'pointer', marginBottom: 16, transition: 'all 0.15s',
         }}
       >
-        <div style={{ fontSize: 32, marginBottom: 8 }}>📂</div>
-        <div style={{ fontSize: 14, fontWeight: 'bold', color: '#1565C0', marginBottom: 4 }}>
-          Drop CSV files here or click to browse
-        </div>
-        <div style={{ fontSize: 11, color: '#888' }}>
-          Drop multiple files at once — they'll be auto-classified by filename
-        </div>
+        <div style={{ fontSize: 36, marginBottom: 8 }}>{file ? '📊' : '📂'}</div>
+        {file ? (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 'bold', color: '#2e7d32', marginBottom: 4 }}>
+              {file.name}
+            </div>
+            <div style={{ fontSize: 11, color: '#888' }}>Click to replace</div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 'bold', color: '#1565C0', marginBottom: 4 }}>
+              Drop the OMNI Excel file here or click to browse
+            </div>
+            <div style={{ fontSize: 11, color: '#888' }}>
+              Single .xlsx file — reads all 4 sheets automatically
+            </div>
+          </>
+        )}
         <input
-          ref={inputRef}
-          type="file"
-          accept=".csv"
-          multiple
+          ref={inputRef} type="file" accept=".xlsx,.xls,.csv"
           style={{ display: 'none' }}
           onChange={e => handleFiles(e.target.files)}
         />
       </div>
 
-      {/* File status */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 20 }}>
-        {FILE_LABELS.map(({ key, label, hint, required }) => (
-          <div key={key} style={{
-            display: 'flex', alignItems: 'flex-start', gap: 10,
-            padding: '10px 14px',
-            background: files[key] ? '#e8f5e9' : '#f9f9f9',
-            border: `1px solid ${files[key] ? '#a5d6a7' : '#e0e0e0'}`,
-            borderRadius: 6,
+      {/* Sheet legend */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 16 }}>
+        {[
+          { label: 'Cases In Created Status', hint: 'Route / SKU / cases ordered', required: true },
+          { label: 'TieHigh and Pickline Layout', hint: 'Zone mapping + pallet thresholds', required: false },
+          { label: 'Bernatello Pick Schedule', hint: 'Route order + appt times', required: false },
+          { label: 'Shortage Report', hint: 'Inventory shortfall data', required: false },
+        ].map(({ label, hint, required }) => (
+          <div key={label} style={{
+            padding: '8px 12px', borderRadius: 6, fontSize: 11,
+            background: '#f9f9f9', border: '1px solid #e0e0e0',
           }}>
-            <span style={{ fontSize: 16, marginTop: 1 }}>{files[key] ? '✅' : required ? '⬜' : '☐'}</span>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 12, fontWeight: 'bold', color: files[key] ? '#2e7d32' : '#444' }}>
-                {label}{required && <span style={{ color: '#c62828', marginLeft: 2 }}>*</span>}
-              </div>
-              <div style={{ fontSize: 10, color: '#888', marginTop: 1 }}>
-                {files[key] ? files[key].name : hint}
-              </div>
+            <div style={{ fontWeight: 'bold', color: '#444', marginBottom: 2 }}>
+              {label}{required && <span style={{ color: '#c62828', marginLeft: 3 }}>*</span>}
             </div>
-            {files[key] && (
-              <button
-                onClick={e => { e.stopPropagation(); setFiles(prev => ({ ...prev, [key]: null })) }}
-                style={{ marginLeft: 'auto', fontSize: 14, color: '#999', background: 'none', border: 'none', cursor: 'pointer', flexShrink: 0, paddingLeft: 4 }}
-              >×</button>
-            )}
+            <div style={{ color: '#999' }}>{hint}</div>
           </div>
         ))}
       </div>
 
       {parseError && (
-        <div style={{ background: '#ffebee', border: '1px solid #ef9a9a', borderRadius: 6, padding: '10px 14px', fontSize: 12, color: '#c62828', marginBottom: 16 }}>
+        <div style={{ background: '#ffebee', border: '1px solid #ef9a9a', borderRadius: 6, padding: '10px 14px', fontSize: 12, color: '#c62828', marginBottom: 14 }}>
           ⚠ {parseError}
         </div>
       )}
 
       <button
-        onClick={handleParse}
-        disabled={!hasRequired || parsing}
+        onClick={handleLoad}
+        disabled={!file || parsing}
         style={{
-          width: '100%', padding: '12px', background: hasRequired ? '#1565C0' : '#ccc',
-          color: '#fff', border: 'none', borderRadius: 6, fontSize: 14,
-          fontWeight: 'bold', cursor: hasRequired ? 'pointer' : 'not-allowed',
-          transition: 'background 0.15s',
+          width: '100%', padding: '12px', fontSize: 14, fontWeight: 'bold',
+          background: file ? '#1565C0' : '#ccc', color: '#fff',
+          border: 'none', borderRadius: 6,
+          cursor: file ? 'pointer' : 'not-allowed', transition: 'background 0.15s',
         }}
       >
-        {parsing ? 'Parsing…' : 'Load Pick Brief'}
+        {parsing ? 'Loading…' : 'Load Pick Brief'}
       </button>
     </div>
   )
 }
 
-// ─── Main Pick Table ──────────────────────────────────────────────────────────
+// ─── Pick Table ───────────────────────────────────────────────────────────────
 function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, routes, crews, crewMode, setCrewMode }) {
   const brkFmt = BREAKS.map(([s, e]) => `${fmt(s)}–${fmt(e)}`).join('  |  ')
   const NUM_LEFT = 7
@@ -407,8 +656,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
     const globalRate = (pickers * cpmh) / 60
     while (cs < 19*60) {
       const pm = cs === 13*60 + 30 ? 30 : 60
-      const end = cs + pm
-      const lastMin = end - 1
+      const end = cs + pm, lastMin = end - 1
       const h1 = cs/60|0, m1 = cs%60, lh = lastMin/60|0, lm = lastMin%60
       const ap = lh >= 12 ? 'pm' : 'am'
       const s1 = `${h1>12?h1-12:h1}${m1?':'+String(m1).padStart(2,'0'):''}`
@@ -486,8 +734,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
         isLate    = end > apptDeadline - 15
         isCaution = !isLate && end > apptDeadline - 30
       }
-      const SHIFT_END = 13 * 60 + 30
-      const capped = start >= SHIFT_END - 0.01
+      const capped = start >= 13*60 + 30 - 0.01
       const sym = crossBrk ? <sup style={{ color:'#5C6BC0', fontSize:8 }}>ǁǁ</sup> : null
       if (capped) {
         pwEl = <span style={{ background:'#111', color:'#fff', borderRadius:3, padding:'1px 6px', fontSize:10, fontWeight:'bold', whiteSpace:'nowrap' }}>{fmt(start)} – {fmt(end)}</span>
@@ -503,15 +750,12 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
       cumCs += cs
     }
 
-    totalAlloc   += alloc
-    totalGross   += gross
-    totalShorted += shorted
-
-    const zSum   = Object.values(z).reduce((a, b) => a + b, 0)
+    totalAlloc += alloc; totalGross += gross; totalShorted += shorted
+    const zSum    = Object.values(z).reduce((a, b) => a + b, 0)
     const unalloc = cs && (cs - zSum) > 5 ? cs - zSum : 0
-    const csEl   = unsched ? <span style={{ color:'#aaa' }}>—</span>
+    const csEl    = unsched ? <span style={{ color:'#aaa' }}>—</span>
       : cs >= 300 ? <span style={{ color:'#E65100', fontWeight:'bold' }}>{cs}cs</span> : `${cs}cs`
-    const rowBg  = unsched ? '#f9f9f9' : isLate ? '#FFEBEE' : isCaution ? '#FFF3E0' : isAmber ? '#FFF3CD' : seq%2===0 ? '#f9fafb' : '#fff'
+    const rowBg   = unsched ? '#f9f9f9' : isLate ? '#FFEBEE' : isCaution ? '#FFF3E0' : isAmber ? '#FFF3CD' : seq%2===0 ? '#f9fafb' : '#fff'
     const td = (content, extra={}) => (
       <td style={{ border:'1px solid #dde', padding:'3px 5px', background:rowBg, fontSize:11, ...extra }}>{content}</td>
     )
@@ -528,44 +772,36 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
         {td(csEl, { textAlign:'center' })}
         {td(pwEl, { whiteSpace:'nowrap', textAlign:'center' })}
         {Array.from({ length:12 }, (_, i) => {
-          const zi = i + 1
-          const v = (z && z[zi]) || 0
+          const zi = i + 1, v = (z && z[zi]) || 0
           if (v > 0) zoneTotals[zi] = (zoneTotals[zi] || 0) + v
-          const colBg = unsched ? '#f9f9f9' : zoneCrewColor[zi] || rowBg
-          return <td key={zi} style={{ border:`1px solid ${zoneCrewBorder[zi]||'#dde'}`, padding:'3px 4px', fontSize:11, textAlign:'center', background:colBg }}>{v || ''}</td>
+          return <td key={zi} style={{ border:`1px solid ${zoneCrewBorder[zi]||'#dde'}`, padding:'3px 4px', fontSize:11, textAlign:'center', background: unsched ? '#f9f9f9' : zoneCrewColor[zi] || rowBg }}>{v || ''}</td>
         })}
       </tr>
     )
   })
 
-  const totalCs = routes.reduce((s, r) => s + (r.cs || 0), 0)
+  const totalCs        = routes.reduce((s, r) => s + (r.cs || 0), 0)
   const totalBaseCases = paceRows.slice(0, PACE.length).reduce((s, r) => s + r.thisCases, 0)
   const hasOverrides   = Object.keys(hourOverrides).length > 0
-  const thZ   = { background:'#37474F', color:'#fff', padding:'3px 5px', fontSize:10, border:'1px solid #555', textAlign:'center' }
-  const miniBtn = { fontSize:9, padding:'0 3px', lineHeight:'14px', minWidth:14, border:'1px solid #bbb', borderRadius:3, background:'#f5f5f5', cursor:'pointer' }
-  const redBarStyle = { background:'#BF360C', color:'#fff', fontWeight:'bold', fontSize:10, padding:'4px 10px', border:'none' }
+  const thZ      = { background:'#37474F', color:'#fff', padding:'3px 5px', fontSize:10, border:'1px solid #555', textAlign:'center' }
+  const miniBtn  = { fontSize:9, padding:'0 3px', lineHeight:'14px', minWidth:14, border:'1px solid #bbb', borderRadius:3, background:'#f5f5f5', cursor:'pointer' }
+  const redBar   = { background:'#BF360C', color:'#fff', fontWeight:'bold', fontSize:10, padding:'4px 10px', border:'none' }
 
   return (
     <div style={{ marginBottom:20 }}>
       <div style={{ background:'#f5f5f5', fontSize:10, color:'#555', padding:'3px 8px' }}>
-        Pick time derived from CPMH pace rate. ǁǁ = crosses break. Amber = interrupted mid-route.{' '}
-        <span style={{ color:'#E65100', fontWeight:'bold' }}>Orange = pick window 15–30 min before appt deadline.</span>{' '}
-        <span style={{ color:'#C62828', fontWeight:'bold' }}>Red = pick window within 15 min of or past appt deadline.</span>{' '}
-        ⚠ = zone breakdown incomplete.
-        &nbsp;|&nbsp; Breaks: {brkFmt}
+        ǁǁ = crosses break. Amber = interrupted. <span style={{ color:'#E65100', fontWeight:'bold' }}>Orange = 15–30 min to appt.</span>{' '}
+        <span style={{ color:'#C62828', fontWeight:'bold' }}>Red = within 15 min / past appt.</span>{' '}
+        ⚠ = zone incomplete. &nbsp;|&nbsp; Breaks: {brkFmt}
       </div>
       <div style={{ overflowX:'auto' }}>
         <table style={{ borderCollapse:'collapse', fontSize:11, tableLayout:'fixed', minWidth:900 }}>
           <colgroup>
-            <col style={{ width:42 }} />
-            <col style={{ width:130 }} />
-            <col style={{ width:65 }} />
-            <col style={{ width:65 }} />
-            <col style={{ width:65 }} />
-            <col style={{ width:100 }} />
+            <col style={{ width:42 }} /><col style={{ width:130 }} />
+            <col style={{ width:65 }} /><col style={{ width:65 }} />
+            <col style={{ width:65 }} /><col style={{ width:100 }} />
             {Array.from({ length:12 }, (_, i) => <col key={i} style={{ width:38 }} />)}
           </colgroup>
-
           <tbody>
             <tr>
               <td colSpan={NUM_LEFT + 12} style={{ background:'#1565C0', color:'#fff', fontWeight:'bold', fontSize:11, padding:'5px 8px', border:'1px solid #0d47a1' }}>
@@ -576,9 +812,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
               </td>
             </tr>
             {netDoneRow === -1 && (
-              <tr><td colSpan={NUM_LEFT + 12} style={redBarStyle}>
-                ⏳ Primary orders extend past schedule — check picker count or CPMH target
-              </td></tr>
+              <tr><td colSpan={NUM_LEFT + 12} style={redBar}>⏳ Primary orders extend past schedule — check picker count or CPMH target</td></tr>
             )}
             <tr>
               <th colSpan={2} style={{ background:'#1565C0', color:'#fff', padding:'4px 6px', fontSize:10, textAlign:'center', border:'1px solid #0d47a1', whiteSpace:'nowrap' }}>Clock</th>
@@ -588,8 +822,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
               <th style={{ background:'#1565C0', color:'#fff', padding:'4px 6px', fontSize:10, textAlign:'center', border:'1px solid #0d47a1', whiteSpace:'pre-line', lineHeight:1.3 }}>{'Cases\nthis hr'}</th>
               <th style={{ background:'#1565C0', border:'1px solid #0d47a1', width:65 }} />
               {crews.map(crew => (
-                <th key={crew.zones[0]} colSpan={crew.zones.length}
-                  style={{ ...thZ, background:crew.border, color:'#222', fontSize:9, fontWeight:'bold', whiteSpace:'nowrap' }}>
+                <th key={crew.zones[0]} colSpan={crew.zones.length} style={{ ...thZ, background:crew.border, color:'#222', fontSize:9, fontWeight:'bold', whiteSpace:'nowrap' }}>
                   {crew.zones.map(z => `Z${z}`).join('+')}
                 </th>
               ))}
@@ -599,13 +832,11 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
               const isMon = netDoneRow >= 0 && i > netDoneRow
               const bg = isMon ? (i%2===0?'#fff9e6':'#FFF3CD') : (i%2===0?'#fff':'#e8f5e9')
               const crewRow = i < PACE.length ? crewHourlyCs[i] : Array(crews.length).fill(0)
-              const pkrsOverridden = r.idx !== null && hourOverrides[r.idx]?.pickers != null
-              const cpmhOverridden = r.idx !== null && hourOverrides[r.idx]?.cpmh    != null
-              const divider = netDoneRow >= 0 && i === netDoneRow + 1 ? (
-                <tr key="div"><td colSpan={NUM_LEFT + 12} style={redBarStyle}>
-                  ✓ Primary orders complete ~{netDoneTime}
-                </td></tr>
-              ) : null
+              const pkrsOvr = r.idx !== null && hourOverrides[r.idx]?.pickers != null
+              const cpmhOvr = r.idx !== null && hourOverrides[r.idx]?.cpmh    != null
+              const divider = netDoneRow >= 0 && i === netDoneRow + 1
+                ? <tr key="div"><td colSpan={NUM_LEFT + 12} style={redBar}>✓ Primary orders complete ~{netDoneTime}</td></tr>
+                : null
               return [divider, (
                 <tr key={i} style={{ background:bg }}>
                   <td colSpan={2} style={{ border:'1px solid #dde', padding:'4px 8px', fontWeight:'bold', whiteSpace:'nowrap' }}>{r.label}</td>
@@ -613,17 +844,17 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
                     <td style={{ border:'1px solid #dde', padding:'2px 3px', textAlign:'center' }}>
                       <div style={{ display:'flex', alignItems:'center', gap:1, justifyContent:'center' }}>
                         <button style={miniBtn} onClick={() => setHourOverride(r.idx, 'pickers', Math.max(1, r.effPickers-1))}>−</button>
-                        <span style={{ minWidth:14, textAlign:'center', fontWeight:pkrsOverridden?'bold':'normal', color:pkrsOverridden?'#C62828':'#555' }}>{r.effPickers}</span>
+                        <span style={{ minWidth:14, textAlign:'center', fontWeight:pkrsOvr?'bold':'normal', color:pkrsOvr?'#C62828':'#555' }}>{r.effPickers}</span>
                         <button style={miniBtn} onClick={() => setHourOverride(r.idx, 'pickers', Math.min(16, r.effPickers+1))}>+</button>
-                        {pkrsOverridden && <button style={{ ...miniBtn, color:'#aaa', marginLeft:1 }} onClick={() => setHourOverride(r.idx, 'pickers', null)}>×</button>}
+                        {pkrsOvr && <button style={{ ...miniBtn, color:'#aaa', marginLeft:1 }} onClick={() => setHourOverride(r.idx, 'pickers', null)}>×</button>}
                       </div>
                     </td>
                     <td style={{ border:'1px solid #dde', padding:'2px 3px', textAlign:'center' }}>
                       <div style={{ display:'flex', alignItems:'center', gap:1, justifyContent:'center' }}>
                         <button style={miniBtn} onClick={() => setHourOverride(r.idx, 'cpmh', Math.max(60, r.effCpmh-5))}>−</button>
-                        <span style={{ minWidth:24, textAlign:'center', fontWeight:cpmhOverridden?'bold':'normal', color:cpmhOverridden?'#C62828':'#555' }}>{r.effCpmh}</span>
+                        <span style={{ minWidth:24, textAlign:'center', fontWeight:cpmhOvr?'bold':'normal', color:cpmhOvr?'#C62828':'#555' }}>{r.effCpmh}</span>
                         <button style={miniBtn} onClick={() => setHourOverride(r.idx, 'cpmh', Math.min(300, r.effCpmh+5))}>+</button>
-                        {cpmhOverridden && <button style={{ ...miniBtn, color:'#aaa', marginLeft:1 }} onClick={() => setHourOverride(r.idx, 'cpmh', null)}>×</button>}
+                        {cpmhOvr && <button style={{ ...miniBtn, color:'#aaa', marginLeft:1 }} onClick={() => setHourOverride(r.idx, 'cpmh', null)}>×</button>}
                       </div>
                     </td>
                   </>) : (<>
@@ -637,10 +868,8 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
                     const cs = crewRow[ci]
                     const capacity = (i < PACE.length && crew.count > 0) ? (crew.count * r.effCpmh / 60) * r.pickMins : 0
                     const ratio = capacity > 0 ? cs / capacity : 0
-                    const cellBg = cs > 0 ? intensityBg(crew.border, Math.min(ratio, 2.0)) : bg
                     return (
-                      <td key={ci} colSpan={crew.zones.length}
-                        style={{ border:`1px solid ${crew.border||'#dde'}`, padding:'4px 4px', textAlign:'center', background:cellBg, color:'#333', fontSize:10 }}>
+                      <td key={ci} colSpan={crew.zones.length} style={{ border:`1px solid ${crew.border||'#dde'}`, padding:'4px 4px', textAlign:'center', background: cs > 0 ? intensityBg(crew.border, Math.min(ratio, 2.0)) : bg, color:'#333', fontSize:10 }}>
                         {cs || ''}
                       </td>
                     )
@@ -649,7 +878,6 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
               )]
             })}
           </tbody>
-
           <tbody>
             <tr>
               <td colSpan={NUM_LEFT} style={{ background:'#263238', border:'1px solid #555', padding:'4px 6px', position:'sticky', left:0, zIndex:3 }}>
@@ -671,8 +899,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
                 </div>
               </td>
               {crews.map(crew => (
-                <td key={crew.zones[0]} colSpan={crew.zones.length}
-                  style={{ background:crew.border, border:'2px solid #555', padding:'4px 6px', textAlign:'center', whiteSpace:'nowrap' }}>
+                <td key={crew.zones[0]} colSpan={crew.zones.length} style={{ background:crew.border, border:'2px solid #555', padding:'4px 6px', textAlign:'center', whiteSpace:'nowrap' }}>
                   <div style={{ fontWeight:'bold', fontSize:10, color:'#222' }}>{crew.label}</div>
                   <div style={{ fontSize:9, color:'#555', fontStyle:'italic' }}>{crew.flex}</div>
                   {crew.crewCs != null && (
@@ -722,7 +949,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
   )
 }
 
-// ─── PicklinePanel: top-level component used in FacilityPanel (WR) ────────────
+// ─── PicklinePanel ────────────────────────────────────────────────────────────
 export default function PicklinePanel() {
   const [snapshot, setSnapshot]           = useState(null)
   const [pickers, setPickers]             = useState(9)
@@ -743,18 +970,13 @@ export default function PicklinePanel() {
     })
   }
 
-  function handleSnapshot(snap) {
-    setSnapshot(snap)
-    setHourOverrides({})
-  }
-
-  const routes = snapshot?.routes     ?? []
-  const netCs  = snapshot?.net_cs     ?? 0
-  const grossCs  = snapshot?.gross_cs   ?? 0
-  const allocCs  = snapshot?.alloc_cs   ?? 0
-  const shortedCs = snapshot?.shorted_cs ?? 0
-  const snapDate  = snapshot?.snapshot_date ?? null
-  const nextDates = snapshot?.next_dates ?? []
+  const routes     = snapshot?.routes      ?? []
+  const netCs      = snapshot?.net_cs      ?? 0
+  const grossCs    = snapshot?.gross_cs    ?? 0
+  const allocCs    = snapshot?.alloc_cs    ?? 0
+  const shortedCs  = snapshot?.shorted_cs  ?? 0
+  const snapDate   = snapshot?.snapshot_date ?? null
+  const nextDates  = snapshot?.next_dates  ?? []
 
   const tl    = useMemo(() => buildTimeline(pickers, cpmh, netCs, hourOverrides), [pickers, cpmh, netCs, hourOverrides])
   const crews = useMemo(() => buildCrews(pickers, routes, crewMode), [pickers, routes, crewMode])
@@ -762,51 +984,42 @@ export default function PicklinePanel() {
   const enrichedCrews = useMemo(() => {
     const zoneTotals = {}
     routes.forEach(r => Object.entries(r.z||{}).forEach(([z, v]) => { zoneTotals[+z] = (zoneTotals[+z]||0) + (v||0) }))
-    const totalMapped = Object.values(zoneTotals).reduce((a, b) => a + b, 0)
+    const totalMapped  = Object.values(zoneTotals).reduce((a, b) => a + b, 0)
     const avgPerPicker = pickers > 1 ? totalMapped / (pickers - 1) : totalMapped
     return crews.map(crew => {
-      const crewCs   = crew.zones.reduce((a, z) => a + (zoneTotals[z]||0), 0)
-      const pct      = totalMapped > 0 ? Math.round(crewCs/totalMapped*100) : 0
+      const crewCs    = crew.zones.reduce((a, z) => a + (zoneTotals[z]||0), 0)
+      const pct       = totalMapped > 0 ? Math.round(crewCs/totalMapped*100) : 0
       const perPerson = crew.count > 0 ? Math.round(crewCs/crew.count) : null
-      const heavy = perPerson !== null && perPerson > avgPerPicker * 1.3
-      const light = perPerson !== null && perPerson < avgPerPicker * 0.7
-      return { ...crew, crewCs, pct, perPerson, heavy, light }
+      return { ...crew, crewCs, pct, perPerson,
+        heavy: perPerson !== null && perPerson > avgPerPicker * 1.3,
+        light: perPerson !== null && perPerson < avgPerPicker * 0.7 }
     })
   }, [crews, routes, pickers])
 
-  const target      = Math.round(cpmh * pickers * HRS)
-  const netDoneTime = useMemo(() => netCs > 0 ? fmt(casesToClock(tl, netCs)) : null, [tl, netCs])
-  const totalCap    = tl[tl.length-1].cum
-  const PRE_PICK_CUTOFF = 13 * 60 + 30
-  const cumAt130pm  = (tl.find(e => e.t >= PRE_PICK_CUTOFF) ?? tl[tl.length-1]).cum
-  const monCs       = nextDates[0]?.net_cs ?? 0
-  const monPickable = Math.min(Math.max(0, cumAt130pm - netCs), monCs)
-
-  const fmtDate = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })
-  const dateLabel = snapDate ? fmtDate(snapDate) : '—'
-
+  const target         = Math.round(cpmh * pickers * HRS)
+  const netDoneTime    = useMemo(() => netCs > 0 ? fmt(casesToClock(tl, netCs)) : null, [tl, netCs])
+  const totalCap       = tl[tl.length-1].cum
+  const cumAt130pm     = (tl.find(e => e.t >= 13*60+30) ?? tl[tl.length-1]).cum
+  const monCs          = nextDates[0]?.net_cs ?? 0
+  const monPickable    = Math.min(Math.max(0, cumAt130pm - netCs), monCs)
+  const fmtDate        = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })
+  const dateLabel      = snapDate ? fmtDate(snapDate) : '—'
   const btnStyle = (disabled) => ({
     width:32, height:32, border:'1px solid #1565C0', borderRadius:5,
     background:'#fff', color:'#1565C0', fontSize:20, cursor:disabled?'not-allowed':'pointer',
     opacity:disabled?0.3:1, lineHeight:1, display:'flex', alignItems:'center', justifyContent:'center',
   })
 
-  if (!snapshot) {
-    return <CsvUploadArea onSnapshot={handleSnapshot} />
-  }
+  if (!snapshot) return <UploadArea onSnapshot={snap => { setSnapshot(snap); setHourOverrides({}) }} />
 
   return (
     <div style={{ fontFamily:'Arial, sans-serif', fontSize:11 }}>
-
-      {/* Header bar */}
-      <div style={{ background:'#1565C0', color:'#fff', padding:'8px 14px', fontSize:14, fontWeight:'bold',
-        display:'flex', justifyContent:'space-between', alignItems:'center', borderRadius:'6px 6px 0 0', marginBottom:0 }}>
+      {/* Header */}
+      <div style={{ background:'#1565C0', color:'#fff', padding:'8px 14px', fontSize:14, fontWeight:'bold', display:'flex', justifyContent:'space-between', alignItems:'center', borderRadius:'6px 6px 0 0' }}>
         <span>CSW Pick Line — {dateLabel} Brief</span>
-        <button
-          onClick={() => { setSnapshot(null); setHourOverrides({}) }}
-          style={{ fontSize:11, padding:'3px 10px', background:'rgba(255,255,255,0.15)', border:'1px solid rgba(255,255,255,0.3)', borderRadius:4, color:'#fff', cursor:'pointer' }}
-        >
-          ↑ Load new CSV
+        <button onClick={() => { setSnapshot(null); setHourOverrides({}) }}
+          style={{ fontSize:11, padding:'3px 10px', background:'rgba(255,255,255,0.15)', border:'1px solid rgba(255,255,255,0.3)', borderRadius:4, color:'#fff', cursor:'pointer' }}>
+          ↑ Load new file
         </button>
       </div>
 
@@ -830,9 +1043,8 @@ export default function PicklinePanel() {
         ))}
       </div>
 
-      {/* Picker + CPMH controls */}
-      <div style={{ background:'#f0f4ff', border:'1px solid #b0c4f0', borderRadius:6,
-        padding:'10px 14px', display:'flex', alignItems:'center', gap:12, marginBottom:10, flexWrap:'wrap' }}>
+      {/* Controls */}
+      <div style={{ background:'#f0f4ff', border:'1px solid #b0c4f0', borderRadius:6, padding:'10px 14px', display:'flex', alignItems:'center', gap:12, marginBottom:10, flexWrap:'wrap' }}>
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
             <div style={{ fontSize:13, fontWeight:'bold', color:'#1565C0', minWidth:120 }}>Pickers Available</div>
@@ -845,9 +1057,7 @@ export default function PicklinePanel() {
             <button style={btnStyle(cpmh<=60)} onClick={() => cpmh>60 && setCpmh(c=>c-5)}>−</button>
             <span style={{ fontSize:28, fontWeight:'bold', color:'#1565C0', minWidth:28, textAlign:'center' }}>{cpmh}</span>
             <button style={btnStyle(cpmh>=300)} onClick={() => cpmh<300 && setCpmh(c=>c+5)}>+</button>
-            <input type="range" min={60} max={300} step={5} value={cpmh}
-              onChange={e => setCpmh(Number(e.target.value))}
-              style={{ width:140, accentColor:'#1565C0' }} />
+            <input type="range" min={60} max={300} step={5} value={cpmh} onChange={e => setCpmh(Number(e.target.value))} style={{ width:140, accentColor:'#1565C0' }} />
           </div>
         </div>
         <div style={{ fontSize:12, color:'#444', lineHeight:2.0 }}>
@@ -861,16 +1071,12 @@ export default function PicklinePanel() {
         </div>
       </div>
 
-      <PickTable
-        pickers={pickers} cpmh={cpmh} tl={tl} netCs={netCs}
+      <PickTable pickers={pickers} cpmh={cpmh} tl={tl} netCs={netCs}
         hourOverrides={hourOverrides} setHourOverride={setHourOverride}
-        routes={routes} crews={enrichedCrews}
-        crewMode={crewMode} setCrewMode={setCrewMode}
-      />
+        routes={routes} crews={enrichedCrews} crewMode={crewMode} setCrewMode={setCrewMode} />
 
       <div style={{ background:'#ECEFF1', padding:'6px 10px', fontSize:9, color:'#78909C', borderTop:'1px solid #CFD8DC' }}>
-        Zone heat map: ≥10%=yellow · ≥20%=amber · ≥30%=orange · ≥40%=red.
-        Pick windows estimated from CPMH pace; actual may vary.
+        Zone heat map: ≥10%=yellow · ≥20%=amber · ≥30%=orange · ≥40%=red. Pick windows estimated from CPMH pace; actual may vary.
       </div>
     </div>
   )
