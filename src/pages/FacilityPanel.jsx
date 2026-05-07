@@ -27,6 +27,8 @@ const WR_TABS = [
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
+function r1(n) { return Math.round(n * 10) / 10 }
+
 function dateRange(from, to) {
   const dates = []
   const cur = new Date(from + 'T00:00:00Z')
@@ -45,8 +47,6 @@ function addDays(iso, n) {
   const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
 }
 
-// FacilityPanel no longer receives pickline props — WR owns its own pickline state
-// since the panel is now kept mounted (display:none when inactive) by LaborPlanning.
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed, onKpiComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
@@ -75,7 +75,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [sideTab, setSideTab] = useState('all')
   const [wrTab, setWrTab]     = useState('warehouse')
 
-  // WR pickline state — lives here since this component stays mounted
   const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
   const [picklineOverrides, setPicklineOverrides] = useState({})
 
@@ -267,6 +266,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { util, delta } = computeDailyKpis(hourly)
 
+  // Daily totals for KPI pills
+  const totalLaborReq = useMemo(() => r1(hourly.reduce((s, r) => s + (r.req ?? 0), 0)), [hourly])
+  const totalAdj      = useMemo(() => Object.values(hourlyAdjustments).reduce((s, v) => s + v, 0), [hourlyAdjustments])
+
   useEffect(() => {
     if (onDeltaComputed && sideTab === 'all' && delta != null) onDeltaComputed(facility.id, delta)
   }, [delta, facility.id, sideTab, onDeltaComputed])
@@ -288,6 +291,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     appts: totalInb + totalOut + totalDrops, drops: totalDrops,
     inb: totalInb, out: totalOut, labor: sideHeadcount,
     totalHours: breakAdjustedTotalHours,
+    laborReq: totalLaborReq,
+    totalAdj,
     util: util ?? networkKpi?.util, delta: delta ?? networkKpi?.delta,
   }
 
@@ -411,7 +416,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     </div>
   )
 
-  // ── WR: sub-tab switcher, pickline state lives here (component stays mounted)
   if (isWr) {
     return (
       <div>

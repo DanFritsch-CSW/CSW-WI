@@ -3,9 +3,11 @@ function fmtDelta(v) {
   return v >= 0 ? `+${parseFloat(v.toFixed(1))}` : `${parseFloat(v.toFixed(1))}`
 }
 
-function Pill({ label, value, color, delta: deltaVal }) {
+function r1(n) { return Math.round(n * 10) / 10 }
+
+function Pill({ label, value, color, delta: deltaVal, highlight }) {
   return (
-    <div className="kpill" style={{ borderTopColor: color, borderTopWidth: 2 }}>
+    <div className="kpill" style={{ borderTopColor: color, borderTopWidth: 2, ...(highlight ? { background: 'var(--brand-bg)', borderColor: 'var(--brand-dim)' } : {}) }}>
       <span className="kpill-label">{label}</span>
       <span className="kpill-value" style={{ color }}>{value}</span>
       {deltaVal != null && (
@@ -20,6 +22,16 @@ function Pill({ label, value, color, delta: deltaVal }) {
 export default function KpiPills({ data, color }) {
   const deltaColor = data.delta != null
     ? (data.delta >= 0 ? '#3dba7e' : '#e05a5a')
+    : color
+
+  // Labor After Adjustments = totalHours + total adjustments
+  const laborAfterAdj = data.totalHours != null
+    ? r1(data.totalHours + (data.totalAdj ?? 0))
+    : null
+
+  // Color for Labor After Adj vs Labor Req comparison
+  const adjColor = (laborAfterAdj != null && data.laborReq != null)
+    ? (laborAfterAdj >= data.laborReq ? '#3dba7e' : '#e05a5a')
     : color
 
   return (
@@ -39,11 +51,17 @@ export default function KpiPills({ data, color }) {
         <Pill label="Outbound"  value={data.out   ?? '--'} color={color} />
       </div>
 
-      {/* Row 3 — Warehousemen · Total Hours Available */}
+      {/* Row 3 — Warehousemen · Total Hrs Available · Daily +/- */}
       <div className="kpi-row">
-        <Pill label="Warehousemen"         value={data.labor      ?? '--'} color={color} />
-        <Pill label="Total Hrs Available"  value={data.totalHours ?? '--'} color={color} />
-        <Pill label="Daily +/-" value={fmtDelta(data.delta)} color={deltaColor} />
+        <Pill label="Warehousemen"        value={data.labor      ?? '--'} color={color} />
+        <Pill label="Total Hrs Avail"     value={data.totalHours ?? '--'} color={color} />
+        <Pill label="Daily +/-"           value={fmtDelta(data.delta)}    color={deltaColor} />
+      </div>
+
+      {/* Row 4 — Labor Req Total · Labor After Adj */}
+      <div className="kpi-row">
+        <Pill label="Labor Req Total"    value={data.laborReq     != null ? r1(data.laborReq)  : '--'} color={color} />
+        <Pill label="Labor After Adj"    value={laborAfterAdj     != null ? laborAfterAdj      : '--'} color={adjColor} />
       </div>
 
     </div>
