@@ -109,6 +109,24 @@ export async function seedRosterAssignments(employees, planDate) {
   return null
 }
 
+/**
+ * After a B2E sync for `correctFacility`, remove any future roster_assignments rows
+ * for the given employee IDs at OTHER facilities — these are stale placements from
+ * before a facility transfer. Loan rows (from_facility IS NOT NULL) are preserved.
+ */
+export async function purgeStaleAssignments(employeeIds, correctFacility, fromDate) {
+  if (!supabase || !employeeIds.length) return null
+  const { error } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .in('employee_id', employeeIds)
+    .neq('facility', correctFacility)
+    .is('from_facility', null)       // don't touch loan destination rows
+    .gte('plan_date', fromDate)       // leave historical data alone
+  if (error) { console.error('purgeStaleAssignments:', error); return error.message }
+  return null
+}
+
 export async function deleteAssignment(facility, employeeId, planDate) {
   if (!supabase) return
   const { error } = await supabase

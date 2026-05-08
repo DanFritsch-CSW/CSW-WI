@@ -18,7 +18,7 @@ import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, FACILITIES, FACILIT
 import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
   seedRosterAssignments, deleteAssignment, resetAssignmentsForDate,
-  sendEmployeeOnLoan, recallLoan,
+  sendEmployeeOnLoan, recallLoan, purgeStaleAssignments,
 } from '../lib/supabase.js'
 import { fetchB2eRoster } from '../lib/omni.js'
 
@@ -330,6 +330,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
         await replaceEmployees(facId, empRows)
         await seedRosterAssignments(b2eEmployees, date)
+        // Purge stale cross-facility rows for these employees
+        const empIds = b2eEmployees.map(e => e.id)
+        await purgeStaleAssignments(empIds, facId, date)
         assignments = await fetchTodayAssignments(facId, date)
       }
     }
@@ -400,6 +403,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       if (err) { setSyncState(err); return }
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
       if (seedErr) { setSyncState(seedErr); return }
+      // Purge stale cross-facility rows for employees who transferred to this facility
+      const empIds = b2eEmployees.map(e => e.id)
+      await purgeStaleAssignments(empIds, facility, date)
       await load(facility, date)
       setSyncState('ok')
       setTimeout(() => setSyncState(null), 3000)
@@ -422,6 +428,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
       const seedErr = await seedRosterAssignments(b2eEmployees, date)
       if (seedErr) { setResetState(`Seed failed: ${seedErr}`); return }
+      // Purge stale cross-facility rows for employees who transferred to this facility
+      const empIds = b2eEmployees.map(e => e.id)
+      await purgeStaleAssignments(empIds, facility, date)
       await load(facility, date)
       setResetState('ok')
       setTimeout(() => setResetState(null), 3000)
