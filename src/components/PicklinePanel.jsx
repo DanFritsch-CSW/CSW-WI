@@ -1,4 +1,5 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
+import { fetchPickSchedule, upsertPickScheduleRow, insertPickScheduleRow, deletePickScheduleRow } from '../lib/supabase.js'
 
 // ─── Pickline constants ───────────────────────────────────────────────────────
 const HRS = 8.0
@@ -16,6 +17,7 @@ const PACE = [
 const BREAKS = [[7*60, 7*60+15], [9*60, 9*60+30], [11*60+30, 11*60+45]]
 const SHIFT_START = 5*60 + 10
 const APPT_WINDOW_MINS = 120
+const DAYS_ORDER = ['Monday','Tuesday','Wednesday','Thursday','Friday']
 
 const CREW_PALETTE = [
   { color: '#E3F2FD', border: '#90CAF9' },
@@ -39,6 +41,30 @@ const ROUTE_NAMES = {
   '640':'Mitchell','642':'Glendale Hts','651':'Lodi','661':'Wis Rapids','667':'Kewaskum',
 }
 const ROUTE_LIVE = new Set(['98','99','639','39','70','16','23','605'])
+
+// ─── Time helpers ─────────────────────────────────────────────────────────────
+function minsToDisplay(mins) {
+  if (mins == null) return ''
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  const ap = h < 12 ? 'am' : 'pm'
+  const hd = h % 12 || 12
+  return m === 0 ? `${hd}${ap}` : `${hd}:${String(m).padStart(2,'0')}${ap}`
+}
+
+function parseDisplayTime(str) {
+  if (!str || !str.trim()) return null
+  const s = str.trim().toLowerCase()
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)$/)
+  if (!m) return null
+  let h = parseInt(m[1], 10)
+  const min = m[2] ? parseInt(m[2], 10) : 0
+  const ap = m[3]
+  if (ap === 'pm' && h !== 12) h += 12
+  if (ap === 'am' && h === 12) h = 0
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null
+  return h * 60 + min
+}
 
 // ─── XLSX Parser ──────────────────────────────────────────────────────────────
 function sheetToRows(wb, nameHint) {
@@ -81,34 +107,39 @@ function parseApptMinutes(val) {
   return mins
 }
 
-export function parsePicklineXlsx(wb) {
+// Build a lookup map from Supabase schedule: { [day]: { [routeNum]: schedRow } }
+function buildScheduleMap(scheduleRows) {
+  const map = {}
+  for (const row of scheduleRows) {
+    const day = row.day_of_week
+    const rt  = String(row.route_number)
+    if (!map[day]) map[day] = {}
+    map[day][rt] = {
+      seq:       row.pick_seq,
+      name:      row.route_name || null,
+      apptStart: row.appt_start_mins ?? null,
+      apptEnd:   row.appt_end_mins   ?? null,
+      live:      (row.drop_or_live || '').toLowerCase() === 'live',
+    }
+  }
+  return map
+}
+
+export function parsePicklineXlsx(wb, scheduleRows = []) {
+  const schedMap = buildScheduleMap(scheduleRows)
+
   // 1. TieHigh
   const skuMap = {}
   for (const row of sheetToRows(wb, 'TieHigh')) {
     const code = String(row['Material Lookup Code'] ?? '').trim()
     if (!code) continue
     const zone = parseInt(String(row['Pickline Zones'] ?? '').replace(/\D/g, ''), 10) || 0
-    const fp   = parseInt(String(row['Full Pallet (t x h)'] ?? '0'), 10) || 0
+    const fp   = parseInt(String(row['Full Pallet (t x h)'] ?? '0'], 10) || 0
     skuMap[code] = { zone, fullPallet: fp }
   }
   const hasTieHigh = Object.keys(skuMap).length > 0
 
-  // 2. Schedule
-  const daySeqMap = {}
-  for (const row of sheetToRows(wb, 'Bernatello')) {
-    const rt  = normalizeRouteNum(row['Route Number'])
-    const day = String(row['Day Of Week'] ?? '').trim()
-    const seq = parseInt(String(row['Pick Seq'] ?? ''), 10)
-    const name = String(row['Route Name'] ?? '').trim()
-    const apptStart = parseApptMinutes(row['Appointment Time'])
-    const apptEnd   = parseApptMinutes(row['Appointment End Time'])
-    const live = String(row['Drop Or Live'] ?? '').toLowerCase().includes('live')
-    if (!rt || !day || isNaN(seq)) continue
-    if (!daySeqMap[day]) daySeqMap[day] = {}
-    daySeqMap[day][rt] = { seq, name: name || null, apptStart, apptEnd, live }
-  }
-
-  // 3. Shortage
+  // 2. Shortage
   const shortageMap = {}
   for (const row of sheetToRows(wb, 'Shortage')) {
     let dateVal = row['Requested Delivery Date Date'] || row['Pick Up Date'] || row['Date'] || ''
@@ -123,7 +154,7 @@ export function parsePicklineXlsx(wb) {
   }
   const hasShortages = Object.keys(shortageMap).length > 0
 
-  // 4. Cases
+  // 3. Cases
   const dateRtSkuOrig  = {}
   const dateRtSkuLines = {}
   for (const row of sheetToRows(wb, 'Cases')) {
@@ -147,14 +178,14 @@ export function parsePicklineXlsx(wb) {
   const allDates     = Object.keys(dateRtSkuOrig).sort()
   const snapshotDate = allDates[0] ?? new Date().toISOString().slice(0, 10)
 
-  // 5. Shortages
+  // 4. Shortages
   const rtSkuShorted = {}
   if (hasShortages) {
     for (const date of allDates) {
       rtSkuShorted[date] = {}
       const rtSkuOrig  = dateRtSkuOrig[date]
       const dow        = dateToDow(date)
-      const seqForDay  = (dow && daySeqMap[dow]) ? daySeqMap[dow] : {}
+      const seqForDay  = (dow && schedMap[dow]) ? schedMap[dow] : {}
       const sortedRts  = Object.keys(rtSkuOrig).sort((a, b) => {
         const sa = seqForDay[a]?.seq ?? null, sb = seqForDay[b]?.seq ?? null
         if (sa !== null && sb !== null) return sa - sb
@@ -179,7 +210,7 @@ export function parsePicklineXlsx(wb) {
     }
   }
 
-  // 6. Route maps
+  // 5. Route maps
   const dateRouteMaps = {}
   for (const date of allDates) {
     dateRouteMaps[date] = {}
@@ -212,10 +243,10 @@ export function parsePicklineXlsx(wb) {
     }
   }
 
-  // 7. Summarize
+  // 6. Summarize — use Supabase schedule for seq/name/apptStart/apptEnd/live
   function summarize(routeMap, date) {
     const dow = dateToDow(date)
-    const seqForDay = (dow && daySeqMap[dow]) ? daySeqMap[dow] : {}
+    const seqForDay = (dow && schedMap[dow]) ? schedMap[dow] : {}
     const routes = Object.keys(routeMap)
       .sort((a, b) => {
         const sa = seqForDay[a]?.seq ?? null, sb = seqForDay[b]?.seq ?? null
@@ -387,8 +418,292 @@ function buildCrews(pickers, routes, mode='spread') {
   return crews
 }
 
+// ─── Pick Schedule Editor ─────────────────────────────────────────────────────
+function TimeCell({ value, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft]     = useState('')
+  const inputRef = useRef(null)
+
+  function startEdit() {
+    setDraft(minsToDisplay(value))
+    setEditing(true)
+    setTimeout(() => inputRef.current?.select(), 0)
+  }
+
+  function commit() {
+    const parsed = parseDisplayTime(draft)
+    if (parsed !== null) onSave(parsed)
+    else if (draft.trim() === '') onSave(null)
+    setEditing(false)
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+        style={{ width: 62, fontSize: 11, padding: '1px 3px', border: '1px solid #1565C0', borderRadius: 3 }}
+        placeholder="5:30am"
+      />
+    )
+  }
+  return (
+    <span
+      onClick={startEdit}
+      style={{ cursor: 'pointer', color: value != null ? '#1565C0' : '#bbb', fontSize: 11,
+               borderBottom: '1px dashed #b0c4f0', padding: '0 2px' }}
+    >
+      {value != null ? minsToDisplay(value) : '—'}
+    </span>
+  )
+}
+
+function TextCell({ value, onSave, width = 90, placeholder = '' }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft]     = useState('')
+  const inputRef = useRef(null)
+
+  function startEdit() { setDraft(value || ''); setEditing(true); setTimeout(() => inputRef.current?.select(), 0) }
+  function commit() { onSave(draft.trim()); setEditing(false) }
+
+  if (editing) {
+    return (
+      <input ref={inputRef} value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+        style={{ width, fontSize: 11, padding: '1px 3px', border: '1px solid #1565C0', borderRadius: 3 }}
+        placeholder={placeholder}
+      />
+    )
+  }
+  return (
+    <span onClick={startEdit}
+      style={{ cursor: 'pointer', color: value ? '#222' : '#bbb', fontSize: 11,
+               borderBottom: '1px dashed #ddd', padding: '0 2px', whiteSpace: 'nowrap' }}
+    >
+      {value || placeholder || '—'}
+    </span>
+  )
+}
+
+function DropLiveCell({ value, onSave }) {
+  const isLive = (value || '').toLowerCase() === 'live'
+  return (
+    <button
+      onClick={() => onSave(isLive ? 'Drop' : 'Live')}
+      style={{
+        fontSize: 10, padding: '1px 6px', borderRadius: 3, cursor: 'pointer', border: 'none',
+        background: isLive ? '#C62828' : '#E8F5E9',
+        color: isLive ? '#fff' : '#2E7D32', fontWeight: 'bold',
+      }}
+    >
+      {isLive ? '🚛 Live' : 'Drop'}
+    </button>
+  )
+}
+
+function PickScheduleEditor({ scheduleRows, onRowUpdate, onRowAdd, onRowDelete }) {
+  const [activeDay, setActiveDay] = useState('Monday')
+  const [saving, setSaving]       = useState(null) // row id being saved
+  const [addingDay, setAddingDay] = useState(null)
+  const [newRow, setNewRow]       = useState({})
+
+  const dayRows = useMemo(() =>
+    scheduleRows.filter(r => r.day_of_week === activeDay)
+      .sort((a, b) => a.pick_seq - b.pick_seq),
+    [scheduleRows, activeDay]
+  )
+
+  async function handleUpdate(row, field, value) {
+    const updated = { ...row, [field]: value }
+    setSaving(row.id)
+    await onRowUpdate(updated)
+    setSaving(null)
+  }
+
+  async function handleDelete(id) {
+    if (!window.confirm('Delete this route row?')) return
+    await onRowDelete(id)
+  }
+
+  async function handleAdd() {
+    const seq = (dayRows.length ? Math.max(...dayRows.map(r => r.pick_seq)) : 0) + 1
+    const row = {
+      day_of_week:    activeDay,
+      pick_seq:       seq,
+      route_number:   parseInt(newRow.route_number) || 0,
+      route_name:     newRow.route_name || '',
+      description:    newRow.description || '',
+      appt_start_mins: parseDisplayTime(newRow.appt_start) ?? null,
+      appt_end_mins:   parseDisplayTime(newRow.appt_end) ?? null,
+      carrier:        newRow.carrier || '',
+      drop_or_live:   newRow.drop_or_live || 'Drop',
+    }
+    if (!row.route_number) return
+    await onRowAdd(row)
+    setNewRow({})
+    setAddingDay(null)
+  }
+
+  const thStyle = { background: '#37474F', color: '#fff', padding: '4px 6px', fontSize: 10,
+                    border: '1px solid #546E7A', textAlign: 'center', whiteSpace: 'nowrap' }
+  const tdStyle = { border: '1px solid #dde', padding: '3px 5px', fontSize: 11,
+                    background: '#fff', textAlign: 'center', verticalAlign: 'middle' }
+
+  return (
+    <div style={{ fontFamily: 'Arial, sans-serif', fontSize: 11 }}>
+      {/* Day tabs */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 10, borderBottom: '2px solid #e0e0e0', paddingBottom: 6 }}>
+        {DAYS_ORDER.map(day => (
+          <button key={day} onClick={() => setActiveDay(day)}
+            style={{
+              padding: '4px 14px', fontSize: 11, borderRadius: '4px 4px 0 0', cursor: 'pointer',
+              border: '1px solid ' + (activeDay === day ? '#1565C0' : '#ccc'),
+              background: activeDay === day ? '#1565C0' : '#f5f5f5',
+              color: activeDay === day ? '#fff' : '#555', fontWeight: activeDay === day ? 'bold' : 'normal',
+              borderBottom: activeDay === day ? '2px solid #fff' : '1px solid #ccc', marginBottom: -2,
+            }}
+          >
+            {day.slice(0,3)} <span style={{ opacity: 0.7, fontSize: 10 }}>({scheduleRows.filter(r => r.day_of_week === day).length})</span>
+          </button>
+        ))}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 10, color: '#888' }}>{dayRows.length} routes · click any cell to edit · changes save instantly</span>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 11, width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={thStyle}>Seq</th>
+              <th style={thStyle}>Route #</th>
+              <th style={{ ...thStyle, textAlign: 'left', paddingLeft: 8 }}>Route Name</th>
+              <th style={{ ...thStyle, textAlign: 'left', paddingLeft: 8 }}>Description</th>
+              <th style={thStyle}>Appt Start</th>
+              <th style={thStyle}>Appt End</th>
+              <th style={{ ...thStyle, textAlign: 'left', paddingLeft: 8 }}>Carrier</th>
+              <th style={thStyle}>Drop / Live</th>
+              <th style={thStyle}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {dayRows.map((row, i) => (
+              <tr key={row.id} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
+                <td style={{ ...tdStyle, color: '#888', width: 36 }}>
+                  <TextCell value={String(row.pick_seq)} width={32}
+                    onSave={v => handleUpdate(row, 'pick_seq', parseInt(v) || row.pick_seq)} />
+                </td>
+                <td style={{ ...tdStyle, fontWeight: 'bold', width: 60 }}>
+                  <TextCell value={String(row.route_number)} width={48}
+                    onSave={v => handleUpdate(row, 'route_number', parseInt(v) || row.route_number)} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: 'left', paddingLeft: 8 }}>
+                  <TextCell value={row.route_name} width={110}
+                    onSave={v => handleUpdate(row, 'route_name', v)} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: 'left', paddingLeft: 8 }}>
+                  <TextCell value={row.description} width={130}
+                    onSave={v => handleUpdate(row, 'description', v)} />
+                </td>
+                <td style={tdStyle}>
+                  <TimeCell value={row.appt_start_mins}
+                    onSave={v => handleUpdate(row, 'appt_start_mins', v)} />
+                </td>
+                <td style={tdStyle}>
+                  <TimeCell value={row.appt_end_mins}
+                    onSave={v => handleUpdate(row, 'appt_end_mins', v)} />
+                </td>
+                <td style={{ ...tdStyle, textAlign: 'left', paddingLeft: 8 }}>
+                  <TextCell value={row.carrier} width={90}
+                    onSave={v => handleUpdate(row, 'carrier', v)} />
+                </td>
+                <td style={tdStyle}>
+                  <DropLiveCell value={row.drop_or_live}
+                    onSave={v => handleUpdate(row, 'drop_or_live', v)} />
+                </td>
+                <td style={{ ...tdStyle, width: 28 }}>
+                  {saving === row.id
+                    ? <span style={{ color: '#888', fontSize: 9 }}>💾</span>
+                    : <button onClick={() => handleDelete(row.id)}
+                        style={{ fontSize: 10, padding: '1px 4px', background: 'none', border: '1px solid #ffcdd2',
+                                 borderRadius: 3, color: '#C62828', cursor: 'pointer' }}>✕</button>
+                  }
+                </td>
+              </tr>
+            ))}
+
+            {/* Add row */}
+            {addingDay === activeDay ? (
+              <tr style={{ background: '#E8F5E9' }}>
+                <td style={tdStyle}><span style={{ color: '#888', fontSize: 10 }}>new</span></td>
+                <td style={tdStyle}>
+                  <input value={newRow.route_number || ''} onChange={e => setNewRow(p => ({...p, route_number: e.target.value}))}
+                    placeholder="Rt #" style={{ width: 48, fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }} />
+                </td>
+                <td style={tdStyle}>
+                  <input value={newRow.route_name || ''} onChange={e => setNewRow(p => ({...p, route_name: e.target.value}))}
+                    placeholder="Name" style={{ width: 100, fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }} />
+                </td>
+                <td style={tdStyle}>
+                  <input value={newRow.description || ''} onChange={e => setNewRow(p => ({...p, description: e.target.value}))}
+                    placeholder="Description" style={{ width: 120, fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }} />
+                </td>
+                <td style={tdStyle}>
+                  <input value={newRow.appt_start || ''} onChange={e => setNewRow(p => ({...p, appt_start: e.target.value}))}
+                    placeholder="5:30am" style={{ width: 62, fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }} />
+                </td>
+                <td style={tdStyle}>
+                  <input value={newRow.appt_end || ''} onChange={e => setNewRow(p => ({...p, appt_end: e.target.value}))}
+                    placeholder="7:30am" style={{ width: 62, fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }} />
+                </td>
+                <td style={tdStyle}>
+                  <input value={newRow.carrier || ''} onChange={e => setNewRow(p => ({...p, carrier: e.target.value}))}
+                    placeholder="Carrier" style={{ width: 80, fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }} />
+                </td>
+                <td style={tdStyle}>
+                  <select value={newRow.drop_or_live || 'Drop'}
+                    onChange={e => setNewRow(p => ({...p, drop_or_live: e.target.value}))}
+                    style={{ fontSize: 11, padding: '1px 3px', border: '1px solid #a5d6a7', borderRadius: 3 }}>
+                    <option>Drop</option><option>Live</option>
+                  </select>
+                </td>
+                <td style={tdStyle}>
+                  <div style={{ display: 'flex', gap: 3 }}>
+                    <button onClick={handleAdd}
+                      style={{ fontSize: 10, padding: '2px 6px', background: '#2E7D32', color: '#fff',
+                               border: 'none', borderRadius: 3, cursor: 'pointer' }}>Save</button>
+                    <button onClick={() => { setAddingDay(null); setNewRow({}) }}
+                      style={{ fontSize: 10, padding: '2px 6px', background: '#eee', border: '1px solid #ccc',
+                               borderRadius: 3, cursor: 'pointer' }}>✕</button>
+                  </div>
+                </td>
+              </tr>
+            ) : (
+              <tr>
+                <td colSpan={9} style={{ ...tdStyle, background: '#f9f9f9' }}>
+                  <button onClick={() => setAddingDay(activeDay)}
+                    style={{ fontSize: 11, padding: '3px 12px', background: '#fff', border: '1px dashed #90CAF9',
+                             borderRadius: 4, color: '#1565C0', cursor: 'pointer' }}>
+                    + Add route to {activeDay}
+                  </button>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // ─── Upload Area ──────────────────────────────────────────────────────────────
-function UploadArea({ onSnapshot }) {
+function UploadArea({ onSnapshot, scheduleRows }) {
   const [dragging, setDragging]     = useState(false)
   const [file, setFile]             = useState(null)
   const [parsing, setParsing]       = useState(false)
@@ -408,7 +723,7 @@ function UploadArea({ onSnapshot }) {
       const buf  = await file.arrayBuffer()
       const wb   = XLSX.read(buf, { type: 'array', cellDates: true })
       wb._XLSX   = XLSX
-      const snap = parsePicklineXlsx(wb)
+      const snap = parsePicklineXlsx(wb, scheduleRows)
       if (!snap.routes || snap.routes.length === 0)
         throw new Error('No routes found — check that the Cases sheet has data')
       onSnapshot(snap)
@@ -442,7 +757,8 @@ function UploadArea({ onSnapshot }) {
         ) : (
           <>
             <div style={{ fontSize: 14, fontWeight: 'bold', color: '#1565C0', marginBottom: 4 }}>Drop the OMNI Excel file here or click to browse</div>
-            <div style={{ fontSize: 11, color: '#888' }}>Single .xlsx file — reads all 4 sheets automatically</div>
+            <div style={{ fontSize: 11, color: '#888' }}>Single .xlsx file — reads Cases, TieHigh, and Shortage sheets</div>
+            <div style={{ fontSize: 10, color: '#aaa', marginTop: 4 }}>Pick Schedule is now managed in-app → Pick Schedule tab</div>
           </>
         )}
         <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
@@ -452,12 +768,15 @@ function UploadArea({ onSnapshot }) {
         {[
           { label: 'Cases In Created Status', hint: 'Route / SKU / cases ordered', required: true },
           { label: 'TieHigh and Pickline Layout', hint: 'Zone mapping + pallet thresholds', required: false },
-          { label: 'Bernatello Pick Schedule', hint: 'Route order + appt times', required: false },
           { label: 'Shortage Report', hint: 'Inventory shortfall data', required: false },
-        ].map(({ label, hint, required }) => (
-          <div key={label} style={{ padding: '8px 12px', borderRadius: 6, fontSize: 11, background: '#f9f9f9', border: '1px solid #e0e0e0' }}>
-            <div style={{ fontWeight: 'bold', color: '#444', marginBottom: 2 }}>
+          { label: 'Pick Schedule', hint: 'Managed in-app — Pick Schedule tab ✓', required: false, managed: true },
+        ].map(({ label, hint, required, managed }) => (
+          <div key={label} style={{ padding: '8px 12px', borderRadius: 6, fontSize: 11,
+                                    background: managed ? '#f1f8e9' : '#f9f9f9',
+                                    border: `1px solid ${managed ? '#a5d6a7' : '#e0e0e0'}` }}>
+            <div style={{ fontWeight: 'bold', color: managed ? '#2E7D32' : '#444', marginBottom: 2 }}>
               {label}{required && <span style={{ color: '#c62828', marginLeft: 3 }}>*</span>}
+              {managed && <span style={{ marginLeft: 4 }}>✓</span>}
             </div>
             <div style={{ color: '#999' }}>{hint}</div>
           </div>
@@ -465,11 +784,14 @@ function UploadArea({ onSnapshot }) {
       </div>
 
       {parseError && (
-        <div style={{ background: '#ffebee', border: '1px solid #ef9a9a', borderRadius: 6, padding: '10px 14px', fontSize: 12, color: '#c62828', marginBottom: 14 }}>⚠ {parseError}</div>
+        <div style={{ background: '#ffebee', border: '1px solid #ef9a9a', borderRadius: 6,
+                      padding: '10px 14px', fontSize: 12, color: '#c62828', marginBottom: 14 }}>⚠ {parseError}</div>
       )}
 
       <button onClick={handleLoad} disabled={!file || parsing}
-        style={{ width: '100%', padding: '12px', fontSize: 14, fontWeight: 'bold', background: file ? '#1565C0' : '#ccc', color: '#fff', border: 'none', borderRadius: 6, cursor: file ? 'pointer' : 'not-allowed' }}>
+        style={{ width: '100%', padding: '12px', fontSize: 14, fontWeight: 'bold',
+                 background: file ? '#1565C0' : '#ccc', color: '#fff', border: 'none',
+                 borderRadius: 6, cursor: file ? 'pointer' : 'not-allowed' }}>
         {parsing ? 'Loading…' : 'Load Pick Brief'}
       </button>
     </div>
@@ -636,7 +958,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
                         <button style={miniBtn} onClick={()=>setHourOverride(r.idx,'pickers',Math.min(16,r.effPickers+1))}>+</button>
                         {pkrsOvr&&<button style={{...miniBtn,color:'#aaa',marginLeft:1}} onClick={()=>setHourOverride(r.idx,'pickers',null)}>×</button>}
                       </div>
-                    </td>
+</td>
                     <td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center'}}>
                       <div style={{display:'flex',alignItems:'center',gap:1,justifyContent:'center'}}>
                         <button style={miniBtn} onClick={()=>setHourOverride(r.idx,'cpmh',Math.max(60,r.effCpmh-5))}>−</button>
@@ -711,12 +1033,42 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
 }
 
 // ─── PicklinePanel ────────────────────────────────────────────────────────────
-// State (snapshot + overrides) lives in FacilityPanel which stays mounted
-// via display:none, so it survives all tab switches for the session.
 export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onOverridesChange, onClear }) {
-  const [pickers,  setPickers]  = useState(9)
-  const [cpmh,     setCpmh]     = useState(150)
-  const [crewMode, setCrewMode] = useState('spread')
+  const [pickers,       setPickers]       = useState(9)
+  const [cpmh,          setCpmh]          = useState(150)
+  const [crewMode,      setCrewMode]      = useState('spread')
+  const [wrTab,         setWrTab]         = useState('brief')  // 'brief' | 'schedule'
+  const [scheduleRows,  setScheduleRows]  = useState([])
+  const [schedLoading,  setSchedLoading]  = useState(true)
+
+  // Load schedule from Supabase once on mount
+  useEffect(() => {
+    fetchPickSchedule().then(rows => {
+      setScheduleRows(rows)
+      setSchedLoading(false)
+    })
+  }, [])
+
+  const handleRowUpdate = useCallback(async (updated) => {
+    const saved = await upsertPickScheduleRow(updated)
+    if (saved) {
+      setScheduleRows(prev => prev.map(r => r.id === saved.id ? saved : r))
+    }
+  }, [])
+
+  const handleRowAdd = useCallback(async (row) => {
+    const saved = await insertPickScheduleRow(row)
+    if (saved) {
+      setScheduleRows(prev => [...prev, saved].sort((a, b) =>
+        DAYS_ORDER.indexOf(a.day_of_week) - DAYS_ORDER.indexOf(b.day_of_week) || a.pick_seq - b.pick_seq
+      ))
+    }
+  }, [])
+
+  const handleRowDelete = useCallback(async (id) => {
+    await deletePickScheduleRow(id)
+    setScheduleRows(prev => prev.filter(r => r.id !== id))
+  }, [])
 
   function setHourOverride(idx, field, value) {
     onOverridesChange(prev => {
@@ -765,68 +1117,122 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
   const dateLabel   = snapDate ? fmtDate(snapDate) : '—'
   const btnStyle    = (disabled) => ({width:32,height:32,border:'1px solid #1565C0',borderRadius:5,background:'#fff',color:'#1565C0',fontSize:20,cursor:disabled?'not-allowed':'pointer',opacity:disabled?0.3:1,lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center'})
 
-  if (!snapshot) return <UploadArea onSnapshot={onSnapshot} />
+  const tabBtn = (id, label) => (
+    <button
+      key={id}
+      onClick={() => setWrTab(id)}
+      style={{
+        padding: '5px 16px', fontSize: 12, cursor: 'pointer',
+        borderRadius: '4px 4px 0 0',
+        border: '1px solid ' + (wrTab === id ? '#1565C0' : '#ccc'),
+        borderBottom: wrTab === id ? '2px solid #fff' : '1px solid #ccc',
+        background: wrTab === id ? '#fff' : '#f0f4ff',
+        color: wrTab === id ? '#1565C0' : '#666',
+        fontWeight: wrTab === id ? 'bold' : 'normal',
+        marginBottom: -1,
+      }}
+    >{label}</button>
+  )
 
   return (
     <div style={{fontFamily:'Arial, sans-serif',fontSize:11}}>
-      <div style={{background:'#1565C0',color:'#fff',padding:'8px 14px',fontSize:14,fontWeight:'bold',display:'flex',justifyContent:'space-between',alignItems:'center',borderRadius:'6px 6px 0 0'}}>
-        <span>CSW Pick Line — {dateLabel} Brief</span>
-        <button onClick={onClear} style={{fontSize:11,padding:'3px 10px',background:'rgba(255,255,255,0.15)',border:'1px solid rgba(255,255,255,0.3)',borderRadius:4,color:'#fff',cursor:'pointer'}}>
-          ↑ Load new file
-        </button>
+      {/* Tab bar */}
+      <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #ccc',
+                    marginBottom: 0, paddingTop: 4, paddingLeft: 2, background: '#f5f8ff' }}>
+        {tabBtn('brief',  snapshot ? `📋 Pick Brief — ${dateLabel}` : '📋 Pick Brief')}
+        {tabBtn('schedule', schedLoading ? '📅 Pick Schedule…' : `📅 Pick Schedule (${scheduleRows.length})`)}
       </div>
 
-      <div style={{background:'#E8F5E9',border:'1px solid #A5D6A7',padding:'4px 10px',fontSize:10,color:'#2E7D32',marginBottom:8,display:'flex',flexDirection:'column',gap:3}}>
-        <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
-          <span style={{fontWeight:'bold',color:'#1B5E20',minWidth:90}}>{dateLabel}</span>
-          <span>📦 Gross: <strong>{grossCs.toLocaleString()}cs</strong></span>
-          <span>↩ Alloc pull: <strong>{allocCs.toLocaleString()}cs</strong></span>
-          {shortedCs>0&&<span>⚠ Shorted: <strong style={{color:'#C62828'}}>{shortedCs.toLocaleString()}cs</strong></span>}
-          <span>✅ NET pick line: <strong>{netCs.toLocaleString()}cs</strong></span>
+      {/* Pick Brief tab */}
+      {wrTab === 'brief' && (
+        <div>
+          {!snapshot ? (
+            <UploadArea onSnapshot={onSnapshot} scheduleRows={scheduleRows} />
+          ) : (
+            <div>
+              <div style={{background:'#1565C0',color:'#fff',padding:'8px 14px',fontSize:14,fontWeight:'bold',
+                           display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span>CSW Pick Line — {dateLabel} Brief</span>
+                <button onClick={onClear} style={{fontSize:11,padding:'3px 10px',background:'rgba(255,255,255,0.15)',
+                         border:'1px solid rgba(255,255,255,0.3)',borderRadius:4,color:'#fff',cursor:'pointer'}}>
+                  ↑ Load new file
+                </button>
+              </div>
+
+              <div style={{background:'#E8F5E9',border:'1px solid #A5D6A7',padding:'4px 10px',fontSize:10,
+                           color:'#2E7D32',marginBottom:8,display:'flex',flexDirection:'column',gap:3}}>
+                <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+                  <span style={{fontWeight:'bold',color:'#1B5E20',minWidth:90}}>{dateLabel}</span>
+                  <span>📦 Gross: <strong>{grossCs.toLocaleString()}cs</strong></span>
+                  <span>↩ Alloc pull: <strong>{allocCs.toLocaleString()}cs</strong></span>
+                  {shortedCs>0&&<span>⚠ Shorted: <strong style={{color:'#C62828'}}>{shortedCs.toLocaleString()}cs</strong></span>}
+                  <span>✅ NET pick line: <strong>{netCs.toLocaleString()}cs</strong></span>
+                </div>
+                {nextDates.map(nd=>(
+                  <div key={nd.date} style={{display:'flex',gap:16,flexWrap:'wrap',opacity:0.8}}>
+                    <span style={{fontWeight:'bold',color:'#1B5E20',minWidth:90}}>{fmtDate(nd.date)}</span>
+                    <span>📦 Gross: <strong>{nd.gross_cs.toLocaleString()}cs</strong></span>
+                    <span>↩ Alloc pull: <strong>{nd.alloc_cs.toLocaleString()}cs</strong></span>
+                    {(nd.shorted_cs??0)>0&&<span>⚠ Shorted: <strong style={{color:'#C62828'}}>{nd.shorted_cs.toLocaleString()}cs</strong></span>}
+                    <span>✅ NET pick line: <strong>{nd.net_cs.toLocaleString()}cs</strong></span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{background:'#f0f4ff',border:'1px solid #b0c4f0',borderRadius:6,padding:'10px 14px',
+                           display:'flex',alignItems:'center',gap:12,marginBottom:10,flexWrap:'wrap'}}>
+                <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                  <div style={{display:'flex',alignItems:'center',gap:10}}>
+                    <div style={{fontSize:13,fontWeight:'bold',color:'#1565C0',minWidth:120}}>Pickers Available</div>
+                    <button style={btnStyle(pickers<=1)} onClick={()=>pickers>1&&setPickers(p=>p-1)}>−</button>
+                    <span style={{fontSize:28,fontWeight:'bold',color:'#1565C0',minWidth:28,textAlign:'center'}}>{pickers}</span>
+                    <button style={btnStyle(pickers>=20)} onClick={()=>pickers<20&&setPickers(p=>p+1)}>+</button>
+                  </div>
+                  <div style={{display:'flex',alignItems:'center',gap:10}}>
+                    <div style={{fontSize:13,fontWeight:'bold',color:'#1565C0',minWidth:120}}>CPMH Target</div>
+                    <button style={btnStyle(cpmh<=60)} onClick={()=>cpmh>60&&setCpmh(c=>c-5)}>−</button>
+                    <span style={{fontSize:28,fontWeight:'bold',color:'#1565C0',minWidth:28,textAlign:'center'}}>{cpmh}</span>
+                    <button style={btnStyle(cpmh>=300)} onClick={()=>cpmh<300&&setCpmh(c=>c+5)}>+</button>
+                    <input type="range" min={60} max={300} step={5} value={cpmh}
+                      onChange={e=>setCpmh(Number(e.target.value))} style={{width:140,accentColor:'#1565C0'}}/>
+                  </div>
+                </div>
+                <div style={{fontSize:12,color:'#444',lineHeight:2.0}}>
+                  <div>Shift capacity: <strong>{target.toLocaleString()} cs</strong></div>
+                  <div>Primary complete est: <strong>~{netDoneTime}</strong></div>
+                  <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>
+                    {totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:''}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}
+                  </strong></div>
+                </div>
+              </div>
+
+              <PickTable pickers={pickers} cpmh={cpmh} tl={tl} netCs={netCs}
+                hourOverrides={hourOverrides} setHourOverride={setHourOverride}
+                routes={routes} crews={enrichedCrews} crewMode={crewMode} setCrewMode={setCrewMode}/>
+
+              <div style={{background:'#ECEFF1',padding:'6px 10px',fontSize:9,color:'#78909C',borderTop:'1px solid #CFD8DC'}}>
+                Zone heat map: ≥10%=yellow · ≥20%=amber · ≥30%=orange · ≥40%=red. Pick windows estimated from CPMH pace; actual may vary.
+              </div>
+            </div>
+          )}
         </div>
-        {nextDates.map(nd=>(
-          <div key={nd.date} style={{display:'flex',gap:16,flexWrap:'wrap',opacity:0.8}}>
-            <span style={{fontWeight:'bold',color:'#1B5E20',minWidth:90}}>{fmtDate(nd.date)}</span>
-            <span>📦 Gross: <strong>{nd.gross_cs.toLocaleString()}cs</strong></span>
-            <span>↩ Alloc pull: <strong>{nd.alloc_cs.toLocaleString()}cs</strong></span>
-            {(nd.shorted_cs??0)>0&&<span>⚠ Shorted: <strong style={{color:'#C62828'}}>{nd.shorted_cs.toLocaleString()}cs</strong></span>}
-            <span>✅ NET pick line: <strong>{nd.net_cs.toLocaleString()}cs</strong></span>
-          </div>
-        ))}
-      </div>
+      )}
 
-      <div style={{background:'#f0f4ff',border:'1px solid #b0c4f0',borderRadius:6,padding:'10px 14px',display:'flex',alignItems:'center',gap:12,marginBottom:10,flexWrap:'wrap'}}>
-        <div style={{display:'flex',flexDirection:'column',gap:10}}>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <div style={{fontSize:13,fontWeight:'bold',color:'#1565C0',minWidth:120}}>Pickers Available</div>
-            <button style={btnStyle(pickers<=1)} onClick={()=>pickers>1&&setPickers(p=>p-1)}>−</button>
-            <span style={{fontSize:28,fontWeight:'bold',color:'#1565C0',minWidth:28,textAlign:'center'}}>{pickers}</span>
-            <button style={btnStyle(pickers>=20)} onClick={()=>pickers<20&&setPickers(p=>p+1)}>+</button>
-          </div>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <div style={{fontSize:13,fontWeight:'bold',color:'#1565C0',minWidth:120}}>CPMH Target</div>
-            <button style={btnStyle(cpmh<=60)} onClick={()=>cpmh>60&&setCpmh(c=>c-5)}>−</button>
-            <span style={{fontSize:28,fontWeight:'bold',color:'#1565C0',minWidth:28,textAlign:'center'}}>{cpmh}</span>
-            <button style={btnStyle(cpmh>=300)} onClick={()=>cpmh<300&&setCpmh(c=>c+5)}>+</button>
-            <input type="range" min={60} max={300} step={5} value={cpmh} onChange={e=>setCpmh(Number(e.target.value))} style={{width:140,accentColor:'#1565C0'}}/>
-          </div>
+      {/* Pick Schedule tab */}
+      {wrTab === 'schedule' && (
+        <div style={{ padding: '12px 4px' }}>
+          {schedLoading ? (
+            <div style={{ textAlign: 'center', color: '#888', padding: 40 }}>Loading schedule…</div>
+          ) : (
+            <PickScheduleEditor
+              scheduleRows={scheduleRows}
+              onRowUpdate={handleRowUpdate}
+              onRowAdd={handleRowAdd}
+              onRowDelete={handleRowDelete}
+            />
+          )}
         </div>
-        <div style={{fontSize:12,color:'#444',lineHeight:2.0}}>
-          <div>Shift capacity: <strong>{target.toLocaleString()} cs</strong></div>
-          <div>Primary complete est: <strong>~{netDoneTime}</strong></div>
-          <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>
-            {totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:''}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}
-          </strong></div>
-        </div>
-      </div>
-
-      <PickTable pickers={pickers} cpmh={cpmh} tl={tl} netCs={netCs}
-        hourOverrides={hourOverrides} setHourOverride={setHourOverride}
-        routes={routes} crews={enrichedCrews} crewMode={crewMode} setCrewMode={setCrewMode}/>
-
-      <div style={{background:'#ECEFF1',padding:'6px 10px',fontSize:9,color:'#78909C',borderTop:'1px solid #CFD8DC'}}>
-        Zone heat map: ≥10%=yellow · ≥20%=amber · ≥30%=orange · ≥40%=red. Pick windows estimated from CPMH pace; actual may vary.
-      </div>
+      )}
     </div>
   )
 }

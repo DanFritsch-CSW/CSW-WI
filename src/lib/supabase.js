@@ -109,11 +109,6 @@ export async function seedRosterAssignments(employees, planDate) {
   return null
 }
 
-/**
- * After a B2E sync for `correctFacility`, remove any future roster_assignments rows
- * for the given employee IDs at OTHER facilities — these are stale placements from
- * before a facility transfer. Loan rows (from_facility IS NOT NULL) are preserved.
- */
 export async function purgeStaleAssignments(employeeIds, correctFacility, fromDate) {
   if (!supabase || !employeeIds.length) return null
   const { error } = await supabase
@@ -121,8 +116,8 @@ export async function purgeStaleAssignments(employeeIds, correctFacility, fromDa
     .delete()
     .in('employee_id', employeeIds)
     .neq('facility', correctFacility)
-    .is('from_facility', null)       // don't touch loan destination rows
-    .gte('plan_date', fromDate)       // leave historical data alone
+    .is('from_facility', null)
+    .gte('plan_date', fromDate)
   if (error) { console.error('purgeStaleAssignments:', error); return error.message }
   return null
 }
@@ -150,19 +145,8 @@ export async function resetAssignmentsForDate(facility, planDate) {
   return null
 }
 
-/**
- * Send an employee on loan from sourceFacility to destFacility.
- *
- * Writes two rows:
- *  1. Updates the source row: sets on_loan_to = destFacility
- *  2. Creates a destination row: from_facility = sourceFacility, lane = destLane
- *
- * Returns null on success, error message on failure.
- */
 export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourceFacility, destFacility, destLane, planDate, shiftStart, shiftHours }) {
   if (!supabase) return 'Supabase not configured'
-
-  // 1. Mark the source row as on loan
   const { error: srcErr } = await supabase
     .from('roster_assignments')
     .update({ on_loan_to: destFacility })
@@ -170,8 +154,6 @@ export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourc
     .eq('employee_id', employeeId)
     .eq('plan_date', planDate)
   if (srcErr) { console.error('sendEmployeeOnLoan src:', srcErr); return srcErr.message }
-
-  // 2. Create the destination row
   const { error: dstErr } = await supabase
     .from('roster_assignments')
     .upsert({
@@ -188,20 +170,11 @@ export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourc
       on_loan_to:    null,
     }, { onConflict: 'facility,employee_id,plan_date' })
   if (dstErr) { console.error('sendEmployeeOnLoan dst:', dstErr); return dstErr.message }
-
   return null
 }
 
-/**
- * Recall a loaned employee back to their source facility.
- *
- * Clears on_loan_to on the source row and deletes the destination row.
- * Returns null on success, error message on failure.
- */
 export async function recallLoan({ employeeId, sourceFacility, destFacility, planDate }) {
   if (!supabase) return 'Supabase not configured'
-
-  // 1. Clear on_loan_to on source
   const { error: srcErr } = await supabase
     .from('roster_assignments')
     .update({ on_loan_to: null })
@@ -209,8 +182,6 @@ export async function recallLoan({ employeeId, sourceFacility, destFacility, pla
     .eq('employee_id', employeeId)
     .eq('plan_date', planDate)
   if (srcErr) { console.error('recallLoan src:', srcErr); return srcErr.message }
-
-  // 2. Delete the destination row
   const { error: dstErr } = await supabase
     .from('roster_assignments')
     .delete()
@@ -218,7 +189,6 @@ export async function recallLoan({ employeeId, sourceFacility, destFacility, pla
     .eq('employee_id', employeeId)
     .eq('plan_date', planDate)
   if (dstErr) { console.error('recallLoan dst:', dstErr); return dstErr.message }
-
   return null
 }
 
@@ -336,7 +306,6 @@ export async function fetchAllFacilitiesLaborCounts(planDate) {
   if (error || !data) return {}
   const result = {}
   for (const r of data) {
-    // Exclude employees who are on loan — they count at destination, not source
     if (r.on_loan_to) continue
     const fac = r.facility
     if (!result[fac]) result[fac] = { headcount: 0, totalHours: 0 }
@@ -443,4 +412,48 @@ export async function deleteCustomDropProject(id) {
     .delete()
     .eq('id', id)
   if (error) console.error('deleteCustomDropProject:', error)
+}
+
+// ─── WR Pick Schedule ─────────────────────────────────────────────────────────
+
+export async function fetchPickSchedule() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('wr_pick_schedule')
+    .select('*')
+    .order('day_of_week')
+    .order('pick_seq')
+  if (error) { console.error('fetchPickSchedule:', error); return [] }
+  return data ?? []
+}
+
+export async function upsertPickScheduleRow(row) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('wr_pick_schedule')
+    .upsert(row, { onConflict: 'day_of_week,route_number' })
+    .select()
+    .single()
+  if (error) { console.error('upsertPickScheduleRow:', error); return null }
+  return data
+}
+
+export async function insertPickScheduleRow(row) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('wr_pick_schedule')
+    .insert(row)
+    .select()
+    .single()
+  if (error) { console.error('insertPickScheduleRow:', error); return null }
+  return data
+}
+
+export async function deletePickScheduleRow(id) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('wr_pick_schedule')
+    .delete()
+    .eq('id', id)
+  if (error) console.error('deletePickScheduleRow:', error)
 }
