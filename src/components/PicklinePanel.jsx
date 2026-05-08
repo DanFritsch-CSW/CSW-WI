@@ -134,7 +134,7 @@ export function parsePicklineXlsx(wb, scheduleRows = []) {
     const code = String(row['Material Lookup Code'] ?? '').trim()
     if (!code) continue
     const zone = parseInt(String(row['Pickline Zones'] ?? '').replace(/\D/g, ''), 10) || 0
-    const fp   = parseInt(String(row['Full Pallet (t x h)'] ?? '0'], 10) || 0
+    const fp   = parseInt(String(row['Full Pallet (t x h)'] ?? '0'), 10) || 0
     skuMap[code] = { zone, fullPallet: fp }
   }
   const hasTieHigh = Object.keys(skuMap).length > 0
