@@ -1,12 +1,24 @@
 'use strict'
 
-// Pickline-specific Omni queries for WR Bernatello's pick planning
+// Pickline-specific Omni queries for WR Bernatello's pick planning.
+// Uses same query format as omni.js (version:5, modelId, table, fields, filters).
 // Returns: { casesRows, tieHighRows, shortageRows, date }
-// Cases and TieHigh queried from production_db via Omni proxy
-// Pick Schedule is now managed in-app (wr_pick_schedule table)
 
 const RETRY_ATTEMPTS = 2
 const RETRY_DELAY_MS = 500
+
+const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
+
+// Table names (same as omni.js conventions)
+const ORDERS      = 'silver__datex_slv_orders'
+const ORDERLINES  = 'silver__datex_slv_orderlines'
+const ORDERSTAT   = 'silver__datex_slv_orderstatuses'
+const MATERIALS   = 'silver__datex_slv_materials'
+const LOCCONTAIN  = 'silver__datex_slv_locationcontainers'
+const LOCASSIGN   = 'silver__datex_slv_locationcontainerassignedmaterials'
+const MATPKG      = 'silver__datex_slv_materialspackagingslookup'
+const WAREHOUSES  = 'silver__datex_slv_warehouses'
+const AVAIL_INV   = 'gold__available_inventory_by_material'
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -31,6 +43,7 @@ function arrowToRows(table) {
 }
 
 async function runOmniQuery(query, apiKey) {
+  // query is already a version:5 object
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(RETRY_DELAY_MS)
     const omniRes = await fetch('https://csw.omniapp.co/api/v1/query/run', {
@@ -57,120 +70,97 @@ async function runOmniQuery(query, apiKey) {
   }
 }
 
-// Validated against production_db via MotherDuck:
-// project_id 320 = Bernatello's - Wisconsin Rapids
-// Tables: silver.datex_slv_orderlines, datex_slv_orders, datex_slv_materials, datex_slv_orderstatuses
+// Build queries in the exact same format as omni.js uses (version:5 with modelId/table/fields/filters)
 function buildCasesQuery(date) {
   return {
-    model_id: '33204248-b6db-4630-ae34-11aa94347add',
-    query: {
-      table: 'silver__datex_slv_orderlines',
-      dimensions: [
-        'silver__datex_slv_orders.requested_delivery_date',
-        'silver__datex_slv_orders.route_number',
-        'silver__datex_slv_materials.lookup_code',
-        'silver__datex_slv_materials.material_name',
-      ],
-      measures: ['silver__datex_slv_orderlines.packaged_amount_sum'],
-      filters: [
-        {
-          field: 'silver__datex_slv_orders.project_id',
-          operator: 'EQUALS',
-          values: ['320'],
-        },
-        {
-          field: 'silver__datex_slv_orders.requested_delivery_date',
-          operator: 'EQUALS',
-          value: date,
-        },
-        {
-          field: 'silver__datex_slv_orderstatuses.status_name',
-          operator: 'IS_IN',
-          values: ['Created', 'Processing'],
-        },
-      ],
-      limit: 5000,
+    version: 5,
+    modelId: GOLD_MODEL_ID,
+    table: ORDERLINES,
+    fields: [
+      `${ORDERS}.requested_delivery_date`,
+      `${ORDERS}.route_number`,
+      `${MATERIALS}.lookup_code`,
+      `${MATERIALS}.material_name`,
+      `${ORDERLINES}.packaged_amount_sum`,
+    ],
+    filters: {
+      [`${ORDERS}.project_id`]: {
+        kind: 'EQUALS', type: 'number', values: [320],
+      },
+      [`${ORDERS}.requested_delivery_date`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false,
+        offset_interval_string: '0 days',
+      },
+      [`${ORDERSTAT}.status_name`]: {
+        kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
+      },
     },
+    sorts: [],
+    limit: 5000,
   }
 }
 
-// Validated against production_db: 112 rows, pallet_tie * pallet_high = full_pallet
-// Tables: silver.datex_slv_locationcontainers + locationcontainerassignedmaterials + materials + materialspackagingslookup
 function buildTieHighQuery() {
   return {
-    model_id: '33204248-b6db-4630-ae34-11aa94347add',
-    query: {
-      table: 'silver__datex_slv_locationcontainers',
-      dimensions: [
-        'silver__datex_slv_locationcontainers.location_container',
-        'silver__datex_slv_locationcontainers.pick_sequence',
-        'silver__datex_slv_materials.lookup_code',
-        'silver__datex_slv_materials.material_name',
-        'silver__datex_slv_materialspackagingslookup.pallet_tie',
-        'silver__datex_slv_materialspackagingslookup.pallet_high',
-      ],
-      filters: [
-        {
-          field: 'silver__datex_slv_locationcontainers.is_primary_pick',
-          operator: 'EQUALS',
-          values: ['true'],
-        },
-        {
-          field: 'silver__datex_slv_warehouses.warehouse_name',
-          operator: 'CONTAINS',
-          value: 'Rapids',
-        },
-      ],
-      limit: 500,
+    version: 5,
+    modelId: GOLD_MODEL_ID,
+    table: LOCCONTAIN,
+    fields: [
+      `${LOCCONTAIN}.location_container`,
+      `${LOCCONTAIN}.pick_sequence`,
+      `${MATERIALS}.lookup_code`,
+      `${MATERIALS}.material_name`,
+      `${MATPKG}.pallet_tie`,
+      `${MATPKG}.pallet_high`,
+    ],
+    filters: {
+      [`${LOCCONTAIN}.is_primary_pick`]: {
+        kind: 'EQUALS', type: 'boolean', values: [true],
+      },
+      [`${WAREHOUSES}.warehouse_name`]: {
+        kind: 'CONTAINS', type: 'string', values: ['Rapids'], is_negative: false,
+      },
     },
+    sorts: [],
+    limit: 500,
   }
 }
 
-// Same SQL as confirmed in Omni workbook
 function buildShortageQuery(date) {
   return {
-    model_id: '33204248-b6db-4630-ae34-11aa94347add',
-    query: {
-      table: 'silver__datex_slv_orderlines',
-      dimensions: [
-        'silver__datex_slv_orders.requested_delivery_date',
-        'silver__datex_slv_materials.lookup_code',
-        'silver__datex_slv_materials.material_name',
-        'gold__available_inventory_by_material.available_amount_sum',
-        'silver__datex_slv_orderlines.amount_sum',
-      ],
-      measures: [],
-      filters: [
-        {
-          field: 'silver__datex_slv_orders.project_id',
-          operator: 'EQUALS',
-          values: ['320'],
-        },
-        {
-          field: 'silver__datex_slv_orders.requested_delivery_date',
-          operator: 'EQUALS',
-          value: date,
-        },
-        {
-          field: 'silver__datex_slv_orderstatuses.status_name',
-          operator: 'IS_IN',
-          values: ['Created', 'Processing'],
-        },
-        {
-          field: 'silver__datex_slv_orderlines.calc_1',
-          operator: 'LESS_THAN_OR_EQUAL_TO',
-          value: '0',
-        },
-      ],
-      limit: 1000,
+    version: 5,
+    modelId: GOLD_MODEL_ID,
+    table: ORDERLINES,
+    fields: [
+      `${ORDERS}.requested_delivery_date`,
+      `${MATERIALS}.lookup_code`,
+      `${MATERIALS}.material_name`,
+      `${AVAIL_INV}.available_amount_sum`,
+      `${ORDERLINES}.amount_sum`,
+    ],
+    filters: {
+      [`${ORDERS}.project_id`]: {
+        kind: 'EQUALS', type: 'number', values: [320],
+      },
+      [`${ORDERS}.requested_delivery_date`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false,
+        offset_interval_string: '0 days',
+      },
+      [`${ORDERSTAT}.status_name`]: {
+        kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
+      },
+      [`${ORDERLINES}.calc_1`]: {
+        kind: 'LESS_THAN_OR_EQUAL_TO', type: 'number', value: 0,
+      },
     },
+    sorts: [],
+    limit: 1000,
   }
 }
 
-// Pick sequence → zone mapping derived from Excel TieHigh data
-// pick_sequence ranges: 101-110=Z1, 111-120=Z2, 121-140=Z3, 141-160=Z4,
-//                       161-170=Z5, 171-180=Z6, 181-190=Z7, 191-200=Z8,
-//                       201-205=Z9, 206-209=Z10, 210-211=Z11, 212=Z12
+// pick_sequence -> zone mapping derived from Excel TieHigh data
 function pickSeqToZone(seq) {
   if (seq >= 101 && seq <= 110) return 1
   if (seq >= 111 && seq <= 120) return 2
@@ -183,41 +173,37 @@ function pickSeqToZone(seq) {
   if (seq >= 201 && seq <= 205) return 9
   if (seq >= 206 && seq <= 209) return 10
   if (seq >= 210 && seq <= 211) return 11
-  if (seq >= 212) return 12
+  if (seq >= 212)               return 12
   return 0
 }
 
-// Transform raw Omni rows into the shape parsePicklineXlsx expects
+// Transform raw Omni field-name rows into the column names parsePicklineXlsx / buildSnapshotFromOmni expect
 function transformRows(casesRaw, tieHighRaw, shortageRaw) {
-  // casesRows: [{ route_number, lookup_code, packaged_amount_sum, requested_delivery_date }]
   const casesRows = casesRaw.map(r => ({
-    "Route Number (Bernatello's)": String(r['silver__datex_slv_orders.route_number'] ?? ''),
-    'Material Lookup Code':        String(r['silver__datex_slv_materials.lookup_code'] ?? ''),
-    'Packaged Amount Sum':          Number(r['silver__datex_slv_orderlines.packaged_amount_sum'] ?? 0),
-    'Requested Delivery Date Date': String(r['silver__datex_slv_orders.requested_delivery_date'] ?? '').slice(0, 10),
+    "Route Number (Bernatello's)": String(r[`${ORDERS}.route_number`] ?? ''),
+    'Material Lookup Code':        String(r[`${MATERIALS}.lookup_code`] ?? ''),
+    'Packaged Amount Sum':          Number(r[`${ORDERLINES}.packaged_amount_sum`] ?? 0),
+    'Requested Delivery Date Date': String(r[`${ORDERS}.requested_delivery_date`] ?? '').slice(0, 10),
   }))
 
-  // tieHighRows: [{ location_container, pick_sequence, lookup_code, pallet_tie, pallet_high }]
-  // Compute Pickline Zones from pick_sequence and Full Pallet from tie*high
   const tieHighRows = tieHighRaw.map(r => {
-    const seq = Number(r['silver__datex_slv_locationcontainers.pick_sequence'] ?? 0)
-    const tie = Number(r['silver__datex_slv_materialspackagingslookup.pallet_tie'] ?? 0)
-    const high = Number(r['silver__datex_slv_materialspackagingslookup.pallet_high'] ?? 0)
+    const seq  = Number(r[`${LOCCONTAIN}.pick_sequence`] ?? 0)
+    const tie  = Number(r[`${MATPKG}.pallet_tie`] ?? 0)
+    const high = Number(r[`${MATPKG}.pallet_high`] ?? 0)
     return {
-      'Location Container':   String(r['silver__datex_slv_locationcontainers.location_container'] ?? ''),
-      'Material Lookup Code': String(r['silver__datex_slv_materials.lookup_code'] ?? ''),
-      'Material Name':        String(r['silver__datex_slv_materials.material_name'] ?? ''),
+      'Location Container':   String(r[`${LOCCONTAIN}.location_container`] ?? ''),
+      'Material Lookup Code': String(r[`${MATERIALS}.lookup_code`] ?? ''),
+      'Material Name':        String(r[`${MATERIALS}.material_name`] ?? ''),
       'Pickline Zones':       pickSeqToZone(seq),
       'Full Pallet (t x h)':  tie * high,
     }
   })
 
-  // shortageRows: [{ lookup_code, available_amount, ordered_amount, requested_delivery_date }]
   const shortageRows = shortageRaw.map(r => ({
-    'Material Lookup Code':          String(r['silver__datex_slv_materials.lookup_code'] ?? ''),
-    'Requested Delivery Date Date':  String(r['silver__datex_slv_orders.requested_delivery_date'] ?? '').slice(0, 10),
-    'Total Available Cases':         Number(r['gold__available_inventory_by_material.available_amount_sum'] ?? 0),
-    'Item Number':                   String(r['silver__datex_slv_materials.lookup_code'] ?? ''),
+    'Material Lookup Code':         String(r[`${MATERIALS}.lookup_code`] ?? ''),
+    'Item Number':                  String(r[`${MATERIALS}.lookup_code`] ?? ''),
+    'Requested Delivery Date Date': String(r[`${ORDERS}.requested_delivery_date`] ?? '').slice(0, 10),
+    'Total Available Cases':        Number(r[`${AVAIL_INV}.available_amount_sum`] ?? 0),
   }))
 
   return { casesRows, tieHighRows, shortageRows }
@@ -257,23 +243,28 @@ exports.handler = async (event) => {
   ])
 
   const failed = [
-    !casesResult?.ok && 'Cases',
+    !casesResult?.ok   && 'Cases',
     !tieHighResult?.ok && 'TieHigh',
     !shortageResult?.ok && 'Shortage',
   ].filter(Boolean)
 
   if (failed.length) {
+    const detail = [
+      !casesResult?.ok   && `Cases: ${casesResult?.raw ?? 'no response'}`,
+      !tieHighResult?.ok && `TieHigh: ${tieHighResult?.raw ?? 'no response'}`,
+      !shortageResult?.ok && `Shortage: ${shortageResult?.raw ?? 'no response'}`,
+    ].filter(Boolean).join(' | ')
     return {
       statusCode: 502,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: `Omni query failed: ${failed.join(', ')}` }),
+      body: JSON.stringify({ error: `Omni query failed: ${failed.join(', ')}`, detail }),
     }
   }
 
   const { tableFromIPC } = await import('apache-arrow')
 
-  const casesRaw    = arrowToRows(tableFromIPC(Buffer.from(casesResult.job.result, 'base64')))
-  const tieHighRaw  = arrowToRows(tableFromIPC(Buffer.from(tieHighResult.job.result, 'base64')))
+  const casesRaw    = arrowToRows(tableFromIPC(Buffer.from(casesResult.job.result,    'base64')))
+  const tieHighRaw  = arrowToRows(tableFromIPC(Buffer.from(tieHighResult.job.result,  'base64')))
   const shortageRaw = arrowToRows(tableFromIPC(Buffer.from(shortageResult.job.result, 'base64')))
 
   const { casesRows, tieHighRows, shortageRows } = transformRows(casesRaw, tieHighRaw, shortageRaw)
