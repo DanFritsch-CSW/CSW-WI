@@ -281,6 +281,160 @@ export function parsePicklineXlsx(wb, scheduleRows = []) {
   return { snapshot_date: snapshotDate, generated_at: new Date().toISOString(), source: 'manual', ...primary, next_dates }
 }
 
+// ─── Omni rows → snapshot (same shape as parsePicklineXlsx output) ─────────────
+export function buildSnapshotFromOmni(casesRows, tieHighRows, shortageRows, date, scheduleRows = []) {
+  // Build a fake workbook-like structure from the Omni rows and reuse the xlsx parser logic
+  // Instead, inline the logic to avoid XLSX dependency in this path
+
+  const schedMap = buildScheduleMap(scheduleRows)
+
+  // TieHigh map: code → { zone, fullPallet }
+  const skuMap = {}
+  for (const row of tieHighRows) {
+    const code = String(row['Material Lookup Code'] ?? '').trim()
+    if (!code) continue
+    const zone = Number(row['Pickline Zones']) || 0
+    const fp   = Number(row['Full Pallet (t x h)']) || 0
+    skuMap[code] = { zone, fullPallet: fp }
+  }
+  const hasTieHigh = Object.keys(skuMap).length > 0
+
+  // Shortage map: { [date]: { [itemNum]: availableCases } }
+  const shortageMap = {}
+  for (const row of shortageRows) {
+    const d       = String(row['Requested Delivery Date Date'] ?? date).slice(0, 10) || '__any__'
+    const itemNum = String(row['Item Number'] ?? '').trim()
+    if (!itemNum) continue
+    const avail = Math.max(0, Number(row['Total Available Cases'] ?? 0))
+    if (!shortageMap[d]) shortageMap[d] = {}
+    shortageMap[d][itemNum] = avail
+  }
+  const hasShortages = Object.keys(shortageMap).length > 0
+
+  // Cases accumulation: { [date]: { [rt]: { [matCode]: [caseCount, ...] } } }
+  const dateRtSkuOrig  = {}
+  const dateRtSkuLines = {}
+  for (const row of casesRows) {
+    const route   = String(row["Route Number (Bernatello's)"] ?? '').trim()
+    const cases   = parseInt(parseFloat(String(row['Packaged Amount Sum'] ?? '0')), 10) || 0
+    const matCode = String(row['Material Lookup Code'] ?? '').trim()
+    const d       = normalizeDate(String(row['Requested Delivery Date Date'] ?? date))
+    if (!d || !route || cases <= 0) continue
+    const rt = normalizeRouteNum(route)
+    if (!dateRtSkuOrig[d])               dateRtSkuOrig[d] = {}
+    if (!dateRtSkuOrig[d][rt])           dateRtSkuOrig[d][rt] = {}
+    dateRtSkuOrig[d][rt][matCode] = (dateRtSkuOrig[d][rt][matCode] || 0) + cases
+    if (!dateRtSkuLines[d])              dateRtSkuLines[d] = {}
+    if (!dateRtSkuLines[d][rt])          dateRtSkuLines[d][rt] = {}
+    if (!dateRtSkuLines[d][rt][matCode]) dateRtSkuLines[d][rt][matCode] = []
+    dateRtSkuLines[d][rt][matCode].push(cases)
+  }
+
+  const allDates     = Object.keys(dateRtSkuOrig).sort()
+  const snapshotDate = allDates[0] ?? date
+
+  // Shortage distribution (same logic as xlsx parser)
+  const rtSkuShorted = {}
+  if (hasShortages) {
+    for (const d of allDates) {
+      rtSkuShorted[d] = {}
+      const rtSkuOrig = dateRtSkuOrig[d]
+      const dow       = dateToDow(d)
+      const seqForDay = (dow && schedMap[dow]) ? schedMap[dow] : {}
+      const sortedRts = Object.keys(rtSkuOrig).sort((a, b) => {
+        const sa = seqForDay[a]?.seq ?? null, sb = seqForDay[b]?.seq ?? null
+        if (sa !== null && sb !== null) return sa - sb
+        if (sa !== null) return -1; if (sb !== null) return 1
+        return parseInt(a, 10) - parseInt(b, 10)
+      })
+      for (const rt of sortedRts) rtSkuShorted[d][rt] = {}
+      const dateShortages = shortageMap[d] ?? shortageMap['__any__'] ?? {}
+      for (const [itemNum, available] of Object.entries(dateShortages)) {
+        const totalOrdered = sortedRts.reduce((s, rt) => s + (rtSkuOrig[rt][itemNum] || 0), 0)
+        if (totalOrdered === 0 || available >= totalOrdered) continue
+        let remaining = available
+        for (const rt of sortedRts) {
+          const ordered = rtSkuOrig[rt][itemNum] || 0
+          if (ordered === 0) continue
+          const allocated = Math.min(ordered, remaining)
+          rtSkuShorted[d][rt][itemNum] = ordered - allocated
+          remaining = Math.max(0, remaining - allocated)
+        }
+      }
+    }
+  }
+
+  // Route maps
+  const dateRouteMaps = {}
+  for (const d of allDates) {
+    dateRouteMaps[d] = {}
+    const rtSkuLines     = dateRtSkuLines[d]
+    const rtSkuOrig      = dateRtSkuOrig[d]
+    const shortedForDate = rtSkuShorted[d] ?? {}
+    for (const rt of Object.keys(rtSkuLines)) {
+      const rtShorted = shortedForDate[rt] ?? {}
+      const rm = { gross: 0, alloc: 0, net: 0, shorted: 0, z: {} }
+      for (const [matCode, lines] of Object.entries(rtSkuLines[rt])) {
+        const origTotal    = rtSkuOrig[rt][matCode] || 0
+        const shortedTotal = rtShorted[matCode] || 0
+        rm.gross += origTotal; rm.shorted += shortedTotal
+        if (shortedTotal >= origTotal) continue
+        let remainingShortage = shortedTotal
+        const adjLines = [...lines].sort((a, b) => b - a).map(c => {
+          if (remainingShortage <= 0) return c
+          const cut = Math.min(c, remainingShortage); remainingShortage -= cut; return c - cut
+        })
+        if (hasTieHigh) {
+          const sku = skuMap[matCode]
+          for (const adjCases of adjLines) {
+            if (adjCases <= 0) continue
+            if (sku && adjCases >= sku.fullPallet / 2) { rm.alloc += adjCases }
+            else { rm.net += adjCases; if (sku && sku.zone > 0) rm.z[sku.zone] = (rm.z[sku.zone] || 0) + adjCases }
+          }
+        } else { rm.net += origTotal - shortedTotal }
+      }
+      dateRouteMaps[d][rt] = rm
+    }
+  }
+
+  // Summarize
+  function summarize(routeMap, d) {
+    const dow = dateToDow(d)
+    const seqForDay = (dow && schedMap[dow]) ? schedMap[dow] : {}
+    const routes = Object.keys(routeMap)
+      .sort((a, b) => {
+        const sa = seqForDay[a]?.seq ?? null, sb = seqForDay[b]?.seq ?? null
+        if (sa !== null && sb !== null) return sa - sb
+        if (sa !== null) return -1; if (sb !== null) return 1
+        return parseInt(a, 10) - parseInt(b, 10)
+      })
+      .map(rt => {
+        const sched = seqForDay[rt]
+        return {
+          rt, nm: sched?.name ?? ROUTE_NAMES[rt] ?? `Rt ${rt}`,
+          cs: routeMap[rt].net, gross: routeMap[rt].gross,
+          alloc: routeMap[rt].alloc, shorted: routeMap[rt].shorted,
+          ready: sched?.apptStart ?? null, apptEnd: sched?.apptEnd ?? null,
+          live: sched?.live ?? ROUTE_LIVE.has(rt), z: routeMap[rt].z,
+        }
+      })
+    return {
+      routes,
+      net_cs:     routes.reduce((s, r) => s + r.cs,      0),
+      alloc_cs:   routes.reduce((s, r) => s + r.alloc,   0),
+      shorted_cs: routes.reduce((s, r) => s + r.shorted, 0),
+      gross_cs:   routes.reduce((s, r) => s + r.gross,   0),
+    }
+  }
+
+  const primary    = summarize(dateRouteMaps[snapshotDate] ?? {}, snapshotDate)
+  const next_dates = allDates.slice(1).map(d => {
+    const s = summarize(dateRouteMaps[d], d)
+    return { date: d, gross_cs: s.gross_cs, alloc_cs: s.alloc_cs, shorted_cs: s.shorted_cs, net_cs: s.net_cs }
+  })
+  return { snapshot_date: snapshotDate, generated_at: new Date().toISOString(), source: 'omni', ...primary, next_dates }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt(m) {
   let hh = Math.floor(m / 60), mm = Math.round(m % 60)
@@ -508,7 +662,7 @@ function DropLiveCell({ value, onSave }) {
 
 function PickScheduleEditor({ scheduleRows, onRowUpdate, onRowAdd, onRowDelete }) {
   const [activeDay, setActiveDay] = useState('Monday')
-  const [saving, setSaving]       = useState(null) // row id being saved
+  const [saving, setSaving]       = useState(null)
   const [addingDay, setAddingDay] = useState(null)
   const [newRow, setNewRow]       = useState({})
 
@@ -556,7 +710,6 @@ function PickScheduleEditor({ scheduleRows, onRowUpdate, onRowAdd, onRowDelete }
 
   return (
     <div style={{ fontFamily: 'Arial, sans-serif', fontSize: 11 }}>
-      {/* Day tabs */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 10, borderBottom: '2px solid #e0e0e0', paddingBottom: 6 }}>
         {DAYS_ORDER.map(day => (
           <button key={day} onClick={() => setActiveDay(day)}
@@ -575,8 +728,6 @@ function PickScheduleEditor({ scheduleRows, onRowUpdate, onRowAdd, onRowDelete }
           <span style={{ fontSize: 10, color: '#888' }}>{dayRows.length} routes · click any cell to edit · changes save instantly</span>
         </div>
       </div>
-
-      {/* Table */}
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: 11, width: '100%' }}>
           <thead>
@@ -637,8 +788,6 @@ function PickScheduleEditor({ scheduleRows, onRowUpdate, onRowAdd, onRowDelete }
                 </td>
               </tr>
             ))}
-
-            {/* Add row */}
             {addingDay === activeDay ? (
               <tr style={{ background: '#E8F5E9' }}>
                 <td style={tdStyle}><span style={{ color: '#888', fontSize: 10 }}>new</span></td>
@@ -708,6 +857,7 @@ function UploadArea({ onSnapshot, scheduleRows }) {
   const [file, setFile]             = useState(null)
   const [parsing, setParsing]       = useState(false)
   const [parseError, setParseError] = useState(null)
+  const [omniPulling, setOmniPulling] = useState(false)
   const inputRef = useRef(null)
 
   function handleFiles(fileList) {
@@ -734,8 +884,63 @@ function UploadArea({ onSnapshot, scheduleRows }) {
     }
   }
 
+  async function handleOmniPull() {
+    setOmniPulling(true); setParseError(null)
+    try {
+      const tomorrow = new Date()
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      const date = tomorrow.toISOString().slice(0, 10)
+      const res = await fetch('/.netlify/functions/omni-pickline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date }),
+      })
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.error || `Omni request failed (${res.status})`)
+      }
+      const { casesRows, tieHighRows, shortageRows } = await res.json()
+      const snap = buildSnapshotFromOmni(casesRows, tieHighRows, shortageRows, date, scheduleRows)
+      if (!snap.routes || snap.routes.length === 0)
+        throw new Error('No routes found in Omni — orders may not be in system yet (try after 4pm)')
+      onSnapshot(snap)
+    } catch (err) {
+      setParseError(err.message ?? 'Omni pull failed')
+    } finally {
+      setOmniPulling(false)
+    }
+  }
+
   return (
     <div style={{ maxWidth: 540, margin: '40px auto', fontFamily: 'Arial, sans-serif' }}>
+      {/* Pull from Omni button */}
+      <button
+        onClick={handleOmniPull}
+        disabled={omniPulling}
+        style={{
+          width: '100%', padding: '13px', fontSize: 14, fontWeight: 'bold',
+          background: omniPulling ? '#ccc' : '#2E7D32', color: '#fff',
+          border: 'none', borderRadius: 6, cursor: omniPulling ? 'not-allowed' : 'pointer',
+          marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+        }}
+      >
+        {omniPulling
+          ? <><span style={{ fontSize: 16 }}>⏳</span> Pulling from Omni…</>
+          : <><span style={{ fontSize: 16 }}>⬇</span> Pull from Omni — tomorrow's orders</>
+        }
+      </button>
+      <div style={{ fontSize: 10, color: '#888', textAlign: 'center', marginBottom: 16 }}>
+        Queries Bernatello's orders, TieHigh, and Shortages directly · Pick Schedule from in-app table
+      </div>
+
+      {/* Divider */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <div style={{ flex: 1, height: 1, background: '#e0e0e0' }} />
+        <span style={{ fontSize: 11, color: '#aaa', whiteSpace: 'nowrap' }}>or upload Excel file</span>
+        <div style={{ flex: 1, height: 1, background: '#e0e0e0' }} />
+      </div>
+
+      {/* Excel drop zone */}
       <div
         onDragOver={e => { e.preventDefault(); setDragging(true) }}
         onDragLeave={() => setDragging(false)}
@@ -743,12 +948,12 @@ function UploadArea({ onSnapshot, scheduleRows }) {
         onClick={() => inputRef.current?.click()}
         style={{
           border: `2px dashed ${dragging ? '#1565C0' : file ? '#43a047' : '#b0c4f0'}`,
-          borderRadius: 8, padding: '36px 24px', textAlign: 'center',
+          borderRadius: 8, padding: '28px 24px', textAlign: 'center',
           background: dragging ? '#e8f0fe' : file ? '#f1f8e9' : '#f5f8ff',
           cursor: 'pointer', marginBottom: 16, transition: 'all 0.15s',
         }}
       >
-        <div style={{ fontSize: 36, marginBottom: 8 }}>{file ? '📊' : '📂'}</div>
+        <div style={{ fontSize: 32, marginBottom: 6 }}>{file ? '📊' : '📂'}</div>
         {file ? (
           <>
             <div style={{ fontSize: 14, fontWeight: 'bold', color: '#2e7d32', marginBottom: 4 }}>{file.name}</div>
@@ -756,7 +961,7 @@ function UploadArea({ onSnapshot, scheduleRows }) {
           </>
         ) : (
           <>
-            <div style={{ fontSize: 14, fontWeight: 'bold', color: '#1565C0', marginBottom: 4 }}>Drop the OMNI Excel file here or click to browse</div>
+            <div style={{ fontSize: 13, fontWeight: 'bold', color: '#1565C0', marginBottom: 4 }}>Drop the OMNI Excel file here or click to browse</div>
             <div style={{ fontSize: 11, color: '#888' }}>Single .xlsx file — reads Cases, TieHigh, and Shortage sheets</div>
             <div style={{ fontSize: 10, color: '#aaa', marginTop: 4 }}>Pick Schedule is now managed in-app → Pick Schedule tab</div>
           </>
@@ -1041,7 +1246,6 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
   const [scheduleRows,  setScheduleRows]  = useState([])
   const [schedLoading,  setSchedLoading]  = useState(true)
 
-  // Load schedule from Supabase once on mount
   useEffect(() => {
     fetchPickSchedule().then(rows => {
       setScheduleRows(rows)
@@ -1136,14 +1340,12 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
 
   return (
     <div style={{fontFamily:'Arial, sans-serif',fontSize:11}}>
-      {/* Tab bar */}
       <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #ccc',
                     marginBottom: 0, paddingTop: 4, paddingLeft: 2, background: '#f5f8ff' }}>
         {tabBtn('brief',  snapshot ? `📋 Pick Brief — ${dateLabel}` : '📋 Pick Brief')}
         {tabBtn('schedule', schedLoading ? '📅 Pick Schedule…' : `📅 Pick Schedule (${scheduleRows.length})`)}
       </div>
 
-      {/* Pick Brief tab */}
       {wrTab === 'brief' && (
         <div>
           {!snapshot ? (
@@ -1152,7 +1354,7 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
             <div>
               <div style={{background:'#1565C0',color:'#fff',padding:'8px 14px',fontSize:14,fontWeight:'bold',
                            display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                <span>CSW Pick Line — {dateLabel} Brief</span>
+                <span>CSW Pick Line — {dateLabel} Brief{snapshot.source === 'omni' ? ' · via Omni' : ''}</span>
                 <button onClick={onClear} style={{fontSize:11,padding:'3px 10px',background:'rgba(255,255,255,0.15)',
                          border:'1px solid rgba(255,255,255,0.3)',borderRadius:4,color:'#fff',cursor:'pointer'}}>
                   ↑ Load new file
@@ -1218,7 +1420,6 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
         </div>
       )}
 
-      {/* Pick Schedule tab */}
       {wrTab === 'schedule' && (
         <div style={{ padding: '12px 4px' }}>
           {schedLoading ? (
