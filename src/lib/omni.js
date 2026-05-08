@@ -65,12 +65,21 @@ function apptStatusFilter() {
   }
 }
 
-function scheduledArrivalDateFilter(date) {
+// 5am–5am operational day filter — matches Omni dashboard's "Shift Day (5am-5am)" filter.
+// Uses BETWEEN with explicit timestamps so overnight appointments (12am–4:59am) are
+// correctly attributed to the operational day they belong to, not the calendar day.
+function operationalDayApptFilter(date) {
+  // date = 'YYYY-MM-DD' of the operational day start (5am)
+  const [year, month, day] = date.split('-').map(Number)
+  const nextDate = new Date(Date.UTC(year, month - 1, day + 1))
+  const nextStr  = nextDate.toISOString().slice(0, 10)
   return {
     [`${VIEW_APPT}.scheduled_arrival`]: {
-      kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-      isFiscal: false, left_side: date, is_negative: false,
-      offset_interval_string: '0 days',
+      kind: 'BETWEEN',
+      type: 'date',
+      left_side:  `${date}T05:00:00`,
+      right_side: `${nextStr}T04:59:59`,
+      is_negative: false,
     },
   }
 }
@@ -320,7 +329,7 @@ export async function fetchHourlyAppointments(facilityId, date) {
     ],
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...scheduledArrivalDateFilter(date),
+      ...operationalDayApptFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [],
@@ -351,7 +360,7 @@ export async function fetchProjectData(facilityId, date) {
     ],
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...scheduledArrivalDateFilter(date),
+      ...operationalDayApptFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
@@ -361,7 +370,7 @@ export async function fetchProjectData(facilityId, date) {
   for (const r of rows) {
     const rawName = r[`${VIEW_APPT}.project_name`] || ''
     if (!rawName) continue
-    const name = normalizeProjectName('ken', rawName)  // normalizes KEN names; safe no-op for others
+    const name = normalizeProjectName(facilityId, rawName)  // use actual facilityId, not hardcoded 'ken'
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
@@ -389,7 +398,7 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: projectNames },
-      ...scheduledArrivalDateFilter(date),
+      ...operationalDayApptFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [],
@@ -433,7 +442,7 @@ export async function fetchNetworkKpis(date) {
       `${VIEW_APPT}.count`,
     ],
     filters: {
-      ...scheduledArrivalDateFilter(date),
+      ...operationalDayApptFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
@@ -507,10 +516,7 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: omniNames },
-      [`${VIEW_APPT}.scheduled_arrival`]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
-      },
+      ...operationalDayApptFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
@@ -545,10 +551,7 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: omniNames },
-      [`${VIEW_APPT}.scheduled_arrival`]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
-      },
+      ...operationalDayApptFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
