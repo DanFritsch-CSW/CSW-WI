@@ -24,13 +24,11 @@ const LANE_TO_SHIFT = {
 
 const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 
-// Operational day: 5am–4:59am (hours 5–28 in a 0-indexed 24h clock).
-// Any hour < 5 is considered "previous night" and should only be counted
-// if it is the tail end of a 3rd shift that legitimately started on this
-// operational day (i.e. shift_start >= 18, wrapping past midnight).
-// Shifts that start before 5am are assumed to belong to the prior
-// operational day and are excluded entirely from the current day's build.
-const OP_DAY_START = 5   // 5am
+// Operational day runs 5am–4:59am (hours 5–28 on a linear 0–28 scale).
+// We do NOT wrap hours past 23 — a 3rd shift starting at 22 covers hours
+// 22 and 23 on day N, then wraps into day N+1 (hours 0–5). Those wrap hours
+// belong to the NEXT operational day and must not appear in today's array.
+const OP_DAY_START = 5   // 5am — shifts starting before this are excluded
 
 function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
@@ -64,13 +62,14 @@ function parseStartHour(shiftStart) {
 /**
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
- * Only counts employees whose shift starts at or after OP_DAY_START (5am).
- * This prevents 3rd-shift employees from the PREVIOUS night (e.g. Sun→Mon)
- * from being incorrectly credited to Monday's early morning hours (12am–4am).
- * A 3rd shift starting at 22 on Monday contributes hours 22–23 + 0–5 on
- * TUESDAY's operational day, not Monday's.
- *
- * Excludes employees where assignment.on_loan_to is set.
+ * Key rules:
+ * 1. Shifts starting before OP_DAY_START (5am) are excluded — they belong to
+ *    the previous operational day.
+ * 2. Hours are NOT wrapped past 23. A 3rd shift (start=22, hours=8.5) covers
+ *    hours 22 and 23 on the current day; hours 0–6 wrap to the NEXT day and
+ *    are simply not counted here. This prevents Sunday 3rd shift from
+ *    inflating Monday's 12am–5am labor availability.
+ * 3. Employees on loan (on_loan_to set) are excluded entirely.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
@@ -99,13 +98,14 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
-    // Skip shifts that start before the operational day boundary (5am).
-    // These belong to the previous night's operational day.
+    // Exclude shifts starting before the operational day boundary
     if (resolvedStart < OP_DAY_START) continue
 
     for (let i = 0; i < resolvedHours; i++) {
+      const h = resolvedStart + i
+      if (h > 23) break   // don't wrap past midnight — those hours are tomorrow
       const mul = breakMuls[i] ?? 1
-      hourlyAvail[(resolvedStart + i) % 24] += mul
+      hourlyAvail[h] += mul
     }
   }
 
@@ -115,7 +115,8 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
 /**
  * Compute break-adjusted total hours for a set of employees.
  * Excludes employees on loan (on_loan_to set).
- * Excludes shifts starting before OP_DAY_START (belong to prior operational day).
+ * Excludes shifts starting before OP_DAY_START.
+ * Does not count hours that wrap past midnight (belong to next day).
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
@@ -134,11 +135,11 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
 
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
 
-    const rawStart   = assignment?.shift_start ?? emp.shift_start
-    const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
+    const rawStart      = assignment?.shift_start ?? emp.shift_start
+    const startHour     = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
     const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
 
-    // Skip shifts starting before operational day boundary
+    // Exclude shifts starting before operational day boundary
     if (resolvedStart < OP_DAY_START) continue
 
     const rawHours      = assignment?.shift_hours ?? shiftDefaults.hours
@@ -146,6 +147,7 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
     for (let i = 0; i < resolvedHours; i++) {
+      if (resolvedStart + i > 23) break  // stop at midnight
       total += breakMuls[i] ?? 1
     }
   }
