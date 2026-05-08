@@ -65,21 +65,17 @@ function apptStatusFilter() {
   }
 }
 
-// 5am–5am operational day filter — matches Omni dashboard's "Shift Day (5am-5am)" filter.
-// Uses BETWEEN with explicit timestamps so overnight appointments (12am–4:59am) are
-// correctly attributed to the operational day they belong to, not the calendar day.
-function operationalDayApptFilter(date) {
-  // date = 'YYYY-MM-DD' of the operational day start (5am)
-  const [year, month, day] = date.split('-').map(Number)
-  const nextDate = new Date(Date.UTC(year, month - 1, day + 1))
-  const nextStr  = nextDate.toISOString().slice(0, 10)
+// Calendar-day filter for appointment queries.
+// NOTE: Omni's dashboard uses a 5am–5am "Shift Day" window. We use the calendar
+// day here because Omni's API does not support BETWEEN on timestamp fields.
+// The ±3 appointment difference vs Omni is caused by this window mismatch and
+// is expected/acceptable — overnight appts (12am–4:59am) land on different days.
+function scheduledArrivalDateFilter(date) {
   return {
     [`${VIEW_APPT}.scheduled_arrival`]: {
-      kind: 'BETWEEN',
-      type: 'date',
-      left_side:  `${date}T05:00:00`,
-      right_side: `${nextStr}T04:59:59`,
-      is_negative: false,
+      kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+      isFiscal: false, left_side: date, is_negative: false,
+      offset_interval_string: '0 days',
     },
   }
 }
@@ -329,7 +325,7 @@ export async function fetchHourlyAppointments(facilityId, date) {
     ],
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...operationalDayApptFilter(date),
+      ...scheduledArrivalDateFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [],
@@ -360,7 +356,7 @@ export async function fetchProjectData(facilityId, date) {
     ],
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...operationalDayApptFilter(date),
+      ...scheduledArrivalDateFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
@@ -398,7 +394,7 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: projectNames },
-      ...operationalDayApptFilter(date),
+      ...scheduledArrivalDateFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [],
@@ -442,7 +438,7 @@ export async function fetchNetworkKpis(date) {
       `${VIEW_APPT}.count`,
     ],
     filters: {
-      ...operationalDayApptFilter(date),
+      ...scheduledArrivalDateFilter(date),
       ...apptStatusFilter(),
     },
     sorts: [{ column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false }],
@@ -516,7 +512,10 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: omniNames },
-      ...operationalDayApptFilter(date),
+      [`${VIEW_APPT}.scheduled_arrival`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
+      },
       ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
@@ -551,7 +550,10 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
     filters: {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: omniNames },
-      ...operationalDayApptFilter(date),
+      [`${VIEW_APPT}.scheduled_arrival`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false, offset_interval_string: '0 days',
+      },
       ...apptStatusFilter(),
     },
     sorts: [], limit: 500,
