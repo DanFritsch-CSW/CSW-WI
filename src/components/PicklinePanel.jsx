@@ -525,11 +525,9 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
   const zoneCrewColor={},zoneCrewBorder={}
   crews.forEach(crew=>crew.zones.forEach(z=>{zoneCrewColor[z]=crew.color;zoneCrewBorder[z]=crew.border}))
 
-  // Map zone → crew index
   const zoneToCrewIdx={}
   crews.forEach((crew,ci)=>crew.zones.forEach(z=>{zoneToCrewIdx[z]=ci}))
 
-  // Group pickers by crew index
   const pickersByCrew={unassigned:[]}
   crews.forEach((_,ci)=>{pickersByCrew[ci]=[]})
   for(const p of pickerRoster){
@@ -593,10 +591,54 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
             <tr><td colSpan={NUM_LEFT+12} style={{background:'#1565C0',color:'#fff',fontWeight:'bold',fontSize:11,padding:'5px 8px',border:'1px solid #0d47a1'}}>{totalBaseCases.toLocaleString()} cs est. shift capacity{hasOverrides?<span style={{fontWeight:'normal',fontSize:10,marginLeft:8,opacity:0.8}}>({Object.keys(hourOverrides).length} hr override{Object.keys(hourOverrides).length>1?'s':''})</span>:<span style={{fontWeight:'normal',fontSize:10,marginLeft:8,opacity:0.8}}>{cpmh} CPMH × {pickers} pkrs</span>}</td></tr>
             {netDoneRow===-1&&<tr><td colSpan={NUM_LEFT+12} style={redBar}>⏳ Primary orders extend past schedule — check picker count or CPMH target</td></tr>}
             <tr><th colSpan={2} style={{background:'#1565C0',color:'#fff',padding:'4px 6px',fontSize:10,textAlign:'center',border:'1px solid #0d47a1',whiteSpace:'nowrap'}}>Clock</th><th style={{background:'#1565C0',color:'#fff',padding:'4px 6px',fontSize:10,textAlign:'center',border:'1px solid #0d47a1'}}>Pkrs</th><th style={{background:'#1565C0',color:'#fff',padding:'4px 6px',fontSize:10,textAlign:'center',border:'1px solid #0d47a1'}}>CPMH</th><th style={{background:'#1565C0',color:'#fff',padding:'4px 6px',fontSize:10,textAlign:'center',border:'1px solid #0d47a1',whiteSpace:'pre-line',lineHeight:1.3}}>{'Pick mins\nthis hr'}</th><th style={{background:'#1565C0',color:'#fff',padding:'4px 6px',fontSize:10,textAlign:'center',border:'1px solid #0d47a1',whiteSpace:'pre-line',lineHeight:1.3}}>{'Cases\nthis hr'}</th><th style={{background:'#1565C0',border:'1px solid #0d47a1',width:65}}/>{crews.map(crew=>(<th key={crew.zones[0]} colSpan={crew.zones.length} style={{...thZ,background:crew.border,color:'#222',fontSize:9,fontWeight:'bold',whiteSpace:'nowrap'}}>{crew.zones.map(z=>`Z${z}`).join('+')}</th>))}</tr>
-            {paceRows.map((r,i)=>{if(i>=PACE.length&&i>netDoneRow+1)return null;const isMon=netDoneRow>=0&&i>netDoneRow;const bg=isMon?(i%2===0?'#fff9e6':'#FFF3CD'):(i%2===0?'#fff':'#e8f5e9');const crewRow=i<PACE.length?crewHourlyCs[i]:Array(crews.length).fill(0);const pkrsOvr=r.idx!==null&&hourOverrides[r.idx]?.pickers!=null;const cpmhOvr=r.idx!==null&&hourOverrides[r.idx]?.cpmh!=null;const divider=netDoneRow>=0&&i===netDoneRow+1?<tr key="div"><td colSpan={NUM_LEFT+12} style={redBar}>✓ Primary orders complete ~{netDoneTime}</td></tr>:null;return[divider,(<tr key={i} style={{background:bg}}><td colSpan={2} style={{border:'1px solid #dde',padding:'4px 8px',fontWeight:'bold',whiteSpace:'nowrap'}}>{r.label}</td>{r.idx!==null?(<><td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center'}}><div style={{display:'flex',alignItems:'center',gap:1,justifyContent:'center'}}><button style={miniBtn} onClick={()=>setHourOverride(r.idx,'pickers',Math.max(1,r.effPickers-1))}>−</button><span style={{minWidth:14,textAlign:'center',fontWeight:pkrsOvr?'bold':'normal',color:pkrsOvr?'#C62828':'#555'}}>{r.effPickers}</span><button style={miniBtn} onClick={()=>setHourOverride(r.idx,'pickers',Math.min(16,r.effPickers+1))}>+</button>{pkrsOvr&&<button style={{...miniBtn,color:'#aaa',marginLeft:1}} onClick={()=>setHourOverride(r.idx,'pickers',null)}>×</button>}</div></td><td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center'}}><div style={{display:'flex',alignItems:'center',gap:1,justifyContent:'center'}}><button style={miniBtn} onClick={()=>setHourOverride(r.idx,'cpmh',Math.max(60,r.effCpmh-5))}>−</button><span style={{minWidth:24,textAlign:'center',fontWeight:cpmhOvr?'bold':'normal',color:cpmhOvr?'#C62828':'#555'}}>{r.effCpmh}</span><button style={miniBtn} onClick={()=>setHourOverride(r.idx,'cpmh',Math.min(300,r.effCpmh+5))}>+</button>{cpmhOvr&&<button style={{...miniBtn,color:'#aaa',marginLeft:1}} onClick={()=>setHourOverride(r.idx,'cpmh',null)}>×</button>}</div></td></>):(<><td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center',color:'#999',fontSize:10}}>{r.effPickers}</td><td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center',color:'#999',fontSize:10}}>{r.effCpmh}</td></>)}<td style={{border:'1px solid #dde',padding:'4px 8px',textAlign:'center'}}>{r.pickMins}</td><td style={{border:'1px solid #dde',padding:'4px 8px',textAlign:'center'}}>{r.thisCases.toLocaleString()}</td><td style={{border:'1px solid #dde'}}/>{crews.map((crew,ci)=>{const cs=crewRow[ci],capacity=(i<PACE.length&&crew.count>0)?(crew.count*r.effCpmh/60)*r.pickMins:0;const ratio=capacity>0?cs/capacity:0;return<td key={ci} colSpan={crew.zones.length} style={{border:`1px solid ${crew.border||'#dde'}`,padding:'4px 4px',textAlign:'center',background:cs>0?intensityBg(crew.border,Math.min(ratio,2.0)):bg,color:'#333',fontSize:10}}>{cs||''}</td>})}</tr>)]})
+            {paceRows.map((r, i) => {
+              if (i >= PACE.length && i > netDoneRow + 1) return null
+              const isMon = netDoneRow >= 0 && i > netDoneRow
+              const bg = isMon ? (i % 2 === 0 ? '#fff9e6' : '#FFF3CD') : (i % 2 === 0 ? '#fff' : '#e8f5e9')
+              const crewRow = i < PACE.length ? crewHourlyCs[i] : Array(crews.length).fill(0)
+              const hasIdx = r.idx !== null
+              const pkrsOvr = hasIdx && hourOverrides[r.idx]?.pickers != null
+              const cpmhOvr = hasIdx && hourOverrides[r.idx]?.cpmh != null
+              const divider = netDoneRow >= 0 && i === netDoneRow + 1
+                ? <tr key="div"><td colSpan={NUM_LEFT + 12} style={redBar}>✓ Primary orders complete ~{netDoneTime}</td></tr>
+                : null
+              return [divider, (
+                <tr key={i} style={{background: bg}}>
+                  <td colSpan={2} style={{border:'1px solid #dde',padding:'4px 8px',fontWeight:'bold',whiteSpace:'nowrap'}}>{r.label}</td>
+                  {hasIdx ? (
+                    <>
+                      <td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:1,justifyContent:'center'}}>
+                          <button style={miniBtn} onClick={()=>setHourOverride(r.idx,'pickers',Math.max(1,r.effPickers-1))}>−</button>
+                          <span style={{minWidth:14,textAlign:'center',fontWeight:pkrsOvr?'bold':'normal',color:pkrsOvr?'#C62828':'#555'}}>{r.effPickers}</span>
+                          <button style={miniBtn} onClick={()=>setHourOverride(r.idx,'pickers',Math.min(16,r.effPickers+1))}>+</button>
+                          {pkrsOvr && <button style={{...miniBtn,color:'#aaa',marginLeft:1}} onClick={()=>setHourOverride(r.idx,'pickers',null)}>×</button>}
+                        </div>
+                      </td>
+                      <td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:1,justifyContent:'center'}}>
+                          <button style={miniBtn} onClick={()=>setHourOverride(r.idx,'cpmh',Math.max(60,r.effCpmh-5))}>−</button>
+                          <span style={{minWidth:24,textAlign:'center',fontWeight:cpmhOvr?'bold':'normal',color:cpmhOvr?'#C62828':'#555'}}>{r.effCpmh}</span>
+                          <button style={miniBtn} onClick={()=>setHourOverride(r.idx,'cpmh',Math.min(300,r.effCpmh+5))}>+</button>
+                          {cpmhOvr && <button style={{...miniBtn,color:'#aaa',marginLeft:1}} onClick={()=>setHourOverride(r.idx,'cpmh',null)}>×</button>}
+                        </div>
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center',color:'#999',fontSize:10}}>{r.effPickers}</td>
+                      <td style={{border:'1px solid #dde',padding:'2px 3px',textAlign:'center',color:'#999',fontSize:10}}>{r.effCpmh}</td>
+                    </>
+                  )}
+                  <td style={{border:'1px solid #dde',padding:'4px 8px',textAlign:'center'}}>{r.pickMins}</td>
+                  <td style={{border:'1px solid #dde',padding:'4px 8px',textAlign:'center'}}>{r.thisCases.toLocaleString()}</td>
+                  <td style={{border:'1px solid #dde'}}/>
+                  {crews.map((crew,ci)=>{const cs=crewRow[ci],capacity=(i<PACE.length&&crew.count>0)?(crew.count*r.effCpmh/60)*r.pickMins:0;const ratio=capacity>0?cs/capacity:0;return<td key={ci} colSpan={crew.zones.length} style={{border:`1px solid ${crew.border||'#dde'}`,padding:'4px 4px',textAlign:'center',background:cs>0?intensityBg(crew.border,Math.min(ratio,2.0)):bg,color:'#333',fontSize:10}}>{cs||''}</td>})}
+                </tr>
+              )]
+            })}
           </tbody>
           <tbody>
-            {/* CREW POSITIONING row with embedded pickers */}
             <tr>
               <td colSpan={NUM_LEFT} style={{background:'#263238',border:'1px solid #555',padding:'4px 6px',position:'sticky',left:0,zIndex:3}}>
                 <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
@@ -618,7 +660,6 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
                 </CrewDropCell>
               ))}
             </tr>
-            {/* Unassigned pickers row — only shown if any are unassigned */}
             <UnassignedPool pickers={pickersByCrew.unassigned} onRemove={onPickerRemove}/>
             <tr><td colSpan={2} style={{background:'#CFD8DC',fontWeight:'bold',padding:'4px 8px',textAlign:'left',border:'1px solid #b0bec5',position:'sticky',left:0,zIndex:2}}>TOTAL</td><td style={{background:'#CFD8DC',fontWeight:'bold',textAlign:'center',border:'1px solid #b0bec5',color:'#555'}}>{totalGross.toLocaleString()}cs</td><td style={{background:'#CFD8DC',fontWeight:'bold',textAlign:'center',border:'1px solid #b0bec5',color:'#7B1FA2'}}>{totalAlloc>0?`${totalAlloc.toLocaleString()}cs`:'—'}</td><td style={{background:'#CFD8DC',fontWeight:'bold',textAlign:'center',border:'1px solid #b0bec5',color:'#C62828'}}>{totalShorted>0?`${totalShorted.toLocaleString()}cs`:'—'}</td><td style={{background:'#CFD8DC',fontWeight:'bold',textAlign:'center',border:'1px solid #b0bec5'}}>{totalCs.toLocaleString()}cs</td><td style={{background:'#CFD8DC',border:'1px solid #b0bec5'}}/>{Array.from({length:12},(_,i)=>(<td key={i} style={{background:zoneCrewColor[i+1]||'#CFD8DC',fontWeight:'bold',textAlign:'center',border:`1px solid ${zoneCrewBorder[i+1]||'#b0bec5'}`,fontSize:11}}>{zoneTotals[i+1]||''}</td>))}</tr>
             <tr><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'center',position:'sticky',left:0,zIndex:2}}>Route</th><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'left',position:'sticky',left:43,zIndex:2}}>Route Name</th><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'center'}}>Gross</th><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'center'}}>Alloc Pull</th><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'center'}}>Shorted</th><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'center'}}>NET Cases</th><th style={{background:'#37474F',color:'#fff',padding:'4px 6px',border:'1px solid #555',fontSize:11,whiteSpace:'nowrap',textAlign:'center'}}>Pick Window</th>{Array.from({length:12},(_,i)=>{const zi=i+1;return<th key={zi} style={{...thZ,background:zoneCrewBorder[zi]||'#37474F',color:'#333'}}>Z{zi}</th>})}</tr>
@@ -641,7 +682,6 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
   const [scheduleRows,  setScheduleRows] = useState([])
   const [schedLoading,  setSchedLoading] = useState(true)
 
-  // ── Picker roster state ─────────────────────────────────────────────────────
   const [pickerRoster,  setPickerRoster] = useState([])
   const [activePickerId,setActivePickerId]=useState(null)
   const [syncingB2e,    setSyncingB2e]   = useState(false)
@@ -674,11 +714,9 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
     })
   }
 
-  // ── Picker sync from B2E ────────────────────────────────────────────────────
   const handlePickerSync = useCallback(async () => {
     setSyncingB2e(true); setSyncMsg(null)
     try {
-      // Use planDate (the date the user is planning for) so B2E schedule entries exist
       const b2ePickers = await fetchWrPickers(planDate)
       if (b2ePickers.length === 0) {
         setSyncMsg({ err: true, text: `No job code 206 employees found at WR for ${planDate}` })
@@ -697,22 +735,18 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
     }
   }, [pickerRoster, planDate])
 
-  // ── Picker drag handlers ────────────────────────────────────────────────────
   const handlePickerDragEnd = useCallback(async (event) => {
     setActivePickerId(null)
     const { active, over } = event
     if (!over) return
     const employeeId = active.id
-    const overId = over.id  // 'crew-0', 'crew-1', … or 'crew-unassigned'
-
-    // Resolve new zone: pick the first zone of the target crew group
+    const overId = over.id
     const crews = buildCrews(pickers, snapshot?.routes ?? [], crewMode)
     let newZone = null
     if (overId !== 'crew-unassigned') {
       const crewIdx = parseInt(overId.replace('crew-', ''), 10)
       if (!isNaN(crewIdx) && crews[crewIdx]) newZone = crews[crewIdx].zones[0]
     }
-
     const picker = pickerRoster.find(p => p.employee_id === employeeId)
     if (!picker || picker.zone === newZone) return
     setPickerRoster(prev => prev.map(p => p.employee_id === employeeId ? { ...p, zone: newZone } : p))
