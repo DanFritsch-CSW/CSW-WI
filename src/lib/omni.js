@@ -52,8 +52,6 @@ function classifyApptType(typeName) {
   return null
 }
 
-// Exclude cancelled/deleted appointments — applied consistently across ALL queries
-// so facility panel and ALL tab always show identical counts.
 function apptStatusFilter() {
   return {
     [`${VIEW_APPT}.dock_status_name`]: {
@@ -65,11 +63,6 @@ function apptStatusFilter() {
   }
 }
 
-// Calendar-day filter for appointment queries.
-// NOTE: Omni's dashboard uses a 5am–5am "Shift Day" window. We use the calendar
-// day here because Omni's API does not support BETWEEN on timestamp fields.
-// The ±3 appointment difference vs Omni is caused by this window mismatch and
-// is expected/acceptable — overnight appts (12am–4:59am) land on different days.
 function scheduledArrivalDateFilter(date) {
   return {
     [`${VIEW_APPT}.scheduled_arrival`]: {
@@ -80,7 +73,6 @@ function scheduledArrivalDateFilter(date) {
   }
 }
 
-// Hardcoded KEN guaranteed projects — always seeded even with no Omni history.
 export const KEN_GUARANTEED_PROJECTS = [
   'CROWN BAKERIES',
   'Pretzilla Kenosha',
@@ -90,7 +82,6 @@ export const KEN_GUARANTEED_PROJECTS = [
   'RICHELIEU RAW MATERIALS KENOSHA',
 ]
 
-// Omni name → display/Supabase key mappings for KEN
 const FAIR_OAKS_OMNI_NAMES  = ['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST']
 const BIRCHWOOD_OMNI_NAMES  = ['BIRCHWOOD FOODS  KENOSHA']
 
@@ -280,7 +271,7 @@ function stripWarehouseSuffix(name) {
   return name
 }
 
-// ── Public API ───────────────────────────────────────────────────
+// ── Public API ─────────────────────────────────────────────────────────────────────────────────
 
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
@@ -366,7 +357,7 @@ export async function fetchProjectData(facilityId, date) {
   for (const r of rows) {
     const rawName = r[`${VIEW_APPT}.project_name`] || ''
     if (!rawName) continue
-    const name = normalizeProjectName(facilityId, rawName)  // use actual facilityId, not hardcoded 'ken'
+    const name = normalizeProjectName(facilityId, rawName)
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!projectMap.has(name)) projectMap.set(name, { name, inb: 0, out: 0, drops: 0 })
@@ -412,9 +403,6 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
   return hourMap
 }
 
-// fetchNetworkKpis: used by the ALL tab scorecards.
-// IMPORTANT: apptStatusFilter() is applied here so cancelled appointments are excluded,
-// matching the facility panel counts exactly.
 export async function fetchNetworkKpis(date) {
   const laborRows = await omniQuery({
     modelId: MODEL_ID,
@@ -474,7 +462,6 @@ export async function fetchNetworkKpis(date) {
   return result
 }
 
-// Run async tasks with a concurrency cap.
 async function batchedRun(tasks, concurrency = 2) {
   const results = []
   let i = 0
@@ -767,5 +754,59 @@ export async function fetchB2eRoster(facilityId, date) {
         facility:     facilityId,
       }
     })
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// ── fetchWrPickers: job code 206 employees at Wisconsin Rapids ────────────────────────
+// Separate from fetchB2eRoster (which fetches job code 205 warehousemen).
+// Returns { id, name } array for the picker roster board.
+export async function fetchWrPickers(date) {
+  const location = B2E_LOCATION['wr']
+  const refDate  = date || new Date().toISOString().slice(0, 10)
+
+  const rosterRows = await omniQuery({
+    modelId: B2E_MODEL_ID, table: ROSTER,
+    fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
+    filters: {
+      [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+      [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
+    },
+    limit: 500,
+  })
+
+  const scheduleRows = await omniQuery({
+    modelId: B2E_MODEL_ID, table: SCHEDULE,
+    fields: [
+      `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
+      `${SCHEDULE}.default_job_code`, `${SCHEDULE}.ingestion_ts`,
+    ],
+    filters: {
+      [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+      [`${SCHEDULE}.entry_date`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: refDate, is_negative: false, offset_interval_string: '0 days',
+      },
+    },
+    sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
+    limit: 500,
+  })
+
+  const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
+  const schedMap  = new Map()
+  for (const r of scheduleRows) {
+    const id = String(r[`${SCHEDULE}.employee_id`])
+    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
+  }
+
+  return [...schedMap.entries()]
+    .filter(([id, { row: r }]) =>
+      activeIds.has(id) &&
+      String(r[`${SCHEDULE}.default_job_code`] ?? '') === '206'
+    )
+    .map(([id, { row: r }]) => ({
+      id,
+      name: [r[`${SCHEDULE}.first_name`] || '', r[`${SCHEDULE}.last_name`] || ''].filter(Boolean).join(' '),
+    }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
