@@ -18,10 +18,16 @@ const SHORT_AVAIL_COL = 'Total Available Cases'
 const SHORT_DATE_CANDIDATES = ['Pick Up Date', 'Pickup Date', 'Requested Delivery Date Date', 'Date']
 const SHORT_MAT_CANDIDATES  = ['Item Number', 'Material Lookup Code', 'Material', 'Material Number', 'SKU', 'Item']
 
+// Normalize material codes: strip leading zeros so '056' === '56', '0792' === '792'.
+// Matches the same pattern used for route numbers.
+function stripLeadingZeros(code) {
+  return String(code).replace(/^0+(\d)/, '$1')
+}
+
 function getMatCode(row) {
   for (const col of MATERIAL_COL_CANDIDATES) {
     const val = String(row[col] ?? '').trim()
-    if (val) return val
+    if (val) return stripLeadingZeros(val)
   }
   return ''
 }
@@ -29,7 +35,7 @@ function getMatCode(row) {
 function getShortageMatCode(row) {
   for (const col of SHORT_MAT_CANDIDATES) {
     const val = String(row[col] ?? '').trim()
-    if (val) return val
+    if (val) return stripLeadingZeros(val)
   }
   return ''
 }
@@ -93,7 +99,7 @@ function buildDaySeqMap(pickSeqRows) {
 function buildShortageMap(shortageRows) {
   const map = {}
   for (const row of shortageRows) {
-    const matCode = getShortageMatCode(row)
+    const matCode = getShortageMatCode(row)  // already strips leading zeros
     if (!matCode) continue
     let date = ''
     for (const col of SHORT_DATE_CANDIDATES) {
@@ -131,9 +137,11 @@ function csvToRows(text) {
 
 function buildSnapshotFromRows(casesRows, tieHighRows, source, pickSeqRows = [], shortageRows = []) {
   const daySeqMap = buildDaySeqMap(pickSeqRows)
+
+  // Build skuMap with normalized (leading-zero-stripped) keys
   const skuMap = {}
   for (const row of tieHighRows) {
-    const code = String(row[COL_TH_CODE] ?? '').trim()
+    const code = stripLeadingZeros(String(row[COL_TH_CODE] ?? '').trim())
     if (!code) continue
     const fp   = parseInt(String(row[COL_TH_FP]   ?? '0'), 10) || 0
     const zone = parseInt(String(row[COL_TH_ZONE] ?? '').replace(/\D/g, ''), 10) || 0
@@ -151,7 +159,7 @@ function buildSnapshotFromRows(casesRows, tieHighRows, source, pickSeqRows = [],
     const route   = String(row[COL_ROUTE] ?? '').trim()
     const cases   = parseInt(parseFloat(String(row[COL_CASES] ?? '0')), 10) || 0
     const date    = normalizeDate(row[COL_DATE])
-    const matCode = getMatCode(row)
+    const matCode = getMatCode(row)  // already strips leading zeros
     if (!date || !route) continue
     const rt = route.replace(/^0+(\d)/, '$1')
     if (!dateRtSkuOrig[date]) dateRtSkuOrig[date] = {}
@@ -226,6 +234,7 @@ function buildSnapshotFromRows(casesRows, tieHighRows, source, pickSeqRows = [],
           return c - cut
         })
         if (hasTieHigh) {
+          // matCode is already normalized — direct skuMap lookup works correctly
           const sku = skuMap[matCode]
           for (const adjCases of adjLines) {
             if (adjCases <= 0) continue
