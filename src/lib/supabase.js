@@ -414,7 +414,7 @@ export async function deleteCustomDropProject(id) {
   if (error) console.error('deleteCustomDropProject:', error)
 }
 
-// ─── WR Pick Schedule ─────────────────────────────────────────────────────────
+// ─── WR Pick Schedule ─────────────────────────────────────────────────────
 
 export async function fetchPickSchedule() {
   if (!supabase) return []
@@ -456,4 +456,40 @@ export async function deletePickScheduleRow(id) {
     .delete()
     .eq('id', id)
   if (error) console.error('deletePickScheduleRow:', error)
+}
+
+// ─── WR Picker Assignments (job code 206) ───────────────────────────────────
+
+export async function fetchPickerAssignments() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('wr_picker_assignments')
+    .select('*')
+    .order('employee_name')
+  if (error) { console.error('fetchPickerAssignments:', error); return [] }
+  return data ?? []
+}
+
+export async function upsertPickerAssignment(employeeId, employeeName, zone) {
+  // zone = 1-12 or null (unassigned)
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('wr_picker_assignments')
+    .upsert(
+      { employee_id: employeeId, employee_name: employeeName, zone, updated_at: new Date().toISOString() },
+      { onConflict: 'employee_id' }
+    )
+    .select()
+    .single()
+  if (error) { console.error('upsertPickerAssignment:', error); return null }
+  return data
+}
+
+export async function deletePickerAssignment(employeeId) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('wr_picker_assignments')
+    .delete()
+    .eq('employee_id', employeeId)
+  if (error) console.error('deletePickerAssignment:', error)
 }
