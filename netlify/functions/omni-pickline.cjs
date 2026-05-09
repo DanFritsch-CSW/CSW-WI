@@ -14,6 +14,7 @@ const F = {
   status_name:      'silver__datex_slv_orderstatuses.status_name',
   delivery_date:    'silver__datex_slv_orders.requested_delivery_date',
   route_number:     'silver__datex_slv_orders.calculation',
+  order_lookup_code:  'silver__datex_slv_orders.lookup_code',
   project_name:     'silver__datex_slv_projects.project_name',
   order_class_name: 'silver__datex_slv_orderclasses.order_class_name',
   mat_lookup_code:  'silver__datex_slv_materials.lookup_code',
@@ -208,9 +209,9 @@ function buildCasesQuery(date) {
   return {
     version: 5, modelId: DATEX_MODEL_ID,
     table: 'silver__datex_slv_orderlines',
-    fields: [F.delivery_date, F.route_number, F.mat_lookup_code, F.mat_name, F.packaged_amount],
+    fields: [F.delivery_date, F.route_number, F.order_lookup_code, F.mat_lookup_code, F.mat_name, F.packaged_amount],
     filters: baseOrderFilters(date),
-    sorts: [], limit: 5000,
+    sorts: [], limit: 10000,
   }
 }
 
