@@ -2,37 +2,51 @@
 
 // Pickline queries for WR Bernatello's pick planning.
 // Field IDs sourced directly from Omni Advanced SQL editor (Silver Datex Slv Orders topic).
+// DSD Order class filter applied to match the Excel export exactly.
 // Returns: { casesRows, tieHighRows, shortageRows, date }
 
 const RETRY_ATTEMPTS = 2
 const RETRY_DELAY_MS = 500
 
-// Model ID for Silver Datex Slv Orders topic
 const DATEX_MODEL_ID = 'e80fa12f-918e-40b8-bb91-60fbac98ab19'
 
-// Field IDs as they appear in Omni Advanced SQL (these are what the API accepts)
+// Field IDs from Omni Advanced SQL editor
 const F = {
-  // Orders
-  status_name:        'silver__datex_slv_orderstatuses.status_name',
-  delivery_date:      'silver__datex_slv_orders.requested_delivery_date',
-  route_number:       'silver__datex_slv_orders.calculation',  // LEFT(owner_reference, 3)
-  order_lookup_code:  'silver__datex_slv_orders.lookup_code',
-  project_id:         'silver__datex_slv_orders.project_id',
-  project_name:       'silver__datex_slv_projects.project_name',
-  // Materials
-  mat_lookup_code:    'silver__datex_slv_materials.lookup_code',
-  mat_name:           'silver__datex_slv_materials.material_name',
-  // Orderlines
-  packaged_amount:    'silver__datex_slv_orderlines.packaged_amount_sum',
-  // Location containers (TieHigh)
-  pick_sequence:      'silver__datex_slv_locationcontainers.pick_sequence',
-  pallet_tie:         'silver__datex_slv_materialspackagingslookup.pallet_tie',
-  pallet_high:        'silver__datex_slv_materialspackagingslookup.pallet_high',
-  warehouse_name:     'silver__datex_slv_warehouses.warehouse_name',
-  is_primary_pick:    'silver__datex_slv_locationcontainers.is_primary_pick',
-  // Availability
-  available_amount:   'gold__available_inventory_by_material.available_amount_sum',
-  amount_sum:         'silver__datex_slv_orderlines.amount_sum',
+  status_name:      'silver__datex_slv_orderstatuses.status_name',
+  delivery_date:    'silver__datex_slv_orders.requested_delivery_date',
+  route_number:     'silver__datex_slv_orders.calculation',  // LEFT(owner_reference, 3)
+  project_name:     'silver__datex_slv_projects.project_name',
+  order_class_name: 'silver__datex_slv_orderclasses.order_class_name',
+  mat_lookup_code:  'silver__datex_slv_materials.lookup_code',
+  mat_name:         'silver__datex_slv_materials.material_name',
+  packaged_amount:  'silver__datex_slv_orderlines.packaged_amount_sum',
+  pick_sequence:    'silver__datex_slv_locationcontainers.pick_sequence',
+  pallet_tie:       'silver__datex_slv_materialspackagingslookup.pallet_tie',
+  pallet_high:      'silver__datex_slv_materialspackagingslookup.pallet_high',
+  warehouse_name:   'silver__datex_slv_warehouses.warehouse_name',
+  is_primary_pick:  'silver__datex_slv_locationcontainers.is_primary_pick',
+  available_amount: 'gold__available_inventory_by_material.available_amount_sum',
+  amount_sum:       'silver__datex_slv_orderlines.amount_sum',
+}
+
+// Shared filters for Cases and Shortage — matches the Omni workbook exactly
+function baseOrderFilters(date) {
+  return {
+    [F.project_name]: {
+      kind: 'EQUALS', type: 'string', values: ["Bernatello's - Wisconsin Rapids"],
+    },
+    [F.order_class_name]: {
+      kind: 'EQUALS', type: 'string', values: ['DSD Order'],
+    },
+    [F.delivery_date]: {
+      kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+      isFiscal: false, left_side: date, is_negative: false,
+      offset_interval_string: '0 days',
+    },
+    [F.status_name]: {
+      kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
+    },
+  }
 }
 
 function sleep(ms) {
@@ -82,8 +96,6 @@ async function runOmniQuery(query, apiKey) {
   }
 }
 
-// Cases query: orders for project 320, given date, Created/Processing status
-// route_number = F.route_number = LEFT(owner_reference, 3) per Omni model
 function buildCasesQuery(date) {
   return {
     version: 5,
@@ -96,25 +108,12 @@ function buildCasesQuery(date) {
       F.mat_name,
       F.packaged_amount,
     ],
-    filters: {
-      [F.project_name]: {
-        kind: 'EQUALS', type: 'string', values: ["Bernatello's - Wisconsin Rapids"],
-      },
-      [F.delivery_date]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false,
-        offset_interval_string: '0 days',
-      },
-      [F.status_name]: {
-        kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
-      },
-    },
+    filters: baseOrderFilters(date),
     sorts: [],
     limit: 5000,
   }
 }
 
-// TieHigh: primary pick locations at Wisconsin Rapids
 function buildTieHighQuery() {
   return {
     version: 5,
@@ -140,7 +139,6 @@ function buildTieHighQuery() {
   }
 }
 
-// Shortage: items where available < ordered
 function buildShortageQuery(date) {
   return {
     version: 5,
@@ -153,19 +151,7 @@ function buildShortageQuery(date) {
       F.available_amount,
       F.amount_sum,
     ],
-    filters: {
-      [F.project_name]: {
-        kind: 'EQUALS', type: 'string', values: ["Bernatello's - Wisconsin Rapids"],
-      },
-      [F.delivery_date]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false,
-        offset_interval_string: '0 days',
-      },
-      [F.status_name]: {
-        kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
-      },
-    },
+    filters: baseOrderFilters(date),
     sorts: [],
     limit: 1000,
   }
@@ -203,7 +189,6 @@ function transformRows(casesRaw, tieHighRaw, shortageRaw) {
     'Full Pallet (t x h)':  Number(r[F.pallet_tie] ?? 0) * Number(r[F.pallet_high] ?? 0),
   }))
 
-  // Shortage: only include rows where available < ordered
   const shortageRows = shortageRaw
     .filter(r => Number(r[F.available_amount] ?? 0) < Number(r[F.amount_sum] ?? 0))
     .map(r => ({
