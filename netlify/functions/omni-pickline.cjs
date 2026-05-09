@@ -7,18 +7,19 @@
 const RETRY_ATTEMPTS = 2
 const RETRY_DELAY_MS = 500
 
-const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
+// Correct model ID for Datex silver tables (Silver Datex Slv Orders topic)
+// Found at: csw.omniapp.co/models/e80fa12f-918e-40b8-bb91-60fbac98ab19/
+const DATEX_MODEL_ID = 'e80fa12f-918e-40b8-bb91-60fbac98ab19'
 
-// Table names (same as omni.js conventions)
-const ORDERS      = 'silver__datex_slv_orders'
-const ORDERLINES  = 'silver__datex_slv_orderlines'
-const ORDERSTAT   = 'silver__datex_slv_orderstatuses'
-const MATERIALS   = 'silver__datex_slv_materials'
-const LOCCONTAIN  = 'silver__datex_slv_locationcontainers'
-const LOCASSIGN   = 'silver__datex_slv_locationcontainerassignedmaterials'
-const MATPKG      = 'silver__datex_slv_materialspackagingslookup'
-const WAREHOUSES  = 'silver__datex_slv_warehouses'
-const AVAIL_INV   = 'gold__available_inventory_by_material'
+// Table names
+const ORDERS     = 'silver__datex_slv_orders'
+const ORDERLINES = 'silver__datex_slv_orderlines'
+const ORDERSTAT  = 'silver__datex_slv_orderstatuses'
+const MATERIALS  = 'silver__datex_slv_materials'
+const LOCCONTAIN = 'silver__datex_slv_locationcontainers'
+const MATPKG     = 'silver__datex_slv_materialspackagingslookup'
+const WAREHOUSES = 'silver__datex_slv_warehouses'
+const AVAIL_INV  = 'gold__available_inventory_by_material'
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -43,7 +44,6 @@ function arrowToRows(table) {
 }
 
 async function runOmniQuery(query, apiKey) {
-  // query is already a version:5 object
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(RETRY_DELAY_MS)
     const omniRes = await fetch('https://csw.omniapp.co/api/v1/query/run', {
@@ -65,16 +65,15 @@ async function runOmniQuery(query, apiKey) {
       } catch { /* skip */ }
     }
     if (completeJob) return { ok: true, job: completeJob }
-    if (!timedOut) return { ok: false, raw: text.slice(0, 500) }
-    if (attempt === RETRY_ATTEMPTS) return { ok: false, raw: text.slice(0, 500), timedOut: true }
+    if (!timedOut) return { ok: false, raw: text.slice(0, 800) }
+    if (attempt === RETRY_ATTEMPTS) return { ok: false, raw: text.slice(0, 800), timedOut: true }
   }
 }
 
-// Build queries in the exact same format as omni.js uses (version:5 with modelId/table/fields/filters)
 function buildCasesQuery(date) {
   return {
     version: 5,
-    modelId: GOLD_MODEL_ID,
+    modelId: DATEX_MODEL_ID,
     table: ORDERLINES,
     fields: [
       `${ORDERS}.requested_delivery_date`,
@@ -104,7 +103,7 @@ function buildCasesQuery(date) {
 function buildTieHighQuery() {
   return {
     version: 5,
-    modelId: GOLD_MODEL_ID,
+    modelId: DATEX_MODEL_ID,
     table: LOCCONTAIN,
     fields: [
       `${LOCCONTAIN}.location_container`,
@@ -130,7 +129,7 @@ function buildTieHighQuery() {
 function buildShortageQuery(date) {
   return {
     version: 5,
-    modelId: GOLD_MODEL_ID,
+    modelId: DATEX_MODEL_ID,
     table: ORDERLINES,
     fields: [
       `${ORDERS}.requested_delivery_date`,
@@ -160,7 +159,6 @@ function buildShortageQuery(date) {
   }
 }
 
-// pick_sequence -> zone mapping derived from Excel TieHigh data
 function pickSeqToZone(seq) {
   if (seq >= 101 && seq <= 110) return 1
   if (seq >= 111 && seq <= 120) return 2
@@ -177,7 +175,6 @@ function pickSeqToZone(seq) {
   return 0
 }
 
-// Transform raw Omni field-name rows into the column names parsePicklineXlsx / buildSnapshotFromOmni expect
 function transformRows(casesRaw, tieHighRaw, shortageRaw) {
   const casesRows = casesRaw.map(r => ({
     "Route Number (Bernatello's)": String(r[`${ORDERS}.route_number`] ?? ''),
@@ -235,7 +232,6 @@ exports.handler = async (event) => {
     }
   }
 
-  // Run all 3 queries in parallel
   const [casesResult, tieHighResult, shortageResult] = await Promise.all([
     runOmniQuery(buildCasesQuery(date), API_KEY),
     runOmniQuery(buildTieHighQuery(), API_KEY),
@@ -243,15 +239,15 @@ exports.handler = async (event) => {
   ])
 
   const failed = [
-    !casesResult?.ok   && 'Cases',
-    !tieHighResult?.ok && 'TieHigh',
+    !casesResult?.ok    && 'Cases',
+    !tieHighResult?.ok  && 'TieHigh',
     !shortageResult?.ok && 'Shortage',
   ].filter(Boolean)
 
   if (failed.length) {
     const detail = [
-      !casesResult?.ok   && `Cases: ${casesResult?.raw ?? 'no response'}`,
-      !tieHighResult?.ok && `TieHigh: ${tieHighResult?.raw ?? 'no response'}`,
+      !casesResult?.ok    && `Cases: ${casesResult?.raw ?? 'no response'}`,
+      !tieHighResult?.ok  && `TieHigh: ${tieHighResult?.raw ?? 'no response'}`,
       !shortageResult?.ok && `Shortage: ${shortageResult?.raw ?? 'no response'}`,
     ].filter(Boolean).join(' | ')
     return {
