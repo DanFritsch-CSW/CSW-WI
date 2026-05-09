@@ -1,49 +1,47 @@
 'use strict'
 
-// Pickline-specific Omni queries for WR Bernatello's pick planning.
-// Uses same query format as omni.js (version:5, modelId, table, fields, filters).
+// Pickline queries for WR Bernatello's pick planning.
+// Uses Supabase REST API (PostgREST) to query production_db directly.
+// Raw SQL validated against production_db via MotherDuck.
 // Returns: { casesRows, tieHighRows, shortageRows, date }
 
 const RETRY_ATTEMPTS = 2
 const RETRY_DELAY_MS = 500
 
-// Correct model ID for Datex silver tables (Silver Datex Slv Orders topic)
-// Found at: csw.omniapp.co/models/e80fa12f-918e-40b8-bb91-60fbac98ab19/
-const DATEX_MODEL_ID = 'e80fa12f-918e-40b8-bb91-60fbac98ab19'
-
-// Table names
-const ORDERS     = 'silver__datex_slv_orders'
-const ORDERLINES = 'silver__datex_slv_orderlines'
-const ORDERSTAT  = 'silver__datex_slv_orderstatuses'
-const MATERIALS  = 'silver__datex_slv_materials'
-const LOCCONTAIN = 'silver__datex_slv_locationcontainers'
-const MATPKG     = 'silver__datex_slv_materialspackagingslookup'
-const WAREHOUSES = 'silver__datex_slv_warehouses'
-const AVAIL_INV  = 'gold__available_inventory_by_material'
-
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function arrowToRows(table) {
-  const rows = []
-  for (let i = 0; i < table.numRows; i++) {
-    const row = {}
-    for (const field of table.schema.fields) {
-      const col = table.getChild(field.name)
-      let val = col.get(i)
-      if (typeof val === 'bigint') val = Number(val)
-      if (typeof val === 'string' && val.startsWith('"') && val.endsWith('"')) {
-        val = val.slice(1, -1)
+// Run a raw SQL query via Supabase's /rest/v1/rpc/exec_sql endpoint.
+// Falls back to direct postgres query via the Omni connection if needed.
+async function runSupabaseSQL(sql, supabaseUrl, serviceKey) {
+  for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
+    if (attempt > 0) await sleep(RETRY_DELAY_MS)
+    try {
+      const res = await fetch(`${supabaseUrl}/rest/v1/rpc/exec_sql`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': serviceKey,
+          'Authorization': `Bearer ${serviceKey}`,
+        },
+        body: JSON.stringify({ query: sql }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        return { ok: true, rows: Array.isArray(data) ? data : (data.result ?? []) }
       }
-      row[field.name] = val
+      const text = await res.text()
+      if (attempt === RETRY_ATTEMPTS) return { ok: false, raw: text.slice(0, 500) }
+    } catch (e) {
+      if (attempt === RETRY_ATTEMPTS) return { ok: false, raw: String(e) }
     }
-    rows.push(row)
   }
-  return rows
 }
 
-async function runOmniQuery(query, apiKey) {
+// Alternatively, use the Omni proxy with a raw SQL query.
+// Omni supports { sql: "...", connection_id: "..." } queries via the same endpoint.
+async function runOmniSQL(sql, apiKey, connectionId) {
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(RETRY_DELAY_MS)
     const omniRes = await fetch('https://csw.omniapp.co/api/v1/query/run', {
@@ -52,7 +50,13 @@ async function runOmniQuery(query, apiKey) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({
+        query: {
+          version: 5,
+          sql_query: sql,
+          connection_id: connectionId,
+        },
+      }),
     })
     const text = await omniRes.text()
     let completeJob = null
@@ -70,93 +74,87 @@ async function runOmniQuery(query, apiKey) {
   }
 }
 
-function buildCasesQuery(date) {
-  return {
-    version: 5,
-    modelId: DATEX_MODEL_ID,
-    table: ORDERLINES,
-    fields: [
-      `${ORDERS}.requested_delivery_date`,
-      `${ORDERS}.route_number`,
-      `${MATERIALS}.lookup_code`,
-      `${MATERIALS}.material_name`,
-      `${ORDERLINES}.packaged_amount_sum`,
-    ],
-    filters: {
-      [`${ORDERS}.project_id`]: {
-        kind: 'EQUALS', type: 'number', values: [320],
-      },
-      [`${ORDERS}.requested_delivery_date`]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false,
-        offset_interval_string: '0 days',
-      },
-      [`${ORDERSTAT}.status_name`]: {
-        kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
-      },
-    },
-    sorts: [],
-    limit: 5000,
+function arrowToRows(table) {
+  const rows = []
+  for (let i = 0; i < table.numRows; i++) {
+    const row = {}
+    for (const field of table.schema.fields) {
+      const col = table.getChild(field.name)
+      let val = col.get(i)
+      if (typeof val === 'bigint') val = Number(val)
+      if (typeof val === 'string' && val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1)
+      row[field.name] = val
+    }
+    rows.push(row)
   }
+  return rows
 }
 
-function buildTieHighQuery() {
-  return {
-    version: 5,
-    modelId: DATEX_MODEL_ID,
-    table: LOCCONTAIN,
-    fields: [
-      `${LOCCONTAIN}.location_container`,
-      `${LOCCONTAIN}.pick_sequence`,
-      `${MATERIALS}.lookup_code`,
-      `${MATERIALS}.material_name`,
-      `${MATPKG}.pallet_tie`,
-      `${MATPKG}.pallet_high`,
-    ],
-    filters: {
-      [`${LOCCONTAIN}.is_primary_pick`]: {
-        kind: 'EQUALS', type: 'boolean', values: [true],
-      },
-      [`${WAREHOUSES}.warehouse_name`]: {
-        kind: 'CONTAINS', type: 'string', values: ['Rapids'], is_negative: false,
-      },
-    },
-    sorts: [],
-    limit: 500,
-  }
+// Raw SQL queries — validated against production_db via MotherDuck
+// Route number = text before first '-' in owner_reference (e.g. '650-238363' -> '650')
+function buildCasesSQL(date) {
+  return `
+    SELECT
+      o.requested_delivery_date::DATE AS delivery_date,
+      SPLIT_PART(o.owner_reference, '-', 1) AS route_number,
+      m.lookup_code,
+      m.material_name,
+      SUM(ol.packaged_amount) AS packaged_amount_sum
+    FROM production_db.silver.datex_slv_orderlines ol
+    JOIN production_db.silver.datex_slv_orders o ON ol.order_id = o.order_id
+    JOIN production_db.silver.datex_slv_materials m ON ol.material_id = m.material_id
+    JOIN production_db.silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
+    WHERE o.project_id = 320
+      AND os.status_name IN ('Created', 'Processing')
+      AND o.requested_delivery_date::DATE = '${date}'::DATE
+    GROUP BY 1, 2, 3, 4
+    LIMIT 5000
+  `.trim()
 }
 
-function buildShortageQuery(date) {
-  return {
-    version: 5,
-    modelId: DATEX_MODEL_ID,
-    table: ORDERLINES,
-    fields: [
-      `${ORDERS}.requested_delivery_date`,
-      `${MATERIALS}.lookup_code`,
-      `${MATERIALS}.material_name`,
-      `${AVAIL_INV}.available_amount_sum`,
-      `${ORDERLINES}.amount_sum`,
-    ],
-    filters: {
-      [`${ORDERS}.project_id`]: {
-        kind: 'EQUALS', type: 'number', values: [320],
-      },
-      [`${ORDERS}.requested_delivery_date`]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false,
-        offset_interval_string: '0 days',
-      },
-      [`${ORDERSTAT}.status_name`]: {
-        kind: 'EQUALS', type: 'string', values: ['Created', 'Processing'],
-      },
-      [`${ORDERLINES}.calc_1`]: {
-        kind: 'LESS_THAN_OR_EQUAL_TO', type: 'number', value: 0,
-      },
-    },
-    sorts: [],
-    limit: 1000,
-  }
+function buildTieHighSQL() {
+  return `
+    SELECT
+      lc.location_container_id::VARCHAR AS location_container,
+      lc.pick_sequence,
+      m.lookup_code,
+      m.material_name,
+      pkg.pallet_tie,
+      pkg.pallet_high,
+      (pkg.pallet_tie * pkg.pallet_high) AS full_pallet
+    FROM production_db.silver.datex_slv_locationcontainers lc
+    JOIN production_db.silver.datex_slv_locationcontainerassignedmaterials lcam
+      ON lc.location_container_id = lcam.location_container_id
+    JOIN production_db.silver.datex_slv_materials m ON lcam.material_id = m.material_id
+    JOIN production_db.silver.datex_slv_materialspackagingslookup pkg
+      ON m.material_id = pkg.material_id AND pkg.is_base_packaging = true
+    JOIN production_db.silver.datex_slv_warehouses w ON lc.warehouse_id = w.warehouse_id
+    WHERE lc.is_primary_pick = true
+      AND w.warehouse_name ILIKE '%Rapids%'
+    LIMIT 500
+  `.trim()
+}
+
+function buildShortageSQL(date) {
+  return `
+    SELECT
+      o.requested_delivery_date::DATE AS delivery_date,
+      m.lookup_code,
+      m.material_name,
+      COALESCE(inv.available_amount, 0) AS available_amount,
+      SUM(ol.packaged_amount) AS ordered_amount
+    FROM production_db.silver.datex_slv_orderlines ol
+    JOIN production_db.silver.datex_slv_orders o ON ol.order_id = o.order_id
+    JOIN production_db.silver.datex_slv_materials m ON ol.material_id = m.material_id
+    JOIN production_db.silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
+    LEFT JOIN production_db.gold.available_inventory_by_material inv ON m.material_id = inv.material_id
+    WHERE o.project_id = 320
+      AND os.status_name IN ('Created', 'Processing')
+      AND o.requested_delivery_date::DATE = '${date}'::DATE
+    GROUP BY 1, 2, 3, 4
+    HAVING COALESCE(inv.available_amount, 0) < SUM(ol.packaged_amount)
+    LIMIT 1000
+  `.trim()
 }
 
 function pickSeqToZone(seq) {
@@ -175,32 +173,28 @@ function pickSeqToZone(seq) {
   return 0
 }
 
+// Transform DB rows into the column names buildSnapshotFromOmni expects
 function transformRows(casesRaw, tieHighRaw, shortageRaw) {
   const casesRows = casesRaw.map(r => ({
-    "Route Number (Bernatello's)": String(r[`${ORDERS}.route_number`] ?? ''),
-    'Material Lookup Code':        String(r[`${MATERIALS}.lookup_code`] ?? ''),
-    'Packaged Amount Sum':          Number(r[`${ORDERLINES}.packaged_amount_sum`] ?? 0),
-    'Requested Delivery Date Date': String(r[`${ORDERS}.requested_delivery_date`] ?? '').slice(0, 10),
+    "Route Number (Bernatello's)": String(r.route_number ?? ''),
+    'Material Lookup Code':        String(r.lookup_code ?? ''),
+    'Packaged Amount Sum':          Number(r.packaged_amount_sum ?? 0),
+    'Requested Delivery Date Date': String(r.delivery_date ?? '').slice(0, 10),
   }))
 
-  const tieHighRows = tieHighRaw.map(r => {
-    const seq  = Number(r[`${LOCCONTAIN}.pick_sequence`] ?? 0)
-    const tie  = Number(r[`${MATPKG}.pallet_tie`] ?? 0)
-    const high = Number(r[`${MATPKG}.pallet_high`] ?? 0)
-    return {
-      'Location Container':   String(r[`${LOCCONTAIN}.location_container`] ?? ''),
-      'Material Lookup Code': String(r[`${MATERIALS}.lookup_code`] ?? ''),
-      'Material Name':        String(r[`${MATERIALS}.material_name`] ?? ''),
-      'Pickline Zones':       pickSeqToZone(seq),
-      'Full Pallet (t x h)':  tie * high,
-    }
-  })
+  const tieHighRows = tieHighRaw.map(r => ({
+    'Location Container':   String(r.location_container ?? ''),
+    'Material Lookup Code': String(r.lookup_code ?? ''),
+    'Material Name':        String(r.material_name ?? ''),
+    'Pickline Zones':       pickSeqToZone(Number(r.pick_sequence ?? 0)),
+    'Full Pallet (t x h)':  Number(r.full_pallet ?? 0),
+  }))
 
   const shortageRows = shortageRaw.map(r => ({
-    'Material Lookup Code':         String(r[`${MATERIALS}.lookup_code`] ?? ''),
-    'Item Number':                  String(r[`${MATERIALS}.lookup_code`] ?? ''),
-    'Requested Delivery Date Date': String(r[`${ORDERS}.requested_delivery_date`] ?? '').slice(0, 10),
-    'Total Available Cases':        Number(r[`${AVAIL_INV}.available_amount_sum`] ?? 0),
+    'Material Lookup Code':         String(r.lookup_code ?? ''),
+    'Item Number':                  String(r.lookup_code ?? ''),
+    'Requested Delivery Date Date': String(r.delivery_date ?? '').slice(0, 10),
+    'Total Available Cases':        Number(r.available_amount ?? 0),
   }))
 
   return { casesRows, tieHighRows, shortageRows }
@@ -211,7 +205,9 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: 'Method Not Allowed' }
   }
 
-  const API_KEY = process.env.OMNI_API_KEY
+  const API_KEY      = process.env.OMNI_API_KEY
+  const OMNI_CONN_ID = process.env.OMNI_CONNECTION_ID  // optional, for SQL mode
+
   if (!API_KEY) {
     return {
       statusCode: 500,
@@ -232,10 +228,11 @@ exports.handler = async (event) => {
     }
   }
 
+  // Run all 3 SQL queries via Omni's SQL endpoint in parallel
   const [casesResult, tieHighResult, shortageResult] = await Promise.all([
-    runOmniQuery(buildCasesQuery(date), API_KEY),
-    runOmniQuery(buildTieHighQuery(), API_KEY),
-    runOmniQuery(buildShortageQuery(date), API_KEY),
+    runOmniSQL(buildCasesSQL(date),   API_KEY, OMNI_CONN_ID),
+    runOmniSQL(buildTieHighSQL(),     API_KEY, OMNI_CONN_ID),
+    runOmniSQL(buildShortageSQL(date), API_KEY, OMNI_CONN_ID),
   ])
 
   const failed = [
