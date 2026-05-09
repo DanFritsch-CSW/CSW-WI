@@ -2,6 +2,7 @@
 
 // Pickline queries for WR Bernatello's pick planning.
 // DSD Order class filter applied to match the Excel export exactly.
+// TieHigh zone+fullPallet data is hardcoded from the Excel (Omni join is unreliable).
 // Returns: { casesRows, tieHighRows, shortageRows, date }
 
 const RETRY_ATTEMPTS = 2
@@ -18,38 +19,136 @@ const F = {
   mat_lookup_code:  'silver__datex_slv_materials.lookup_code',
   mat_name:         'silver__datex_slv_materials.material_name',
   packaged_amount:  'silver__datex_slv_orderlines.packaged_amount_sum',
-  loc_name:         'silver__datex_slv_locationcontainers.location_container_name',
-  pallet_tie:       'silver__datex_slv_materialspackagingslookup.pallet_tie',
-  pallet_high:      'silver__datex_slv_materialspackagingslookup.pallet_high',
-  warehouse_name:   'silver__datex_slv_warehouses.warehouse_name',
-  is_primary_pick:  'silver__datex_slv_locationcontainers.is_primary_pick',
   available_amount: 'gold__available_inventory_by_material.available_amount_sum',
   amount_sum:       'silver__datex_slv_orderlines.amount_sum',
 }
 
-// Zone boundaries derived from actual WR slot numbers (P029A–P122A).
-// Validated against TieHigh Excel sheet — "Pickline Zones" column.
-// Zone 1: P029–P036, Zone 2: P037–P042, Zone 3: P043–P050,
-// Zone 4: P051–P058, Zone 5: P059–P064, Zone 6: P065–P074,
-// Zone 7: P075–P081, Zone 8: P083–P090, Zone 9: P091–P098,
-// Zone 10: P099–P106, Zone 11: P107–P114, Zone 12: P115+
-function slotToZone(locName) {
-  const m = String(locName || '').match(/P(\d+)/i)
-  if (!m) return 0
-  const s = parseInt(m[1], 10)
-  if (s >= 29  && s <= 36)  return 1
-  if (s >= 37  && s <= 42)  return 2
-  if (s >= 43  && s <= 50)  return 3
-  if (s >= 51  && s <= 58)  return 4
-  if (s >= 59  && s <= 64)  return 5
-  if (s >= 65  && s <= 74)  return 6
-  if (s >= 75  && s <= 81)  return 7
-  if (s >= 83  && s <= 90)  return 8
-  if (s >= 91  && s <= 98)  return 9
-  if (s >= 99  && s <= 106) return 10
-  if (s >= 107 && s <= 114) return 11
-  if (s >= 115)             return 12
-  return 0
+// Static SKU->zone+fullPallet map derived from WR TieHigh Excel (112 SKUs, Z1-Z12).
+// Update if pickline layout changes.
+const SKU_ZONE_MAP = {
+  '45': { zone: 12, fullPallet: 100 },
+  '46': { zone: 10, fullPallet: 100 },
+  '47': { zone: 11, fullPallet: 100 },
+  '48': { zone: 11, fullPallet: 100 },
+  '50': { zone: 7, fullPallet: 48 },
+  '51': { zone: 7, fullPallet: 48 },
+  '52': { zone: 6, fullPallet: 48 },
+  '53': { zone: 6, fullPallet: 54 },
+  '54': { zone: 6, fullPallet: 48 },
+  '56': { zone: 7, fullPallet: 48 },
+  '58': { zone: 6, fullPallet: 48 },
+  '59': { zone: 7, fullPallet: 48 },
+  '60': { zone: 6, fullPallet: 48 },
+  '61': { zone: 6, fullPallet: 48 },
+  '66': { zone: 6, fullPallet: 48 },
+  '67': { zone: 6, fullPallet: 48 },
+  '120': { zone: 12, fullPallet: 40 },
+  '128': { zone: 6, fullPallet: 42 },
+  '129': { zone: 6, fullPallet: 42 },
+  '130': { zone: 5, fullPallet: 42 },
+  '133': { zone: 5, fullPallet: 42 },
+  '137': { zone: 5, fullPallet: 42 },
+  '411': { zone: 12, fullPallet: 42 },
+  '412': { zone: 12, fullPallet: 42 },
+  '415': { zone: 11, fullPallet: 42 },
+  '416': { zone: 10, fullPallet: 42 },
+  '417': { zone: 11, fullPallet: 42 },
+  '418': { zone: 10, fullPallet: 42 },
+  '555': { zone: 11, fullPallet: 100 },
+  '556': { zone: 11, fullPallet: 100 },
+  '557': { zone: 11, fullPallet: 100 },
+  '558': { zone: 11, fullPallet: 100 },
+  '791': { zone: 9, fullPallet: 48 },
+  '792': { zone: 9, fullPallet: 48 },
+  '10791': { zone: 9, fullPallet: 48 },
+  '10792': { zone: 8, fullPallet: 48 },
+  '11008': { zone: 9, fullPallet: 48 },
+  '11009': { zone: 8, fullPallet: 48 },
+  '47000': { zone: 12, fullPallet: 60 },
+  '47001': { zone: 12, fullPallet: 60 },
+  '47002': { zone: 11, fullPallet: 60 },
+  '47004': { zone: 11, fullPallet: 60 },
+  '47005': { zone: 12, fullPallet: 60 },
+  '60301': { zone: 7, fullPallet: 54 },
+  '60303': { zone: 8, fullPallet: 54 },
+  '60310': { zone: 8, fullPallet: 54 },
+  '60314': { zone: 8, fullPallet: 54 },
+  '60315': { zone: 8, fullPallet: 54 },
+  '61001': { zone: 5, fullPallet: 48 },
+  '61002': { zone: 2, fullPallet: 48 },
+  '61003': { zone: 3, fullPallet: 48 },
+  '61010': { zone: 5, fullPallet: 42 },
+  '61011': { zone: 3, fullPallet: 42 },
+  '61015': { zone: 4, fullPallet: 42 },
+  '61019': { zone: 3, fullPallet: 42 },
+  '61023': { zone: 4, fullPallet: 48 },
+  '61024': { zone: 3, fullPallet: 48 },
+  '61026': { zone: 4, fullPallet: 42 },
+  '61027': { zone: 4, fullPallet: 42 },
+  '61028': { zone: 3, fullPallet: 42 },
+  '61030': { zone: 3, fullPallet: 48 },
+  '61031': { zone: 3, fullPallet: 48 },
+  '61033': { zone: 4, fullPallet: 42 },
+  '61060': { zone: 1, fullPallet: 48 },
+  '61061': { zone: 1, fullPallet: 48 },
+  '61062': { zone: 2, fullPallet: 48 },
+  '61063': { zone: 2, fullPallet: 42 },
+  '61070': { zone: 3, fullPallet: 48 },
+  '61071': { zone: 4, fullPallet: 48 },
+  '61072': { zone: 4, fullPallet: 48 },
+  '61073': { zone: 4, fullPallet: 42 },
+  '61150': { zone: 12, fullPallet: 90 },
+  '61151': { zone: 11, fullPallet: 90 },
+  '61152': { zone: 12, fullPallet: 90 },
+  '61153': { zone: 12, fullPallet: 90 },
+  '61154': { zone: 11, fullPallet: 90 },
+  '61155': { zone: 12, fullPallet: 90 },
+  '62101': { zone: 7, fullPallet: 30 },
+  '62102': { zone: 7, fullPallet: 30 },
+  '62103': { zone: 7, fullPallet: 30 },
+  '62104': { zone: 7, fullPallet: 30 },
+  '62105': { zone: 8, fullPallet: 30 },
+  '71600': { zone: 1, fullPallet: 48 },
+  '71602': { zone: 2, fullPallet: 48 },
+  '71604': { zone: 2, fullPallet: 48 },
+  '71605': { zone: 1, fullPallet: 48 },
+  '71606': { zone: 1, fullPallet: 48 },
+  '71608': { zone: 1, fullPallet: 48 },
+  '71609': { zone: 2, fullPallet: 48 },
+  '72100': { zone: 8, fullPallet: 48 },
+  '72101': { zone: 8, fullPallet: 48 },
+  '72102': { zone: 9, fullPallet: 48 },
+  '72103': { zone: 9, fullPallet: 48 },
+  '72104': { zone: 8, fullPallet: 48 },
+  '72105': { zone: 8, fullPallet: 48 },
+  '73008': { zone: 10, fullPallet: 64 },
+  '73009': { zone: 9, fullPallet: 54 },
+  '73010': { zone: 9, fullPallet: 36 },
+  '73011': { zone: 10, fullPallet: 36 },
+  '73012': { zone: 9, fullPallet: 54 },
+  '73013': { zone: 10, fullPallet: 36 },
+  '73014': { zone: 10, fullPallet: 64 },
+  '73030': { zone: 9, fullPallet: 36 },
+  '73031': { zone: 10, fullPallet: 36 },
+  '73032': { zone: 10, fullPallet: 36 },
+  '73033': { zone: 8, fullPallet: 36 },
+  '78010': { zone: 9, fullPallet: 48 },
+  '78011': { zone: 10, fullPallet: 48 },
+  '78012': { zone: 9, fullPallet: 48 },
+  '78013': { zone: 10, fullPallet: 48 },
+  '78014': { zone: 10, fullPallet: 48 },
+  '78015': { zone: 9, fullPallet: 48 },
+}
+
+// Build tieHighRows directly from the static map — no Omni query needed
+function buildStaticTieHighRows() {
+  return Object.entries(SKU_ZONE_MAP).map(([sku, { zone, fullPallet }]) => ({
+    'Location Container':   '',
+    'Material Lookup Code': sku,
+    'Material Name':        '',
+    'Pickline Zones':       zone,
+    'Full Pallet (t x h)':  fullPallet,
+  }))
 }
 
 function baseOrderFilters(date) {
@@ -115,21 +214,6 @@ function buildCasesQuery(date) {
   }
 }
 
-function buildTieHighQuery() {
-  return {
-    version: 5, modelId: DATEX_MODEL_ID,
-    table: 'silver__datex_slv_locationcontainers',
-    // Use location_container_name to derive zone via slotToZone() — pick_sequence ranges
-    // don't correspond to zones directly.
-    fields: [F.loc_name, F.mat_lookup_code, F.mat_name, F.pallet_tie, F.pallet_high],
-    filters: {
-      [F.is_primary_pick]: { kind: 'EQUALS', type: 'boolean', values: [true] },
-      [F.warehouse_name]:  { kind: 'CONTAINS', type: 'string', values: ['Rapids'], is_negative: false },
-    },
-    sorts: [], limit: 500,
-  }
-}
-
 function buildShortageQuery(date) {
   return {
     version: 5, modelId: DATEX_MODEL_ID,
@@ -140,20 +224,12 @@ function buildShortageQuery(date) {
   }
 }
 
-function transformRows(casesRaw, tieHighRaw, shortageRaw) {
+function transformRows(casesRaw, shortageRaw) {
   const casesRows = casesRaw.map(r => ({
     "Route Number (Bernatello's)": String(r[F.route_number] ?? ''),
     'Material Lookup Code':        String(r[F.mat_lookup_code] ?? ''),
     'Packaged Amount Sum':          Number(r[F.packaged_amount] ?? 0),
     'Requested Delivery Date Date': String(r[F.delivery_date] ?? '').slice(0, 10),
-  }))
-
-  const tieHighRows = tieHighRaw.map(r => ({
-    'Location Container':   String(r[F.loc_name] ?? ''),
-    'Material Lookup Code': String(r[F.mat_lookup_code] ?? ''),
-    'Material Name':        String(r[F.mat_name] ?? ''),
-    'Pickline Zones':       slotToZone(r[F.loc_name]),
-    'Full Pallet (t x h)':  Number(r[F.pallet_tie] ?? 0) * Number(r[F.pallet_high] ?? 0),
   }))
 
   const shortageRows = shortageRaw
@@ -165,7 +241,7 @@ function transformRows(casesRaw, tieHighRaw, shortageRaw) {
       'Total Available Cases':        Number(r[F.available_amount] ?? 0),
     }))
 
-  return { casesRows, tieHighRows, shortageRows }
+  return { casesRows, shortageRows }
 }
 
 exports.handler = async (event) => {
@@ -186,22 +262,20 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ error: 'Body must be { date: "YYYY-MM-DD" }' }) }
   }
 
-  const [casesResult, tieHighResult, shortageResult] = await Promise.all([
+  // Only 2 Omni queries now — TieHigh is static
+  const [casesResult, shortageResult] = await Promise.all([
     runOmniQuery(buildCasesQuery(date),    API_KEY),
-    runOmniQuery(buildTieHighQuery(),      API_KEY),
     runOmniQuery(buildShortageQuery(date), API_KEY),
   ])
 
   const failed = [
     !casesResult?.ok    && 'Cases',
-    !tieHighResult?.ok  && 'TieHigh',
     !shortageResult?.ok && 'Shortage',
   ].filter(Boolean)
 
   if (failed.length) {
     const detail = [
       !casesResult?.ok    && `Cases: ${casesResult?.raw ?? 'no response'}`,
-      !tieHighResult?.ok  && `TieHigh: ${tieHighResult?.raw ?? 'no response'}`,
       !shortageResult?.ok && `Shortage: ${shortageResult?.raw ?? 'no response'}`,
     ].filter(Boolean).join(' | ')
     return { statusCode: 502, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ error: `Omni query failed: ${failed.join(', ')}`, detail }) }
@@ -209,10 +283,10 @@ exports.handler = async (event) => {
 
   const { tableFromIPC } = await import('apache-arrow')
   const casesRaw    = arrowToRows(tableFromIPC(Buffer.from(casesResult.job.result,    'base64')))
-  const tieHighRaw  = arrowToRows(tableFromIPC(Buffer.from(tieHighResult.job.result,  'base64')))
   const shortageRaw = arrowToRows(tableFromIPC(Buffer.from(shortageResult.job.result, 'base64')))
 
-  const { casesRows, tieHighRows, shortageRows } = transformRows(casesRaw, tieHighRaw, shortageRaw)
+  const { casesRows, shortageRows } = transformRows(casesRaw, shortageRaw)
+  const tieHighRows = buildStaticTieHighRows()
 
   return {
     statusCode: 200,
