@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { fetchPickSchedule, upsertPickScheduleRow, insertPickScheduleRow, deletePickScheduleRow } from '../lib/supabase.js'
+import PickerRoster from './PickerRoster.jsx'
 
 // ─── Pickline constants ───────────────────────────────────────────────────────
 const HRS = 8.0
@@ -633,7 +634,6 @@ function PickScheduleEditor({ scheduleRows, onRowUpdate, onRowAdd, onRowDelete }
 }
 
 // ─── Upload Area ──────────────────────────────────────────────────────────────
-// planDate = the app's current plan date (passed from FacilityPanel)
 function UploadArea({ onSnapshot, scheduleRows, planDate }) {
   const [dragging, setDragging]       = useState(false)
   const [file, setFile]               = useState(null)
@@ -666,8 +666,6 @@ function UploadArea({ onSnapshot, scheduleRows, planDate }) {
   async function handleOmniPull() {
     setOmniPulling(true); setParseError(null)
     try {
-      // Use the app's current plan date — not wall-clock tomorrow
-      // This handles Friday->Monday, multi-day advance orders, etc.
       const date = planDate
       const res = await fetch('/.netlify/functions/omni-pickline', {
         method: 'POST',
@@ -696,19 +694,16 @@ function UploadArea({ onSnapshot, scheduleRows, planDate }) {
         {omniPulling ? <><span style={{ fontSize: 16 }}>⏳</span> Pulling from Omni…</> : <><span style={{ fontSize: 16 }}>⬇</span> Pull from Omni — {fmtDate(planDate)} orders</>}
       </button>
       <div style={{ fontSize: 10, color: '#888', textAlign: 'center', marginBottom: 16 }}>Queries Bernatello's orders, TieHigh, and Shortages · Pick Schedule from in-app table</div>
-
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
         <div style={{ flex: 1, height: 1, background: '#e0e0e0' }} />
         <span style={{ fontSize: 11, color: '#aaa', whiteSpace: 'nowrap' }}>or upload Excel file</span>
         <div style={{ flex: 1, height: 1, background: '#e0e0e0' }} />
       </div>
-
       <div onDragOver={e => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files) }} onClick={() => inputRef.current?.click()} style={{ border: `2px dashed ${dragging ? '#1565C0' : file ? '#43a047' : '#b0c4f0'}`, borderRadius: 8, padding: '28px 24px', textAlign: 'center', background: dragging ? '#e8f0fe' : file ? '#f1f8e9' : '#f5f8ff', cursor: 'pointer', marginBottom: 16, transition: 'all 0.15s' }}>
         <div style={{ fontSize: 32, marginBottom: 6 }}>{file ? '📊' : '📂'}</div>
         {file ? (<><div style={{ fontSize: 14, fontWeight: 'bold', color: '#2e7d32', marginBottom: 4 }}>{file.name}</div><div style={{ fontSize: 11, color: '#888' }}>Click to replace</div></>) : (<><div style={{ fontSize: 13, fontWeight: 'bold', color: '#1565C0', marginBottom: 4 }}>Drop the OMNI Excel file here or click to browse</div><div style={{ fontSize: 11, color: '#888' }}>Single .xlsx file — reads Cases, TieHigh, and Shortage sheets</div><div style={{ fontSize: 10, color: '#aaa', marginTop: 4 }}>Pick Schedule is now managed in-app → Pick Schedule tab</div></>)}
         <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
       </div>
-
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 16 }}>
         {[{ label: 'Cases In Created Status', hint: 'Route / SKU / cases ordered', required: true }, { label: 'TieHigh and Pickline Layout', hint: 'Zone mapping + pallet thresholds' }, { label: 'Shortage Report', hint: 'Inventory shortfall data' }, { label: 'Pick Schedule', hint: 'Managed in-app — Pick Schedule tab ✓', managed: true }].map(({ label, hint, required, managed }) => (
           <div key={label} style={{ padding: '8px 12px', borderRadius: 6, fontSize: 11, background: managed ? '#f1f8e9' : '#f9f9f9', border: `1px solid ${managed ? '#a5d6a7' : '#e0e0e0'}` }}>
@@ -717,9 +712,7 @@ function UploadArea({ onSnapshot, scheduleRows, planDate }) {
           </div>
         ))}
       </div>
-
       {parseError && <div style={{ background: '#ffebee', border: '1px solid #ef9a9a', borderRadius: 6, padding: '10px 14px', fontSize: 12, color: '#c62828', marginBottom: 14 }}>⚠ {parseError}</div>}
-
       <button onClick={handleLoad} disabled={!file || parsing} style={{ width: '100%', padding: '12px', fontSize: 14, fontWeight: 'bold', background: file ? '#1565C0' : '#ccc', color: '#fff', border: 'none', borderRadius: 6, cursor: file ? 'pointer' : 'not-allowed' }}>
         {parsing ? 'Loading…' : 'Load Pick Brief'}
       </button>
@@ -727,7 +720,7 @@ function UploadArea({ onSnapshot, scheduleRows, planDate }) {
   )
 }
 
-// ─── Pick Table (unchanged) ─────────────────────────────────────────────────────────
+// ─── Pick Table ───────────────────────────────────────────────────────────────
 function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, routes, crews, crewMode, setCrewMode }) {
   const brkFmt = BREAKS.map(([s,e]) => `${fmt(s)}–${fmt(e)}`).join('  |  ')
   const NUM_LEFT = 7
@@ -765,7 +758,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
   const thZ={background:'#37474F',color:'#fff',padding:'3px 5px',fontSize:10,border:'1px solid #555',textAlign:'center'}; const miniBtn={fontSize:9,padding:'0 3px',lineHeight:'14px',minWidth:14,border:'1px solid #bbb',borderRadius:3,background:'#f5f5f5',cursor:'pointer'}; const redBar={background:'#BF360C',color:'#fff',fontWeight:'bold',fontSize:10,padding:'4px 10px',border:'none'}
   return (
     <div style={{marginBottom:20}}>
-      <div style={{background:'#f5f5f5',fontSize:10,color:'#555',padding:'3px 8px'}}>ǁǁ = crosses break. Amber = interrupted.{' '}<span style={{color:'#E65100',fontWeight:'bold'}}>Orange = 15–30 min to appt.</span>{' '}<span style={{color:'#C62828',fontWeight:'bold'}}>Red = within 15 min / past appt.</span>{' '}⚠ = zone incomplete. &nbsp;|  Breaks: {brkFmt}</div>
+      <div style={{background:'#f5f5f5',fontSize:10,color:'#555',padding:'3px 8px'}}>ǁǁ = crosses break. Amber = interrupted.{' '}<span style={{color:'#E65100',fontWeight:'bold'}}>Orange = 15–30 min to appt.</span>{' '}<span style={{color:'#C62828',fontWeight:'bold'}}>Red = within 15 min / past appt.</span>{' '}⚠ = zone incomplete. &nbsp;|  Breaks: {brkFmt}</div>
       <div style={{overflowX:'auto'}}>
         <table style={{borderCollapse:'collapse',fontSize:11,tableLayout:'fixed',minWidth:900}}>
           <colgroup><col style={{width:42}}/><col style={{width:130}}/><col style={{width:65}}/><col style={{width:65}}/><col style={{width:65}}/><col style={{width:100}}/>{Array.from({length:12},(_,i)=><col key={i} style={{width:38}}/>)}</colgroup>
@@ -788,7 +781,6 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
 }
 
 // ─── PicklinePanel ────────────────────────────────────────────────────────────
-// planDate prop added — passed from FacilityPanel, used for Omni pull date
 export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onOverridesChange, onClear, planDate }) {
   const [pickers,      setPickers]      = useState(9)
   const [cpmh,         setCpmh]         = useState(150)
@@ -880,6 +872,8 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
                 </div>
                 {nextDates.map(nd=>(<div key={nd.date} style={{display:'flex',gap:16,flexWrap:'wrap',opacity:0.8}}><span style={{fontWeight:'bold',color:'#1B5E20',minWidth:90}}>{fmtDate(nd.date)}</span><span>📦 Gross: <strong>{nd.gross_cs.toLocaleString()}cs</strong></span><span>↩ Alloc pull: <strong>{nd.alloc_cs.toLocaleString()}cs</strong></span>{(nd.shorted_cs??0)>0&&<span>⚠ Shorted: <strong style={{color:'#C62828'}}>{nd.shorted_cs.toLocaleString()}cs</strong></span>}<span>✅ NET pick line: <strong>{nd.net_cs.toLocaleString()}cs</strong></span></div>))}
               </div>
+
+              {/* Pickers/CPMH controls */}
               <div style={{background:'#f0f4ff',border:'1px solid #b0c4f0',borderRadius:6,padding:'10px 14px',display:'flex',alignItems:'center',gap:12,marginBottom:10,flexWrap:'wrap'}}>
                 <div style={{display:'flex',flexDirection:'column',gap:10}}>
                   <div style={{display:'flex',alignItems:'center',gap:10}}><div style={{fontSize:13,fontWeight:'bold',color:'#1565C0',minWidth:120}}>Pickers Available</div><button style={btnStyle(pickers<=1)} onClick={()=>pickers>1&&setPickers(p=>p-1)}>−</button><span style={{fontSize:28,fontWeight:'bold',color:'#1565C0',minWidth:28,textAlign:'center'}}>{pickers}</span><button style={btnStyle(pickers>=20)} onClick={()=>pickers<20&&setPickers(p=>p+1)}>+</button></div>
@@ -891,6 +885,10 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
                   <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>{totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:''}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}</strong></div>
                 </div>
               </div>
+
+              {/* ─── Case Picker Roster — above shift capacity table ─── */}
+              <PickerRoster routes={routes} />
+
               <PickTable pickers={pickers} cpmh={cpmh} tl={tl} netCs={netCs} hourOverrides={hourOverrides} setHourOverride={setHourOverride} routes={routes} crews={enrichedCrews} crewMode={crewMode} setCrewMode={setCrewMode}/>
               <div style={{background:'#ECEFF1',padding:'6px 10px',fontSize:9,color:'#78909C',borderTop:'1px solid #CFD8DC'}}>Zone heat map: ≥10%=yellow · ≥20%=amber · ≥30%=orange · ≥40%=red. Pick windows estimated from CPMH pace; actual may vary.</div>
             </div>
