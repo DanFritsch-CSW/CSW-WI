@@ -18,6 +18,10 @@ const SHORT_AVAIL_COL = 'Total Available Cases'
 const SHORT_DATE_CANDIDATES = ['Pick Up Date', 'Pickup Date', 'Requested Delivery Date Date', 'Date']
 const SHORT_MAT_CANDIDATES  = ['Item Number', 'Material Lookup Code', 'Material', 'Material Number', 'SKU', 'Item']
 
+// Fallback full-pallet size when a SKU is not in skuMap.
+// Used only for alloc vs net bucketing — zone will remain unassigned.
+const DEFAULT_FULL_PALLET = 48
+
 // Normalize material codes: strip leading zeros so '056' === '56', '0792' === '792'.
 // Matches the same pattern used for route numbers.
 function stripLeadingZeros(code) {
@@ -234,11 +238,15 @@ function buildSnapshotFromRows(casesRows, tieHighRows, source, pickSeqRows = [],
           return c - cut
         })
         if (hasTieHigh) {
-          // matCode is already normalized — direct skuMap lookup works correctly
+          // matCode is already normalized — direct skuMap lookup works correctly.
+          // If SKU is not in skuMap, fall back to DEFAULT_FULL_PALLET for alloc/net
+          // bucketing. Zone stays unassigned (no rm.z entry) since we don't know
+          // where the SKU lives on the pickline.
           const sku = skuMap[matCode]
+          const halfPallet = (sku ? sku.fullPallet : DEFAULT_FULL_PALLET) / 2
           for (const adjCases of adjLines) {
             if (adjCases <= 0) continue
-            if (sku && adjCases >= sku.fullPallet / 2) {
+            if (adjCases >= halfPallet) {
               rm.alloc += adjCases
               rm.pallets += 1
             } else {
