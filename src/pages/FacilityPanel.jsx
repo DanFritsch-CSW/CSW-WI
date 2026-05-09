@@ -266,7 +266,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { util, delta } = computeDailyKpis(hourly)
 
-  // Daily totals for KPI pills
   const totalLaborReq = useMemo(() => r1(hourly.reduce((s, r) => s + (r.req ?? 0), 0)), [hourly])
   const totalAdj      = useMemo(() => Object.values(hourlyAdjustments).reduce((s, v) => s + v, 0), [hourlyAdjustments])
 
@@ -316,7 +315,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const hasDropData = Object.keys(projectHourlyDrops).length > 0
   const copyProjectNames = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
 
-  // ── Warehouse content
   const warehouseContent = (
     <div>
       {isCal2 && (
@@ -355,32 +353,20 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
             <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Copy EST drops from {planDate} to:</span>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              From
-              <input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }}
-                value={copyFrom} onChange={e => setCopyFrom(e.target.value)} />
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              To
-              <input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }}
-                value={copyTo} onChange={e => setCopyTo(e.target.value)} />
-            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>From<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyFrom} onChange={e => setCopyFrom(e.target.value)} /></label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>To<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyTo} onChange={e => setCopyTo(e.target.value)} /></label>
           </div>
           <div style={{ marginBottom: 10 }}>
             <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
               <span>Projects to copy:</span>
-              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }}
-                onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
-              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }}
-                onClick={() => setCopyProjects(new Set())}>Clear</button>
+              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
+              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set())}>Clear</button>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px' }}>
               {copyProjectNames.map(name => (
                 <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
                   <input type="checkbox" checked={copyProjects.has(name)} onChange={() => toggleCopyProject(name)} />
-                  <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>
-                    {name.length > 28 ? name.slice(0, 28) + '...' : name}
-                  </span>
+                  <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>{name.length > 28 ? name.slice(0, 28) + '...' : name}</span>
                 </label>
               ))}
             </div>
@@ -436,6 +422,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
               onSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
               onOverridesChange={setPicklineOverrides}
               onClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
+              planDate={planDate}
             />
         }
       </div>
