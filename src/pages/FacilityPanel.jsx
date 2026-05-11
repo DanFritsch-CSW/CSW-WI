@@ -10,7 +10,7 @@ import {
   fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments,
   isRuleProject, fetchActiveInventory, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
 } from '../lib/omni.js'
-import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
+import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, insertProjectHourlyDropsIfMissing, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, computeBreakAdjustedTotalHours } from '../lib/laborCalc.js'
 
@@ -112,47 +112,58 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
 
+      // Always fetch both existing rows and fresh historical average.
+      // Insert only slots that don't yet exist in Supabase (ignoreDuplicates: true)
+      // so manual edits are never overwritten on reload.
+      setSeedingDrops(true)
       try {
-        const data = await fetchProjectHourlyDrops(facility.id, planDate)
+        const [existing, historical] = await Promise.all([
+          fetchProjectHourlyDrops(facility.id, planDate),
+          fetchHistoricalProjectHourlyDrops(facility.id, planDate),
+        ])
         if (cancelled) return
-        const filtered = Object.fromEntries(
-          Object.entries(data).filter(([name]) => isRuleProject(facility.id, name) && !KEN_STALE_KEYS.has(name))
-        )
-        if (isKen || hasCustom) {
-          const allRequired = [...(isKen ? KEN_GUARANTEED_PROJECTS : []), ...customRows.map(r => r.project_name)]
-          const missingProjects = allRequired.filter(p => !(p in filtered))
-          if (missingProjects.length > 0) {
-            setSeedingDrops(true)
-            try {
-              const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
-              if (cancelled) return
-              const patch = {}
-              for (const p of missingProjects) patch[p] = historical[p] ?? { 17: 0 }
-              const rows = []
-              for (const [project_name, hourMap] of Object.entries(patch))
-                for (const [h, est_drops] of Object.entries(hourMap))
-                  rows.push({ project_name, h: Number(h), est_drops })
-              if (rows.length) await upsertProjectHourlyDrops(facility.id, planDate, rows)
-              if (!cancelled) setProjectHourlyDrops({ ...filtered, ...patch })
-            } finally { if (!cancelled) setSeedingDrops(false) }
-          } else { setProjectHourlyDrops(filtered) }
-          return
+
+        // Merge: guaranteed / custom projects get a zero-seed fallback
+        if (isKen) {
+          for (const p of KEN_GUARANTEED_PROJECTS) { if (!(p in historical)) historical[p] = { 17: 0 } }
         }
-        if (Object.keys(filtered).length > 0) { setProjectHourlyDrops(filtered); return }
-        setSeedingDrops(true)
-        try {
-          const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
-          if (cancelled) return
-          if (Object.keys(historical).length) {
-            const rows = []
-            for (const [project_name, hourMap] of Object.entries(historical))
-              for (const [h, est_drops] of Object.entries(hourMap))
-                rows.push({ project_name, h: Number(h), est_drops })
-            await upsertProjectHourlyDrops(facility.id, planDate, rows)
-            if (!cancelled) setProjectHourlyDrops(historical)
+        for (const row of customRows) {
+          if (!(row.project_name in historical)) historical[row.project_name] = { 17: 0 }
+        }
+
+        // Filter out stale KEN keys from existing display
+        const filteredExisting = Object.fromEntries(
+          Object.entries(existing).filter(([name]) => !KEN_STALE_KEYS.has(name))
+        )
+
+        // Build rows to insert — only those not already in Supabase
+        const newRows = []
+        for (const [project_name, hourMap] of Object.entries(historical)) {
+          if (!isRuleProject(facility.id, project_name) && !isKen && !hasCustom) continue
+          for (const [h, est_drops] of Object.entries(hourMap)) {
+            const hour = Number(h)
+            // Skip if this project+hour already exists in Supabase
+            if (filteredExisting[project_name]?.[hour] !== undefined) continue
+            newRows.push({ project_name, h: hour, est_drops })
           }
-        } finally { if (!cancelled) setSeedingDrops(false) }
-      } catch { if (!cancelled) setSeedingDrops(false) }
+        }
+
+        if (newRows.length > 0) {
+          await insertProjectHourlyDropsIfMissing(facility.id, planDate, newRows)
+        }
+
+        // Merge historical into display state: existing rows take priority
+        const merged = { ...historical }
+        for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
+          merged[project_name] = { ...(merged[project_name] ?? {}), ...hourMap }
+        }
+
+        if (!cancelled) setProjectHourlyDrops(merged)
+      } catch (e) {
+        console.error('EST drops seed error:', e)
+      } finally {
+        if (!cancelled) setSeedingDrops(false)
+      }
     }
 
     loadData()
@@ -295,23 +306,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     util: util ?? networkKpi?.util, delta: delta ?? networkKpi?.delta,
   }
 
-  const resetEstDrops = async () => {
-    setSeedingDrops(true)
-    try {
-      const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
-      if (isKen) for (const p of KEN_GUARANTEED_PROJECTS) { if (!(p in historical)) historical[p] = { 17: 0 } }
-      for (const row of customDropProjects) { if (!(row.project_name in historical)) historical[row.project_name] = { 17: 0 } }
-      if (Object.keys(historical).length) {
-        const rows = []
-        for (const [project_name, hourMap] of Object.entries(historical))
-          for (const [h, est_drops] of Object.entries(hourMap))
-            rows.push({ project_name, h: Number(h), est_drops })
-        await upsertProjectHourlyDrops(facility.id, planDate, rows)
-        setProjectHourlyDrops(historical)
-      }
-    } finally { setSeedingDrops(false) }
-  }
-
   const hasDropData = Object.keys(projectHourlyDrops).length > 0
   const copyProjectNames = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
 
@@ -342,10 +336,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         <span>Hourly Breakdown</span>
         {seedingDrops
           ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
-          : <>
-              <button className="est-reset-btn" title="Recalculate from 4-week average" onClick={resetEstDrops}>Reset EST Drops</button>
-              {hasDropData && <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>}
-            </>
+          : hasDropData && <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
         }
       </div>
 

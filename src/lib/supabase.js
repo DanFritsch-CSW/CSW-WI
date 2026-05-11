@@ -368,6 +368,7 @@ export async function fetchAllFacilitiesEstDrops(planDate) {
   return result
 }
 
+// Overwrites existing rows — used by manual edits and Copy to dates
 export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (!supabase) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
@@ -381,6 +382,22 @@ export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
     .from('project_hourly_drops_forecast')
     .upsert(records, { onConflict: 'facility,plan_date,project_name,hour' })
   if (error) console.error('upsertProjectHourlyDrops:', error)
+}
+
+// Inserts only rows that don't already exist — used by auto-seed to protect manual edits
+export async function insertProjectHourlyDropsIfMissing(facilityId, planDate, rows) {
+  if (!supabase || !rows.length) return
+  const records = rows.map(({ project_name, h, est_drops }) => ({
+    facility:     facilityId,
+    plan_date:    planDate,
+    project_name,
+    hour:         h,
+    est_drops:    est_drops ?? 0,
+  }))
+  const { error } = await supabase
+    .from('project_hourly_drops_forecast')
+    .upsert(records, { onConflict: 'facility,plan_date,project_name,hour', ignoreDuplicates: true })
+  if (error) console.error('insertProjectHourlyDropsIfMissing:', error)
 }
 
 export async function fetchCustomDropProjects(facilityId) {
