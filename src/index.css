@@ -315,6 +315,31 @@ input, select { font: inherit; color: inherit; }
 .emp-shift-save   { color: #3dba7e; background: rgba(61,186,126,0.12); border: 1px solid rgba(61,186,126,0.3); }
 .emp-shift-cancel { color: var(--text-dim); background: var(--bg4); border: 1px solid var(--border); }
 
+/* ─── Time-off tile ─────────────────────────────────────────────── */
+/* Tile placed in PTO lane by B2E time-off sync */
+.emp-tile.emp-time-off {
+  border-color: rgba(100,160,100,0.45);
+  background: rgba(61,186,126,0.06);
+}
+.emp-tile.emp-time-off:hover {
+  background: rgba(61,186,126,0.12);
+  border-color: rgba(61,186,126,0.6);
+}
+
+/* Badge shown on the role line: PTO / FMLA / Unpaid / Bereave */
+.emp-timeoff-badge {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-right: 3px;
+  vertical-align: middle;
+  color: #1a7a52;
+  background: rgba(61,186,126,0.14);
+  border: 1px solid rgba(61,186,126,0.35);
+}
+
 /* ─── Loan badges ───────────────────────────────────────────────── */
 /* ON LOAN tile: grayed out, dashed amber border */
 .emp-tile.emp-on-loan {
