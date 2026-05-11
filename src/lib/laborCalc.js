@@ -24,11 +24,10 @@ const LANE_TO_SHIFT = {
 
 const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 
-// Operational day runs 5am–4:59am (hours 5–28 on a linear 0–28 scale).
-// We do NOT wrap hours past 23 — a 3rd shift starting at 22 covers hours
-// 22 and 23 on day N, then wraps into day N+1 (hours 0–5). Those wrap hours
-// belong to the NEXT operational day and must not appear in today's array.
-const OP_DAY_START = 5   // 5am — shifts starting before this are excluded
+// Operational day boundary: 5am–4:59am.
+// Shifts starting before this hour belong to the previous operational day
+// and are excluded from today's availability calc.
+const OP_DAY_START = 5
 
 function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
@@ -62,13 +61,17 @@ function parseStartHour(shiftStart) {
 /**
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
+ * Operational day = 5am–4:59am. Hours 0–4 (12am–4am) are the TAIL of the
+ * current operational day, not the start of the next.
+ *
  * Key rules:
  * 1. Shifts starting before OP_DAY_START (5am) are excluded — they belong to
  *    the previous operational day.
- * 2. Hours are NOT wrapped past 23. A 3rd shift (start=22, hours=8.5) covers
- *    hours 22 and 23 on the current day; hours 0–6 wrap to the NEXT day and
- *    are simply not counted here. This prevents Sunday 3rd shift from
- *    inflating Monday's 12am–5am labor availability.
+ * 2. Shifts that cross midnight ARE allowed to wrap into hours 0–4, since
+ *    those hours are within the same 5am–5am operational window.
+ *    e.g. 3rd shift start=22, hours=8 → covers 22, 23, 0, 1, 2, 3, 4, 5
+ *    Hours 0–4 are included; hour 5 would start a new op day so the loop
+ *    stops when the wrapped hour reaches OP_DAY_START.
  * 3. Employees on loan (on_loan_to set) are excluded entirely.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
@@ -102,10 +105,15 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     if (resolvedStart < OP_DAY_START) continue
 
     for (let i = 0; i < resolvedHours; i++) {
-      const h = resolvedStart + i
-      if (h > 23) break   // don't wrap past midnight — those hours are tomorrow
+      const h    = resolvedStart + i
+      const hMod = h % 24  // actual clock hour (wraps past midnight)
+
+      // If we've wrapped past midnight and reached the start of the NEXT
+      // operational day (5am), stop — those hours belong to tomorrow.
+      if (h >= 24 && hMod >= OP_DAY_START) break
+
       const mul = breakMuls[i] ?? 1
-      hourlyAvail[h] += mul
+      hourlyAvail[hMod] += mul
     }
   }
 
@@ -116,7 +124,7 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
  * Compute break-adjusted total hours for a set of employees.
  * Excludes employees on loan (on_loan_to set).
  * Excludes shifts starting before OP_DAY_START.
- * Does not count hours that wrap past midnight (belong to next day).
+ * Wraps midnight correctly — hours 0–4 count toward the current op day.
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
@@ -147,7 +155,10 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
     for (let i = 0; i < resolvedHours; i++) {
-      if (resolvedStart + i > 23) break  // stop at midnight
+      const h    = resolvedStart + i
+      const hMod = h % 24
+      // Stop when we've wrapped past midnight into the next op day
+      if (h >= 24 && hMod >= OP_DAY_START) break
       total += breakMuls[i] ?? 1
     }
   }
