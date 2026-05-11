@@ -45,6 +45,9 @@ function facilityCode(facId) {
   return FACILITIES[facId]?.code ?? facId?.toUpperCase() ?? '?'
 }
 
+// Time-off badge labels that come from the role field when seeded by B2E time-off
+const TIME_OFF_LABELS = new Set(['PTO', 'FMLA', 'Unpaid', 'Bereave'])
+
 export default function EmployeeTile({ employee, assignment, laneSettings, onShiftChange, onDelete, onRecall }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: employee.id,
@@ -57,8 +60,12 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
 
   const color      = avatarColor(employee.name)
   const isTemp     = !!employee.is_temp
-  const isOnLoan   = !!assignment?.on_loan_to       // source: employee sent away
-  const isFromLoan = !!assignment?.from_facility     // destination: employee received
+  const isOnLoan   = !!assignment?.on_loan_to
+  const isFromLoan = !!assignment?.from_facility
+
+  // Time-off badge: stored in role field when auto-placed in PTO lane by B2E sync
+  const roleValue   = assignment?.role ?? employee.role
+  const isTimeOff   = TIME_OFF_LABELS.has(roleValue)
 
   const effectiveStart = assignment?.shift_start ?? laneSettings?.defaultStart ?? null
   const effectiveHours = assignment?.shift_hours ?? laneSettings?.defaultHours ?? 8
@@ -93,10 +100,11 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
       ref={setNodeRef}
       style={style}
       className={`emp-tile${
-        isDragging ? ' dragging' : ''}${
-        isTemp     ? ' emp-temp' : ''}${
-        isOnLoan   ? ' emp-on-loan' : ''}${
-        isFromLoan ? ' emp-from-loan' : ''}`}
+        isDragging  ? ' dragging'      : ''}${
+        isTemp      ? ' emp-temp'      : ''}${
+        isOnLoan    ? ' emp-on-loan'   : ''}${
+        isFromLoan  ? ' emp-from-loan' : ''}${
+        isTimeOff   ? ' emp-time-off'  : ''}`}
       title={employee.name}
       {...attributes}
       {...listeners}
@@ -110,7 +118,10 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
           {isTemp     && <span className="emp-temp-badge">TEMP</span>}
           {isOnLoan   && <span className="emp-loan-badge emp-loan-badge--out">ON LOAN → {facilityCode(assignment.on_loan_to)}</span>}
           {isFromLoan && <span className="emp-loan-badge emp-loan-badge--in">FROM: {facilityCode(assignment.from_facility)}</span>}
-          {!isOnLoan && !isFromLoan && employee.role}
+          {isTimeOff  && !isOnLoan && !isFromLoan && (
+            <span className="emp-timeoff-badge">{roleValue}</span>
+          )}
+          {!isOnLoan && !isFromLoan && !isTimeOff && roleValue}
         </div>
         {editing ? (
           <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>

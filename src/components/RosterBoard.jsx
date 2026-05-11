@@ -20,7 +20,7 @@ import {
   seedRosterAssignments, deleteAssignment, resetAssignmentsForDate,
   sendEmployeeOnLoan, recallLoan, purgeStaleAssignments,
 } from '../lib/supabase.js'
-import { fetchB2eRoster } from '../lib/omni.js'
+import { fetchB2eRoster, fetchB2eTimeOff } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
   shift1: { start: 'shift1_start', hours: 'shift1_hours' },
@@ -139,6 +139,21 @@ function laneSideClass(laneId) {
   if (laneId.startsWith('side12_')) return 'lane-side12'
   if (laneId.startsWith('side35_')) return 'lane-side35'
   return ''
+}
+
+/**
+ * Apply time-off overrides to a list of B2E employees before seeding.
+ * Employees found in the timeOffMap get their default_lane set to 'pto'
+ * and their role set to the time-off label (e.g. 'FMLA', 'PTO') so the
+ * tile badge survives a page refresh.
+ */
+function applyTimeOffOverrides(employees, timeOffMap) {
+  if (!timeOffMap.size) return employees
+  return employees.map(emp => {
+    const label = timeOffMap.get(String(emp.id))
+    if (!label) return emp
+    return { ...emp, default_lane: 'pto', role: label }
+  })
 }
 
 // ── Send-to-Facility Drop Zone ───────────────────────────────────
@@ -325,13 +340,17 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     let assignments = await fetchTodayAssignments(facId, date)
 
     if (assignments.length === 0) {
-      const b2eEmployees = await fetchB2eRoster(facId, date)
+      // Fetch B2E roster and time-off in parallel for first-time seed
+      const [b2eEmployees, timeOffMap] = await Promise.all([
+        fetchB2eRoster(facId, date),
+        fetchB2eTimeOff(facId, date),
+      ])
       if (b2eEmployees.length > 0) {
-        const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+        const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
+        const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
         await replaceEmployees(facId, empRows)
-        await seedRosterAssignments(b2eEmployees, date)
-        // Purge stale cross-facility rows for these employees
-        const empIds = b2eEmployees.map(e => e.id)
+        await seedRosterAssignments(withTimeOff, date)
+        const empIds = withTimeOff.map(e => e.id)
         await purgeStaleAssignments(empIds, facId, date)
         assignments = await fetchTodayAssignments(facId, date)
       }
@@ -395,16 +414,20 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const handleB2eSync = useCallback(async () => {
     setSyncState('loading')
     try {
-      const date         = planDate || todayISO()
-      const b2eEmployees = await fetchB2eRoster(facility, date)
+      const date = planDate || todayISO()
+      // Fetch roster and time-off in parallel
+      const [b2eEmployees, timeOffMap] = await Promise.all([
+        fetchB2eRoster(facility, date),
+        fetchB2eTimeOff(facility, date),
+      ])
       if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
-      const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+      const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
+      const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
       if (err) { setSyncState(err); return }
-      const seedErr = await seedRosterAssignments(b2eEmployees, date)
+      const seedErr = await seedRosterAssignments(withTimeOff, date)
       if (seedErr) { setSyncState(seedErr); return }
-      // Purge stale cross-facility rows for employees who transferred to this facility
-      const empIds = b2eEmployees.map(e => e.id)
+      const empIds = withTimeOff.map(e => e.id)
       await purgeStaleAssignments(empIds, facility, date)
       await load(facility, date)
       setSyncState('ok')
@@ -421,15 +444,19 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const date = planDate || todayISO()
       const err = await resetAssignmentsForDate(facility, date)
       if (err) { setResetState(`Delete failed: ${err}`); return }
-      const b2eEmployees = await fetchB2eRoster(facility, date)
+      // Fetch roster and time-off in parallel
+      const [b2eEmployees, timeOffMap] = await Promise.all([
+        fetchB2eRoster(facility, date),
+        fetchB2eTimeOff(facility, date),
+      ])
       if (!b2eEmployees.length) { setResetState('No B2E data found'); return }
-      const empRows = b2eEmployees.map(({ shift_hours, ...e }) => e)
+      const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
+      const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const replErr = await replaceEmployees(facility, empRows)
       if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
-      const seedErr = await seedRosterAssignments(b2eEmployees, date)
+      const seedErr = await seedRosterAssignments(withTimeOff, date)
       if (seedErr) { setResetState(`Seed failed: ${seedErr}`); return }
-      // Purge stale cross-facility rows for employees who transferred to this facility
-      const empIds = b2eEmployees.map(e => e.id)
+      const empIds = withTimeOff.map(e => e.id)
       await purgeStaleAssignments(empIds, facility, date)
       await load(facility, date)
       setResetState('ok')
@@ -494,7 +521,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         shiftHours:     existing.shift_hours ?? null,
       })
       if (!err) {
-        // Update local state: mark as on loan
         setAssignmentMap(prev => ({
           ...prev,
           [emp.id]: { ...(prev[emp.id] ?? {}), on_loan_to: destFacility },

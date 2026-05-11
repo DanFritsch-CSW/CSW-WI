@@ -157,6 +157,7 @@ export function isRuleProject(facilityId, projectName) {
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
 const ROSTER       = 'silver__b2e_slv_employeeroster'
 const SCHEDULE     = 'silver__b2e_slv_futurescheduleentries'
+const TIME_OFF     = 'silver__b2e_slv_futuretimeoff'
 
 const B2E_LOCATION = {
   cal:  '019 - Caledonia',
@@ -671,6 +672,54 @@ async function fetchCal2DockAssignments() {
     .eq('facility', 'cal')
   if (error || !data) return new Map()
   return new Map(data.map(e => [String(e.id), e.default_lane]))
+}
+
+/**
+ * Fetches employees with approved time off (PTO, FMLA, Bereavement, etc.) for a
+ * given facility and date from B2E. Job code 205 only (matches roster sync filter).
+ *
+ * Returns a Map<employeeId (string), timeOffLabel (string)>
+ * e.g. Map { '704' => 'FMLA', '973' => 'PTO' }
+ */
+export async function fetchB2eTimeOff(facilityId, date) {
+  const location = B2E_LOCATION[facilityId]
+  if (!location) return new Map()
+  try {
+    const rows = await omniQuery({
+      modelId: B2E_MODEL_ID,
+      table: TIME_OFF,
+      fields: [
+        `${TIME_OFF}.employee_id`,
+        `${TIME_OFF}.time_off_name`,
+      ],
+      filters: {
+        [`${TIME_OFF}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: ['205'] },
+        [`${TIME_OFF}.date`]: {
+          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+          isFiscal: false, left_side: date, is_negative: false,
+          offset_interval_string: '0 days',
+        },
+      },
+      sorts: [],
+      limit: 200,
+    })
+    const map = new Map()
+    for (const r of rows) {
+      const id    = String(r[`${TIME_OFF}.employee_id`])
+      const name  = r[`${TIME_OFF}.time_off_name`] || 'PTO'
+      // Normalize to short display label
+      const label = name.toLowerCase().includes('fmla')   ? 'FMLA'
+                  : name.toLowerCase().includes('unpaid') ? 'Unpaid'
+                  : name.toLowerCase().includes('bereavement') ? 'Bereave'
+                  : 'PTO'
+      map.set(id, label)
+    }
+    return map
+  } catch (e) {
+    console.warn('fetchB2eTimeOff failed (non-fatal):', e.message)
+    return new Map()
+  }
 }
 
 export async function fetchB2eRoster(facilityId, date) {
