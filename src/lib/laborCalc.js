@@ -67,11 +67,10 @@ function parseStartHour(shiftStart) {
  * Key rules:
  * 1. Shifts starting before OP_DAY_START (5am) are excluded — they belong to
  *    the previous operational day.
- * 2. Shifts that cross midnight ARE allowed to wrap into hours 0–4, since
- *    those hours are within the same 5am–5am operational window.
- *    e.g. 3rd shift start=22, hours=8 → covers 22, 23, 0, 1, 2, 3, 4, 5
- *    Hours 0–4 are included; hour 5 would start a new op day so the loop
- *    stops when the wrapped hour reaches OP_DAY_START.
+ * 2. Shifts that cross midnight wrap via % 24 — all resolvedHours are counted,
+ *    no early break at 5am. A 10pm–6am shift (start=22, hours=8) covers
+ *    22, 23, 0, 1, 2, 3, 4, 5 — the worker is physically present until 6am
+ *    so the 5am hour is included.
  * 3. Employees on loan (on_loan_to set) are excluded entirely.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
@@ -105,14 +104,8 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     if (resolvedStart < OP_DAY_START) continue
 
     for (let i = 0; i < resolvedHours; i++) {
-      const h    = resolvedStart + i
-      const hMod = h % 24  // actual clock hour (wraps past midnight)
-
-      // If we've wrapped past midnight and reached the start of the NEXT
-      // operational day (5am), stop — those hours belong to tomorrow.
-      if (h >= 24 && hMod >= OP_DAY_START) break
-
-      const mul = breakMuls[i] ?? 1
+      const hMod = (resolvedStart + i) % 24
+      const mul  = breakMuls[i] ?? 1
       hourlyAvail[hMod] += mul
     }
   }
@@ -124,7 +117,7 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
  * Compute break-adjusted total hours for a set of employees.
  * Excludes employees on loan (on_loan_to set).
  * Excludes shifts starting before OP_DAY_START.
- * Wraps midnight correctly — hours 0–4 count toward the current op day.
+ * All resolvedHours count — no early break when wrapping past midnight.
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
@@ -155,10 +148,6 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
     for (let i = 0; i < resolvedHours; i++) {
-      const h    = resolvedStart + i
-      const hMod = h % 24
-      // Stop when we've wrapped past midnight into the next op day
-      if (h >= 24 && hMod >= OP_DAY_START) break
       total += breakMuls[i] ?? 1
     }
   }
