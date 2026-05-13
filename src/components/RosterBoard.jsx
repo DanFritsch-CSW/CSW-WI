@@ -55,6 +55,13 @@ function sendZoneId(laneId) { return `${SEND_ZONE_PREFIX}${laneId}` }
 function isSendZone(id)     { return String(id).startsWith(SEND_ZONE_PREFIX) }
 function laneFromSendZone(id) { return String(id).slice(SEND_ZONE_PREFIX.length) }
 
+// Active (labor-counting) lanes — PTO/callin excluded
+const STANDARD_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2', 'shift3'])
+const CAL_ACTIVE_LANES = new Set([
+  'side12_shift1','side12_mid','side12_shift2','side12_shift3',
+  'side35_shift1','side35_mid','side35_shift2','side35_shift3',
+])
+
 function getLaneSettings(laneId, settings) {
   const keys = LANE_SETTING_KEYS[laneId]
   if (!keys) return null
@@ -306,12 +313,6 @@ const STUB_EMPLOYEES = [
   { id: 'e9', name: 'Quinn Adams',    role: 'Associate',  default_lane: 'callin' },
 ]
 
-const STANDARD_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2', 'shift3'])
-const CAL_ACTIVE_LANES = new Set([
-  'side12_shift1','side12_mid','side12_shift2','side12_shift3',
-  'side35_shift1','side35_mid','side35_shift2','side35_shift3',
-])
-
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
   const isCal          = facility === 'cal'
   const activeLaneSet  = isCal ? LANES_CAL2     : LANES
@@ -337,14 +338,19 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   async function load(facId, date) {
     setIsLoading(true)
-    let assignments = await fetchTodayAssignments(facId, date)
+
+    // Always fetch time-off in parallel with assignments so PTO is applied
+    // on every load — not just on first seed. This means users never need to
+    // manually click "Sync from B2E" just to get PTO employees moved to the
+    // PTO lane.
+    const [assignments, timeOffMap] = await Promise.all([
+      fetchTodayAssignments(facId, date),
+      fetchB2eTimeOff(facId, date).catch(() => new Map()),
+    ])
 
     if (assignments.length === 0) {
-      // Fetch B2E roster and time-off in parallel for first-time seed
-      const [b2eEmployees, timeOffMap] = await Promise.all([
-        fetchB2eRoster(facId, date),
-        fetchB2eTimeOff(facId, date),
-      ])
+      // First-time seed for this date
+      const b2eEmployees = await fetchB2eRoster(facId, date)
       if (b2eEmployees.length > 0) {
         const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
         const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
@@ -352,10 +358,38 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         await seedRosterAssignments(withTimeOff, date)
         const empIds = withTimeOff.map(e => e.id)
         await purgeStaleAssignments(empIds, facId, date)
-        assignments = await fetchTodayAssignments(facId, date)
+        // Re-fetch assignments after seed
+        const seeded = await fetchTodayAssignments(facId, date)
+        return _buildState(facId, seeded, timeOffMap)
+      }
+    } else {
+      // Roster already seeded — apply any time-off overrides that aren't
+      // already in the PTO lane. Upsert changed rows so they persist.
+      if (timeOffMap.size > 0) {
+        const toUpdate = []
+        for (const asg of assignments) {
+          const label = timeOffMap.get(String(asg.employee_id))
+          if (label && asg.lane !== 'pto') {
+            toUpdate.push({ ...asg, lane: 'pto', role: label })
+          }
+        }
+        if (toUpdate.length > 0) {
+          // Fire-and-forget upserts (non-blocking for UI)
+          for (const row of toUpdate) {
+            upsertAssignment(row).catch(e => console.warn('time-off upsert:', e))
+          }
+          // Merge overrides into the local assignments array for immediate UI
+          const overrideMap = new Map(toUpdate.map(r => [r.employee_id, r]))
+          const merged = assignments.map(a => overrideMap.get(a.employee_id) ?? a)
+          return _buildState(facId, merged, timeOffMap)
+        }
       }
     }
 
+    return _buildState(facId, assignments, timeOffMap)
+  }
+
+  function _buildState(facId, assignments, _timeOffMap) {
     let emps = assignments
       .filter(a => !a.is_temp)
       .map(a => ({
