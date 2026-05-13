@@ -12,7 +12,7 @@ import {
 } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, insertProjectHourlyDropsIfMissing, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
-import { applySettings, computeDailyKpis, buildRosterAvailability, computeBreakAdjustedTotalHours } from '../lib/laborCalc.js'
+import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
 
 const CAL2_SIDE35_PROJECTS = new Set([
   'Palermos CALEDONIA finished', "Palermo's CALEDONIA finished", 'PALERMOS CALEDONIA FINISHED',
@@ -222,25 +222,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
   }, [rosterState, settings, laneFilter])
 
-  // Roster-based break-adjusted total — used for side-filtered tabs (1-2 Side / 3.5 Side)
-  // where Omni has no per-side breakdown.
-  const rosterBreakAdjTotal = useMemo(() => {
-    if (!rosterState.employees.length || settingsLoading) return 0
-    return computeBreakAdjustedTotalHours(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
-  }, [rosterState, settings, settingsLoading, laneFilter])
-
-  // Omni-based total: sum rawHourly[].avail (= labor_available_aw_update_ =
-  // adjusted_staffed_employee from Omni's model). Already fetched on every load,
-  // no extra query. Used for the "All" tab KPI pill — matches Omni dashboard exactly.
-  const omniAdjTotalHours = useMemo(() => {
-    if (!rawHourly.length) return 0
-    return r1(rawHourly.reduce((s, r) => s + (r.avail ?? 0), 0))
-  }, [rawHourly])
-
-  // For the KPI pill: use Omni sum on the "all" tab, roster calc on side tabs
-  // (side tabs need per-side scoping which Omni can't provide)
-  const totalHoursForKpi = (isCal2 && sideTab !== 'all') ? rosterBreakAdjTotal : omniAdjTotalHours
-
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
     return Object.fromEntries(
@@ -286,6 +267,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const totalLaborReq = useMemo(() => r1(hourly.reduce((s, r) => s + (r.req ?? 0), 0)), [hourly])
   const totalAdj      = useMemo(() => Object.values(hourlyAdjustments).reduce((s, v) => s + v, 0), [hourlyAdjustments])
 
+  // Single source of truth: sum hourly[].avail — same array that drives the
+  // table Labour Avail column and the chart. Pill, table total, and Daily +/-
+  // all derive from the same number so they are always consistent.
+  const totalHoursAvail = useMemo(() => r1(hourly.reduce((s, r) => s + (r.avail ?? 0), 0)), [hourly])
+
   useEffect(() => {
     if (onDeltaComputed && sideTab === 'all' && delta != null) onDeltaComputed(facility.id, delta)
   }, [delta, facility.id, sideTab, onDeltaComputed])
@@ -306,7 +292,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const kpiData = {
     appts: totalInb + totalOut + totalDrops, drops: totalDrops,
     inb: totalInb, out: totalOut, labor: sideHeadcount,
-    totalHours: totalHoursForKpi,
+    totalHours: totalHoursAvail,
     laborReq: totalLaborReq,
     totalAdj,
     util: util ?? networkKpi?.util, delta: delta ?? networkKpi?.delta,
