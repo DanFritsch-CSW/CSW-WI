@@ -80,14 +80,17 @@ export const KEN_GUARANTEED_PROJECTS = [
   'Fair Oaks Farms',
   'RICHELIEU KENOSHA',
   'RICHELIEU RAW MATERIALS KENOSHA',
+  'BossBites',
 ]
 
 const FAIR_OAKS_OMNI_NAMES  = ['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST']
 const BIRCHWOOD_OMNI_NAMES  = ['BIRCHWOOD FOODS  KENOSHA']
+const BOSSBITES_OMNI_NAMES  = ['BOSSB5']
 
 const KEN_OMNI_NAME_MAP = new Map([
   ...FAIR_OAKS_OMNI_NAMES.map(n => [n, 'Fair Oaks Farms']),
   ...BIRCHWOOD_OMNI_NAMES.map(n => [n, 'Birchwood Foods Kenosha']),
+  ...BOSSBITES_OMNI_NAMES.map(n => [n, 'BossBites']),
 ])
 
 const CUSTOM_OMNI_NAME_MAPS = {}
@@ -112,6 +115,11 @@ const PROJECT_DROP_RULES = {
   },
   'RICHELIEU KENOSHA':               { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
   'RICHELIEU RAW MATERIALS KENOSHA': { facility: 'ken', method: 'inbound_include_lookup', includePatterns: ['TOP', 'PSH'] },
+  'BossBites': {
+    facility: 'ken',
+    method: 'inbound_all_merged',
+    omniNames: BOSSBITES_OMNI_NAMES,
+  },
 }
 
 const CUSTOM_DROP_RULES_CACHE = {}
