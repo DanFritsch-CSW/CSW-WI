@@ -93,6 +93,9 @@ function applyBreakMuls(resolvedHours, breakMuls) {
  * 3. Employees on loan (on_loan_to set) are excluded entirely.
  * 4. Fractional shift lengths (e.g. 8.5h) are handled correctly — the partial
  *    hour receives a prorated break multiplier.
+ * 5. Employees with no schedule data (both shift_start and shift_hours are null
+ *    on both the assignment and employee record) are excluded. These are
+ *    "Free Flow" employees in B2E with no valid shift — Omni excludes them too.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
@@ -113,9 +116,15 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
 
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
 
-    const rawStart   = assignment?.shift_start ?? emp.shift_start
+    const rawStart = assignment?.shift_start ?? emp.shift_start
+    const rawHours = assignment?.shift_hours ?? emp.shift_hours
+
+    // Exclude employees with no schedule data at all (e.g. "Free Flow" in B2E).
+    // Both start and hours must be null — if either is present, use it with defaults.
+    // Mirrors Omni's behavior: no valid shift times = not counted.
+    if (rawStart == null && rawHours == null) continue
+
     const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
-    const rawHours   = assignment?.shift_hours ?? shiftDefaults.hours
     const shiftHours = rawHours != null ? Number(rawHours) : shiftDefaults.hours
 
     const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
@@ -146,6 +155,7 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
  * Compute break-adjusted total hours for a set of employees.
  * Excludes employees on loan (on_loan_to set).
  * Excludes shifts starting before OP_DAY_START.
+ * Excludes employees with no schedule data (both start and hours null).
  * All resolvedHours count — no early break when wrapping past midnight.
  * Fractional shift lengths handled correctly via applyBreakMuls().
  */
@@ -166,14 +176,18 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
 
     const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
 
-    const rawStart      = assignment?.shift_start ?? emp.shift_start
+    const rawStart = assignment?.shift_start ?? emp.shift_start
+    const rawHours = assignment?.shift_hours ?? emp.shift_hours
+
+    // Exclude employees with no schedule data (mirrors Omni behavior)
+    if (rawStart == null && rawHours == null) continue
+
     const startHour     = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
     const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
 
     // Exclude shifts starting before operational day boundary
     if (resolvedStart < OP_DAY_START) continue
 
-    const rawHours      = assignment?.shift_hours ?? shiftDefaults.hours
     const shiftHours    = rawHours != null ? Number(rawHours) : shiftDefaults.hours
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
