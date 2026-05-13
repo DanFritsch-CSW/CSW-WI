@@ -112,9 +112,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
 
-      // Always fetch both existing rows and fresh historical average.
-      // Insert only slots that don't yet exist in Supabase (ignoreDuplicates: true)
-      // so manual edits are never overwritten on reload.
       setSeedingDrops(true)
       try {
         const [existing, historical] = await Promise.all([
@@ -123,7 +120,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         ])
         if (cancelled) return
 
-        // Merge: guaranteed / custom projects get a zero-seed fallback
         if (isKen) {
           for (const p of KEN_GUARANTEED_PROJECTS) { if (!(p in historical)) historical[p] = { 17: 0 } }
         }
@@ -131,18 +127,15 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           if (!(row.project_name in historical)) historical[row.project_name] = { 17: 0 }
         }
 
-        // Filter out stale KEN keys from existing display
         const filteredExisting = Object.fromEntries(
           Object.entries(existing).filter(([name]) => !KEN_STALE_KEYS.has(name))
         )
 
-        // Build rows to insert — only those not already in Supabase
         const newRows = []
         for (const [project_name, hourMap] of Object.entries(historical)) {
           if (!isRuleProject(facility.id, project_name) && !isKen && !hasCustom) continue
           for (const [h, est_drops] of Object.entries(hourMap)) {
             const hour = Number(h)
-            // Skip if this project+hour already exists in Supabase
             if (filteredExisting[project_name]?.[hour] !== undefined) continue
             newRows.push({ project_name, h: hour, est_drops })
           }
@@ -152,7 +145,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           await insertProjectHourlyDropsIfMissing(facility.id, planDate, newRows)
         }
 
-        // Merge historical into display state: existing rows take priority
         const merged = { ...historical }
         for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
           merged[project_name] = { ...(merged[project_name] ?? {}), ...hourMap }
@@ -230,10 +222,24 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
   }, [rosterState, settings, laneFilter])
 
-  const breakAdjustedTotalHours = useMemo(() => {
+  // Roster-based break-adjusted total — used for side-filtered tabs (1-2 Side / 3.5 Side)
+  // where Omni has no per-side breakdown.
+  const rosterBreakAdjTotal = useMemo(() => {
     if (!rosterState.employees.length || settingsLoading) return 0
     return computeBreakAdjustedTotalHours(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
   }, [rosterState, settings, settingsLoading, laneFilter])
+
+  // Omni-based total: sum rawHourly[].avail (= labor_available_aw_update_ =
+  // adjusted_staffed_employee from Omni's model). Already fetched on every load,
+  // no extra query. Used for the "All" tab KPI pill — matches Omni dashboard exactly.
+  const omniAdjTotalHours = useMemo(() => {
+    if (!rawHourly.length) return 0
+    return r1(rawHourly.reduce((s, r) => s + (r.avail ?? 0), 0))
+  }, [rawHourly])
+
+  // For the KPI pill: use Omni sum on the "all" tab, roster calc on side tabs
+  // (side tabs need per-side scoping which Omni can't provide)
+  const totalHoursForKpi = (isCal2 && sideTab !== 'all') ? rosterBreakAdjTotal : omniAdjTotalHours
 
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
@@ -300,7 +306,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const kpiData = {
     appts: totalInb + totalOut + totalDrops, drops: totalDrops,
     inb: totalInb, out: totalOut, labor: sideHeadcount,
-    totalHours: breakAdjustedTotalHours,
+    totalHours: totalHoursForKpi,
     laborReq: totalLaborReq,
     totalAdj,
     util: util ?? networkKpi?.util, delta: delta ?? networkKpi?.delta,
