@@ -285,11 +285,22 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
 
 const BREAK_MULS = [0.83, 1.00, 0.75, 1.00, 0.50, 1.00, 0.75, 1.00]
 
+/**
+ * Break-adjusted hours for a single employee's shift.
+ * Handles fractional shift lengths (e.g. 8.5h) by running floor(h) full
+ * iterations then adding one partial iteration scaled by the remainder.
+ * BREAK_MULS[i] defaults to 1.0 beyond index 7.
+ */
 function breakAdjustedHours(rawHours) {
-  const h = rawHours != null ? Number(rawHours) : 8
+  const h         = rawHours != null ? Number(rawHours) : 8
+  const fullHours = Math.floor(h)
+  const frac      = h - fullHours
   let total = 0
-  for (let i = 0; i < h; i++) {
+  for (let i = 0; i < fullHours; i++) {
     total += BREAK_MULS[i] ?? 1
+  }
+  if (frac > 0) {
+    total += frac * (BREAK_MULS[fullHours] ?? 1)
   }
   return total
 }

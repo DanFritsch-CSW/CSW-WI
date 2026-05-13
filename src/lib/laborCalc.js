@@ -59,6 +59,25 @@ function parseStartHour(shiftStart) {
 }
 
 /**
+ * Apply break multipliers to a shift of `resolvedHours` length.
+ * Handles fractional hours (e.g. 8.5h) by running floor(h) full iterations
+ * then adding one partial iteration scaled by the remainder.
+ * breakMuls[i] defaults to 1.0 beyond the defined array length.
+ */
+function applyBreakMuls(resolvedHours, breakMuls) {
+  const fullHours = Math.floor(resolvedHours)
+  const frac      = resolvedHours - fullHours
+  let total = 0
+  for (let i = 0; i < fullHours; i++) {
+    total += breakMuls[i] ?? 1
+  }
+  if (frac > 0) {
+    total += frac * (breakMuls[fullHours] ?? 1)
+  }
+  return total
+}
+
+/**
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
  * Operational day = 5am–4:59am. Hours 0–4 (12am–4am) are the TAIL of the
@@ -72,6 +91,8 @@ function parseStartHour(shiftStart) {
  *    22, 23, 0, 1, 2, 3, 4, 5 — the worker is physically present until 6am
  *    so the 5am hour is included.
  * 3. Employees on loan (on_loan_to set) are excluded entirely.
+ * 4. Fractional shift lengths (e.g. 8.5h) are handled correctly — the partial
+ *    hour receives a prorated break multiplier.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
@@ -103,10 +124,18 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     // Exclude shifts starting before the operational day boundary
     if (resolvedStart < OP_DAY_START) continue
 
-    for (let i = 0; i < resolvedHours; i++) {
+    const fullHours = Math.floor(resolvedHours)
+    const frac      = resolvedHours - fullHours
+
+    for (let i = 0; i < fullHours; i++) {
       const hMod = (resolvedStart + i) % 24
       const mul  = breakMuls[i] ?? 1
       hourlyAvail[hMod] += mul
+    }
+    // Partial final hour
+    if (frac > 0) {
+      const hMod = (resolvedStart + fullHours) % 24
+      hourlyAvail[hMod] += frac * (breakMuls[fullHours] ?? 1)
     }
   }
 
@@ -118,6 +147,7 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
  * Excludes employees on loan (on_loan_to set).
  * Excludes shifts starting before OP_DAY_START.
  * All resolvedHours count — no early break when wrapping past midnight.
+ * Fractional shift lengths handled correctly via applyBreakMuls().
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
@@ -147,9 +177,7 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const shiftHours    = rawHours != null ? Number(rawHours) : shiftDefaults.hours
     const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
 
-    for (let i = 0; i < resolvedHours; i++) {
-      total += breakMuls[i] ?? 1
-    }
+    total += applyBreakMuls(resolvedHours, breakMuls)
   }
 
   return Math.round(total * 10) / 10
