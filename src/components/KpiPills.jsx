@@ -5,6 +5,15 @@ function fmtDelta(v) {
 
 function r1(n) { return Math.round(n * 10) / 10 }
 
+function fmtTime(date) {
+  if (!date) return null
+  const h = date.getHours()
+  const m = date.getMinutes()
+  const ampm = h >= 12 ? 'pm' : 'am'
+  const h12 = h % 12 || 12
+  return `${h12}:${String(m).padStart(2, '0')}${ampm}`
+}
+
 function Pill({ label, value, color, delta: deltaVal, highlight }) {
   return (
     <div className="kpill" style={{ borderTopColor: color, borderTopWidth: 2, ...(highlight ? { background: 'var(--brand-bg)', borderColor: 'var(--brand-dim)' } : {}) }}>
@@ -34,6 +43,8 @@ export default function KpiPills({ data, color }) {
     ? (laborAfterAdj >= data.laborReq ? '#3dba7e' : '#e05a5a')
     : color
 
+  const timeLabel = fmtTime(data.fetchedAt)
+
   return (
     <div className="kpi-stack">
 
@@ -41,6 +52,7 @@ export default function KpiPills({ data, color }) {
       <div className="kpi-hero" style={{ borderTopColor: color }}>
         <span className="kpi-hero-label">Total Appointments</span>
         <span className="kpi-hero-value" style={{ color }}>{data.appts ?? '--'}</span>
+        {timeLabel && <span className="kpi-hero-fetched">Data as of {timeLabel}</span>}
         <div className="kpi-hero-glow" style={{ background: color }} />
       </div>
 

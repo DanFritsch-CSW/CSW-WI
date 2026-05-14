@@ -21,6 +21,12 @@ function arrowToRows(table) {
 const RETRY_ATTEMPTS = 2
 const RETRY_DELAY_MS = 500
 
+const NO_CACHE_HEADERS = {
+  'Content-Type': 'application/json',
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  'Pragma': 'no-cache',
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -58,14 +64,14 @@ async function runOmniQuery(query, apiKey) {
 
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: 'Method Not Allowed' }
+    return { statusCode: 405, headers: NO_CACHE_HEADERS, body: 'Method Not Allowed' }
   }
 
   const API_KEY = process.env.OMNI_API_KEY
   if (!API_KEY) {
     return {
       statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: NO_CACHE_HEADERS,
       body: JSON.stringify({ error: 'OMNI_API_KEY not configured' }),
     }
   }
@@ -76,7 +82,7 @@ exports.handler = async (event) => {
   } catch {
     return {
       statusCode: 400,
-      headers: { 'Content-Type': 'application/json' },
+      headers: NO_CACHE_HEADERS,
       body: JSON.stringify({ error: 'Invalid JSON body' }),
     }
   }
@@ -86,7 +92,7 @@ exports.handler = async (event) => {
   if (!result.ok) {
     return {
       statusCode: 502,
-      headers: { 'Content-Type': 'application/json' },
+      headers: NO_CACHE_HEADERS,
       body: JSON.stringify({ error: 'Omni query did not complete', raw: result.raw }),
     }
   }
@@ -98,7 +104,7 @@ exports.handler = async (event) => {
 
   return {
     statusCode: 200,
-    headers: { 'Content-Type': 'application/json' },
+    headers: NO_CACHE_HEADERS,
     body: JSON.stringify({ rows }),
   }
 }

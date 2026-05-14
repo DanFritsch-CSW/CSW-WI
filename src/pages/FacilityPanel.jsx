@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
@@ -26,6 +26,9 @@ const WR_TABS = [
   { id: 'warehouse', label: 'Warehouse' }, { id: 'pickline', label: 'Pickline' },
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
+
+// Minimum gap between auto-refreshes (ms) — prevents hammering Omni on rapid tab switches
+const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000
 
 function r1(n) { return Math.round(n * 10) / 10 }
 
@@ -66,6 +69,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [copyProjects, setCopyProjects] = useState(new Set())
   const [copying, setCopying]           = useState(false)
   const [copyMsg, setCopyMsg]           = useState(null)
+  const [fetchedAt, setFetchedAt]       = useState(null)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -80,10 +84,40 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
+  // Ref to track last auto-refresh time for throttling
+  const lastRefreshRef = useRef(0)
+
+  // ── Refresh just appointment data (lightweight, no EST drops re-seed) ──
+  const refreshAppointments = useCallback(async () => {
+    try {
+      const [apptsResult, projectResult] = await Promise.allSettled([
+        fetchHourlyAppointments(facility.id, planDate),
+        fetchProjectData(facility.id, planDate),
+      ])
+      if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
+      if (projectResult.status === 'fulfilled') setProjects(projectResult.value)
+      setFetchedAt(new Date())
+    } catch { /* non-fatal */ }
+  }, [facility.id, planDate])
+
+  // ── Auto-refresh on tab/window focus ──
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState !== 'visible') return
+      const now = Date.now()
+      if (now - lastRefreshRef.current < AUTO_REFRESH_MIN_GAP_MS) return
+      lastRefreshRef.current = now
+      refreshAppointments()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [refreshAppointments])
+
   useEffect(() => {
     let cancelled = false
     setRawHourly([]); setHourlyAppts({}); setHourlyErr(null); setProjects([])
     setProjectHourlyDrops({}); setHourlyAdjustments({}); setSideHourlyAppts({}); setActiveInventory(null)
+    setFetchedAt(null)
 
     async function loadData() {
       const customRows = await loadCustomDropRules(facility.id)
@@ -97,6 +131,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       if (hourlyResult.status === 'fulfilled') setRawHourly(hourlyResult.value)
       else setHourlyErr(hourlyResult.reason?.message ?? 'Failed to load hourly data')
       if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
+      setFetchedAt(new Date())
+      lastRefreshRef.current = Date.now()
 
       let fetchedProjects = []
       try { fetchedProjects = await fetchProjectData(facility.id, planDate); if (!cancelled) setProjects(fetchedProjects) }
@@ -296,6 +332,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     laborReq: totalLaborReq,
     totalAdj,
     util: util ?? networkKpi?.util, delta: delta ?? networkKpi?.delta,
+    fetchedAt,
   }
 
   const hasDropData = Object.keys(projectHourlyDrops).length > 0
