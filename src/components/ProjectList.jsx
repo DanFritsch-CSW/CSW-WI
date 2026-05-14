@@ -7,7 +7,8 @@
 export default function ProjectList({ projects, projectDrops = {}, color, inventoryData = null }) {
   if (!projects?.length) return null
 
-  const named      = projects.filter(p => p.name && p.tot > 0)
+  // Include named projects that have appointments OR EST drops (e.g. BossBites before first appointment)
+  const named      = projects.filter(p => p.name && (p.tot > 0 || (projectDrops[p.name] ?? 0) > 0))
   const unassigned = projects.filter(p => !p.name && p.tot > 0)
   const unassignedInb = unassigned.reduce((s, p) => s + p.inb, 0)
   const unassignedOut = unassigned.reduce((s, p) => s + p.out, 0)
@@ -58,7 +59,7 @@ export default function ProjectList({ projects, projectDrops = {}, color, invent
                   <span className="project-num">{estVal}</span>
                   <span className="project-num">{p.inb}</span>
                   <span className="project-num">{p.out}</span>
-                  <span className="project-num" style={{ color }}>{p.tot}</span>
+                  <span className="project-num" style={{ color }}>{p.tot || '—'}</span>
                 </div>
               )
             })}
@@ -131,9 +132,9 @@ export default function ProjectList({ projects, projectDrops = {}, color, invent
               <span className="project-name">{p.name}</span>
             </div>
             <span className="project-num">{estVal}</span>
-            <span className="project-num">{p.inb}</span>
-            <span className="project-num">{p.out}</span>
-            <span className="project-num" style={{ color }}>{p.tot}</span>
+            <span className="project-num">{p.inb || '—'}</span>
+            <span className="project-num">{p.out || '—'}</span>
+            <span className="project-num" style={{ color: p.tot ? color : 'var(--text-dim)' }}>{p.tot || '—'}</span>
           </div>
         )
       })}
