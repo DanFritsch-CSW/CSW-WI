@@ -63,6 +63,20 @@ function apptStatusFilter() {
   }
 }
 
+// Hours 0–4 in the hourly table represent the overnight tail (next calendar
+// day's early morning).  Appointment queries use TIME_FOR_UNIT_DURATION which
+// returns a single calendar day, so hours 0–4 from the plan-date query are
+// actually the *current* day's early morning — not the next day's.  We fix
+// this by making a second query for the next calendar day and overlaying
+// only the 0–4 hour results.
+const OVERNIGHT_HOURS = new Set([0, 1, 2, 3, 4])
+
+function nextDayISO(date) {
+  const d = new Date(date + 'T00:00:00Z')
+  d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
 function scheduledArrivalDateFilter(date) {
   return {
     [`${VIEW_APPT}.scheduled_arrival`]: {
@@ -280,7 +294,61 @@ function stripWarehouseSuffix(name) {
   return name
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────────────────────────
+// ── Shared helper: fetch appointments and bucket by hour, skipping/overlaying overnight ──
+
+async function fetchApptHourMap(filters, date) {
+  const rows = await omniQuery({
+    modelId: GOLD_MODEL_ID, table: VIEW_APPT,
+    fields: [
+      `${VIEW_APPT}.scheduled_arrival`,
+      `${VIEW_APPT}.dock_appointment_type_name`,
+      `${VIEW_APPT}.count`,
+    ],
+    filters: { ...filters, ...scheduledArrivalDateFilter(date), ...apptStatusFilter() },
+    sorts: [], limit: 1000,
+  })
+
+  const hourMap = {}
+  for (const r of rows) {
+    const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
+    if (OVERNIGHT_HOURS.has(h)) continue   // skip plan-date's own 0–4am
+    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
+    const count = Number(r[`${VIEW_APPT}.count`]) || 0
+    if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
+    if (dir === 'inbound')  hourMap[h].inb += count
+    if (dir === 'outbound') hourMap[h].out += count
+  }
+
+  // Overlay next calendar day's hours 0–4 (the operational overnight tail)
+  try {
+    const nextDay = nextDayISO(date)
+    const overnightRows = await omniQuery({
+      modelId: GOLD_MODEL_ID, table: VIEW_APPT,
+      fields: [
+        `${VIEW_APPT}.scheduled_arrival`,
+        `${VIEW_APPT}.dock_appointment_type_name`,
+        `${VIEW_APPT}.count`,
+      ],
+      filters: { ...filters, ...scheduledArrivalDateFilter(nextDay), ...apptStatusFilter() },
+      sorts: [], limit: 1000,
+    })
+    for (const r of overnightRows) {
+      const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
+      if (!OVERNIGHT_HOURS.has(h)) continue
+      const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
+      const count = Number(r[`${VIEW_APPT}.count`]) || 0
+      if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
+      if (dir === 'inbound')  hourMap[h].inb += count
+      if (dir === 'outbound') hourMap[h].out += count
+    }
+  } catch (e) {
+    console.warn('Overnight appointment fetch failed (non-fatal):', e.message)
+  }
+
+  return hourMap
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────────────────────
 
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
@@ -315,32 +383,10 @@ export async function fetchHourlyData(facilityId, date) {
 export async function fetchHourlyAppointments(facilityId, date) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
-  const rows = await omniQuery({
-    modelId: GOLD_MODEL_ID,
-    table: VIEW_APPT,
-    fields: [
-      `${VIEW_APPT}.scheduled_arrival`,
-      `${VIEW_APPT}.dock_appointment_type_name`,
-      `${VIEW_APPT}.count`,
-    ],
-    filters: {
-      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...scheduledArrivalDateFilter(date),
-      ...apptStatusFilter(),
-    },
-    sorts: [],
-    limit: 1000,
-  })
-  const hourMap = {}
-  for (const r of rows) {
-    const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
-    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
-    const count = Number(r[`${VIEW_APPT}.count`]) || 0
-    if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
-    if (dir === 'inbound')  hourMap[h].inb += count
-    if (dir === 'outbound') hourMap[h].out += count
-  }
-  return hourMap
+  return fetchApptHourMap(
+    { [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] } },
+    date
+  )
 }
 
 export async function fetchProjectData(facilityId, date) {
@@ -383,33 +429,13 @@ export async function fetchProjectData(facilityId, date) {
 export async function fetchProjectHourlyAppointments(facilityId, date, projectNames) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh || !projectNames?.length) return {}
-  const rows = await omniQuery({
-    modelId: GOLD_MODEL_ID,
-    table: VIEW_APPT,
-    fields: [
-      `${VIEW_APPT}.scheduled_arrival`,
-      `${VIEW_APPT}.dock_appointment_type_name`,
-      `${VIEW_APPT}.count`,
-    ],
-    filters: {
+  return fetchApptHourMap(
+    {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
       [`${VIEW_APPT}.project_name`]:   { kind: 'EQUALS', type: 'string', values: projectNames },
-      ...scheduledArrivalDateFilter(date),
-      ...apptStatusFilter(),
     },
-    sorts: [],
-    limit: 1000,
-  })
-  const hourMap = {}
-  for (const r of rows) {
-    const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
-    const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
-    const count = Number(r[`${VIEW_APPT}.count`]) || 0
-    if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
-    if (dir === 'inbound')  hourMap[h].inb += count
-    if (dir === 'outbound') hourMap[h].out += count
-  }
-  return hourMap
+    date
+  )
 }
 
 export async function fetchNetworkKpis(date) {
@@ -814,7 +840,7 @@ export async function fetchB2eRoster(facilityId, date) {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// ── fetchWrPickers: job code 206 employees at Wisconsin Rapids ────────────────────────
+// ── fetchWrPickers: job code 206 employees at Wisconsin Rapids ────────────────────
 // Separate from fetchB2eRoster (which fetches job code 205 warehousemen).
 // Returns { id, name } array for the picker roster board.
 export async function fetchWrPickers(date) {
