@@ -274,6 +274,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return result
   }, [visibleProjectHourlyDrops])
 
+  // ── Merge Omni appointment projects with EST-drops-only projects ──
+  // Projects that have EST drops but no Omni appointments still appear in the
+  // project list (e.g. BossBites before its first real appointment is scheduled).
+  // They show inb:0, out:0, tot:0 with their drop count visible in Est Drops.
+  const mergedProjects = useMemo(() => {
+    const apptNames = new Set(visibleProjects.map(p => p.name))
+    const dropsOnlyRows = Object.keys(projectDrops)
+      .filter(name => name && !apptNames.has(name) && (projectDrops[name] ?? 0) > 0)
+      .map(name => ({ name, inb: 0, out: 0, tot: 0 }))
+    if (!dropsOnlyRows.length) return visibleProjects
+    return [...visibleProjects, ...dropsOnlyRows]
+  }, [visibleProjects, projectDrops])
+
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops))
@@ -354,7 +367,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         <KpiPills data={kpiData} color={facility.color} />
         <div>
           <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
-          <ProjectList projects={visibleProjects} projectDrops={projectDrops} color={facility.color}
+          <ProjectList projects={mergedProjects} projectDrops={projectDrops} color={facility.color}
             inventoryData={isMad ? activeInventory : null} />
         </div>
       </div>
