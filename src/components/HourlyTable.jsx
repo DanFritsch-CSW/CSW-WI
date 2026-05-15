@@ -11,7 +11,6 @@ function r1(n) { return Math.round(n * 10) / 10 }
 function r2(n) { return Math.round(n * 100) / 100 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
 function fmtContribution(c) {
-  // Show 1.0 for full hours, decimal for partials (0.5, 0.25, 0.75 etc.)
   if (c >= 1) return '1.0'
   return r2(c).toString()
 }
@@ -79,8 +78,6 @@ const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigat
 })
 
 // StaffedCell — click to open popover with names of employees on clock that hour.
-// Each name shows its per-hour contribution (1.0 for full hour, <1.0 for partials).
-// Used in the Raw Staffed column to reconcile against Omni's Raw Staffed Employee.
 function StaffedCell({ value, entries, hour, openHour, setOpenHour }) {
   const popoverRef = useRef(null)
   const triggerRef = useRef(null)
@@ -154,11 +151,8 @@ export default function HourlyTable({
   color,
 }) {
   const [expanded, setExpanded] = useState(false)
-  // compact=true hides EST Drops, Inb, Out columns (default for screenshots)
   const [compact, setCompact] = useState(true)
-  // openStaffedHour: which hour's popover is open (single open at a time)
   const [openStaffedHour, setOpenStaffedHour] = useState(null)
-  // cellRefs[projIdx][rowIdx] = ref to the visible EditableCell span
   const cellRefs = useRef({})
 
   const getCellRef = useCallback((projIdx, rowIdx) => el => {
@@ -197,14 +191,19 @@ export default function HourlyTable({
     const adj = hourlyAdjustments[r.h] ?? 0
     const final = r1((r.avail + adj) - r.req)
     cumul = r1(cumul + final)
-    return { ...r, adj, final, cumul, est: estDrops[r.h] ?? null, staffed: showStaffed ? (staffedHourly[r.h] ?? 0) : null }
+    // est: round to integer for display (stored as decimal for req math accuracy)
+    const estRaw = estDrops[r.h] ?? null
+    const est = estRaw !== null ? Math.round(estRaw) : null
+    // appts: always integer — inb + out are already integers, est drop is rounded
+    const appts = Math.round(r.appts)
+    return { ...r, adj, final, cumul, est, appts, staffed: showStaffed ? (staffedHourly[r.h] ?? 0) : null }
   })
 
   const tot = {
-    est:   rows.reduce((s, r) => s + (r.est ?? 0), 0),
+    est:   Math.round(rows.reduce((s, r) => s + (r.est ?? 0), 0)),
     inb:   rows.reduce((s, r) => s + r.inb,   0),
     out:   rows.reduce((s, r) => s + r.out,   0),
-    appts: rows.reduce((s, r) => s + r.appts, 0),
+    appts: Math.round(rows.reduce((s, r) => s + r.appts, 0)),
     req:   r1(rows.reduce((s, r) => s + r.req,   0)),
     avail: r1(rows.reduce((s, r) => s + r.avail, 0)),
     adj:   rows.reduce((s, r) => s + r.adj, 0),
@@ -214,7 +213,7 @@ export default function HourlyTable({
 
   const projectTotals = {}
   for (const p of projects)
-    projectTotals[p] = Object.values(projectHourlyDrops[p] ?? {}).reduce((s, v) => s + v, 0)
+    projectTotals[p] = Math.round(Object.values(projectHourlyDrops[p] ?? {}).reduce((s, v) => s + v, 0))
 
   const numRows = rows.length
   const numProjects = projects.length

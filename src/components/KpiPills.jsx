@@ -45,13 +45,16 @@ export default function KpiPills({ data, color }) {
 
   const timeLabel = fmtTime(data.fetchedAt)
 
+  // Total appointments is always an integer — fractions of appointments don't exist.
+  const totalAppts = data.appts != null ? Math.round(data.appts) : '--'
+
   return (
     <div className="kpi-stack">
 
       {/* Row 1 — hero: Total Appointments */}
       <div className="kpi-hero" style={{ borderTopColor: color }}>
         <span className="kpi-hero-label">Total Appointments</span>
-        <span className="kpi-hero-value" style={{ color }}>{data.appts ?? '--'}</span>
+        <span className="kpi-hero-value" style={{ color }}>{totalAppts}</span>
         {timeLabel && <span className="kpi-hero-fetched">Data as of {timeLabel}</span>}
         <div className="kpi-hero-glow" style={{ background: color }} />
       </div>
