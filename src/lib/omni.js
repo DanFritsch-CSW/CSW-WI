@@ -399,50 +399,80 @@ export async function fetchHourlyData(facilityId, date) {
 
 // ── KEN v2 / Diagnostic Mirror ──────────────────────────────────────────────────
 //
-// Fetches only the columns that are actually live in hourly_labor_required_vs_available:
-//   - labor_required (from Datex appointments, always current)
-//   - inbound_count, outbound_count, drops, total_appointments (same)
+// Mirrors the Omni dashboard table for KEN v2. Queries ALL columns from
+// hourly_labor_required_vs_available using activity_date (a real base column),
+// then client-side filters to the 5am→5am operational window — replicating
+// exactly what Omni's labor_shift_timestamp virtual field does in the dashboard SQL.
 //
-// NOTE: raw_staffed_employee, adjusted_staffed_employee, employees_on_break,
-// warehouse_labor_adjustment, and labor_available_aw_update_ are computed by
-// Omni's model layer from B2E joins. They exist in the workbook UI via Omni's
-// dynamic join, but are only materialized in the base MotherDuck table for
-// past dates after nightly jobs run. Querying them via the API returns zeros
-// for current and future dates. Staffed/avail is computed client-side in
-// KenV2Panel from the live B2E roster instead.
+// Two queries: activity_date = date (hours 5-23) + activity_date = nextDay (hours 0-4).
+// Returns all columns: raw_staffed, adj_staffed, breaks, wh_adj, labor_avail,
+// labor_avail_aw, labor_req, inb, out, drops, total_appts.
 export async function fetchOmniLaborFullRow(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
   if (!wh) return []
-  const rows = await omniQuery({
-    modelId: MODEL_ID,
-    table: VIEW_H,
-    fields: [
-      `${VIEW_H}.hour_of_day_timestamp`,
-      `${VIEW_H}.labor_required`,
-      `${VIEW_H}.inbound_count`,
-      `${VIEW_H}.outbound_count`,
-      `${VIEW_H}.drops`,
-      `${VIEW_H}.total_appointments`,
-    ],
-    filters: {
-      [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      [`${VIEW_H}.labor_shift_timestamp`]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: date, is_negative: false,
-        offset_interval_string: '0 days',
-      },
-    },
-    sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
-    limit: 100,
+
+  const FIELDS = [
+    `${VIEW_H}.hour_of_day_timestamp`,
+    `${VIEW_H}.raw_staffed_employee`,
+    `${VIEW_H}.adjusted_staffed_employee`,
+    `${VIEW_H}.employees_on_break`,
+    `${VIEW_H}.warehouse_labor_adjustment`,
+    `${VIEW_H}.labor_available`,
+    `${VIEW_H}.labor_available_aw_update_`,
+    `${VIEW_H}.labor_required`,
+    `${VIEW_H}.inbound_count`,
+    `${VIEW_H}.outbound_count`,
+    `${VIEW_H}.drops`,
+    `${VIEW_H}.total_appointments`,
+  ]
+
+  const warehouseFilter = {
+    [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+  }
+
+  // Fetch hours 5-23 from the target date, and hours 0-4 from the next day.
+  // This replicates the labor_shift_timestamp 5am→5am window.
+  const [dayRows, nextDayRows] = await Promise.all([
+    omniQuery({
+      modelId: MODEL_ID, table: VIEW_H, fields: FIELDS,
+      filters: { ...warehouseFilter, ...activityDateFilter(date) },
+      sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
+      limit: 100,
+    }),
+    omniQuery({
+      modelId: MODEL_ID, table: VIEW_H, fields: FIELDS,
+      filters: { ...warehouseFilter, ...activityDateFilter(nextDayISO(date)) },
+      sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
+      limit: 100,
+    }).catch(() => []),
+  ])
+
+  const parseRow = r => ({
+    h:          tsToHour(r[`${VIEW_H}.hour_of_day_timestamp`]),
+    rawStaffed: Number(r[`${VIEW_H}.raw_staffed_employee`])       || 0,
+    adjStaffed: Number(r[`${VIEW_H}.adjusted_staffed_employee`])  || 0,
+    breaks:     Number(r[`${VIEW_H}.employees_on_break`])         || 0,
+    whAdj:      Number(r[`${VIEW_H}.warehouse_labor_adjustment`]) || 0,
+    avail:      Number(r[`${VIEW_H}.labor_available`])            || 0,
+    availAw:    Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
+    req:        Number(r[`${VIEW_H}.labor_required`])             || 0,
+    inb:        Number(r[`${VIEW_H}.inbound_count`])              || 0,
+    out:        Number(r[`${VIEW_H}.outbound_count`])             || 0,
+    drops:      Number(r[`${VIEW_H}.drops`])                      || 0,
+    appts:      Number(r[`${VIEW_H}.total_appointments`])         || 0,
   })
-  return rows.map(r => ({
-    h:     tsToHour(r[`${VIEW_H}.hour_of_day_timestamp`]),
-    req:   Number(r[`${VIEW_H}.labor_required`])      || 0,
-    inb:   Number(r[`${VIEW_H}.inbound_count`])       || 0,
-    out:   Number(r[`${VIEW_H}.outbound_count`])      || 0,
-    drops: Number(r[`${VIEW_H}.drops`])               || 0,
-    appts: Number(r[`${VIEW_H}.total_appointments`])  || 0,
-  }))
+
+  // Hours 5-23: from the target date
+  const dayParsed = dayRows.map(parseRow).filter(r => r.h >= 5)
+  // Hours 0-4: from the next day (the overnight tail of the operational day)
+  const overnightParsed = nextDayRows.map(parseRow).filter(r => OVERNIGHT_HOURS.has(r.h))
+
+  return [...dayParsed, ...overnightParsed]
+    .sort((a, b) => {
+      const sa = a.h < 5 ? a.h + 24 : a.h
+      const sb = b.h < 5 ? b.h + 24 : b.h
+      return sa - sb
+    })
 }
 
 export async function fetchHourlyAppointments(facilityId, date) {
