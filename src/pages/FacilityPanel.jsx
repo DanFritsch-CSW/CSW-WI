@@ -27,7 +27,6 @@ const WR_TABS = [
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
-// Minimum gap between auto-refreshes (ms) — prevents hammering Omni on rapid tab switches
 const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000
 
 function r1(n) { return Math.round(n * 10) / 10 }
@@ -54,6 +53,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
   const [hourlyErr, setHourlyErr]           = useState(null)
+  const [omniWarning, setOmniWarning]       = useState(null)
   const [projects, setProjects]             = useState([])
   const [laborCount, setLaborCount]         = useState(0)
   const [rosterState, setRosterState]       = useState({ employees: [], laneMap: {}, assignmentMap: {} })
@@ -70,6 +70,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [copying, setCopying]           = useState(false)
   const [copyMsg, setCopyMsg]           = useState(null)
   const [fetchedAt, setFetchedAt]       = useState(null)
+  const [retryNonce, setRetryNonce]     = useState(0)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -84,10 +85,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const { settings, loading: settingsLoading } = useSettings(facility.id)
 
-  // Ref to track last auto-refresh time for throttling
   const lastRefreshRef = useRef(0)
 
-  // ── Refresh just appointment data (lightweight, no EST drops re-seed) ──
   const refreshAppointments = useCallback(async () => {
     try {
       const [apptsResult, projectResult] = await Promise.allSettled([
@@ -100,7 +99,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     } catch { /* non-fatal */ }
   }, [facility.id, planDate])
 
-  // ── Auto-refresh on tab/window focus ──
   useEffect(() => {
     function handleVisibility() {
       if (document.visibilityState !== 'visible') return
@@ -115,35 +113,62 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   useEffect(() => {
     let cancelled = false
-    setRawHourly([]); setHourlyAppts({}); setHourlyErr(null); setProjects([])
+    setRawHourly([]); setHourlyAppts({}); setHourlyErr(null); setOmniWarning(null); setProjects([])
     setProjectHourlyDrops({}); setHourlyAdjustments({}); setSideHourlyAppts({}); setActiveInventory(null)
     setFetchedAt(null)
 
     async function loadData() {
-      const customRows = await loadCustomDropRules(facility.id)
+      let omniFailures = []
+
+      const customRows = await loadCustomDropRules(facility.id).catch(() => [])
       if (!cancelled) setCustomDropProjects(customRows)
 
+      // ── Phase 1: critical core data (hourly + appointments) ──
+      // These two queries drive the table, chart, and KPI pills. If either fails,
+      // we don't 502 the whole page — we render empty data and show a retry banner.
       const [hourlyResult, apptsResult] = await Promise.allSettled([
         fetchHourlyData(facility.id, planDate),
         fetchHourlyAppointments(facility.id, planDate),
       ])
       if (cancelled) return
-      if (hourlyResult.status === 'fulfilled') setRawHourly(hourlyResult.value)
-      else setHourlyErr(hourlyResult.reason?.message ?? 'Failed to load hourly data')
-      if (apptsResult.status === 'fulfilled') setHourlyAppts(apptsResult.value)
+
+      if (hourlyResult.status === 'fulfilled') {
+        setRawHourly(hourlyResult.value)
+      } else {
+        omniFailures.push('hourly labor data')
+        console.warn('fetchHourlyData failed:', hourlyResult.reason?.message)
+      }
+      if (apptsResult.status === 'fulfilled') {
+        setHourlyAppts(apptsResult.value)
+      } else {
+        omniFailures.push('appointment counts')
+        console.warn('fetchHourlyAppointments failed:', apptsResult.reason?.message)
+      }
       setFetchedAt(new Date())
       lastRefreshRef.current = Date.now()
 
+      // ── Phase 2: project list (non-critical, used for project breakdown) ──
       let fetchedProjects = []
-      try { fetchedProjects = await fetchProjectData(facility.id, planDate); if (!cancelled) setProjects(fetchedProjects) }
-      catch { /* non-fatal */ }
+      try {
+        fetchedProjects = await fetchProjectData(facility.id, planDate)
+        if (!cancelled) setProjects(fetchedProjects)
+      } catch (e) {
+        omniFailures.push('project list')
+        console.warn('fetchProjectData failed:', e.message)
+      }
       if (cancelled) return
 
       if (isMad) {
         fetchActiveInventory(facility.id).then(d => { if (!cancelled) setActiveInventory(d) }).catch(() => { if (!cancelled) setActiveInventory([]) })
       }
-      fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) })
+      fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) }).catch(() => {})
 
+      // Surface a single consolidated warning to the user if any Phase 1/2 failed
+      if (!cancelled && omniFailures.length > 0) {
+        setOmniWarning(`Omni couldn't load: ${omniFailures.join(', ')}. Showing empty data — click Retry to try again.`)
+      }
+
+      // ── Phase 3: EST drops seeding (heaviest, already wrapped in try/catch) ──
       const hasCustom = customRows.length > 0
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
@@ -189,6 +214,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         if (!cancelled) setProjectHourlyDrops(merged)
       } catch (e) {
         console.error('EST drops seed error:', e)
+        // Still load any existing EST drops even if historical seed failed
+        try {
+          const existing = await fetchProjectHourlyDrops(facility.id, planDate)
+          if (!cancelled && Object.keys(existing).length > 0) setProjectHourlyDrops(existing)
+        } catch { /* really nothing to do */ }
       } finally {
         if (!cancelled) setSeedingDrops(false)
       }
@@ -196,7 +226,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
     loadData()
     return () => { cancelled = true }
-  }, [facility.id, planDate, isMad, isKen])
+  }, [facility.id, planDate, isMad, isKen, retryNonce])
 
   function openCopy() {
     const names = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
@@ -258,7 +288,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
   }, [rosterState, settings, laneFilter])
 
-  // Raw staffed headcount (no break math) + per-hour name lists for drill-down
   const rosterStaffed = useMemo(() => {
     if (!rosterState.employees.length) return null
     return buildRosterStaffedHeadcount(rosterState.employees, rosterState.laneMap, rosterState.assignmentMap, laneFilter)
@@ -280,10 +309,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return result
   }, [visibleProjectHourlyDrops])
 
-  // ── Merge Omni appointment projects with EST-drops-only projects ──
-  // Projects that have EST drops but no Omni appointments still appear in the
-  // project list (e.g. BossBites before its first real appointment is scheduled).
-  // They show inb:0, out:0, tot:0 with their drop count visible in Est Drops.
   const mergedProjects = useMemo(() => {
     const apptNames = new Set(visibleProjects.map(p => p.name))
     const dropsOnlyRows = Object.keys(projectDrops)
@@ -322,9 +347,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const totalLaborReq = useMemo(() => r1(hourly.reduce((s, r) => s + (r.req ?? 0), 0)), [hourly])
   const totalAdj      = useMemo(() => Object.values(hourlyAdjustments).reduce((s, v) => s + v, 0), [hourlyAdjustments])
 
-  // Single source of truth: sum hourly[].avail — same array that drives the
-  // table Labour Avail column and the chart. Pill, table total, and Daily +/-
-  // all derive from the same number so they are always consistent.
   const totalHoursAvail = useMemo(() => r1(hourly.reduce((s, r) => s + (r.avail ?? 0), 0)), [hourly])
 
   useEffect(() => {
@@ -366,6 +388,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
               className={`cal2-tab${sideTab === t.id ? ' active' : ''}`}
               onClick={() => setSideTab(t.id)}>{t.label}</button>
           ))}
+        </div>
+      )}
+
+      {omniWarning && (
+        <div className="omni-warning-banner">
+          <span className="omni-warning-icon">⚠</span>
+          <span className="omni-warning-text">{omniWarning}</span>
+          <button className="omni-warning-retry" onClick={() => { setOmniWarning(null); setRetryNonce(n => n + 1) }}>Retry</button>
         </div>
       )}
 

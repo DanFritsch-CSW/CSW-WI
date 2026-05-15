@@ -63,12 +63,6 @@ function apptStatusFilter() {
   }
 }
 
-// Hours 0–4 in the hourly table represent the overnight tail (next calendar
-// day's early morning).  Appointment queries use TIME_FOR_UNIT_DURATION which
-// returns a single calendar day, so hours 0–4 from the plan-date query are
-// actually the *current* day's early morning — not the next day's.  We fix
-// this by making a second query for the next calendar day and overlaying
-// only the 0–4 hour results.
 const OVERNIGHT_HOURS = new Set([0, 1, 2, 3, 4])
 
 function nextDayISO(date) {
@@ -251,16 +245,40 @@ function computeShiftHours(startTime, endTime) {
   return hours > 0 ? Math.round(hours * 2) / 2 : null
 }
 
-async function omniQuery(query) {
-  const res = await fetch('/.netlify/functions/omni-query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: { version: 5, ...query } }),
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`omni-query ${res.status}: ${text}`)
+// Custom error class — lets callers distinguish Omni timeouts from other failures
+// and short-circuit retry storms (e.g. if KEN historical drops timeouts, don't keep
+// retrying every other Omni call too).
+export class OmniQueryError extends Error {
+  constructor(message, { status, timedOut, reason } = {}) {
+    super(message)
+    this.name     = 'OmniQueryError'
+    this.status   = status   ?? null
+    this.timedOut = timedOut ?? false
+    this.reason   = reason   ?? null
   }
+}
+
+async function omniQuery(query) {
+  let res
+  try {
+    res = await fetch('/.netlify/functions/omni-query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: { version: 5, ...query } }),
+    })
+  } catch (e) {
+    throw new OmniQueryError(`Network error reaching omni-query: ${e.message}`, { status: 0 })
+  }
+
+  if (!res.ok) {
+    let body = {}
+    try { body = await res.json() } catch { /* non-json */ }
+    throw new OmniQueryError(
+      body.error || `omni-query ${res.status}`,
+      { status: res.status, timedOut: body.timedOut === true, reason: body.reason }
+    )
+  }
+
   const { rows } = await res.json()
   return rows
 }
@@ -311,7 +329,7 @@ async function fetchApptHourMap(filters, date) {
   const hourMap = {}
   for (const r of rows) {
     const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
-    if (OVERNIGHT_HOURS.has(h)) continue   // skip plan-date's own 0–4am
+    if (OVERNIGHT_HOURS.has(h)) continue
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
     const count = Number(r[`${VIEW_APPT}.count`]) || 0
     if (!hourMap[h]) hourMap[h] = { inb: 0, out: 0 }
@@ -319,7 +337,6 @@ async function fetchApptHourMap(filters, date) {
     if (dir === 'outbound') hourMap[h].out += count
   }
 
-  // Overlay next calendar day's hours 0–4 (the operational overnight tail)
   try {
     const nextDay = nextDayISO(date)
     const overnightRows = await omniQuery({
@@ -348,7 +365,7 @@ async function fetchApptHourMap(filters, date) {
   return hourMap
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────────────────────
+// ── Public API ─────────────────────────────────────────────────────────────────────
 
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
@@ -708,13 +725,6 @@ async function fetchCal2DockAssignments() {
   return new Map(data.map(e => [String(e.id), e.default_lane]))
 }
 
-/**
- * Fetches employees with approved time off (PTO, FMLA, Bereavement, etc.) for a
- * given facility and date from B2E. Job code 205 only (matches roster sync filter).
- *
- * Returns a Map<employeeId (string), timeOffLabel (string)>
- * e.g. Map { '704' => 'FMLA', '973' => 'PTO' }
- */
 export async function fetchB2eTimeOff(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return new Map()
@@ -742,7 +752,6 @@ export async function fetchB2eTimeOff(facilityId, date) {
     for (const r of rows) {
       const id    = String(r[`${TIME_OFF}.employee_id`])
       const name  = r[`${TIME_OFF}.time_off_name`] || 'PTO'
-      // Normalize to short display label
       const label = name.toLowerCase().includes('fmla')   ? 'FMLA'
                   : name.toLowerCase().includes('unpaid') ? 'Unpaid'
                   : name.toLowerCase().includes('bereavement') ? 'Bereave'
@@ -840,9 +849,6 @@ export async function fetchB2eRoster(facilityId, date) {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// ── fetchWrPickers: job code 206 employees at Wisconsin Rapids ────────────────────
-// Separate from fetchB2eRoster (which fetches job code 205 warehousemen).
-// Returns { id, name } array for the picker roster board.
 export async function fetchWrPickers(date) {
   const location = B2E_LOCATION['wr']
   const refDate  = date || new Date().toISOString().slice(0, 10)

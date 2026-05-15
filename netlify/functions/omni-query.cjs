@@ -21,6 +21,19 @@ function arrowToRows(table) {
 const RETRY_ATTEMPTS = 2
 const RETRY_DELAY_MS = 500
 
+// Tell Omni: "work on this query for up to 20 seconds before giving up."
+// Omni's API default is shorter — explicitly setting this means many queries
+// that currently fail-and-retry will now succeed on the first attempt.
+const OMNI_QUERY_TIMEOUT_SEC = 20
+
+// Hard ceiling — stop attempting new retries this many ms before the Netlify
+// function timeout fires. Netlify kills the process at the timeout boundary and
+// returns an empty response (raw: "") to the client. Bailing out a few seconds
+// early lets us return a structured 502 with a useful error message instead.
+const FUNCTION_TIMEOUT_MS = 26000
+const SAFETY_MARGIN_MS    = 3500
+const HARD_DEADLINE_MS    = FUNCTION_TIMEOUT_MS - SAFETY_MARGIN_MS
+
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
   'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -31,18 +44,45 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function runOmniQuery(query, apiKey) {
+async function runOmniQuery(query, apiKey, startTime) {
+  // Inject per-query Omni-side timeout so Omni waits longer before bailing.
+  // Omni accepts `timeout` as a top-level field on the query body in seconds.
+  const queryWithTimeout = { ...query, timeout: OMNI_QUERY_TIMEOUT_SEC }
+
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(RETRY_DELAY_MS)
 
-    const omniRes = await fetch('https://csw.omniapp.co/api/v1/query/run', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ query }),
-    })
+    // Bail out if we're about to hit the Netlify function timeout. Better to
+    // return a structured 502 than to let the process get killed mid-stream.
+    const elapsed = Date.now() - startTime
+    if (elapsed >= HARD_DEADLINE_MS) {
+      return {
+        ok: false,
+        raw: '',
+        timedOut: true,
+        reason: 'netlify_function_deadline',
+        elapsed,
+        attempts: attempt,
+      }
+    }
+
+    let omniRes
+    try {
+      omniRes = await fetch('https://csw.omniapp.co/api/v1/query/run', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query: queryWithTimeout }),
+      })
+    } catch (e) {
+      // Network error reaching Omni — retry if attempts remain.
+      if (attempt === RETRY_ATTEMPTS) {
+        return { ok: false, raw: `network error: ${e.message}`, timedOut: false }
+      }
+      continue
+    }
 
     const text = await omniRes.text()
     let completeJob = null
@@ -56,13 +96,17 @@ async function runOmniQuery(query, apiKey) {
       } catch { /* skip malformed lines */ }
     }
 
-    if (completeJob) return { ok: true, job: completeJob }
+    if (completeJob) return { ok: true, job: completeJob, attempts: attempt + 1 }
     if (!timedOut) return { ok: false, raw: text.slice(0, 500) }
-    if (attempt === RETRY_ATTEMPTS) return { ok: false, raw: text.slice(0, 500), timedOut: true }
+    if (attempt === RETRY_ATTEMPTS) {
+      return { ok: false, raw: text.slice(0, 500), timedOut: true, attempts: attempt + 1 }
+    }
   }
 }
 
 exports.handler = async (event) => {
+  const startTime = Date.now()
+
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, headers: NO_CACHE_HEADERS, body: 'Method Not Allowed' }
   }
@@ -87,13 +131,20 @@ exports.handler = async (event) => {
     }
   }
 
-  const result = await runOmniQuery(query, API_KEY)
+  const result = await runOmniQuery(query, API_KEY, startTime)
 
   if (!result.ok) {
     return {
       statusCode: 502,
       headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: 'Omni query did not complete', raw: result.raw }),
+      body: JSON.stringify({
+        error: 'Omni query did not complete',
+        raw: result.raw,
+        timedOut: result.timedOut === true,
+        reason: result.reason ?? null,
+        elapsedMs: Date.now() - startTime,
+        attempts: result.attempts ?? null,
+      }),
     }
   }
 

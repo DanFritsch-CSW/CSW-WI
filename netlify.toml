@@ -6,6 +6,13 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
+# Bump omni-query timeout from default 10s to 26s (Netlify max for synchronous functions).
+# KEN's facility load fires the heaviest Omni query batch and during periods of Omni
+# slowness can exceed the 10s default. The internal retry-on-timeout logic in
+# omni-query.cjs needs room to actually retry before the function process is killed.
+[functions."omni-query"]
+  timeout = 26
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
