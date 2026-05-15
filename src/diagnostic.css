@@ -1,0 +1,23 @@
+/* Diagnostic mirror tabs — KEN v2 etc.
+ * Visual conventions to distinguish "pure Omni mirror" diagnostic tabs from
+ * regular facility tabs in the LaborPlanning tab strip, plus the amber-warn
+ * delta state for the Omni vs App comparison table.
+ */
+
+/* ─── Diagnostic mirror tab indicator ───────────────────────────── */
+.fac-tab--diagnostic {
+  font-style: italic;
+  position: relative;
+}
+.fac-tab--diagnostic::before {
+  content: '◆';
+  font-size: 7px;
+  margin-right: 4px;
+  opacity: 0.6;
+  font-style: normal;
+}
+.fac-tab--diagnostic.active { font-style: normal; }
+.fac-tab--diagnostic.active::before { opacity: 1; }
+
+/* ─── Hourly Table: amber "warn" delta (App over Omni) ─────────── */
+.hourly-table .ht-warn { color: #a07030; font-weight: 600; }
