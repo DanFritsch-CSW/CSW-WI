@@ -27,7 +27,16 @@ const BREAK_DEFAULTS = [83, 100, 75, 100, 50, 100, 75, 100]
 // Operational day boundary: 5am–4:59am.
 // Shifts starting before this hour belong to the previous operational day
 // and are excluded from today's availability calc.
+// Overnight shifts (e.g. 10pm–6:30am) are capped at this boundary —
+// hours at 5am and beyond belong to the NEXT operational day and are not
+// counted here. B2E has a separate entry_date for the next night's shift,
+// so those employees will be counted again when that date is viewed.
 const OP_DAY_START = 5
+
+// Maximum linear hour an overnight shift can reach before it's cut off.
+// e.g. a 10pm start (hour 22) can count hours 22,23,0,1,2,3,4 but NOT 5.
+// In linear space: 24 + OP_DAY_START = 29. Any hour >= 29 is cut.
+const OP_DAY_END_LINEAR = 24 + OP_DAY_START
 
 function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
@@ -79,10 +88,6 @@ function applyBreakMuls(resolvedHours, breakMuls) {
 
 /**
  * Shared exclusion logic + resolved start/hours/lane for an employee.
- * `resolvedStart` here uses raw decimal start (NOT floored) so callers that
- * need to know about pre-hour partial starts (e.g. 6:30 start → 0.5 contribution
- * at 6am) get the fractional information. Callers that need an integer start
- * should floor it themselves.
  * Returns null if the employee should be excluded from labor calcs entirely.
  * Otherwise returns { resolvedStart, resolvedHours, lane, rawStartDecimal }.
  */
@@ -131,16 +136,14 @@ function resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter) {
  * Key rules:
  * 1. Shifts starting before OP_DAY_START (5am) are excluded — they belong to
  *    the previous operational day.
- * 2. Shifts that cross midnight wrap via % 24 — all resolvedHours are counted,
- *    no early break at 5am. A 10pm–6am shift (start=22, hours=8) covers
- *    22, 23, 0, 1, 2, 3, 4, 5 — the worker is physically present until 6am
- *    so the 5am hour is included.
+ * 2. Overnight shifts (e.g. 10pm–6:30am) wrap via % 24 but are CAPPED at the
+ *    next 5am boundary (linear hour 29). Hours 22,23,0,1,2,3,4 are counted;
+ *    hour 5 and beyond belong to the next operational day and are excluded.
+ *    B2E provides a separate entry_date for the next night's shift, so those
+ *    employees are counted again when that date is viewed.
  * 3. Employees on loan (on_loan_to set) are excluded entirely.
- * 4. Fractional shift lengths (e.g. 8.5h) are handled correctly — the partial
- *    hour receives a prorated break multiplier.
- * 5. Employees with no schedule data (both shift_start and shift_hours are null
- *    on both the assignment and employee record) are excluded. These are
- *    "Free Flow" employees in B2E with no valid shift — Omni excludes them too.
+ * 4. Fractional shift lengths (e.g. 8.5h) are handled correctly.
+ * 5. Employees with no schedule data (Free Flow) are excluded.
  */
 export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls   = getBreakMultipliers(settings)
@@ -155,14 +158,20 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     const frac      = resolvedHours - fullHours
 
     for (let i = 0; i < fullHours; i++) {
-      const hMod = (resolvedStart + i) % 24
+      const hLinear = resolvedStart + i
+      // Cap overnight shifts at the next 5am boundary (matches Omni's 5am→5am window)
+      if (hLinear >= OP_DAY_END_LINEAR) break
+      const hMod = hLinear % 24
       const mul  = breakMuls[i] ?? 1
       hourlyAvail[hMod] += mul
     }
-    // Partial final hour
+    // Partial final hour — only if still within the operational day
     if (frac > 0) {
-      const hMod = (resolvedStart + fullHours) % 24
-      hourlyAvail[hMod] += frac * (breakMuls[fullHours] ?? 1)
+      const hLinear = resolvedStart + fullHours
+      if (hLinear < OP_DAY_END_LINEAR) {
+        const hMod = hLinear % 24
+        hourlyAvail[hMod] += frac * (breakMuls[fullHours] ?? 1)
+      }
     }
   }
 
@@ -173,25 +182,8 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
  * Build a 24-element array of raw staffed headcount per hour of day, plus
  * a per-hour map of employee name + per-hour contribution.
  *
- * This is the "Raw Staffed Employee" equivalent — pure body count, NO break math.
- * Used for reconciliation against Omni's Raw Staffed Employee column.
- *
- * Contribution semantics (one per employee per hour they touch):
- *   - Full hour on the clock: 1.0
- *   - Shift START is fractional (e.g. 6:30am start) at hour 6: 0.5 (worked 30 of 60 min)
- *   - Shift END is fractional (e.g. 8.5h shift ending at 1:30pm) at hour 13: 0.5
- *   - If both start AND end land in the same hour (very short partial), contribution
- *     is `min(startFrac, endFrac)` — rare edge case, conservative handling.
- *
- * Same exclusion rules as buildRosterAvailability:
- *   - on-loan, PTO/callin, free-flow (null shifts), pre-5am starts excluded
- *   - lane filter respected for CAL v2 side tabs
- *
- * Returns:
- *   {
- *     hourly: number[24]                                       // headcount per hour (rounded 1 decimal)
- *     byHour: { [hour: number]: Array<{name: string, contribution: number}> }  // sorted alphabetically by name
- *   }
+ * Same operational day cap as buildRosterAvailability — overnight shifts
+ * are cut at the next 5am boundary (linear hour 29).
  */
 export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = {}, laneFilter = null) {
   const hourly = new Array(24).fill(0)
@@ -212,33 +204,29 @@ export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = 
     const empName = emp.name || `Employee ${emp.id}`
 
     // Start offset: how much of the start hour is BEFORE the shift begins.
-    // e.g. shift starts at 6:30 → startOffset = 0.5 (first 30 min of 6am not worked).
-    // Shift starts at 6:00 (integer) → startOffset = 0.
     const startOffset = rawStartDecimal - resolvedStart
 
-    // Effective real-time end (decimal hours from shift start). e.g. start 6.5, hours 8 → ends at 14.5.
-    const realEnd = rawStartDecimal + resolvedHours
-
-    // We walk integer hours from `resolvedStart` (floor of start) to `ceil(realEnd) - 1`.
-    // For each hour the employee touches, compute contribution.
+    // Effective real-time end in linear hours
+    const realEnd       = rawStartDecimal + resolvedHours
     const lastHourFloor = Math.floor(realEnd)
-    const endFrac       = realEnd - lastHourFloor  // 0 means shift ends exactly on the hour
+    const endFrac       = realEnd - lastHourFloor
 
     for (let h = resolvedStart; h <= lastHourFloor; h++) {
+      // Cap overnight shifts at the next 5am boundary
+      if (h >= OP_DAY_END_LINEAR) break
+
       const hMod = h % 24
       let contribution = 1
 
-      // First hour partial start: subtract the part of the hour BEFORE shift start.
+      // First hour partial start
       if (h === resolvedStart && startOffset > 0) {
         contribution -= startOffset
       }
-      // Last hour partial end: only count up to the end frac.
-      // If shift ends exactly on the hour (endFrac === 0), this hour shouldn't count at all.
+      // Last hour partial end
       if (h === lastHourFloor) {
         if (endFrac === 0) {
-          contribution = 0  // shift ended exactly at the start of this hour
+          contribution = 0
         } else if (h === resolvedStart && startOffset > 0) {
-          // edge case: shift both starts AND ends in same hour
           contribution = Math.min(endFrac - startOffset, contribution)
           if (contribution < 0) contribution = 0
         } else {
@@ -246,6 +234,9 @@ export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = 
         }
       }
 
+      // If the shift end crosses 5am, cap the contribution at the boundary.
+      // e.g. 10pm start, 8.5h shift ends 6:30am — the 4am hour gets full
+      // credit but the 5am hour is excluded entirely (handled by break above).
       addContribution(hMod, empName, contribution)
     }
   }
@@ -261,11 +252,7 @@ export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = 
 
 /**
  * Compute break-adjusted total hours for a set of employees.
- * Excludes employees on loan (on_loan_to set).
- * Excludes shifts starting before OP_DAY_START.
- * Excludes employees with no schedule data (both start and hours null).
- * All resolvedHours count — no early break when wrapping past midnight.
- * Fractional shift lengths handled correctly via applyBreakMuls().
+ * Respects the 5am operational day cap for overnight shifts.
  */
 export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
   const breakMuls = getBreakMultipliers(settings)
@@ -275,7 +262,16 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const shift = resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter)
     if (!shift) continue
 
-    total += applyBreakMuls(shift.resolvedHours, breakMuls)
+    const { resolvedStart, resolvedHours } = shift
+
+    // For overnight shifts, cap hours at the 5am boundary
+    const maxLinearEnd = OP_DAY_END_LINEAR
+    const linearEnd    = resolvedStart + resolvedHours
+    const cappedHours  = resolvedStart >= OP_DAY_START && linearEnd > maxLinearEnd
+      ? maxLinearEnd - resolvedStart
+      : resolvedHours
+
+    total += applyBreakMuls(cappedHours, breakMuls)
   }
 
   return Math.round(total * 10) / 10
