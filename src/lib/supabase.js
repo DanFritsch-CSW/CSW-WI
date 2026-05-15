@@ -340,7 +340,7 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
   const result = {}
   for (const r of data) {
     if (!result[r.project_name]) result[r.project_name] = {}
-    result[r.project_name][r.hour] = r.est_drops
+    result[r.project_name][r.hour] = Number(r.est_drops)
   }
   return result
 }
@@ -374,7 +374,7 @@ export async function fetchAllFacilitiesEstDrops(planDate) {
   if (error || !data) return {}
   const result = {}
   for (const r of data) {
-    result[r.facility] = (result[r.facility] ?? 0) + r.est_drops
+    result[r.facility] = (result[r.facility] ?? 0) + Number(r.est_drops)
   }
   return result
 }
@@ -395,8 +395,11 @@ export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectHourlyDrops:', error)
 }
 
-// Inserts only rows that don't already exist — used by auto-seed to protect manual edits
-export async function insertProjectHourlyDropsIfMissing(facilityId, planDate, rows) {
+// Auto-seed: always overwrites with fresh L4W data so stale 0s from old seed
+// runs (different rules, cancelled-filter era, etc.) are replaced on every load.
+// Manual edits use upsertProjectHourlyDrops directly and will be overwritten on
+// next page load — acceptable tradeoff vs. the alternative of permanently stuck 0s.
+export async function upsertProjectHourlyDropsSeed(facilityId, planDate, rows) {
   if (!supabase || !rows.length) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
     facility:     facilityId,
@@ -407,8 +410,21 @@ export async function insertProjectHourlyDropsIfMissing(facilityId, planDate, ro
   }))
   const { error } = await supabase
     .from('project_hourly_drops_forecast')
-    .upsert(records, { onConflict: 'facility,plan_date,project_name,hour', ignoreDuplicates: true })
-  if (error) console.error('insertProjectHourlyDropsIfMissing:', error)
+    .upsert(records, { onConflict: 'facility,plan_date,project_name,hour', ignoreDuplicates: false })
+  if (error) console.error('upsertProjectHourlyDropsSeed:', error)
+}
+
+// Deletes all EST drop rows for a single project on a given date.
+// Used by the per-project Refresh L4W button — clears stale data before re-seeding.
+export async function deleteProjectHourlyDropsForProject(facilityId, planDate, projectName) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('project_hourly_drops_forecast')
+    .delete()
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+    .eq('project_name', projectName)
+  if (error) console.error('deleteProjectHourlyDropsForProject:', error)
 }
 
 export async function fetchCustomDropProjects(facilityId) {

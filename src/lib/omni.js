@@ -725,8 +725,13 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     const sums = {}
     for (const hourMap of weeklyHourCounts)
       for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
+    // Store 2-decimal averages — preserves sub-1 values (e.g. 0.50) that integer
+    // rounding would collapse to 0, causing forecast totals to undercount thin customers.
     const avgs = Object.fromEntries(
-      Object.entries(sums).map(([h, total]) => [Number(h), Math.round(total / weeksBack)])
+      Object.entries(sums).map(([h, total]) => [
+        Number(h),
+        Math.round(total / weeksBack * 100) / 100,
+      ])
     )
     return [projectName, avgs]
   })

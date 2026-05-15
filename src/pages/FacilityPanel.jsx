@@ -10,7 +10,14 @@ import {
   fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments,
   isRuleProject, fetchActiveInventory, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
 } from '../lib/omni.js'
-import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, insertProjectHourlyDropsIfMissing, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
+import {
+  fetchProjectHourlyDrops,
+  upsertProjectHourlyDrops,
+  upsertProjectHourlyDropsSeed,
+  deleteProjectHourlyDropsForProject,
+  fetchHourlyAdjustments,
+  upsertHourlyAdjustment,
+} from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, buildRosterStaffedHeadcount } from '../lib/laborCalc.js'
 
@@ -59,6 +66,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [rosterState, setRosterState]       = useState({ employees: [], laneMap: {}, assignmentMap: {} })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
+  const [refreshingProject, setRefreshingProject]   = useState(null) // project name being refreshed
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
   const [activeInventory, setActiveInventory]       = useState(null)
   const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
@@ -124,8 +132,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       if (!cancelled) setCustomDropProjects(customRows)
 
       // ── Phase 1: critical core data (hourly + appointments) ──
-      // These two queries drive the table, chart, and KPI pills. If either fails,
-      // we don't 502 the whole page — we render empty data and show a retry banner.
       const [hourlyResult, apptsResult] = await Promise.allSettled([
         fetchHourlyData(facility.id, planDate),
         fetchHourlyAppointments(facility.id, planDate),
@@ -147,7 +153,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       setFetchedAt(new Date())
       lastRefreshRef.current = Date.now()
 
-      // ── Phase 2: project list (non-critical, used for project breakdown) ──
+      // ── Phase 2: project list ──
       let fetchedProjects = []
       try {
         fetchedProjects = await fetchProjectData(facility.id, planDate)
@@ -163,12 +169,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       }
       fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) }).catch(() => {})
 
-      // Surface a single consolidated warning to the user if any Phase 1/2 failed
       if (!cancelled && omniFailures.length > 0) {
         setOmniWarning(`Omni couldn't load: ${omniFailures.join(', ')}. Showing empty data — click Retry to try again.`)
       }
 
-      // ── Phase 3: EST drops seeding (heaviest, already wrapped in try/catch) ──
+      // ── Phase 3: EST drops seeding ──
       const hasCustom = customRows.length > 0
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
@@ -192,20 +197,25 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           Object.entries(existing).filter(([name]) => !KEN_STALE_KEYS.has(name))
         )
 
-        const newRows = []
+        // Build seed rows from historical — always overwrite so stale 0s from
+        // prior seed runs don't persist. Manual edits via the hourly table cells
+        // will be overwritten on next page load (acceptable vs. permanently stuck 0s).
+        const seedRows = []
         for (const [project_name, hourMap] of Object.entries(historical)) {
           if (!isRuleProject(facility.id, project_name) && !isKen && !hasCustom) continue
           for (const [h, est_drops] of Object.entries(hourMap)) {
-            const hour = Number(h)
-            if (filteredExisting[project_name]?.[hour] !== undefined) continue
-            newRows.push({ project_name, h: hour, est_drops })
+            seedRows.push({ project_name, h: Number(h), est_drops })
           }
         }
 
-        if (newRows.length > 0) {
-          await insertProjectHourlyDropsIfMissing(facility.id, planDate, newRows)
+        if (seedRows.length > 0) {
+          await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
         }
 
+        // Merged display state: historical (freshly seeded) as base,
+        // then overlay filteredExisting so any manual edits made THIS session
+        // (before page reload) are preserved in UI state even though they'll
+        // be overwritten by the next seed on reload.
         const merged = { ...historical }
         for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
           merged[project_name] = { ...(merged[project_name] ?? {}), ...hourMap }
@@ -214,11 +224,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         if (!cancelled) setProjectHourlyDrops(merged)
       } catch (e) {
         console.error('EST drops seed error:', e)
-        // Still load any existing EST drops even if historical seed failed
         try {
           const existing = await fetchProjectHourlyDrops(facility.id, planDate)
           if (!cancelled && Object.keys(existing).length > 0) setProjectHourlyDrops(existing)
-        } catch { /* really nothing to do */ }
+        } catch { /* nothing to do */ }
       } finally {
         if (!cancelled) setSeedingDrops(false)
       }
@@ -227,6 +236,32 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     loadData()
     return () => { cancelled = true }
   }, [facility.id, planDate, isMad, isKen, retryNonce])
+
+  // Per-project refresh: delete stale rows then re-seed from fresh L4W data
+  async function handleRefreshProject(projectName) {
+    setRefreshingProject(projectName)
+    try {
+      await deleteProjectHourlyDropsForProject(facility.id, planDate, projectName)
+      const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+      const projectData = historical[projectName]
+      if (projectData && Object.keys(projectData).length > 0) {
+        const seedRows = Object.entries(projectData).map(([h, est_drops]) => ({
+          project_name: projectName, h: Number(h), est_drops,
+        }))
+        await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
+        setProjectHourlyDrops(prev => ({ ...prev, [projectName]: projectData }))
+      } else {
+        // No historical data — set guaranteed zero at hour 17
+        const fallback = { 17: 0 }
+        await upsertProjectHourlyDropsSeed(facility.id, planDate, [{ project_name: projectName, h: 17, est_drops: 0 }])
+        setProjectHourlyDrops(prev => ({ ...prev, [projectName]: fallback }))
+      }
+    } catch (e) {
+      console.error('Refresh project drops failed:', e)
+    } finally {
+      setRefreshingProject(null)
+    }
+  }
 
   function openCopy() {
     const names = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
@@ -305,7 +340,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const projectDrops = useMemo(() => {
     const result = {}
     for (const [name, hourMap] of Object.entries(visibleProjectHourlyDrops))
-      result[name] = Object.values(hourMap).reduce((s, v) => s + v, 0)
+      result[name] = Object.values(hourMap).reduce((s, v) => s + Number(v), 0)
     return result
   }, [visibleProjectHourlyDrops])
 
@@ -321,11 +356,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops))
-      for (const [h, v] of Object.entries(hourMap)) { const hour = Number(h); sums[hour] = (sums[hour] ?? 0) + v }
+      for (const [h, v] of Object.entries(hourMap)) { const hour = Number(h); sums[hour] = (sums[hour] ?? 0) + Number(v) }
     return sums
   }, [visibleProjectHourlyDrops])
 
-  const totalDrops = useMemo(() => Object.values(estDrops).reduce((s, v) => s + v, 0), [estDrops])
+  const totalDrops = useMemo(() => Object.values(estDrops).reduce((s, v) => s + Number(v), 0), [estDrops])
 
   const rawWithAppts = useMemo(() => {
     if (!rawHourly.length) return rawHourly
@@ -414,7 +449,25 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         <span>Hourly Breakdown</span>
         {seedingDrops
           ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
-          : hasDropData && <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
+          : hasDropData && (
+            <>
+              <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                {copyProjectNames.map(name => (
+                  <button
+                    key={name}
+                    className="est-reset-btn"
+                    style={{ opacity: refreshingProject === name ? 0.6 : 1 }}
+                    disabled={refreshingProject !== null}
+                    onClick={() => handleRefreshProject(name)}
+                    title={`Refresh L4W average for ${name}`}
+                  >
+                    {refreshingProject === name ? '...' : '↺'} {name.length > 22 ? name.slice(0, 22) + '…' : name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )
         }
       </div>
 
