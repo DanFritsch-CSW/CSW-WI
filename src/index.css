@@ -394,6 +394,12 @@ input, select { font: inherit; color: inherit; }
 .ht-cell-editable:hover { opacity: 0.75; }
 .ht-cell-input { width: 52px; background: var(--bg1); border: 1px solid var(--brand); border-radius: 3px; color: var(--text-primary); font-size: 11px; font-family: var(--font-mono); padding: 1px 4px; text-align: right; }
 
+/* EST drops — auto-seeded vs manually edited */
+.ht-cell-auto { color: var(--text-secondary); border-bottom-color: var(--text-dim); }
+.ht-cell-auto::before { content: '~'; font-size: 9px; color: var(--text-dim); margin-right: 1px; }
+.ht-cell-manual { color: var(--text-primary); font-weight: 700; border-bottom-color: var(--brand); }
+.ht-cell-manual::after { content: '✎'; font-size: 8px; color: var(--brand); margin-left: 3px; vertical-align: super; }
+
 /* ─── Raw Staffed (headcount) column ────────────────────────────── */
 .ht-staffed-col { color: var(--blue) !important; min-width: 48px; }
 .ht-staffed-trigger { display: inline-block; min-width: 20px; font-weight: 600; }

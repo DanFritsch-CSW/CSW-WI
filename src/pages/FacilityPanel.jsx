@@ -15,6 +15,7 @@ import {
   upsertProjectHourlyDrops,
   upsertProjectHourlyDropsSeed,
   deleteProjectHourlyDropsForProject,
+  clearExpiredManualEdits,
   fetchHourlyAdjustments,
   upsertHourlyAdjustment,
 } from '../lib/supabase.js'
@@ -128,6 +129,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     async function loadData() {
       let omniFailures = []
 
+      // Clear manually edited rows from before the current week (fire-and-forget)
+      const { from: weekStartISO } = weekOf(new Date().toISOString().slice(0, 10))
+      clearExpiredManualEdits(facility.id, weekStartISO)
+
       const customRows = await loadCustomDropRules(facility.id).catch(() => [])
       if (!cancelled) setCustomDropProjects(customRows)
 
@@ -211,7 +216,15 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
         }
 
-        const merged = { ...historical }
+        // Build merged state in object shape { [project]: { [hour]: { est_drops, manually_edited } } }
+        // historical returns plain numbers — wrap them; filteredExisting already returns objects.
+        const merged = {}
+        for (const [proj, hourMap] of Object.entries(historical)) {
+          merged[proj] = {}
+          for (const [h, v] of Object.entries(hourMap)) {
+            merged[proj][h] = { est_drops: Number(v), manually_edited: false }
+          }
+        }
         for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
           merged[project_name] = { ...(merged[project_name] ?? {}), ...hourMap }
         }
@@ -244,11 +257,15 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           project_name: projectName, h: Number(h), est_drops,
         }))
         await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
-        setProjectHourlyDrops(prev => ({ ...prev, [projectName]: projectData }))
+        setProjectHourlyDrops(prev => ({
+          ...prev,
+          [projectName]: Object.fromEntries(
+            Object.entries(projectData).map(([h, v]) => [h, { est_drops: Number(v), manually_edited: false }])
+          ),
+        }))
       } else {
-        const fallback = { 17: 0 }
         await upsertProjectHourlyDropsSeed(facility.id, planDate, [{ project_name: projectName, h: 17, est_drops: 0 }])
-        setProjectHourlyDrops(prev => ({ ...prev, [projectName]: fallback }))
+        setProjectHourlyDrops(prev => ({ ...prev, [projectName]: { 17: { est_drops: 0, manually_edited: false } } }))
       }
     } catch (e) {
       console.error('Refresh project drops failed:', e)
@@ -281,8 +298,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       const rows = []
       for (const [project_name, hourMap] of Object.entries(projectHourlyDrops)) {
         if (!copyProjects.has(project_name)) continue
-        for (const [h, est_drops] of Object.entries(hourMap))
-          rows.push({ project_name, h: Number(h), est_drops })
+        for (const [h, v] of Object.entries(hourMap))
+          rows.push({ project_name, h: Number(h), est_drops: typeof v === 'object' ? (v?.est_drops ?? 0) : (v ?? 0) })
       }
       await Promise.all(dates.map(d => upsertProjectHourlyDrops(facility.id, d, rows)))
       setCopyMsg({ err: false, text: `Copied ${copyProjects.size} project${copyProjects.size > 1 ? 's' : ''} to ${dates.length} date${dates.length > 1 ? 's' : ''}.` })
@@ -337,7 +354,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const projectDrops = useMemo(() => {
     const result = {}
     for (const [name, hourMap] of Object.entries(visibleProjectHourlyDrops))
-      result[name] = Math.round(Object.values(hourMap).reduce((s, v) => s + Number(v), 0))
+      result[name] = Math.round(Object.values(hourMap).reduce((s, v) => s + Number(typeof v === 'object' ? (v?.est_drops ?? 0) : v), 0))
     return result
   }, [visibleProjectHourlyDrops])
 
@@ -356,8 +373,36 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops))
-      for (const [h, v] of Object.entries(hourMap)) { const hour = Number(h); sums[hour] = (sums[hour] ?? 0) + Number(v) }
+      for (const [h, v] of Object.entries(hourMap)) {
+        const hour = Number(h)
+        const val = typeof v === 'object' ? (v?.est_drops ?? 0) : Number(v ?? 0)
+        sums[hour] = (sums[hour] ?? 0) + val
+      }
     return sums
+  }, [visibleProjectHourlyDrops])
+
+  // Flat numeric map for HourlyTable's projectHourlyDrops prop (plain est_drops values)
+  const visibleProjectHourlyDropsFlat = useMemo(() => {
+    const result = {}
+    for (const [name, hourMap] of Object.entries(visibleProjectHourlyDrops)) {
+      result[name] = {}
+      for (const [h, v] of Object.entries(hourMap)) {
+        result[name][h] = typeof v === 'object' ? (v?.est_drops ?? 0) : Number(v ?? 0)
+      }
+    }
+    return result
+  }, [visibleProjectHourlyDrops])
+
+  // manuallyEdited boolean map for HourlyTable visual indicators
+  const manuallyEdited = useMemo(() => {
+    const result = {}
+    for (const [name, hourMap] of Object.entries(visibleProjectHourlyDrops)) {
+      result[name] = {}
+      for (const [h, v] of Object.entries(hourMap)) {
+        result[name][h] = typeof v === 'object' ? (v?.manually_edited ?? false) : false
+      }
+    }
+    return result
   }, [visibleProjectHourlyDrops])
 
   // totalDrops for KPI pill: rounded to integer — users don't track fractional appointments.
@@ -506,12 +551,16 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
         : <HourlyTable
             hourlyData={hourly} estDrops={estDrops}
-            projectHourlyDrops={visibleProjectHourlyDrops}
+            projectHourlyDrops={visibleProjectHourlyDropsFlat}
+            manuallyEdited={manuallyEdited}
             hourlyAdjustments={hourlyAdjustments}
             staffedHourly={rosterStaffed?.hourly}
             staffedByHour={rosterStaffed?.byHour}
             onProjectHourlyChange={(projectName, h, val) => {
-              setProjectHourlyDrops(prev => ({ ...prev, [projectName]: { ...(prev[projectName] ?? {}), [h]: val } }))
+              setProjectHourlyDrops(prev => ({
+                ...prev,
+                [projectName]: { ...(prev[projectName] ?? {}), [h]: { est_drops: val, manually_edited: true } },
+              }))
               upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
             }}
             onAdjustmentChange={(h, val) => {

@@ -333,14 +333,14 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase
     .from('project_hourly_drops_forecast')
-    .select('project_name, hour, est_drops')
+    .select('project_name, hour, est_drops, manually_edited')
     .eq('facility', facilityId)
     .eq('plan_date', planDate)
   if (error || !data) return {}
   const result = {}
   for (const r of data) {
     if (!result[r.project_name]) result[r.project_name] = {}
-    result[r.project_name][r.hour] = Number(r.est_drops)
+    result[r.project_name][r.hour] = { est_drops: Number(r.est_drops), manually_edited: r.manually_edited ?? false }
   }
   return result
 }
@@ -383,11 +383,12 @@ export async function fetchAllFacilitiesEstDrops(planDate) {
 export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (!supabase) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
-    facility:     facilityId,
-    plan_date:    planDate,
+    facility:        facilityId,
+    plan_date:       planDate,
     project_name,
-    hour:         h,
-    est_drops:    est_drops ?? 0,
+    hour:            h,
+    est_drops:       est_drops ?? 0,
+    manually_edited: true,
   }))
   const { error } = await supabase
     .from('project_hourly_drops_forecast')
@@ -402,11 +403,12 @@ export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
 export async function upsertProjectHourlyDropsSeed(facilityId, planDate, rows) {
   if (!supabase || !rows.length) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
-    facility:     facilityId,
-    plan_date:    planDate,
+    facility:        facilityId,
+    plan_date:       planDate,
     project_name,
-    hour:         h,
-    est_drops:    est_drops ?? 0,
+    hour:            h,
+    est_drops:       est_drops ?? 0,
+    manually_edited: false,
   }))
   const { error } = await supabase
     .from('project_hourly_drops_forecast')
@@ -425,6 +427,17 @@ export async function deleteProjectHourlyDropsForProject(facilityId, planDate, p
     .eq('plan_date', planDate)
     .eq('project_name', projectName)
   if (error) console.error('deleteProjectHourlyDropsForProject:', error)
+}
+
+export async function clearExpiredManualEdits(facilityId, beforeDate) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('project_hourly_drops_forecast')
+    .delete()
+    .eq('facility', facilityId)
+    .eq('manually_edited', true)
+    .lt('plan_date', beforeDate)
+  if (error) console.error('clearExpiredManualEdits:', error)
 }
 
 export async function fetchCustomDropProjects(facilityId) {
