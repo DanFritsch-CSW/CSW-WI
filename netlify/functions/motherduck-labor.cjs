@@ -1,11 +1,8 @@
 'use strict'
 
 // MotherDuck query proxy for KEN v2 diagnostic mirror.
-// Uses duckdb npm package + MotherDuck extension to run SQL directly against
-// production_db.labor_planning_app.hourly_labor_required_vs_available
-//
-// Accepts POST { facilityId: string, date: string (YYYY-MM-DD) }
-// Returns { rows: Array<{ h, rawStaffed, adjStaffed, breaks, whAdj, avail, availAw, req, inb, out, drops, appts }> }
+// Uses duckdb npm package with MotherDuck extension.
+// Token is set via env var motherduck_token (MotherDuck's convention).
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -78,9 +75,18 @@ exports.handler = async (event) => {
   `
 
   try {
+    // Set the token as an env var — MotherDuck's Node extension picks it up automatically
+    process.env.motherduck_token = TOKEN
+
     const duckdb = require('duckdb')
-    const db = new duckdb.Database(`md:?motherduck_token=${TOKEN}`)
+    // Connect directly to the production_db on MotherDuck
+    const db = new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
     const conn = db.connect()
+
+    // Load MotherDuck extension explicitly
+    await new Promise((resolve, reject) => {
+      conn.run('LOAD motherduck', (err) => err ? reject(err) : resolve())
+    })
 
     const rows = await new Promise((resolve, reject) => {
       conn.all(sql, (err, result) => {
@@ -94,17 +100,17 @@ exports.handler = async (event) => {
 
     const parsed = rows.map(r => ({
       h:          tsToHour(r.ts),
-      rawStaffed: Number(r.raw_staffed_employee)      || 0,
-      adjStaffed: Number(r.adjusted_staffed_employee) || 0,
-      breaks:     Number(r.employees_on_break)        || 0,
-      whAdj:      Number(r.warehouse_labor_adjustment)|| 0,
-      avail:      Number(r.labor_available)           || 0,
-      availAw:    Number(r.labor_available_aw)        || 0,
-      req:        Number(r.labor_required)            || 0,
-      inb:        Number(r.inbound_count)             || 0,
-      out:        Number(r.outbound_count)            || 0,
-      drops:      Number(r.drops)                     || 0,
-      appts:      Number(r.total_appointments)        || 0,
+      rawStaffed: Number(r.raw_staffed_employee)       || 0,
+      adjStaffed: Number(r.adjusted_staffed_employee)  || 0,
+      breaks:     Number(r.employees_on_break)         || 0,
+      whAdj:      Number(r.warehouse_labor_adjustment) || 0,
+      avail:      Number(r.labor_available)            || 0,
+      availAw:    Number(r.labor_available_aw)         || 0,
+      req:        Number(r.labor_required)             || 0,
+      inb:        Number(r.inbound_count)              || 0,
+      out:        Number(r.outbound_count)             || 0,
+      drops:      Number(r.drops)                      || 0,
+      appts:      Number(r.total_appointments)         || 0,
     }))
 
     return {
@@ -116,7 +122,7 @@ exports.handler = async (event) => {
     return {
       statusCode: 502,
       headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: e.message }),
+      body: JSON.stringify({ error: e.message, stack: e.stack?.slice(0, 500) }),
     }
   }
 }
