@@ -28,6 +28,13 @@ export default function ProjectList({ projects, projectDrops = {}, color, invent
     return name
   }
 
+  // Always display est drops as integers — storage is numeric(6,2) for accuracy
+  // but users don't work in fractions of appointments.
+  function fmtDrops(val) {
+    const n = Number(val) || 0
+    return n > 0 ? Math.round(n) : '—'
+  }
+
   const isSplit = inventoryData !== null
 
   if (isSplit) {
@@ -56,7 +63,7 @@ export default function ProjectList({ projects, projectDrops = {}, color, invent
                     </div>
                     <span className="project-name">{stripSuffix(p.name)}</span>
                   </div>
-                  <span className="project-num">{estVal}</span>
+                  <span className="project-num">{fmtDrops(estVal)}</span>
                   <span className="project-num">{p.inb}</span>
                   <span className="project-num">{p.out}</span>
                   <span className="project-num" style={{ color }}>{p.tot || '—'}</span>
@@ -131,7 +138,7 @@ export default function ProjectList({ projects, projectDrops = {}, color, invent
               </div>
               <span className="project-name">{p.name}</span>
             </div>
-            <span className="project-num">{estVal}</span>
+            <span className="project-num">{fmtDrops(estVal)}</span>
             <span className="project-num">{p.inb || '—'}</span>
             <span className="project-num">{p.out || '—'}</span>
             <span className="project-num" style={{ color: p.tot ? color : 'var(--text-dim)' }}>{p.tot || '—'}</span>
