@@ -482,6 +482,43 @@ input, select { font: inherit; color: inherit; }
   font-weight: 700;
 }
 
+/* ─── Omni Warning Banner (graceful failure surface) ───────────── */
+.omni-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  background: #fdf8ec;
+  border: 1px solid #f0d68a;
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #6b5012;
+}
+.omni-warning-icon {
+  color: #a07818;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.omni-warning-text { flex: 1; line-height: 1.4; }
+.omni-warning-retry {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid #a07818;
+  background: var(--bg1);
+  color: #6b5012;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.omni-warning-retry:hover { background: #a07818; color: #fff; }
+
 .est-drops-editor { background: var(--bg2); border: 1px solid var(--bg4); border-radius: var(--r-lg); padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 860px; }
 .est-drops-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .est-drops-select, .est-drops-date { padding: 5px 10px; border-radius: var(--r-md); background: var(--bg3); border: 1px solid var(--bg5); color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; outline: none; color-scheme: light; }
