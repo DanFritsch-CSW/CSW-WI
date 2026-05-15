@@ -719,20 +719,36 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
   const projectTasks = ruleProjects.map(projectName => async () => {
     const rule = PROJECT_DROP_RULES[projectName]
     if (!rule) return [projectName, {}]
+
+    // Fetch raw hourly counts for each of the 4 past same-weekday dates
     const weeklyHourCounts = await Promise.all(
       pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
     )
-    const sums = {}
-    for (const hourMap of weeklyHourCounts)
-      for (const [h, count] of Object.entries(hourMap)) { sums[h] = (sums[h] ?? 0) + count }
-    // Store 2-decimal averages — preserves sub-1 values (e.g. 0.50) that integer
-    // rounding would collapse to 0, causing forecast totals to undercount thin customers.
-    const avgs = Object.fromEntries(
-      Object.entries(sums).map(([h, total]) => [
-        Number(h),
-        Math.round(total / weeksBack * 100) / 100,
-      ])
+
+    // Step 1 — daily totals per week (sum all hours for that day)
+    const dailyTotals = weeklyHourCounts.map(hourMap =>
+      Object.values(hourMap).reduce((s, v) => s + v, 0)
     )
+
+    // Step 2 — L4W daily average, rounded to integer
+    const dailyForecast = Math.round(dailyTotals.reduce((s, v) => s + v, 0) / weeksBack)
+
+    if (dailyForecast === 0) return [projectName, {}]
+
+    // Step 3 — aggregate raw hourly frequency across all 4 weeks
+    const hourFreq = {}
+    for (const hourMap of weeklyHourCounts)
+      for (const [h, count] of Object.entries(hourMap))
+        hourFreq[h] = (hourFreq[h] ?? 0) + count
+
+    const totalFreq = Object.values(hourFreq).reduce((s, v) => s + v, 0)
+    if (totalFreq === 0) return [projectName, {}]
+
+    // Step 4 — distribute dailyForecast proportionally across historical hours
+    const avgs = {}
+    for (const [h, freq] of Object.entries(hourFreq)) {
+      avgs[Number(h)] = Math.round(dailyForecast * (freq / totalFreq) * 100) / 100
+    }
     return [projectName, avgs]
   })
 

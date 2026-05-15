@@ -17,7 +17,7 @@ function fmtContribution(c) {
 
 // EditableCell forwards its outer ref so the table can programmatically
 // call .click() on the visible span to open the cell.
-const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigate }, ref) {
+const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigate, isManual }, ref) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
 
@@ -65,10 +65,12 @@ const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigat
     )
   }
 
+  const extraClass = isManual === true ? ' ht-cell-manual' : isManual === false ? ' ht-cell-auto' : ''
+
   return (
     <span
       ref={ref}
-      className="ht-cell-editable"
+      className={`ht-cell-editable${extraClass}`}
       title="Tab = next hour. Shift+Tab = prev hour. Up/Down = +/-1. Enter = commit."
       onClick={open}
     >
@@ -143,6 +145,7 @@ export default function HourlyTable({
   hourlyData,
   estDrops = {},
   projectHourlyDrops = {},
+  manuallyEdited = {},
   hourlyAdjustments = {},
   staffedHourly = null,
   staffedByHour = null,
@@ -280,6 +283,7 @@ export default function HourlyTable({
                             value={projectHourlyDrops[p]?.[r.h] ?? 0}
                             onSave={val => onProjectHourlyChange?.(p, r.h, val)}
                             onNavigate={dir => navigate(projIdx, rowIdx, dir, numProjects, numRows)}
+                            isManual={manuallyEdited[p]?.[r.h] ?? false}
                           />
                         </td>
                       ))}
