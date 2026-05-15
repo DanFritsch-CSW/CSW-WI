@@ -198,8 +198,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         )
 
         // Build seed rows from historical — always overwrite so stale 0s from
-        // prior seed runs don't persist. Manual edits via the hourly table cells
-        // will be overwritten on next page load (acceptable vs. permanently stuck 0s).
+        // prior seed runs don't persist.
         const seedRows = []
         for (const [project_name, hourMap] of Object.entries(historical)) {
           if (!isRuleProject(facility.id, project_name) && !isKen && !hasCustom) continue
@@ -212,10 +211,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
         }
 
-        // Merged display state: historical (freshly seeded) as base,
-        // then overlay filteredExisting so any manual edits made THIS session
-        // (before page reload) are preserved in UI state even though they'll
-        // be overwritten by the next seed on reload.
         const merged = { ...historical }
         for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
           merged[project_name] = { ...(merged[project_name] ?? {}), ...hourMap }
@@ -251,7 +246,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
         setProjectHourlyDrops(prev => ({ ...prev, [projectName]: projectData }))
       } else {
-        // No historical data — set guaranteed zero at hour 17
         const fallback = { 17: 0 }
         await upsertProjectHourlyDropsSeed(facility.id, planDate, [{ project_name: projectName, h: 17, est_drops: 0 }])
         setProjectHourlyDrops(prev => ({ ...prev, [projectName]: fallback }))
@@ -337,10 +331,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     )
   }, [projectHourlyDrops, isCal2, sideTab])
 
+  // projectDrops: per-project total EST drops for the day, rounded to integer for display.
+  // Raw decimal values are kept in visibleProjectHourlyDrops for accurate per-hour math
+  // and req calculations; rounding only happens at display boundaries.
   const projectDrops = useMemo(() => {
     const result = {}
     for (const [name, hourMap] of Object.entries(visibleProjectHourlyDrops))
-      result[name] = Object.values(hourMap).reduce((s, v) => s + Number(v), 0)
+      result[name] = Math.round(Object.values(hourMap).reduce((s, v) => s + Number(v), 0))
     return result
   }, [visibleProjectHourlyDrops])
 
@@ -353,6 +350,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return [...visibleProjects, ...dropsOnlyRows]
   }, [visibleProjects, projectDrops])
 
+  // estDrops: per-hour EST drops for the hourly table and req calc.
+  // Kept as raw decimals so that req = appts * hpa uses accurate drop counts.
+  // The hourly table renders these via HourlyTable which rounds for display.
   const estDrops = useMemo(() => {
     const sums = {}
     for (const hourMap of Object.values(visibleProjectHourlyDrops))
@@ -360,7 +360,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return sums
   }, [visibleProjectHourlyDrops])
 
-  const totalDrops = useMemo(() => Object.values(estDrops).reduce((s, v) => s + Number(v), 0), [estDrops])
+  // totalDrops for KPI pill: rounded to integer — users don't track fractional appointments.
+  const totalDrops = useMemo(() => Math.round(Object.values(estDrops).reduce((s, v) => s + Number(v), 0)), [estDrops])
 
   const rawWithAppts = useMemo(() => {
     if (!rawHourly.length) return rawHourly
