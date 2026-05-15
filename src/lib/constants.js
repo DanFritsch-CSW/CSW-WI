@@ -10,6 +10,14 @@ export const FACILITIES = {
 
 export const FACILITY_LIST = Object.values(FACILITIES)
 
+// Diagnostic mirror tabs — pull straight from Omni with no App-side computation.
+// Used for reconciling App numbers against Omni's dashboard view.
+// These do NOT appear in network-level rollups (AllFacilities, est-drops queries)
+// — they live only in LaborPlanning's tab strip.
+export const DIAGNOSTIC_TABS = [
+  { id: 'ken_v2', code: 'KEN v2', name: 'Kenosha (Omni Mirror)', color: '#7da5e6', mirrors: 'ken' },
+]
+
 export const LANES = [
   { id: 'shift1', label: '1st Shift' },
   { id: 'mid',    label: 'Mid Shift' },
