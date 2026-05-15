@@ -397,6 +397,59 @@ export async function fetchHourlyData(facilityId, date) {
   }))
 }
 
+// ── KEN v2 / Diagnostic Mirror: pull the COMPLETE Omni labor row ──
+//
+// Returns every column from hourly_labor_required_vs_available for one
+// facility/date, using the same labor_shift_timestamp filter Omni's dashboard
+// uses (operational day, 5am→5am). Powers the "pure Omni mirror" diagnostic
+// tabs (KEN v2 etc.) — no App-side override of any value.
+export async function fetchOmniLaborFullRow(facilityId, date) {
+  const wh = LABOR_WAREHOUSE[facilityId]
+  if (!wh) return []
+  const rows = await omniQuery({
+    modelId: MODEL_ID,
+    table: VIEW_H,
+    fields: [
+      `${VIEW_H}.hour_of_day_timestamp`,
+      `${VIEW_H}.raw_staffed_employee`,
+      `${VIEW_H}.adjusted_staffed_employee`,
+      `${VIEW_H}.employees_on_break`,
+      `${VIEW_H}.warehouse_labor_adjustment`,
+      `${VIEW_H}.labor_available`,
+      `${VIEW_H}.labor_available_aw_update_`,
+      `${VIEW_H}.labor_required`,
+      `${VIEW_H}.inbound_count`,
+      `${VIEW_H}.outbound_count`,
+      `${VIEW_H}.drops`,
+      `${VIEW_H}.total_appointments`,
+    ],
+    filters: {
+      [`${VIEW_H}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+      [`${VIEW_H}.labor_shift_timestamp`]: {
+        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+        isFiscal: false, left_side: date, is_negative: false,
+        offset_interval_string: '0 days',
+      },
+    },
+    sorts: [{ column_name: `${VIEW_H}.hour_of_day_timestamp`, sort_descending: false }],
+    limit: 100,
+  })
+  return rows.map(r => ({
+    h:           tsToHour(r[`${VIEW_H}.hour_of_day_timestamp`]),
+    rawStaffed:  Number(r[`${VIEW_H}.raw_staffed_employee`])       || 0,
+    adjStaffed:  Number(r[`${VIEW_H}.adjusted_staffed_employee`])  || 0,
+    breaks:      Number(r[`${VIEW_H}.employees_on_break`])         || 0,
+    whAdj:       Number(r[`${VIEW_H}.warehouse_labor_adjustment`]) || 0,
+    avail:       Number(r[`${VIEW_H}.labor_available`])            || 0,
+    availAw:     Number(r[`${VIEW_H}.labor_available_aw_update_`]) || 0,
+    req:         Number(r[`${VIEW_H}.labor_required`])             || 0,
+    inb:         Number(r[`${VIEW_H}.inbound_count`])              || 0,
+    out:         Number(r[`${VIEW_H}.outbound_count`])             || 0,
+    drops:       Number(r[`${VIEW_H}.drops`])                      || 0,
+    appts:       Number(r[`${VIEW_H}.total_appointments`])         || 0,
+  }))
+}
+
 export async function fetchHourlyAppointments(facilityId, date) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
