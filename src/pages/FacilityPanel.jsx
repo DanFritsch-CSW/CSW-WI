@@ -12,7 +12,7 @@ import {
 } from '../lib/omni.js'
 import { fetchProjectHourlyDrops, upsertProjectHourlyDrops, insertProjectHourlyDropsIfMissing, fetchHourlyAdjustments, upsertHourlyAdjustment } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
-import { applySettings, computeDailyKpis, buildRosterAvailability } from '../lib/laborCalc.js'
+import { applySettings, computeDailyKpis, buildRosterAvailability, buildRosterStaffedHeadcount } from '../lib/laborCalc.js'
 
 const CAL2_SIDE35_PROJECTS = new Set([
   'Palermos CALEDONIA finished', "Palermo's CALEDONIA finished", 'PALERMOS CALEDONIA FINISHED',
@@ -258,6 +258,12 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
   }, [rosterState, settings, laneFilter])
 
+  // Raw staffed headcount (no break math) + per-hour name lists for drill-down
+  const rosterStaffed = useMemo(() => {
+    if (!rosterState.employees.length) return null
+    return buildRosterStaffedHeadcount(rosterState.employees, rosterState.laneMap, rosterState.assignmentMap, laneFilter)
+  }, [rosterState, laneFilter])
+
   const visibleProjectHourlyDrops = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return projectHourlyDrops
     return Object.fromEntries(
@@ -418,6 +424,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
             hourlyData={hourly} estDrops={estDrops}
             projectHourlyDrops={visibleProjectHourlyDrops}
             hourlyAdjustments={hourlyAdjustments}
+            staffedHourly={rosterStaffed?.hourly}
+            staffedByHour={rosterStaffed?.byHour}
             onProjectHourlyChange={(projectName, h, val) => {
               setProjectHourlyDrops(prev => ({ ...prev, [projectName]: { ...(prev[projectName] ?? {}), [h]: val } }))
               upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])

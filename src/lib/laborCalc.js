@@ -78,6 +78,44 @@ function applyBreakMuls(resolvedHours, breakMuls) {
 }
 
 /**
+ * Shared exclusion logic + resolved start/hours/lane for an employee.
+ * Returns null if the employee should be excluded from labor calcs entirely.
+ * Otherwise returns { resolvedStart, resolvedHours, lane }.
+ */
+function resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter) {
+  const assignment = assignmentMap?.[emp.id]
+
+  // Exclude employees on loan to another facility
+  if (assignment?.on_loan_to) return null
+
+  const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
+
+  if (laneFilter && !laneFilter.has(lane)) return null
+
+  const shiftKey = LANE_TO_SHIFT[lane]
+  if (!shiftKey) return null  // pto, callin — not counted
+
+  const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
+
+  const rawStart = assignment?.shift_start ?? emp.shift_start
+  const rawHours = assignment?.shift_hours ?? emp.shift_hours
+
+  // Exclude employees with no schedule data (e.g. "Free Flow" in B2E).
+  if (rawStart == null && rawHours == null) return null
+
+  const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
+  const shiftHours = rawHours != null ? Number(rawHours) : shiftDefaults.hours
+
+  const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
+  const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
+
+  // Exclude shifts starting before operational day boundary
+  if (resolvedStart < OP_DAY_START) return null
+
+  return { resolvedStart, resolvedHours, lane }
+}
+
+/**
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
  * Operational day = 5am–4:59am. Hours 0–4 (12am–4am) are the TAIL of the
@@ -102,37 +140,10 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
   const hourlyAvail = new Array(24).fill(0)
 
   for (const emp of employees) {
-    const assignment = assignmentMap?.[emp.id]
+    const shift = resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter)
+    if (!shift) continue
 
-    // Exclude employees on loan to another facility
-    if (assignment?.on_loan_to) continue
-
-    const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
-
-    if (laneFilter && !laneFilter.has(lane)) continue
-
-    const shiftKey = LANE_TO_SHIFT[lane]
-    if (!shiftKey) continue  // pto, callin — not counted
-
-    const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
-
-    const rawStart = assignment?.shift_start ?? emp.shift_start
-    const rawHours = assignment?.shift_hours ?? emp.shift_hours
-
-    // Exclude employees with no schedule data at all (e.g. "Free Flow" in B2E).
-    // Both start and hours must be null — if either is present, use it with defaults.
-    // Mirrors Omni's behavior: no valid shift times = not counted.
-    if (rawStart == null && rawHours == null) continue
-
-    const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
-    const shiftHours = rawHours != null ? Number(rawHours) : shiftDefaults.hours
-
-    const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
-    const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
-
-    // Exclude shifts starting before the operational day boundary
-    if (resolvedStart < OP_DAY_START) continue
-
+    const { resolvedStart, resolvedHours } = shift
     const fullHours = Math.floor(resolvedHours)
     const frac      = resolvedHours - fullHours
 
@@ -152,6 +163,64 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
 }
 
 /**
+ * Build a 24-element array of raw staffed headcount per hour of day, plus
+ * a per-hour map of employee names on the clock that hour.
+ *
+ * This is the "Raw Staffed Employee" equivalent — pure body count, NO break math.
+ * One employee on the clock during an hour contributes 1.0 to that hour.
+ * Used for reconciliation against Omni's Raw Staffed Employee column.
+ *
+ * Same exclusion rules as buildRosterAvailability:
+ *   - on-loan, PTO/callin, free-flow (null shifts), pre-5am starts excluded
+ *   - lane filter respected for CAL v2 side tabs
+ *
+ * Fractional shift lengths: the partial final hour contributes its fractional
+ * remainder (e.g. 8.5h shift = 8 full hours @ 1.0 + 1 hour @ 0.5).
+ *
+ * Returns:
+ *   {
+ *     hourly: number[24]                  // headcount per hour (rounded 1 decimal)
+ *     byHour: { [hour: number]: string[] } // employee names on clock that hour, sorted
+ *   }
+ */
+export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = {}, laneFilter = null) {
+  const hourly = new Array(24).fill(0)
+  const byHour = {}
+
+  for (const emp of employees) {
+    const shift = resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter)
+    if (!shift) continue
+
+    const { resolvedStart, resolvedHours } = shift
+    const fullHours = Math.floor(resolvedHours)
+    const frac      = resolvedHours - fullHours
+    const empName   = emp.name || `Employee ${emp.id}`
+
+    for (let i = 0; i < fullHours; i++) {
+      const hMod = (resolvedStart + i) % 24
+      hourly[hMod] += 1
+      if (!byHour[hMod]) byHour[hMod] = []
+      byHour[hMod].push(empName)
+    }
+    // Partial final hour — fractional contribution to headcount, still listed in roster
+    if (frac > 0) {
+      const hMod = (resolvedStart + fullHours) % 24
+      hourly[hMod] += frac
+      if (!byHour[hMod]) byHour[hMod] = []
+      byHour[hMod].push(empName)
+    }
+  }
+
+  // Sort each hour's name list alphabetically for stable display
+  for (const h in byHour) byHour[h].sort((a, b) => a.localeCompare(b))
+
+  return {
+    hourly: hourly.map(v => Math.round(v * 10) / 10),
+    byHour,
+  }
+}
+
+/**
  * Compute break-adjusted total hours for a set of employees.
  * Excludes employees on loan (on_loan_to set).
  * Excludes shifts starting before OP_DAY_START.
@@ -164,34 +233,10 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
   let total = 0
 
   for (const emp of employees) {
-    const assignment = assignmentMap?.[emp.id]
+    const shift = resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter)
+    if (!shift) continue
 
-    // Exclude employees on loan
-    if (assignment?.on_loan_to) continue
-
-    const lane = laneMap[emp.id] || emp.default_lane || 'shift1'
-    if (laneFilter && !laneFilter.has(lane)) continue
-    const shiftKey = LANE_TO_SHIFT[lane]
-    if (!shiftKey) continue
-
-    const shiftDefaults = SHIFT_DEFAULTS[shiftKey]
-
-    const rawStart = assignment?.shift_start ?? emp.shift_start
-    const rawHours = assignment?.shift_hours ?? emp.shift_hours
-
-    // Exclude employees with no schedule data (mirrors Omni behavior)
-    if (rawStart == null && rawHours == null) continue
-
-    const startHour     = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
-    const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
-
-    // Exclude shifts starting before operational day boundary
-    if (resolvedStart < OP_DAY_START) continue
-
-    const shiftHours    = rawHours != null ? Number(rawHours) : shiftDefaults.hours
-    const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
-
-    total += applyBreakMuls(resolvedHours, breakMuls)
+    total += applyBreakMuls(shift.resolvedHours, breakMuls)
   }
 
   return Math.round(total * 10) / 10

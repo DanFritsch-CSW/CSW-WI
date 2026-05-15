@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, forwardRef } from 'react'
+import { useState, useRef, useCallback, useEffect, forwardRef } from 'react'
 
 function fmtHour(h) {
   if (h === 0) return '12am'
@@ -72,10 +72,76 @@ const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigat
   )
 })
 
-export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDrops = {}, hourlyAdjustments = {}, onProjectHourlyChange, onAdjustmentChange, color }) {
+// StaffedCell — click to open popover with names of employees on clock that hour.
+// Used in the Raw Staffed column to reconcile against Omni's Raw Staffed Employee.
+function StaffedCell({ value, names, hour, openHour, setOpenHour }) {
+  const popoverRef = useRef(null)
+  const triggerRef = useRef(null)
+  const isOpen = openHour === hour
+
+  useEffect(() => {
+    if (!isOpen) return
+    function handleClickOutside(e) {
+      if (popoverRef.current?.contains(e.target)) return
+      if (triggerRef.current?.contains(e.target)) return
+      setOpenHour(null)
+    }
+    function handleEscape(e) {
+      if (e.key === 'Escape') setOpenHour(null)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [isOpen, setOpenHour])
+
+  const hasNames = Array.isArray(names) && names.length > 0
+  const display = value == null ? '--' : r1(value)
+
+  return (
+    <span style={{ position: 'relative', display: 'inline-block' }}>
+      <span
+        ref={triggerRef}
+        className={`ht-staffed-trigger${hasNames ? ' ht-staffed-trigger--clickable' : ''}`}
+        title={hasNames ? `Click to see ${names.length} employee${names.length === 1 ? '' : 's'} on clock at ${fmtHour(hour)}` : 'No employees on clock'}
+        onClick={hasNames ? () => setOpenHour(isOpen ? null : hour) : undefined}
+      >
+        {display}
+      </span>
+      {isOpen && hasNames && (
+        <div ref={popoverRef} className="ht-staffed-popover">
+          <div className="ht-staffed-popover-header">
+            {fmtHour(hour)} &mdash; {names.length} on clock
+          </div>
+          <div className="ht-staffed-popover-body">
+            {names.map((n, i) => (
+              <div key={i} className="ht-staffed-popover-name">{n}</div>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  )
+}
+
+export default function HourlyTable({
+  hourlyData,
+  estDrops = {},
+  projectHourlyDrops = {},
+  hourlyAdjustments = {},
+  staffedHourly = null,
+  staffedByHour = null,
+  onProjectHourlyChange,
+  onAdjustmentChange,
+  color,
+}) {
   const [expanded, setExpanded] = useState(false)
   // compact=true hides EST Drops, Inb, Out columns (default for screenshots)
   const [compact, setCompact] = useState(true)
+  // openStaffedHour: which hour's popover is open (single open at a time)
+  const [openStaffedHour, setOpenStaffedHour] = useState(null)
   // cellRefs[projIdx][rowIdx] = ref to the visible EditableCell span
   const cellRefs = useRef({})
 
@@ -102,6 +168,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
 
   const projects = Object.keys(projectHourlyDrops).sort((a, b) => a.localeCompare(b))
   const multiProject = projects.length >= 1
+  const showStaffed = Array.isArray(staffedHourly)
 
   const sorted = [...hourlyData].sort((a, b) => {
     const sa = a.h < 5 ? a.h + 24 : a.h
@@ -114,7 +181,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
     const adj = hourlyAdjustments[r.h] ?? 0
     const final = r1((r.avail + adj) - r.req)
     cumul = r1(cumul + final)
-    return { ...r, adj, final, cumul, est: estDrops[r.h] ?? null }
+    return { ...r, adj, final, cumul, est: estDrops[r.h] ?? null, staffed: showStaffed ? (staffedHourly[r.h] ?? 0) : null }
   })
 
   const tot = {
@@ -125,6 +192,7 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
     req:   r1(rows.reduce((s, r) => s + r.req,   0)),
     avail: r1(rows.reduce((s, r) => s + r.avail, 0)),
     adj:   rows.reduce((s, r) => s + r.adj, 0),
+    staffed: showStaffed ? r1(rows.reduce((s, r) => s + (r.staffed ?? 0), 0)) : null,
     cumul: rows[rows.length - 1]?.cumul ?? 0,
   }
 
@@ -175,6 +243,9 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
             <th>Appts</th>
             <th>Labor Req</th>
             <th>Labor Avail</th>
+            {showStaffed && (
+              <th className="ht-staffed-col" title="Raw staffed headcount — bodies on the clock this hour. No break math. Click a value to see names.">Staffed</th>
+            )}
             <th className="ht-adj-col" title="Adjustment to labor available this hour.">Adj</th>
             <th>Final +/-</th>
             <th>Cumul +/-</th>
@@ -210,6 +281,17 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
               <td style={{ color }}>{r.appts}</td>
               <td>{r.req}</td>
               <td>{r1(r.avail)}</td>
+              {showStaffed && (
+                <td className="ht-staffed-col">
+                  <StaffedCell
+                    value={r.staffed}
+                    names={staffedByHour?.[r.h] ?? []}
+                    hour={r.h}
+                    openHour={openStaffedHour}
+                    setOpenHour={setOpenStaffedHour}
+                  />
+                </td>
+              )}
               <td className="ht-adj-col">
                 <EditableCell value={r.adj} onSave={val => onAdjustmentChange?.(r.h, val)} />
               </td>
@@ -236,6 +318,9 @@ export default function HourlyTable({ hourlyData, estDrops = {}, projectHourlyDr
             <td style={{ color }}>{tot.appts}</td>
             <td>{tot.req}</td>
             <td>{tot.avail}</td>
+            {showStaffed && (
+              <td className="ht-staffed-col">{tot.staffed}</td>
+            )}
             <td className="ht-adj-col">{
               tot.adj !== 0
                 ? <span className={tot.adj > 0 ? 'ht-pos' : 'ht-neg'}>{tot.adj > 0 ? `+${tot.adj}` : tot.adj}</span>
