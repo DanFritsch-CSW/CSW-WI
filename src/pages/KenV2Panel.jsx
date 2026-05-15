@@ -1,20 +1,20 @@
 // src/pages/KenV2Panel.jsx
 //
-// Diagnostic tab: Omni's appointment/labor-req data + App-computed roster math.
+// Diagnostic mirror tab — displays ALL columns from Omni's
+// hourly_labor_required_vs_available view, replicating the dashboard SQL's
+// 5am→5am operational window by querying activity_date for the target date
+// AND the next day, then client-side filtering to hours 5-28.
 //
-// Data sources:
-//   - Labor Required, appointments, inbound, outbound, drops → Omni labor model
-//     (hourly_labor_required_vs_available, labor_shift_timestamp 5am→5am filter)
-//   - Staffed headcount, Labor Available → computed client-side from the live
-//     B2E roster using the same laborCalc.js logic as the main FacilityPanel.
-//     (The base Omni table only materializes roster columns for past dates after
-//     nightly jobs run; current-day values are always zero via the API.)
+// Columns shown in the hourly table:
+//   Hour | Appts | Inb | Out | Drops | Labor Req (Omni)
+//        | Raw Staffed (Omni) | App Staffed | Δ
+//        | Breaks (Omni) | WH Adj (Omni)
+//        | Labor Avail AW (Omni) | App Avail | Δ
+//        | Final +/- | Cumul +/-
 //
-// The hourly table shows both Omni's Labor Req and the App's Staffed/Avail
-// side-by-side with Δ columns, so any divergence from Omni's workbook is visible.
-// Roster is in-memory only — drag-drop changes don't persist to Supabase.
-//
-// Props: planDate, networkKpi, onDeltaComputed, onKpiComputed, facility
+// Roster is in-memory only — drag-drop doesn't persist to Supabase.
+// This lets you compare Omni's computed roster vs App's computed roster
+// and see divergence per hour.
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
@@ -67,7 +67,7 @@ export default function KenV2Panel({ planDate, networkKpi, onDeltaComputed, onKp
 
   const handleRosterChange = useCallback(s => setRosterState(s), [])
 
-  // App-computed roster labor — same logic as FacilityPanel, read-only here
+  // App-computed roster labor — same logic as FacilityPanel
   const appAvail = useMemo(() => {
     if (!rosterState.employees.length) return null
     return buildRosterAvailability(
@@ -82,51 +82,60 @@ export default function KenV2Panel({ planDate, networkKpi, onDeltaComputed, onKp
     )
   }, [rosterState])
 
-  // Merge Omni req/appts with App avail for chart + KPIs
-  const mergedRows = useMemo(() => omniRows.map(r => ({
+  // Chart uses Omni's avail (AW) as the avail line
+  const chartRows = useMemo(() => omniRows.map(r => ({
     h:     r.h,
     appts: r.appts,
     req:   r.req,
-    avail: appAvail?.[r.h] ?? 0,
+    avail: r.availAw,
     inb:   r.inb,
     out:   r.out,
     drops: r.drops,
-  })), [omniRows, appAvail])
+  })), [omniRows])
 
-  const totals = useMemo(() => {
-    const labor  = r1(omniRows.reduce((s, r) => s + r.req,   0))
-    const avail  = r1(appAvail ? appAvail.reduce((s, v) => s + v, 0) : 0)
-    const appts  = omniRows.reduce((s, r) => s + r.appts, 0)
-    const inb    = omniRows.reduce((s, r) => s + r.inb,   0)
-    const out    = omniRows.reduce((s, r) => s + r.out,   0)
-    const drops  = omniRows.reduce((s, r) => s + r.drops, 0)
-    const staffed = appStaffed ? r1(appStaffed.hourly.reduce((s, v) => s + v, 0)) : 0
+  const omniTotals = useMemo(() => {
+    if (!omniRows.length) return { labor: 0, availAw: 0, rawStaffed: 0, breaks: 0, whAdj: 0, appts: 0, inb: 0, out: 0, drops: 0 }
     return {
-      labor, avail, appts, inb, out, drops, staffed,
-      util:  avail > 0 ? Math.round(labor / avail * 100) : 0,
-      delta: r1(avail - labor),
+      labor:      r1(omniRows.reduce((s, r) => s + r.req,        0)),
+      availAw:    r1(omniRows.reduce((s, r) => s + r.availAw,    0)),
+      rawStaffed: r1(omniRows.reduce((s, r) => s + r.rawStaffed, 0)),
+      breaks:     r1(omniRows.reduce((s, r) => s + r.breaks,     0)),
+      whAdj:      r1(omniRows.reduce((s, r) => s + r.whAdj,      0)),
+      appts:         omniRows.reduce((s, r) => s + r.appts,      0),
+      inb:           omniRows.reduce((s, r) => s + r.inb,        0),
+      out:           omniRows.reduce((s, r) => s + r.out,        0),
+      drops:         omniRows.reduce((s, r) => s + r.drops,      0),
     }
-  }, [omniRows, appAvail, appStaffed])
+  }, [omniRows])
+
+  const appTotals = useMemo(() => ({
+    staffed: appStaffed ? r1(appStaffed.hourly.reduce((s, v) => s + v, 0)) : null,
+    avail:   appAvail   ? r1(appAvail.reduce((s, v) => s + v, 0))          : null,
+  }), [appStaffed, appAvail])
+
+  // For KPI pills and delta propagation — use Omni avail vs Omni req
+  const omniDelta = r1(omniTotals.availAw - omniTotals.labor)
+  const omniUtil  = omniTotals.availAw > 0 ? Math.round(omniTotals.labor / omniTotals.availAw * 100) : 0
 
   useEffect(() => {
-    if (onDeltaComputed) onDeltaComputed(`${facId}_v2`, totals.delta)
-  }, [totals.delta, facId, onDeltaComputed])
+    if (onDeltaComputed) onDeltaComputed(`${facId}_v2`, omniDelta)
+  }, [omniDelta, facId, onDeltaComputed])
 
   useEffect(() => {
-    if (onKpiComputed) onKpiComputed(`${facId}_v2`, { inb: totals.inb, out: totals.out, drops: totals.drops })
-  }, [totals.inb, totals.out, totals.drops, facId, onKpiComputed])
+    if (onKpiComputed) onKpiComputed(`${facId}_v2`, { inb: omniTotals.inb, out: omniTotals.out, drops: omniTotals.drops })
+  }, [omniTotals.inb, omniTotals.out, omniTotals.drops, facId, onKpiComputed])
 
   const kpiData = {
-    appts: totals.appts,
-    drops: totals.drops,
-    inb:   totals.inb,
-    out:   totals.out,
-    labor: totals.staffed,
-    totalHours: totals.avail,
-    laborReq:   totals.labor,
-    totalAdj:   0,
-    util:  totals.util,
-    delta: totals.delta,
+    appts:      omniTotals.appts,
+    drops:      omniTotals.drops,
+    inb:        omniTotals.inb,
+    out:        omniTotals.out,
+    labor:      omniTotals.rawStaffed,
+    totalHours: omniTotals.availAw,
+    laborReq:   omniTotals.labor,
+    totalAdj:   omniTotals.whAdj,
+    util:       omniUtil,
+    delta:      omniDelta,
     fetchedAt,
   }
 
@@ -135,9 +144,9 @@ export default function KenV2Panel({ planDate, networkKpi, onDeltaComputed, onKp
       <div className="omni-warning-banner" style={{ background: 'rgba(125, 165, 230, 0.08)', borderColor: 'rgba(125, 165, 230, 0.3)' }}>
         <span className="omni-warning-icon" style={{ color: '#7da5e6' }}>ℹ</span>
         <span className="omni-warning-text">
-          <strong>Diagnostic mirror</strong> — Labor Req &amp; appointments from Omni's{' '}
-          <code>hourly_labor_required_vs_available</code> (5am→5am shift filter).
-          Staffed &amp; Labor Available computed from the live B2E roster using the same App logic as the KEN tab.
+          <strong>Omni Mirror</strong> — All columns pulled directly from{' '}
+          <code>hourly_labor_required_vs_available</code> using the same 5am→5am window as the dashboard.
+          App Staffed &amp; App Avail columns computed from the live B2E roster for comparison.
           Roster is in-memory only — drag-drop changes don't save.
         </span>
       </div>
@@ -153,17 +162,25 @@ export default function KenV2Panel({ planDate, networkKpi, onDeltaComputed, onKp
       <div className="panel-top-grid">
         <KpiPills data={kpiData} color={fac.color} />
         <div>
-          <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Day Totals</div>
+          <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Omni Totals</div>
           <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', fontSize: 11, fontFamily: 'var(--font-mono)', lineHeight: 1.9 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 16px' }}>
-              <div><span style={{ color: 'var(--text-dim)' }}>Appts (Omni):</span> <strong>{totals.appts}</strong></div>
-              <div><span style={{ color: 'var(--text-dim)' }}>Labor Req (Omni):</span> <strong>{totals.labor}</strong></div>
-              <div><span style={{ color: 'var(--text-dim)' }}>Staffed (App):</span> <strong>{totals.staffed}</strong></div>
-              <div><span style={{ color: 'var(--text-dim)' }}>Avail (App):</span> <strong>{totals.avail}</strong></div>
+              <div><span style={{ color: 'var(--text-dim)' }}>Raw Staffed:</span> <strong>{omniTotals.rawStaffed}</strong></div>
+              <div><span style={{ color: 'var(--text-dim)' }}>Adj Staffed:</span> <strong>{r1(omniTotals.availAw - omniTotals.whAdj)}</strong></div>
+              <div><span style={{ color: 'var(--text-dim)' }}>Breaks:</span> <strong>{omniTotals.breaks}</strong></div>
+              <div><span style={{ color: 'var(--text-dim)' }}>WH Adj:</span> <strong>{omniTotals.whAdj > 0 ? `+${omniTotals.whAdj}` : omniTotals.whAdj}</strong></div>
+              <div><span style={{ color: 'var(--text-dim)' }}>Labor Avail (AW):</span> <strong>{omniTotals.availAw}</strong></div>
+              <div><span style={{ color: 'var(--text-dim)' }}>Labor Req:</span> <strong>{omniTotals.labor}</strong></div>
+              {appTotals.staffed != null && (
+                <div><span style={{ color: 'var(--text-dim)' }}>App Staffed:</span> <strong>{appTotals.staffed}</strong></div>
+              )}
+              {appTotals.avail != null && (
+                <div><span style={{ color: 'var(--text-dim)' }}>App Avail:</span> <strong>{appTotals.avail}</strong></div>
+              )}
               <div style={{ gridColumn: '1 / 3', paddingTop: 4, borderTop: '1px dashed var(--border)' }}>
-                <span style={{ color: 'var(--text-dim)' }}>Daily +/-:</span> &nbsp;
-                <strong style={{ color: totals.delta >= 0 ? '#3dba7e' : '#e05a5a' }}>
-                  {totals.delta >= 0 ? `+${totals.delta}` : totals.delta}
+                <span style={{ color: 'var(--text-dim)' }}>Omni Daily +/-:</span> &nbsp;
+                <strong style={{ color: omniDelta >= 0 ? '#3dba7e' : '#e05a5a' }}>
+                  {omniDelta >= 0 ? `+${omniDelta}` : omniDelta}
                 </strong>
               </div>
             </div>
@@ -174,8 +191,8 @@ export default function KenV2Panel({ planDate, networkKpi, onDeltaComputed, onKp
       {loading
         ? <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-dim)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>Loading Omni data…</div>
         : <>
-            <HourlyChart hourlyData={mergedRows} color={fac.color} />
-            <div className="section-label" style={{ marginTop: 8 }}>Hourly Breakdown</div>
+            <HourlyChart hourlyData={chartRows} color={fac.color} />
+            <div className="section-label" style={{ marginTop: 8 }}>Hourly Breakdown (Omni vs App)</div>
             <OmniHourlyTable
               omniRows={omniRows}
               appStaffed={appStaffed?.hourly}
