@@ -1,14 +1,10 @@
 'use strict'
 
-// MotherDuck HTTP API proxy for the KEN v2 diagnostic mirror.
-// Queries production_db.labor_planning_app.hourly_labor_required_vs_available
-// directly, bypassing Omni's API layer (which only materializes staffing columns
-// for past dates after nightly ETL jobs run).
+// MotherDuck query proxy for KEN v2 diagnostic mirror.
+// Uses duckdb npm package + MotherDuck extension to run SQL directly against
+// production_db.labor_planning_app.hourly_labor_required_vs_available
 //
-// MotherDuck's in-memory snapshot is updated more frequently and contains live
-// staffed employee data for the current operational day.
-//
-// Accepts POST { warehouse: string, date: string (YYYY-MM-DD) }
+// Accepts POST { facilityId: string, date: string (YYYY-MM-DD) }
 // Returns { rows: Array<{ h, rawStaffed, adjStaffed, breaks, whAdj, avail, availAw, req, inb, out, drops, appts }> }
 
 const NO_CACHE_HEADERS = {
@@ -23,6 +19,12 @@ const WAREHOUSE_MAP = {
   mad: 'madison',
   wr:  'wisconsin rapids',
   ec:  'eau claire',
+}
+
+function tsToHour(ts) {
+  if (!ts) return 0
+  const m = String(ts).match(/[T ](\d{2}):/)
+  return m ? parseInt(m[1]) : 0
 }
 
 exports.handler = async (event) => {
@@ -51,15 +53,13 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Missing facilityId or date' }) }
   }
 
-  // Query the target date AND next day to cover the full 5am→5am operational window.
-  // Client-side filtering to the window happens in fetchOmniLaborFullRow.
   const nextDate = new Date(date + 'T00:00:00Z')
   nextDate.setUTCDate(nextDate.getUTCDate() + 1)
   const nextDateStr = nextDate.toISOString().slice(0, 10)
 
   const sql = `
     SELECT
-      hour_of_day_timestamp,
+      hour_of_day_timestamp::VARCHAR AS ts,
       COALESCE(raw_staffed_employee, 0)       AS raw_staffed_employee,
       COALESCE(adjusted_staffed_employee, 0)  AS adjusted_staffed_employee,
       COALESCE(employees_on_break, 0)         AS employees_on_break,
@@ -72,73 +72,51 @@ exports.handler = async (event) => {
       COALESCE(drops, 0)                      AS drops,
       COALESCE(total_appointments, 0)         AS total_appointments
     FROM production_db.labor_planning_app.hourly_labor_required_vs_available
-    WHERE warehouse_name = '${warehouse}'
+    WHERE warehouse_name = '${warehouse.replace(/'/g, "''")}'
       AND activity_date::DATE IN ('${date}', '${nextDateStr}')
     ORDER BY hour_of_day_timestamp
   `
 
-  let res
   try {
-    res = await fetch('https://app.motherduck.com/api/sql', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ sql }),
+    const duckdb = require('duckdb')
+    const db = new duckdb.Database(`md:?motherduck_token=${TOKEN}`)
+    const conn = db.connect()
+
+    const rows = await new Promise((resolve, reject) => {
+      conn.all(sql, (err, result) => {
+        if (err) reject(err)
+        else resolve(result)
+      })
     })
+
+    conn.close()
+    db.close()
+
+    const parsed = rows.map(r => ({
+      h:          tsToHour(r.ts),
+      rawStaffed: Number(r.raw_staffed_employee)      || 0,
+      adjStaffed: Number(r.adjusted_staffed_employee) || 0,
+      breaks:     Number(r.employees_on_break)        || 0,
+      whAdj:      Number(r.warehouse_labor_adjustment)|| 0,
+      avail:      Number(r.labor_available)           || 0,
+      availAw:    Number(r.labor_available_aw)        || 0,
+      req:        Number(r.labor_required)            || 0,
+      inb:        Number(r.inbound_count)             || 0,
+      out:        Number(r.outbound_count)            || 0,
+      drops:      Number(r.drops)                     || 0,
+      appts:      Number(r.total_appointments)        || 0,
+    }))
+
+    return {
+      statusCode: 200,
+      headers: NO_CACHE_HEADERS,
+      body: JSON.stringify({ rows: parsed }),
+    }
   } catch (e) {
     return {
       statusCode: 502,
       headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: `MotherDuck network error: ${e.message}` }),
+      body: JSON.stringify({ error: e.message }),
     }
-  }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    return {
-      statusCode: 502,
-      headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: `MotherDuck ${res.status}`, detail: text.slice(0, 300) }),
-    }
-  }
-
-  const json = await res.json()
-
-  // MotherDuck HTTP API returns { data: { columns: [...], rows: [[...], ...] } }
-  const columns = json?.data?.columns ?? []
-  const rawRows = json?.data?.rows ?? []
-
-  function col(row, name) {
-    const idx = columns.findIndex(c => c.name === name)
-    return idx >= 0 ? row[idx] : null
-  }
-
-  function tsToHour(ts) {
-    if (!ts) return 0
-    const m = String(ts).match(/[T ](\d{2}):/)
-    return m ? parseInt(m[1]) : 0
-  }
-
-  const rows = rawRows.map(row => ({
-    h:          tsToHour(col(row, 'hour_of_day_timestamp')),
-    rawStaffed: Number(col(row, 'raw_staffed_employee'))      || 0,
-    adjStaffed: Number(col(row, 'adjusted_staffed_employee')) || 0,
-    breaks:     Number(col(row, 'employees_on_break'))        || 0,
-    whAdj:      Number(col(row, 'warehouse_labor_adjustment'))|| 0,
-    avail:      Number(col(row, 'labor_available'))           || 0,
-    availAw:    Number(col(row, 'labor_available_aw'))        || 0,
-    req:        Number(col(row, 'labor_required'))            || 0,
-    inb:        Number(col(row, 'inbound_count'))             || 0,
-    out:        Number(col(row, 'outbound_count'))            || 0,
-    drops:      Number(col(row, 'drops'))                     || 0,
-    appts:      Number(col(row, 'total_appointments'))        || 0,
-  }))
-
-  return {
-    statusCode: 200,
-    headers: NO_CACHE_HEADERS,
-    body: JSON.stringify({ rows }),
   }
 }
