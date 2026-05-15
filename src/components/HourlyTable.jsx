@@ -8,7 +8,13 @@ function fmtHour(h) {
 }
 
 function r1(n) { return Math.round(n * 10) / 10 }
+function r2(n) { return Math.round(n * 100) / 100 }
 function fmtDelta(v) { const n = r1(v); return n >= 0 ? `+${n}` : `${n}` }
+function fmtContribution(c) {
+  // Show 1.0 for full hours, decimal for partials (0.5, 0.25, 0.75 etc.)
+  if (c >= 1) return '1.0'
+  return r2(c).toString()
+}
 
 // EditableCell forwards its outer ref so the table can programmatically
 // call .click() on the visible span to open the cell.
@@ -73,8 +79,9 @@ const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigat
 })
 
 // StaffedCell — click to open popover with names of employees on clock that hour.
+// Each name shows its per-hour contribution (1.0 for full hour, <1.0 for partials).
 // Used in the Raw Staffed column to reconcile against Omni's Raw Staffed Employee.
-function StaffedCell({ value, names, hour, openHour, setOpenHour }) {
+function StaffedCell({ value, entries, hour, openHour, setOpenHour }) {
   const popoverRef = useRef(null)
   const triggerRef = useRef(null)
   const isOpen = openHour === hour
@@ -97,27 +104,36 @@ function StaffedCell({ value, names, hour, openHour, setOpenHour }) {
     }
   }, [isOpen, setOpenHour])
 
-  const hasNames = Array.isArray(names) && names.length > 0
+  const hasEntries = Array.isArray(entries) && entries.length > 0
   const display = value == null ? '--' : r1(value)
+  const partialCount = hasEntries ? entries.filter(e => e.contribution < 1).length : 0
 
   return (
     <span style={{ position: 'relative', display: 'inline-block' }}>
       <span
         ref={triggerRef}
-        className={`ht-staffed-trigger${hasNames ? ' ht-staffed-trigger--clickable' : ''}`}
-        title={hasNames ? `Click to see ${names.length} employee${names.length === 1 ? '' : 's'} on clock at ${fmtHour(hour)}` : 'No employees on clock'}
-        onClick={hasNames ? () => setOpenHour(isOpen ? null : hour) : undefined}
+        className={`ht-staffed-trigger${hasEntries ? ' ht-staffed-trigger--clickable' : ''}`}
+        title={hasEntries ? `Click to see ${entries.length} employee${entries.length === 1 ? '' : 's'} on clock at ${fmtHour(hour)}${partialCount > 0 ? ` (${partialCount} partial)` : ''}` : 'No employees on clock'}
+        onClick={hasEntries ? () => setOpenHour(isOpen ? null : hour) : undefined}
       >
         {display}
       </span>
-      {isOpen && hasNames && (
+      {isOpen && hasEntries && (
         <div ref={popoverRef} className="ht-staffed-popover">
           <div className="ht-staffed-popover-header">
-            {fmtHour(hour)} &mdash; {names.length} on clock
+            <span>{fmtHour(hour)} &mdash; {entries.length} on clock</span>
+            {partialCount > 0 && (
+              <span className="ht-staffed-popover-partial-count">{partialCount} partial</span>
+            )}
           </div>
           <div className="ht-staffed-popover-body">
-            {names.map((n, i) => (
-              <div key={i} className="ht-staffed-popover-name">{n}</div>
+            {entries.map((e, i) => (
+              <div key={i} className={`ht-staffed-popover-row${e.contribution < 1 ? ' ht-staffed-popover-row--partial' : ''}`}>
+                <span className="ht-staffed-popover-name">{e.name}</span>
+                <span className={`ht-staffed-popover-contrib${e.contribution < 1 ? ' ht-staffed-popover-contrib--partial' : ''}`}>
+                  {fmtContribution(e.contribution)}
+                </span>
+              </div>
             ))}
           </div>
         </div>
@@ -244,7 +260,7 @@ export default function HourlyTable({
             <th>Labor Req</th>
             <th>Labor Avail</th>
             {showStaffed && (
-              <th className="ht-staffed-col" title="Raw staffed headcount — bodies on the clock this hour. No break math. Click a value to see names.">Staffed</th>
+              <th className="ht-staffed-col" title="Raw staffed headcount — bodies on the clock this hour. No break math. Click a value to see names + per-employee contribution. Partials (<1.0) shown in amber.">Staffed</th>
             )}
             <th className="ht-adj-col" title="Adjustment to labor available this hour.">Adj</th>
             <th>Final +/-</th>
@@ -285,7 +301,7 @@ export default function HourlyTable({
                 <td className="ht-staffed-col">
                   <StaffedCell
                     value={r.staffed}
-                    names={staffedByHour?.[r.h] ?? []}
+                    entries={staffedByHour?.[r.h] ?? []}
                     hour={r.h}
                     openHour={openStaffedHour}
                     setOpenHour={setOpenStaffedHour}

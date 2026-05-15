@@ -79,8 +79,12 @@ function applyBreakMuls(resolvedHours, breakMuls) {
 
 /**
  * Shared exclusion logic + resolved start/hours/lane for an employee.
+ * `resolvedStart` here uses raw decimal start (NOT floored) so callers that
+ * need to know about pre-hour partial starts (e.g. 6:30 start → 0.5 contribution
+ * at 6am) get the fractional information. Callers that need an integer start
+ * should floor it themselves.
  * Returns null if the employee should be excluded from labor calcs entirely.
- * Otherwise returns { resolvedStart, resolvedHours, lane }.
+ * Otherwise returns { resolvedStart, resolvedHours, lane, rawStartDecimal }.
  */
 function resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter) {
   const assignment = assignmentMap?.[emp.id]
@@ -103,16 +107,19 @@ function resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter) {
   // Exclude employees with no schedule data (e.g. "Free Flow" in B2E).
   if (rawStart == null && rawHours == null) return null
 
+  // Raw decimal start (e.g. 6.5 for 6:30am) — preserved for fractional-hour calcs
+  const rawStartDecimal = rawStart != null ? Number(rawStart) : shiftDefaults.start
   const startHour  = rawStart != null ? Math.floor(Number(rawStart)) : shiftDefaults.start
   const shiftHours = rawHours != null ? Number(rawHours) : shiftDefaults.hours
 
   const resolvedStart = isNaN(startHour) ? shiftDefaults.start : startHour
   const resolvedHours = isNaN(shiftHours) || shiftHours <= 0 ? shiftDefaults.hours : shiftHours
+  const resolvedRawStart = isNaN(rawStartDecimal) ? shiftDefaults.start : rawStartDecimal
 
-  // Exclude shifts starting before operational day boundary
+  // Exclude shifts starting before operational day boundary (uses floored start)
   if (resolvedStart < OP_DAY_START) return null
 
-  return { resolvedStart, resolvedHours, lane }
+  return { resolvedStart, resolvedHours, lane, rawStartDecimal: resolvedRawStart }
 }
 
 /**
@@ -164,55 +171,87 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
 
 /**
  * Build a 24-element array of raw staffed headcount per hour of day, plus
- * a per-hour map of employee names on the clock that hour.
+ * a per-hour map of employee name + per-hour contribution.
  *
  * This is the "Raw Staffed Employee" equivalent — pure body count, NO break math.
- * One employee on the clock during an hour contributes 1.0 to that hour.
  * Used for reconciliation against Omni's Raw Staffed Employee column.
+ *
+ * Contribution semantics (one per employee per hour they touch):
+ *   - Full hour on the clock: 1.0
+ *   - Shift START is fractional (e.g. 6:30am start) at hour 6: 0.5 (worked 30 of 60 min)
+ *   - Shift END is fractional (e.g. 8.5h shift ending at 1:30pm) at hour 13: 0.5
+ *   - If both start AND end land in the same hour (very short partial), contribution
+ *     is `min(startFrac, endFrac)` — rare edge case, conservative handling.
  *
  * Same exclusion rules as buildRosterAvailability:
  *   - on-loan, PTO/callin, free-flow (null shifts), pre-5am starts excluded
  *   - lane filter respected for CAL v2 side tabs
  *
- * Fractional shift lengths: the partial final hour contributes its fractional
- * remainder (e.g. 8.5h shift = 8 full hours @ 1.0 + 1 hour @ 0.5).
- *
  * Returns:
  *   {
- *     hourly: number[24]                  // headcount per hour (rounded 1 decimal)
- *     byHour: { [hour: number]: string[] } // employee names on clock that hour, sorted
+ *     hourly: number[24]                                       // headcount per hour (rounded 1 decimal)
+ *     byHour: { [hour: number]: Array<{name: string, contribution: number}> }  // sorted alphabetically by name
  *   }
  */
 export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = {}, laneFilter = null) {
   const hourly = new Array(24).fill(0)
   const byHour = {}
 
+  function addContribution(hour, name, contribution) {
+    if (contribution <= 0) return
+    hourly[hour] += contribution
+    if (!byHour[hour]) byHour[hour] = []
+    byHour[hour].push({ name, contribution: Math.round(contribution * 100) / 100 })
+  }
+
   for (const emp of employees) {
     const shift = resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter)
     if (!shift) continue
 
-    const { resolvedStart, resolvedHours } = shift
-    const fullHours = Math.floor(resolvedHours)
-    const frac      = resolvedHours - fullHours
-    const empName   = emp.name || `Employee ${emp.id}`
+    const { resolvedStart, resolvedHours, rawStartDecimal } = shift
+    const empName = emp.name || `Employee ${emp.id}`
 
-    for (let i = 0; i < fullHours; i++) {
-      const hMod = (resolvedStart + i) % 24
-      hourly[hMod] += 1
-      if (!byHour[hMod]) byHour[hMod] = []
-      byHour[hMod].push(empName)
-    }
-    // Partial final hour — fractional contribution to headcount, still listed in roster
-    if (frac > 0) {
-      const hMod = (resolvedStart + fullHours) % 24
-      hourly[hMod] += frac
-      if (!byHour[hMod]) byHour[hMod] = []
-      byHour[hMod].push(empName)
+    // Start offset: how much of the start hour is BEFORE the shift begins.
+    // e.g. shift starts at 6:30 → startOffset = 0.5 (first 30 min of 6am not worked).
+    // Shift starts at 6:00 (integer) → startOffset = 0.
+    const startOffset = rawStartDecimal - resolvedStart
+
+    // Effective real-time end (decimal hours from shift start). e.g. start 6.5, hours 8 → ends at 14.5.
+    const realEnd = rawStartDecimal + resolvedHours
+
+    // We walk integer hours from `resolvedStart` (floor of start) to `ceil(realEnd) - 1`.
+    // For each hour the employee touches, compute contribution.
+    const lastHourFloor = Math.floor(realEnd)
+    const endFrac       = realEnd - lastHourFloor  // 0 means shift ends exactly on the hour
+
+    for (let h = resolvedStart; h <= lastHourFloor; h++) {
+      const hMod = h % 24
+      let contribution = 1
+
+      // First hour partial start: subtract the part of the hour BEFORE shift start.
+      if (h === resolvedStart && startOffset > 0) {
+        contribution -= startOffset
+      }
+      // Last hour partial end: only count up to the end frac.
+      // If shift ends exactly on the hour (endFrac === 0), this hour shouldn't count at all.
+      if (h === lastHourFloor) {
+        if (endFrac === 0) {
+          contribution = 0  // shift ended exactly at the start of this hour
+        } else if (h === resolvedStart && startOffset > 0) {
+          // edge case: shift both starts AND ends in same hour
+          contribution = Math.min(endFrac - startOffset, contribution)
+          if (contribution < 0) contribution = 0
+        } else {
+          contribution = Math.min(endFrac, contribution)
+        }
+      }
+
+      addContribution(hMod, empName, contribution)
     }
   }
 
   // Sort each hour's name list alphabetically for stable display
-  for (const h in byHour) byHour[h].sort((a, b) => a.localeCompare(b))
+  for (const h in byHour) byHour[h].sort((a, b) => a.name.localeCompare(b.name))
 
   return {
     hourly: hourly.map(v => Math.round(v * 10) / 10),
