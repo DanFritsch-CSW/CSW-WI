@@ -17,17 +17,21 @@ function fmtContribution(c) {
 
 // EditableCell forwards its outer ref so the table can programmatically
 // call .click() on the visible span to open the cell.
+// value is always displayed as a rounded integer — decimals live in storage only.
 const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigate, isManual }, ref) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft]     = useState(0)
 
-  function open() { setDraft(value ?? 0); setEditing(true) }
+  // Display value is always rounded to integer
+  const displayValue = value != null ? Math.round(Number(value)) : 0
+
+  function open() { setDraft(displayValue); setEditing(true) }
 
   function commit() {
     const parsed = Number(draft)
     const val = isNaN(parsed) ? 0 : Math.round(parsed)
     setEditing(false)
-    if (val !== (value ?? 0)) onSave(val)
+    if (val !== displayValue) onSave(val)
   }
 
   function handleKeyDown(e) {
@@ -74,7 +78,7 @@ const EditableCell = forwardRef(function EditableCell({ value, onSave, onNavigat
       title="Tab = next hour. Shift+Tab = prev hour. Up/Down = +/-1. Enter = commit."
       onClick={open}
     >
-      {value ?? 0}
+      {displayValue}
     </span>
   )
 })
@@ -197,7 +201,7 @@ export default function HourlyTable({
     // est: round to integer for display (stored as decimal for req math accuracy)
     const estRaw = estDrops[r.h] ?? null
     const est = estRaw !== null ? Math.round(estRaw) : null
-    // appts: always integer — inb + out are already integers, est drop is rounded
+    // appts: always integer
     const appts = Math.round(r.appts)
     return { ...r, adj, final, cumul, est, appts, staffed: showStaffed ? (staffedHourly[r.h] ?? 0) : null }
   })
@@ -216,7 +220,7 @@ export default function HourlyTable({
 
   const projectTotals = {}
   for (const p of projects)
-    projectTotals[p] = Math.round(Object.values(projectHourlyDrops[p] ?? {}).reduce((s, v) => s + v, 0))
+    projectTotals[p] = Math.round(Object.values(projectHourlyDrops[p] ?? {}).reduce((s, v) => s + Number(v), 0))
 
   const numRows = rows.length
   const numProjects = projects.length
