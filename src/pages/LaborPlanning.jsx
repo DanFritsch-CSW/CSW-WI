@@ -1,17 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { FACILITY_LIST } from '../lib/constants.js'
+import { FACILITY_LIST, DIAGNOSTIC_TABS } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
 import { fetchAllFacilitiesEstDrops, fetchAllFacilitiesLaborCounts, fetchAllFacilitiesSettings } from '../lib/supabase.js'
 import AllFacilities from './AllFacilities.jsx'
 import FacilityPanel from './FacilityPanel.jsx'
+import KenV2Panel from './KenV2Panel.jsx'
 
 function todayISO() { return new Date().toISOString().slice(0, 10) }
 function tomorrowISO() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10) }
 function addDays(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
 
 const ALL_TAB = { id: 'all', code: 'ALL', name: 'All Facilities', color: '#8a9899' }
-const TABS = [ALL_TAB, ...FACILITY_LIST]
+const TABS = [ALL_TAB, ...FACILITY_LIST, ...DIAGNOSTIC_TABS]
+
+// Map of diagnostic tab id → component renderer. Add new diagnostic mirrors here.
+const DIAGNOSTIC_RENDERERS = {
+  ken_v2: KenV2Panel,
+}
 
 export default function LaborPlanning() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -29,15 +35,15 @@ export default function LaborPlanning() {
   const [facilityDeltas, setFacilityDeltas]           = useState({})
   const [facilityKpis, setFacilityKpis]               = useState({})
   const [snapLabel, setSnapLabel]                     = useState('Snapshot')
-  // Track which facility tabs have ever been visited so we only mount them on first visit
-  const [mountedFacs, setMountedFacs]                 = useState(() => new Set())
+  // Track which tabs (regular + diagnostic) have been visited so we only mount them on first visit
+  const [mountedTabs, setMountedTabs]                 = useState(() => new Set())
 
   const pageRef = useRef(null)
 
-  // Mount a facility panel the first time it's visited
+  // Mount any non-all tab the first time it's visited
   useEffect(() => {
     if (activeTab !== 'all') {
-      setMountedFacs(prev => prev.has(activeTab) ? prev : new Set([...prev, activeTab]))
+      setMountedTabs(prev => prev.has(activeTab) ? prev : new Set([...prev, activeTab]))
     }
   }, [activeTab])
 
@@ -105,16 +111,20 @@ export default function LaborPlanning() {
       </div>
 
       <div className="facility-tabs">
-        {TABS.map(tab => (
-          <button key={tab.id}
-            className={`fac-tab${activeTab === tab.id ? ' active' : ''}`}
-            style={activeTab === tab.id ? { color: tab.color, borderColor: tab.color } : {}}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.id !== 'all' && <span className="dot" style={{ background: tab.color }} />}
-            {tab.code}
-          </button>
-        ))}
+        {TABS.map(tab => {
+          const isDiag = DIAGNOSTIC_TABS.some(t => t.id === tab.id)
+          return (
+            <button key={tab.id}
+              className={`fac-tab${activeTab === tab.id ? ' active' : ''}${isDiag ? ' fac-tab--diagnostic' : ''}`}
+              style={activeTab === tab.id ? { color: tab.color, borderColor: tab.color } : {}}
+              onClick={() => setActiveTab(tab.id)}
+              title={isDiag ? tab.name : undefined}
+            >
+              {tab.id !== 'all' && <span className="dot" style={{ background: tab.color }} />}
+              {tab.code}
+            </button>
+          )
+        })}
       </div>
 
       {/* ALL tab */}
@@ -131,18 +141,36 @@ export default function LaborPlanning() {
         />
       </div>
 
-      {/* Facility panels — rendered once on first visit, hidden via CSS when inactive.
-          This keeps component state (including WR pickline snapshot) alive across tab switches. */}
+      {/* Regular facility panels — mounted once on first visit, hidden via CSS otherwise.
+          Preserves component state (WR pickline snapshot etc.) across tab switches. */}
       {FACILITY_LIST.map(fac => {
         const isActive = activeTab === fac.id
-        // Don't mount until first visited — avoids 5x Omni queries on page load
-        if (!mountedFacs.has(fac.id)) return null
+        if (!mountedTabs.has(fac.id)) return null
         return (
           <div key={fac.id} style={{ display: isActive ? undefined : 'none' }}>
             <FacilityPanel
               facility={fac}
               planDate={planDate}
               networkKpi={networkData?.[fac.id]}
+              onDeltaComputed={handleDeltaComputed}
+              onKpiComputed={handleKpiComputed}
+            />
+          </div>
+        )
+      })}
+
+      {/* Diagnostic mirror tabs (KEN v2, future mirrors) — same mount-once pattern */}
+      {DIAGNOSTIC_TABS.map(tab => {
+        const isActive = activeTab === tab.id
+        if (!mountedTabs.has(tab.id)) return null
+        const Renderer = DIAGNOSTIC_RENDERERS[tab.id]
+        if (!Renderer) return null
+        return (
+          <div key={tab.id} style={{ display: isActive ? undefined : 'none' }}>
+            <Renderer
+              planDate={planDate}
+              facility={tab}
+              networkKpi={networkData?.[tab.mirrors]}
               onDeltaComputed={handleDeltaComputed}
               onKpiComputed={handleKpiComputed}
             />
