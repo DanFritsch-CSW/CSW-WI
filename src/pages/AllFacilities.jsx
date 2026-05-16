@@ -12,15 +12,12 @@ export default function AllFacilities({ networkData, facilityEstDrops = {}, faci
       <div className="scorecards-grid">
         {FACILITY_LIST.map(fac => {
           const d        = networkData[fac.id] || {}
-          const panelKpi = facilityKpis[fac.id]  // set when user has visited facility tab this session
+          const panelKpi = facilityKpis[fac.id]
 
-          // Use facility-panel-computed inb/out/drops when available (user visited that tab).
-          // These come from the same query path as the facility panel, so numbers are identical.
-          // Fall back to networkData (fetchNetworkKpis) for unvisited facilities.
-          const inb      = panelKpi?.inb      ?? d.inb ?? 0
-          const out      = panelKpi?.out      ?? d.out ?? 0
-          const estDrops = panelKpi?.drops    ?? facilityEstDrops[fac.id] ?? 0
-          const appts    = inb + out + estDrops
+          const inb      = panelKpi?.inb   ?? d.inb ?? 0
+          const out      = panelKpi?.out   ?? d.out ?? 0
+          const estDrops = Math.round(panelKpi?.drops ?? facilityEstDrops[fac.id] ?? 0)
+          const appts    = Math.round(inb + out + estDrops)
 
           const laborData  = facilityLaborCounts[fac.id]
           const headcount  = laborData?.headcount  ?? '--'
