@@ -552,3 +552,48 @@ input, select { font: inherit; color: inherit; }
 ::-webkit-scrollbar-track { background: var(--bg0); }
 ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--brand-dim); }
+
+/* ── Carryover tiles ─────────────────────────────────────────────
+ * Prior-night 3rd shifters still on clock at 5am today.
+ * Live-computed each load, never persisted, read-only.
+ */
+.emp-tile.emp-carryover {
+  opacity: 0.6;
+  background: linear-gradient(90deg,
+    rgba(255, 176, 59, 0.08) 0%,
+    rgba(255, 176, 59, 0.02) 100%);
+  border-left: 2px solid rgba(255, 176, 59, 0.55);
+  cursor: default;
+}
+
+.emp-tile.emp-carryover .emp-shift-label {
+  cursor: default;
+  pointer-events: none;
+}
+
+.emp-carryover-badge {
+  display: inline-block;
+  font-family: var(--font-mono, monospace);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 176, 59, 0.18);
+  color: #d68a2b;
+  border: 1px solid rgba(255, 176, 59, 0.35);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.emp-carryover-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  color: rgba(255, 176, 59, 0.7);
+  cursor: default;
+  user-select: none;
+}

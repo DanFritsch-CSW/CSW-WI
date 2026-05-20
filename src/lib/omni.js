@@ -71,6 +71,12 @@ function nextDayISO(date) {
   return d.toISOString().slice(0, 10)
 }
 
+function prevDayISO(date) {
+  const d = new Date(date + 'T00:00:00Z')
+  d.setUTCDate(d.getUTCDate() - 1)
+  return d.toISOString().slice(0, 10)
+}
+
 function scheduledArrivalDateFilter(date) {
   return {
     [`${VIEW_APPT}.scheduled_arrival`]: {
@@ -864,12 +870,10 @@ export async function fetchB2eTimeOff(facilityId, date) {
   }
 }
 
-export async function fetchB2eRoster(facilityId, date) {
+// Internal helper — fetches active schedule rows for a single B2E entry_date.
+async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssignments) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
-  const refDate = date || new Date().toISOString().slice(0, 10)
-  const isCal   = facilityId === 'cal'
-  const dockAssignments = isCal ? await fetchCal2DockAssignments() : new Map()
 
   const rosterRows = await omniQuery({
     modelId: B2E_MODEL_ID, table: ROSTER,
@@ -893,7 +897,7 @@ export async function fetchB2eRoster(facilityId, date) {
       [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${SCHEDULE}.entry_date`]: {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: refDate, is_negative: false, offset_interval_string: '0 days',
+        isFiscal: false, left_side: entryDate, is_negative: false, offset_interval_string: '0 days',
       },
     },
     sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
@@ -945,7 +949,51 @@ export async function fetchB2eRoster(facilityId, date) {
         facility:     facilityId,
       }
     })
-    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * Fetch the roster for a given operational date.
+ *
+ * Op day spans 5am→4:59am+1, so we do TWO B2E queries:
+ * 1. entry_date = date — today's roster (1st/Mid/2nd + 3rd starting tonight)
+ * 2. entry_date = date - 1 — prior-night carryover (3rd shifters whose shift
+ *    started yesterday at 10pm and extends into today's post-5am window)
+ *
+ * Carryovers tagged is_carryover: true. NOT persisted to Supabase —
+ * recomputed live each page load. Callers writing to employees or
+ * roster_assignments tables must filter via e => !e.is_carryover.
+ */
+export async function fetchB2eRoster(facilityId, date) {
+  const location = B2E_LOCATION[facilityId]
+  if (!location) return []
+  const refDate = date || new Date().toISOString().slice(0, 10)
+  const isCal   = facilityId === 'cal'
+  const dockAssignments = isCal ? await fetchCal2DockAssignments() : new Map()
+
+  const [todayRoster, priorNightRoster] = await Promise.all([
+    fetchB2eRosterForEntryDate(facilityId, refDate, isCal, dockAssignments),
+    fetchB2eRosterForEntryDate(facilityId, prevDayISO(refDate), isCal, dockAssignments).catch(e => {
+      console.warn('Prior-night carryover fetch failed (non-fatal):', e.message)
+      return []
+    }),
+  ])
+
+  // Carryover rule: linearEnd = shift_start + shift_hours
+  //   - linearEnd <= 24+5 (29) → tail entirely within yesterday's op day → skip
+  //   - linearEnd > 29 → tail reaches into today's post-5am window → carryover
+  // Example: 22:00 + 8.5h = 30.5 → 30.5 > 29 ✓ carryover (tail = 6:30am)
+  const todayIds = new Set(todayRoster.map(e => String(e.id)))
+  const carryovers = priorNightRoster
+    .filter(e => {
+      if (e.shift_start == null || e.shift_hours == null) return false
+      const linearEnd = Number(e.shift_start) + Number(e.shift_hours)
+      if (linearEnd <= 24 + 5) return false
+      if (todayIds.has(String(e.id))) return false  // dedup
+      return true
+    })
+    .map(e => ({ ...e, is_carryover: true }))
+
+  return [...todayRoster, ...carryovers].sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export async function fetchWrPickers(date) {

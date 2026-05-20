@@ -149,6 +149,13 @@ function laneSideClass(laneId) {
 }
 
 /**
+ * Filter carryovers out before any DB write — they are NOT persisted.
+ */
+function withoutCarryovers(employees) {
+  return employees.filter(e => !e.is_carryover)
+}
+
+/**
  * Apply time-off overrides to a list of B2E employees before seeding.
  * Employees found in the timeOffMap get their default_lane set to 'pto'
  * and their role set to the time-off label (e.g. 'FMLA', 'PTO') so the
@@ -240,13 +247,16 @@ function LoanModal({ employee, sourceFacility, onConfirm, onCancel }) {
 }
 
 // ── DroppableLane ────────────────────────────────────────────────
-function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp, onShiftChange, onRecall, sortOrder, isActiveLane }) {
+function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings, onDeleteTemp, onShiftChange, onRecall, sortOrder, isActiveLane }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const sorted       = sortEmployees(employees, sortOrder)
   const ids          = sorted.map(e => e.id)
   const groups       = groupByStartHour(sorted, assignmentMap)
   const laneSettings = getLaneSettings(lane.id, settings)
   const sideClass    = laneSideClass(lane.id)
+
+  // Lane header headcount excludes carryovers (already counted on prior day).
+  const headcount = employees.filter(e => !carryoverMap?.[e.id]).length
 
   return (
     <div
@@ -256,7 +266,7 @@ function DroppableLane({ lane, employees, assignmentMap, settings, onDeleteTemp,
     >
       <div className="lane-header">
         <span className="lane-title">{lane.label}</span>
-        <span className="lane-count">{employees.length}</span>
+        <span className="lane-count">{headcount}</span>
       </div>
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         <div className="lane-body">
@@ -322,6 +332,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
+  const [carryoverMap, setCarryoverMap]   = useState({})
   const [employees, setEmployees]         = useState([])
   const [isLoading, setIsLoading]         = useState(true)
   const [activeId, setActiveId]           = useState(null)
@@ -339,28 +350,28 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   async function load(facId, date) {
     setIsLoading(true)
 
-    // Always fetch time-off in parallel with assignments so PTO is applied
-    // on every load — not just on first seed. This means users never need to
-    // manually click "Sync from B2E" just to get PTO employees moved to the
-    // PTO lane.
-    const [assignments, timeOffMap] = await Promise.all([
+    // Fetch B2E roster ALWAYS (for live carryover data) in parallel with
+    // assignments and time-off so PTO is applied on every load.
+    const [assignments, timeOffMap, b2eRosterFull] = await Promise.all([
       fetchTodayAssignments(facId, date),
       fetchB2eTimeOff(facId, date).catch(() => new Map()),
+      fetchB2eRoster(facId, date).catch(() => []),
     ])
 
+    const carryovers = b2eRosterFull.filter(e => e.is_carryover)
+
     if (assignments.length === 0) {
-      // First-time seed for this date
-      const b2eEmployees = await fetchB2eRoster(facId, date)
-      if (b2eEmployees.length > 0) {
-        const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
+      // First-time seed — persist non-carryover entries only
+      const persistable = withoutCarryovers(b2eRosterFull)
+      if (persistable.length > 0) {
+        const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
         const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
         await replaceEmployees(facId, empRows)
         await seedRosterAssignments(withTimeOff, date)
         const empIds = withTimeOff.map(e => e.id)
         await purgeStaleAssignments(empIds, facId, date)
-        // Re-fetch assignments after seed
         const seeded = await fetchTodayAssignments(facId, date)
-        return _buildState(facId, seeded, timeOffMap)
+        return _buildState(facId, seeded, timeOffMap, carryovers)
       }
     } else {
       // Roster already seeded — apply any time-off overrides that aren't
@@ -374,22 +385,20 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           }
         }
         if (toUpdate.length > 0) {
-          // Fire-and-forget upserts (non-blocking for UI)
           for (const row of toUpdate) {
             upsertAssignment(row).catch(e => console.warn('time-off upsert:', e))
           }
-          // Merge overrides into the local assignments array for immediate UI
           const overrideMap = new Map(toUpdate.map(r => [r.employee_id, r]))
           const merged = assignments.map(a => overrideMap.get(a.employee_id) ?? a)
-          return _buildState(facId, merged, timeOffMap)
+          return _buildState(facId, merged, timeOffMap, carryovers)
         }
       }
     }
 
-    return _buildState(facId, assignments, timeOffMap)
+    return _buildState(facId, assignments, timeOffMap, carryovers)
   }
 
-  function _buildState(facId, assignments, _timeOffMap) {
+  function _buildState(facId, assignments, _timeOffMap, carryovers = []) {
     let emps = assignments
       .filter(a => !a.is_temp)
       .map(a => ({
@@ -416,15 +425,51 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       emps = STUB_EMPLOYEES.map(e => ({ ...e, facility: facId }))
     }
 
-    const allEmps = [...emps, ...tempEmps]
+    // Merge carryovers — filter against existing IDs to avoid duplicates
+    const existingIds = new Set([...emps, ...tempEmps].map(e => String(e.id)))
+    const carryoverEmps = carryovers
+      .filter(c => !existingIds.has(String(c.id)))
+      .map(c => ({
+        id:           c.id,
+        name:         c.name,
+        role:         c.role,
+        facility:     facId,
+        is_temp:      false,
+        is_carryover: true,
+        default_lane: c.default_lane,
+        shift_start:  c.shift_start,
+        shift_hours:  c.shift_hours,
+      }))
+
+    const allEmps = [...emps, ...tempEmps, ...carryoverEmps]
     setEmployees(allEmps)
+
+    const cMap = {}
+    for (const c of carryoverEmps) cMap[c.id] = true
+    setCarryoverMap(cMap)
 
     const map = {}
     assignments.forEach(a => { map[a.employee_id] = a.lane })
+    for (const c of carryoverEmps) map[c.id] = c.default_lane
     setLaneMap(map)
 
+    // Synthetic assignments for carryovers — ephemeral, never upserted.
     const asgMap = {}
     assignments.forEach(a => { asgMap[a.employee_id] = a })
+    for (const c of carryoverEmps) {
+      asgMap[c.id] = {
+        facility:      facId,
+        employee_id:   c.id,
+        employee_name: c.name,
+        role:          c.role,
+        lane:          c.default_lane,
+        plan_date:     null,
+        is_temp:       false,
+        shift_start:   c.shift_start,
+        shift_hours:   c.shift_hours,
+        is_carryover:  true,
+      }
+    }
     setAssignmentMap(asgMap)
 
     setIsLoading(false)
@@ -449,13 +494,13 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setSyncState('loading')
     try {
       const date = planDate || todayISO()
-      // Fetch roster and time-off in parallel
-      const [b2eEmployees, timeOffMap] = await Promise.all([
+      const [b2eRosterFull, timeOffMap] = await Promise.all([
         fetchB2eRoster(facility, date),
         fetchB2eTimeOff(facility, date),
       ])
-      if (!b2eEmployees.length) { setSyncState('No B2E data found'); return }
-      const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
+      const persistable = withoutCarryovers(b2eRosterFull)
+      if (!persistable.length) { setSyncState('No B2E data found'); return }
+      const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
       const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
       if (err) { setSyncState(err); return }
@@ -478,13 +523,13 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const date = planDate || todayISO()
       const err = await resetAssignmentsForDate(facility, date)
       if (err) { setResetState(`Delete failed: ${err}`); return }
-      // Fetch roster and time-off in parallel
-      const [b2eEmployees, timeOffMap] = await Promise.all([
+      const [b2eRosterFull, timeOffMap] = await Promise.all([
         fetchB2eRoster(facility, date),
         fetchB2eTimeOff(facility, date),
       ])
-      if (!b2eEmployees.length) { setResetState('No B2E data found'); return }
-      const withTimeOff = applyTimeOffOverrides(b2eEmployees, timeOffMap)
+      const persistable = withoutCarryovers(b2eRosterFull)
+      if (!persistable.length) { setResetState('No B2E data found'); return }
+      const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
       const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const replErr = await replaceEmployees(facility, empRows)
       if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
@@ -517,6 +562,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const handleShiftChange = useCallback(async (empId, shiftStart, shiftHours) => {
     const emp  = employees.find(e => e.id === empId)
     if (!emp) return
+    if (emp.is_carryover) return
     const date     = planDate || todayISO()
     const existing = assignmentMap[empId] ?? {}
     const updated  = {
@@ -592,8 +638,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   }, [assignmentMap, facility, planDate])
 
   useEffect(() => {
-    // Exclude on-loan employees from active headcount
     const activeEmps = employees.filter(e => {
+      if (e.is_carryover) return false
       if (!activeLaneSet_.has(laneMap[e.id] || e.default_lane)) return false
       if (assignmentMap[e.id]?.on_loan_to) return false
       return true
@@ -612,6 +658,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (!over) return
     const employeeId = active.id
     const overId     = String(over.id)
+
+    const emp = employees.find(e => e.id === employeeId)
+    if (emp?.is_carryover) return
 
     // Dropped on the send zone → open loan modal
     if (isSendZone(overId)) {
@@ -641,6 +690,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     })
     const emp      = employees.find(e => e.id === employeeId)
     if (!emp) return
+    if (emp.is_carryover) return
     const date     = planDate || todayISO()
     const existing = assignmentMap[employeeId] ?? {}
     trackedUpsert({
@@ -661,17 +711,17 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   const activeCount = activeLaneSet
     .filter(l => activeLaneIds.includes(l.id))
-    .reduce((n, l) => n + laneEmployees(l.id).filter(e => !assignmentMap[e.id]?.on_loan_to).length, 0)
+    .reduce((n, l) => n + laneEmployees(l.id).filter(e => !assignmentMap[e.id]?.on_loan_to && !e.is_carryover).length, 0)
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
 
   const side12Count = isCal
     ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3']
-        .reduce((n, l) => n + laneEmployees(l).filter(e => !assignmentMap[e.id]?.on_loan_to).length, 0)
+        .reduce((n, l) => n + laneEmployees(l).filter(e => !assignmentMap[e.id]?.on_loan_to && !e.is_carryover).length, 0)
     : null
   const side35Count = isCal
     ? ['side35_shift1','side35_mid','side35_shift2','side35_shift3']
-        .reduce((n, l) => n + laneEmployees(l).filter(e => !assignmentMap[e.id]?.on_loan_to).length, 0)
+        .reduce((n, l) => n + laneEmployees(l).filter(e => !assignmentMap[e.id]?.on_loan_to && !e.is_carryover).length, 0)
     : null
 
   const currentSort = SORT_MODES.find(m => m.key === sortOrder)
@@ -743,6 +793,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
               lane={lane}
               employees={laneEmployees(lane.id)}
               assignmentMap={assignmentMap}
+              carryoverMap={carryoverMap}
               settings={settings}
               sortOrder={sortOrder}
               isActiveLane={activeLaneIdSet.has(lane.id)}

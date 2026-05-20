@@ -62,6 +62,7 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
   const isTemp     = !!employee.is_temp
   const isOnLoan   = !!assignment?.on_loan_to
   const isFromLoan = !!assignment?.from_facility
+  const isCarryover = !!employee.is_carryover || !!assignment?.is_carryover
 
   // Time-off badge: stored in role field when auto-placed in PTO lane by B2E sync
   const roleValue   = assignment?.role ?? employee.role
@@ -71,8 +72,14 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
   const effectiveHours = assignment?.shift_hours ?? laneSettings?.defaultHours ?? 8
   const shiftLabel     = fmtShift(effectiveStart, effectiveHours)
 
+  // End-time label for the carryover badge (renormalized start + tail hours)
+  const carryoverEndLabel = isCarryover && effectiveStart != null
+    ? fmtHour((Number(effectiveStart) + Number(effectiveHours ?? 0)) % 24)
+    : null
+
   function openEdit(e) {
     e.stopPropagation()
+    if (isCarryover) return
     const start = effectiveStart ?? laneSettings?.defaultStart ?? 5
     const end   = (start + effectiveHours) % 24
     setEditStart(decToTimeStr(start))
@@ -100,28 +107,32 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
       ref={setNodeRef}
       style={style}
       className={`emp-tile${
-        isDragging  ? ' dragging'      : ''}${
-        isTemp      ? ' emp-temp'      : ''}${
-        isOnLoan    ? ' emp-on-loan'   : ''}${
-        isFromLoan  ? ' emp-from-loan' : ''}${
-        isTimeOff   ? ' emp-time-off'  : ''}`}
+        isDragging   ? ' dragging'       : ''}${
+        isTemp       ? ' emp-temp'       : ''}${
+        isOnLoan     ? ' emp-on-loan'    : ''}${
+        isFromLoan   ? ' emp-from-loan'  : ''}${
+        isTimeOff    ? ' emp-time-off'   : ''}${
+        isCarryover  ? ' emp-carryover'  : ''}`}
       title={employee.name}
       {...attributes}
-      {...listeners}
+      {...(isCarryover ? {} : listeners)}
     >
-      <div className="emp-avatar" style={{ background: color, opacity: isOnLoan ? 0.45 : 0.9 }}>
+      <div className="emp-avatar" style={{ background: color, opacity: (isOnLoan || isCarryover) ? 0.45 : 0.9 }}>
         {initials(employee.name)}
       </div>
       <div className="emp-info">
         <div className="emp-name">{employee.name}</div>
         <div className="emp-role">
           {isTemp     && <span className="emp-temp-badge">TEMP</span>}
+          {isCarryover && (
+            <span className="emp-carryover-badge">↪ Until {carryoverEndLabel ?? '?'}</span>
+          )}
           {isOnLoan   && <span className="emp-loan-badge emp-loan-badge--out">ON LOAN → {facilityCode(assignment.on_loan_to)}</span>}
           {isFromLoan && <span className="emp-loan-badge emp-loan-badge--in">FROM: {facilityCode(assignment.from_facility)}</span>}
           {isTimeOff  && !isOnLoan && !isFromLoan && (
             <span className="emp-timeoff-badge">{roleValue}</span>
           )}
-          {!isOnLoan && !isFromLoan && !isTimeOff && roleValue}
+          {!isOnLoan && !isFromLoan && !isTimeOff && !isCarryover && roleValue}
         </div>
         {editing ? (
           <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
@@ -137,14 +148,14 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
               className="emp-shift-label"
               onClick={openEdit}
               onPointerDown={e => e.stopPropagation()}
-              title="Click to edit shift times"
+              title={isCarryover ? 'Carryover shift (read-only)' : 'Click to edit shift times'}
             >
               {shiftLabel}
             </div>
           )
         )}
       </div>
-      {/* Action button: delete temp | recall loan | drag handle */}
+      {/* Action button: delete temp | recall loan | carryover icon | drag handle */}
       {onDelete ? (
         <button className="emp-delete-btn" onClick={e => { e.stopPropagation(); onDelete() }}
           title="Remove temp employee" onPointerDown={e => e.stopPropagation()}>×</button>
@@ -153,6 +164,8 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
           onClick={e => { e.stopPropagation(); onRecall() }}
           title="Recall employee back from loan"
           onPointerDown={e => e.stopPropagation()}>↩</button>
+      ) : isCarryover ? (
+        <span className="emp-carryover-icon" title="Carryover from prior shift">↪</span>
       ) : (
         <svg className="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
           <rect x="2" y="2" width="2" height="2" rx="1"/>
