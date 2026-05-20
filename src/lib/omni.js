@@ -3,7 +3,11 @@
 // Auth: OMNI_API_KEY env var set in Netlify dashboard.
 
 import { supabase } from './supabase.js'
-import { fetchCustomDropProjects } from './supabase.js'
+import {
+  fetchCustomDropProjects,
+  fetchHistoricalDropsCache,
+  writeHistoricalDropsCache,
+} from './supabase.js'
 
 const MODEL_ID = '79a98af2-a904-4b5d-b25f-7f6a2c7ef467'
 
@@ -778,6 +782,49 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     }
   }
   return out
+}
+
+/**
+ * Cached wrapper around fetchHistoricalProjectHourlyDrops.
+ *
+ * Reads from est_drops_historical_cache first. If the cache is fresh
+ * (default: < 24h since computed_at), returns the cached result without
+ * hitting Omni — saves ~28 Omni queries on KEN facility loads.
+ *
+ * On cache miss / stale cache / forceRefresh: re-queries Omni via the
+ * uncached function, then writes the result back to the cache.
+ *
+ * The 24h TTL avoids the future-date drift problem that killed our first
+ * caching attempt: the rolling 4-week window shifts every 7 days, so any
+ * cache value computed >24h ago for a future date will be re-queried before
+ * it has a chance to silently go stale.
+ *
+ * Options:
+ *   - forceRefresh: bypass cache read, always query Omni (used by the
+ *     per-project ↺ refresh button, which already invalidates the cache
+ *     before calling, but this is a belt-and-suspenders guarantee).
+ *   - maxAgeMs: override the 24h TTL.
+ */
+export async function fetchHistoricalProjectHourlyDropsCached(
+  facilityId,
+  targetDate,
+  { forceRefresh = false, maxAgeMs, weeksBack = 4 } = {}
+) {
+  if (!forceRefresh) {
+    const cached = await fetchHistoricalDropsCache(facilityId, targetDate, maxAgeMs)
+    if (cached) return cached
+  }
+
+  const fresh = await fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack)
+
+  // Write back to cache — fire-and-forget. If write fails (RLS, transient
+  // network) we still return the fresh result to the caller; next page load
+  // will just re-query Omni.
+  writeHistoricalDropsCache(facilityId, targetDate, fresh).catch(e =>
+    console.warn('writeHistoricalDropsCache failed (non-fatal):', e?.message)
+  )
+
+  return fresh
 }
 
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
