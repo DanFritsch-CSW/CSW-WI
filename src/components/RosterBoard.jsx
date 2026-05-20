@@ -55,7 +55,7 @@ function sendZoneId(laneId) { return `${SEND_ZONE_PREFIX}${laneId}` }
 function isSendZone(id)     { return String(id).startsWith(SEND_ZONE_PREFIX) }
 function laneFromSendZone(id) { return String(id).slice(SEND_ZONE_PREFIX.length) }
 
-// Active (labor-counting) lanes — PTO/callin excluded
+// Active (labor-counting) lanes — PTO/callin/specialProject excluded
 const STANDARD_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2', 'shift3'])
 const CAL_ACTIVE_LANES = new Set([
   'side12_shift1','side12_mid','side12_shift2','side12_shift3',
@@ -145,6 +145,7 @@ function groupByStartHour(employees, assignmentMap) {
 function laneSideClass(laneId) {
   if (laneId.startsWith('side12_')) return 'lane-side12'
   if (laneId.startsWith('side35_')) return 'lane-side35'
+  if (laneId === 'specialProject') return 'lane-special-project'
   return ''
 }
 
@@ -247,7 +248,7 @@ function LoanModal({ employee, sourceFacility, onConfirm, onCancel }) {
 }
 
 // ── DroppableLane ────────────────────────────────────────────────
-function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings, onDeleteTemp, onShiftChange, onRecall, sortOrder, isActiveLane }) {
+function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings, onDeleteTemp, onShiftChange, onRecall, onSpecialProjectLabelChange, autoEditLabelId, onAutoEditConsumed, sortOrder, isActiveLane }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const sorted       = sortEmployees(employees, sortOrder)
   const ids          = sorted.map(e => e.id)
@@ -286,6 +287,9 @@ function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings,
                     onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
                     onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
                     onRecall={assignmentMap?.[emp.id]?.on_loan_to ? () => onRecall(emp) : undefined}
+                    onSpecialProjectLabelChange={onSpecialProjectLabelChange}
+                    autoEditLabel={autoEditLabelId === emp.id}
+                    onAutoEditConsumed={onAutoEditConsumed}
                   />
                 ))}
               </div>
@@ -300,6 +304,9 @@ function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings,
                 onShiftChange={(start, hours) => onShiftChange(emp.id, start, hours)}
                 onDelete={emp.is_temp ? () => onDeleteTemp(emp) : undefined}
                 onRecall={assignmentMap?.[emp.id]?.on_loan_to ? () => onRecall(emp) : undefined}
+                onSpecialProjectLabelChange={onSpecialProjectLabelChange}
+                autoEditLabel={autoEditLabelId === emp.id}
+                onAutoEditConsumed={onAutoEditConsumed}
               />
             ))
           )}
@@ -343,6 +350,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [sortOrder, setSortOrder]         = useState('default')
   // Loan modal state
   const [loanEmployee, setLoanEmployee]   = useState(null) // emp being sent
+  // Special Project auto-edit: tracks which employee just landed in
+  // specialProject so EmployeeTile can auto-open the label input.
+  const [autoEditLabelId, setAutoEditLabelId] = useState(null)
   const loadRef = useRef(null)
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -375,7 +385,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       }
     } else {
       // Roster already seeded — apply any time-off overrides that aren't
-      // already in the PTO lane. Upsert changed rows so they persist.
+      // already in the PTO lane. PTO wins over Special Project too —
+      // they're not in the building, so PTO is the stronger constraint.
       if (timeOffMap.size > 0) {
         const toUpdate = []
         for (const asg of assignments) {
@@ -427,9 +438,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
     // Carryovers come from B2E with synthetic IDs (e.g. '549__carryover')
     // so they coexist with the employee's normal today's-shift entry.
-    // We do NOT dedup against existingIds — that was the bug. An employee
-    // can legitimately appear as both: today's 10pm starter AND a carryover
-    // from last night's 10pm shift finishing at 6:30am this morning.
     const carryoverEmps = carryovers.map(c => ({
       id:           c.id,           // already has CARRYOVER_ID_SUFFIX
       originalId:   c.originalId,   // real employee ID, for reference
@@ -583,6 +591,34 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
+  // ── Special Project label change: persist the user-typed note into role.
+  // Reuses the `role` column on roster_assignments — no schema change needed.
+  const handleSpecialProjectLabelChange = useCallback(async (empId, label) => {
+    const emp = employees.find(e => e.id === empId)
+    if (!emp || emp.is_carryover) return
+    const date     = planDate || todayISO()
+    const existing = assignmentMap[empId] ?? {}
+    const trimmed  = (label || '').trim() || null
+    const updated  = {
+      facility,
+      employee_id:   empId,
+      employee_name: emp.name,
+      lane:          laneMap[empId] || 'specialProject',
+      plan_date:     date,
+      is_temp:       emp.is_temp ?? false,
+      shift_start:   existing.shift_start ?? null,
+      shift_hours:   existing.shift_hours ?? null,
+      ...existing,
+      role:          trimmed,
+    }
+    // Optimistic: update local state immediately so the tile reflects the new label.
+    setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
+    setEmployees(prev => prev.map(e => e.id === empId ? { ...e, role: trimmed } : e))
+    await trackedUpsert(updated)
+  }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
+
+  const handleAutoEditConsumed = useCallback(() => setAutoEditLabelId(null), [])
+
   // ── Loan: drop on send zone → open modal
   const handleSendConfirm = useCallback(async (destFacility, destLane) => {
     if (!loanEmployee) return
@@ -685,21 +721,45 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   }, [laneMap, activeLaneSet, employees, assignmentMap])
 
   function moveTo(employeeId, laneId) {
+    const previousLane = laneMap[employeeId]
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
     setAssignmentMap(prev => {
       const existing = prev[employeeId] ?? {}
-      return { ...prev, [employeeId]: { ...existing, lane: laneId } }
+      // When moving INTO specialProject, clear any prior role so the tile
+      // starts with an empty label (user will type or skip).
+      // When moving OUT of specialProject, also clear role so the previous
+      // note doesn't bleed into the new lane's role display.
+      const isEnteringSP = laneId === 'specialProject'
+      const isLeavingSP  = previousLane === 'specialProject' && laneId !== 'specialProject'
+      const nextRole     = (isEnteringSP || isLeavingSP) ? null : existing.role
+      return { ...prev, [employeeId]: { ...existing, lane: laneId, role: nextRole } }
     })
-    const emp      = employees.find(e => e.id === employeeId)
+    const emp = employees.find(e => e.id === employeeId)
     if (!emp) return
     if (emp.is_carryover) return
+
+    // Clear role on the in-memory employee record too, so the tile picks
+    // up the cleared value immediately (EmployeeTile falls back to
+    // employee.role when assignment.role is undefined).
+    if (laneId === 'specialProject' || previousLane === 'specialProject') {
+      setEmployees(prev => prev.map(e => e.id === employeeId ? { ...e, role: null } : e))
+    }
+
+    // Trigger auto-prompt when entering Special Project lane
+    if (laneId === 'specialProject') {
+      setAutoEditLabelId(employeeId)
+    }
+
     const date     = planDate || todayISO()
     const existing = assignmentMap[employeeId] ?? {}
+    const isEnteringSP = laneId === 'specialProject'
+    const isLeavingSP  = previousLane === 'specialProject' && laneId !== 'specialProject'
+    const nextRole     = (isEnteringSP || isLeavingSP) ? null : (existing.role ?? emp.role)
     trackedUpsert({
       facility,
       employee_id:   employeeId,
       employee_name: emp.name,
-      role:          emp.role,
+      role:          nextRole,
       lane:          laneId,
       plan_date:     date,
       is_temp:       emp.is_temp ?? false,
@@ -716,6 +776,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     .reduce((n, l) => n + laneEmployees(l.id).filter(e => !assignmentMap[e.id]?.on_loan_to && !e.is_carryover).length, 0)
   const ptoCount    = laneEmployees('pto').length
   const callinCount = laneEmployees('callin').length
+  const specialProjectCount = laneEmployees('specialProject').length
 
   const side12Count = isCal
     ? ['side12_shift1','side12_mid','side12_shift2','side12_shift3']
@@ -732,7 +793,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
   }
 
-  const gridCols  = isCal ? 'repeat(10, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))'
+  // Grid: standard = 7 lanes (4 active + pto + callin + specialProject)
+  //       CAL      = 11 lanes (8 active + pto + callin + specialProject)
+  const gridCols  = isCal ? 'repeat(11, minmax(0, 1fr))' : 'repeat(7, minmax(0, 1fr))'
   const gridStyle = { gridTemplateColumns: gridCols }
 
   if (isLoading) {
@@ -756,6 +819,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           <span className="roster-stat"><strong>{activeCount}</strong> active</span>
           <span className="roster-stat"><strong>{ptoCount}</strong> PTO</span>
           <span className="roster-stat"><strong>{callinCount}</strong> call-in</span>
+          <span className="roster-stat"><strong>{specialProjectCount}</strong> special project</span>
           {pendingWrites > 0 && <span className="roster-saving">Saving…</span>}
           <button className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`} onClick={nextSort} title="Cycle sort">{currentSort.label}</button>
           <button className="b2e-sync-btn" onClick={() => setShowAddTemp(true)}>+ Add Temp</button>
@@ -802,6 +866,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
               onDeleteTemp={handleDeleteTemp}
               onShiftChange={handleShiftChange}
               onRecall={handleRecall}
+              onSpecialProjectLabelChange={handleSpecialProjectLabelChange}
+              autoEditLabelId={autoEditLabelId}
+              onAutoEditConsumed={handleAutoEditConsumed}
             />
           ))}
         </div>
