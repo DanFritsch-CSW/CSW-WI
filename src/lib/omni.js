@@ -45,6 +45,12 @@ const VIEW_LP       = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
+// Suffix appended to carryover employee IDs to distinguish them from the
+// same employee's normal entry when they work back-to-back overnight shifts.
+// Surface-checked by RosterBoard, EmployeeTile, and laborCalc via the
+// is_carryover flag — this suffix is just a unique React key.
+export const CARRYOVER_ID_SUFFIX = '__carryover'
+
 function classifyApptType(typeName) {
   const t = (typeName || '').toLowerCase()
   if (t.startsWith('inbound'))  return 'inbound'
@@ -959,9 +965,12 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
  * 2. entry_date = date - 1 — prior-night carryover (3rd shifters whose shift
  *    started yesterday at 10pm and extends into today's post-5am window)
  *
- * Carryovers tagged is_carryover: true. NOT persisted to Supabase —
- * recomputed live each page load. Callers writing to employees or
- * roster_assignments tables must filter via e => !e.is_carryover.
+ * Carryovers tagged is_carryover: true with a synthetic ID suffix so they
+ * can coexist with the same employee's normal entry today (M-F 3rd shifters
+ * commonly appear on both: yesterday's shift finishing this morning AND
+ * tonight's shift starting at 10pm). NOT persisted to Supabase — recomputed
+ * live each page load. Callers writing to employees or roster_assignments
+ * tables must filter via e => !e.is_carryover.
  */
 export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
@@ -982,16 +991,24 @@ export async function fetchB2eRoster(facilityId, date) {
   //   - linearEnd <= 24+5 (29) → tail entirely within yesterday's op day → skip
   //   - linearEnd > 29 → tail reaches into today's post-5am window → carryover
   // Example: 22:00 + 8.5h = 30.5 → 30.5 > 29 ✓ carryover (tail = 6:30am)
-  const todayIds = new Set(todayRoster.map(e => String(e.id)))
+  //
+  // NOTE: we deliberately do NOT dedup against today's roster. M-F 3rd shifters
+  // legitimately appear on BOTH (their prior-night shift finishing this morning,
+  // and tonight's shift starting at 10pm). Synthetic ID suffix prevents React
+  // key collisions; the carryover entry's `originalId` field lets downstream
+  // code reference the real employee when needed.
   const carryovers = priorNightRoster
     .filter(e => {
       if (e.shift_start == null || e.shift_hours == null) return false
       const linearEnd = Number(e.shift_start) + Number(e.shift_hours)
-      if (linearEnd <= 24 + 5) return false
-      if (todayIds.has(String(e.id))) return false  // dedup
-      return true
+      return linearEnd > 24 + 5
     })
-    .map(e => ({ ...e, is_carryover: true }))
+    .map(e => ({
+      ...e,
+      originalId:   e.id,
+      id:           `${e.id}${CARRYOVER_ID_SUFFIX}`,
+      is_carryover: true,
+    }))
 
   return [...todayRoster, ...carryovers].sort((a, b) => a.name.localeCompare(b.name))
 }
