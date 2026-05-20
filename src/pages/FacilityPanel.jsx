@@ -7,7 +7,7 @@ import RosterBoard from '../components/RosterBoard.jsx'
 import PicklinePanel from '../components/PicklinePanel.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
-  fetchHistoricalProjectHourlyDrops, fetchProjectHourlyAppointments,
+  fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
   isRuleProject, fetchActiveInventory, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
 } from '../lib/omni.js'
 import {
@@ -179,6 +179,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       }
 
       // ── Phase 3: EST drops seeding ──
+      // Historical drops are fetched via the cached wrapper. On cache hit (< 24h
+      // old), this is ~0ms instead of ~28 Omni queries on KEN. Cache TTL of 24h
+      // guarantees daily refresh — avoids the future-date drift problem where a
+      // cached aggregate goes stale as the rolling 4-week window shifts.
       const hasCustom = customRows.length > 0
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
@@ -187,7 +191,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       try {
         const [existing, historical] = await Promise.all([
           fetchProjectHourlyDrops(facility.id, planDate),
-          fetchHistoricalProjectHourlyDrops(facility.id, planDate),
+          fetchHistoricalProjectHourlyDropsCached(facility.id, planDate),
         ])
         if (cancelled) return
 
@@ -245,12 +249,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return () => { cancelled = true }
   }, [facility.id, planDate, isMad, isKen, retryNonce])
 
-  // Per-project refresh: delete stale rows then re-seed from fresh L4W data
+  // Per-project refresh: delete stale rows then re-seed from fresh L4W data.
+  // forceRefresh:true bypasses the historical drops cache so we hit Omni
+  // directly — and the fresh result is written back to the cache, so the next
+  // page load (and any other sessions today) get the updated value for free.
   async function handleRefreshProject(projectName) {
     setRefreshingProject(projectName)
     try {
       await deleteProjectHourlyDropsForProject(facility.id, planDate, projectName)
-      const historical = await fetchHistoricalProjectHourlyDrops(facility.id, planDate)
+      const historical = await fetchHistoricalProjectHourlyDropsCached(
+        facility.id,
+        planDate,
+        { forceRefresh: true }
+      )
       const projectData = historical[projectName]
       if (projectData && Object.keys(projectData).length > 0) {
         const seedRows = Object.entries(projectData).map(([h, est_drops]) => ({
