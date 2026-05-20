@@ -471,6 +471,126 @@ export async function deleteCustomDropProject(id) {
   if (error) console.error('deleteCustomDropProject:', error)
 }
 
+// ─── Historical EST Drops Cache ────────────────────────────────────────────
+//
+// Caches the result of fetchHistoricalProjectHourlyDrops keyed by (facility,
+// plan_date, project, hour). Application-level TTL (default 24h) — if the
+// cache is fresher than TTL, use it; otherwise the caller re-queries Omni
+// and writes the result back via writeHistoricalDropsCache.
+//
+// Why this exists: the L4W historical pull fires ~28 Omni queries on KEN
+// (7 projects × 4 weeks). Caching it eliminates that load on every facility
+// open during the same day.
+//
+// Why TTL (not infinite cache): the rolling 4-week window shifts every 7
+// days. A cache entry computed weeks ago for a future date would no longer
+// reflect the actual rolling window. TTL of 24h ensures every project's
+// historical aggregate refreshes daily — small Omni cost, big freshness
+// guarantee, no future-date drift.
+
+/**
+ * Returns the cached historical drops as { [project]: { [hour]: number } },
+ * or null if no fresh cache entry exists for (facility, planDate).
+ *
+ * "Fresh" = max(computed_at) for that (facility, planDate) is within
+ * maxAgeMs (default 24h).
+ *
+ * Returns null on any error or stale cache so callers fall through to Omni.
+ */
+export async function fetchHistoricalDropsCache(facilityId, planDate, maxAgeMs = 24 * 60 * 60 * 1000) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('est_drops_historical_cache')
+    .select('project_name, hour, est_drops, computed_at')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (error) { console.error('fetchHistoricalDropsCache:', error); return null }
+  if (!data || data.length === 0) return null
+
+  // Freshness check: use the most recent computed_at across all rows for this
+  // (facility, planDate). A single timestamp gates the entire cache for that
+  // key — all rows are written in the same transaction so they share an age.
+  let newest = 0
+  for (const r of data) {
+    const ts = new Date(r.computed_at).getTime()
+    if (ts > newest) newest = ts
+  }
+  if (Date.now() - newest > maxAgeMs) return null
+
+  const result = {}
+  for (const r of data) {
+    if (!result[r.project_name]) result[r.project_name] = {}
+    result[r.project_name][r.hour] = Number(r.est_drops)
+  }
+  return result
+}
+
+/**
+ * Writes a fresh historical drops aggregate to the cache.
+ *
+ * historicalDrops: { [project]: { [hour]: number } } — exactly the shape
+ * returned by fetchHistoricalProjectHourlyDrops.
+ *
+ * Strategy: delete-then-insert for this (facility, planDate). This guarantees
+ * we don't accumulate stale project rows for projects that have since dropped
+ * out of the L4W window (e.g. a customer that hasn't received an appointment
+ * in 4 weeks should not still appear in the cache).
+ */
+export async function writeHistoricalDropsCache(facilityId, planDate, historicalDrops) {
+  if (!supabase) return
+
+  // Delete-then-insert pattern (so projects that disappeared from L4W don't
+  // linger in the cache). Done in two statements; brief race window is
+  // acceptable for a labor planning tool.
+  const { error: delErr } = await supabase
+    .from('est_drops_historical_cache')
+    .delete()
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (delErr) {
+    console.error('writeHistoricalDropsCache delete:', delErr)
+    return
+  }
+
+  const rows = []
+  const computedAt = new Date().toISOString()
+  for (const [project_name, hourMap] of Object.entries(historicalDrops || {})) {
+    for (const [h, est_drops] of Object.entries(hourMap)) {
+      rows.push({
+        facility:     facilityId,
+        plan_date:    planDate,
+        project_name,
+        hour:         Number(h),
+        est_drops:    Number(est_drops) || 0,
+        computed_at:  computedAt,
+      })
+    }
+  }
+  if (!rows.length) return
+
+  const { error: insErr } = await supabase
+    .from('est_drops_historical_cache')
+    .insert(rows)
+  if (insErr) console.error('writeHistoricalDropsCache insert:', insErr)
+}
+
+/**
+ * Invalidates the cache for a single project under (facility, planDate).
+ * Used by the per-project ↺ refresh button — after the user clicks refresh,
+ * we want the next read to bypass the cache for that project specifically.
+ * The simplest correct behavior is to invalidate the whole (facility,
+ * planDate) entry so the next page load reseeds everything from Omni.
+ */
+export async function invalidateHistoricalDropsCache(facilityId, planDate) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('est_drops_historical_cache')
+    .delete()
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+  if (error) console.error('invalidateHistoricalDropsCache:', error)
+}
+
 // ─── WR Pick Schedule ─────────────────────────────────────────────────────
 
 export async function fetchPickSchedule() {
