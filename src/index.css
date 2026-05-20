@@ -597,3 +597,53 @@ input, select { font: inherit; color: inherit; }
   cursor: default;
   user-select: none;
 }
+
+/* ── Special Project lane + tile ─────────────────────────────────── */
+.lane-special-project { /* inherits base .lane styling — no extra tint needed */ }
+
+.emp-tile.emp-special-project {
+  background: #f4f4f5;
+  border-color: #d4d4d8;
+}
+.emp-tile.emp-special-project:hover {
+  background: #e4e4e7;
+  border-color: #a1a1aa;
+}
+.emp-tile.emp-special-project .emp-name { color: #52525b; }
+.emp-tile.emp-special-project .emp-shift-label { color: #71717a; }
+
+/* Label badge — visible when a label exists and tile is not in edit mode */
+.emp-sp-label {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: rgba(0,0,0,0.05);
+  color: #71717a;
+  border: 1px solid #d4d4d8;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.emp-sp-label:hover { background: rgba(0,0,0,0.09); border-color: #a1a1aa; }
+.emp-sp-label--empty { color: #a1a1aa; font-style: italic; border-style: dashed; }
+
+/* Inline edit input */
+.emp-sp-edit { margin-top: 3px; }
+.emp-sp-input {
+  width: 100%;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border: 1px solid #a1a1aa;
+  border-radius: 3px;
+  background: #fff;
+  color: #18181b;
+  outline: none;
+  box-sizing: border-box;
+}
+.emp-sp-input:focus { border-color: var(--brand-dim, #4d9de0); }
