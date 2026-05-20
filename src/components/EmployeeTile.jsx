@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { FACILITIES } from '../lib/constants.js'
@@ -48,13 +48,28 @@ function facilityCode(facId) {
 // Time-off badge labels that come from the role field when seeded by B2E time-off
 const TIME_OFF_LABELS = new Set(['PTO', 'FMLA', 'Unpaid', 'Bereave'])
 
-export default function EmployeeTile({ employee, assignment, laneSettings, onShiftChange, onDelete, onRecall }) {
+export default function EmployeeTile({
+  employee,
+  assignment,
+  laneSettings,
+  onShiftChange,
+  onDelete,
+  onRecall,
+  onSpecialProjectLabelChange,
+  autoEditLabel,
+  onAutoEditConsumed,
+}) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: employee.id,
   })
   const [editing, setEditing]     = useState(false)
   const [editStart, setEditStart] = useState('00:00')
   const [editEnd, setEditEnd]     = useState('00:00')
+
+  // Special Project label editing state
+  const [editingLabel, setEditingLabel] = useState(false)
+  const [labelDraft, setLabelDraft]     = useState('')
+  const labelInputRef = useRef(null)
 
   const style = { transform: CSS.Transform.toString(transform), transition }
 
@@ -64,9 +79,32 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
   const isFromLoan = !!assignment?.from_facility
   const isCarryover = !!employee.is_carryover || !!assignment?.is_carryover
 
+  const currentLane = assignment?.lane ?? employee.default_lane
+  const isSpecialProject = currentLane === 'specialProject'
+
   // Time-off badge: stored in role field when auto-placed in PTO lane by B2E sync
   const roleValue   = assignment?.role ?? employee.role
   const isTimeOff   = TIME_OFF_LABELS.has(roleValue)
+
+  // Special Project label = role value when in specialProject lane
+  const specialProjectLabel = isSpecialProject ? (roleValue || '') : ''
+
+  // Auto-open label editor when employee is just dropped into Special Project
+  useEffect(() => {
+    if (autoEditLabel && isSpecialProject && !editingLabel) {
+      setLabelDraft(specialProjectLabel)
+      setEditingLabel(true)
+      onAutoEditConsumed?.()
+    }
+  }, [autoEditLabel, isSpecialProject])
+
+  // Focus the label input when it opens
+  useEffect(() => {
+    if (editingLabel && labelInputRef.current) {
+      labelInputRef.current.focus()
+      labelInputRef.current.select()
+    }
+  }, [editingLabel])
 
   const effectiveStart = assignment?.shift_start ?? laneSettings?.defaultStart ?? null
   const effectiveHours = assignment?.shift_hours ?? laneSettings?.defaultHours ?? 8
@@ -102,17 +140,45 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
     setEditing(false)
   }
 
+  function openLabelEdit(e) {
+    e.stopPropagation()
+    if (isCarryover) return
+    setLabelDraft(specialProjectLabel)
+    setEditingLabel(true)
+  }
+
+  function commitLabel() {
+    onSpecialProjectLabelChange?.(employee.id, labelDraft.trim())
+    setEditingLabel(false)
+  }
+
+  function cancelLabelEdit() {
+    setLabelDraft(specialProjectLabel)
+    setEditingLabel(false)
+  }
+
+  function handleLabelKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      commitLabel()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      cancelLabelEdit()
+    }
+  }
+
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={`emp-tile${
-        isDragging   ? ' dragging'       : ''}${
-        isTemp       ? ' emp-temp'       : ''}${
-        isOnLoan     ? ' emp-on-loan'    : ''}${
-        isFromLoan   ? ' emp-from-loan'  : ''}${
-        isTimeOff    ? ' emp-time-off'   : ''}${
-        isCarryover  ? ' emp-carryover'  : ''}`}
+        isDragging        ? ' dragging'          : ''}${
+        isTemp            ? ' emp-temp'          : ''}${
+        isOnLoan          ? ' emp-on-loan'       : ''}${
+        isFromLoan        ? ' emp-from-loan'     : ''}${
+        isTimeOff         ? ' emp-time-off'      : ''}${
+        isCarryover       ? ' emp-carryover'     : ''}${
+        isSpecialProject  ? ' emp-special-project' : ''}`}
       title={employee.name}
       {...attributes}
       {...(isCarryover ? {} : listeners)}
@@ -129,11 +195,40 @@ export default function EmployeeTile({ employee, assignment, laneSettings, onShi
           )}
           {isOnLoan   && <span className="emp-loan-badge emp-loan-badge--out">ON LOAN → {facilityCode(assignment.on_loan_to)}</span>}
           {isFromLoan && <span className="emp-loan-badge emp-loan-badge--in">FROM: {facilityCode(assignment.from_facility)}</span>}
-          {isTimeOff  && !isOnLoan && !isFromLoan && (
+          {isTimeOff  && !isOnLoan && !isFromLoan && !isSpecialProject && (
             <span className="emp-timeoff-badge">{roleValue}</span>
           )}
-          {!isOnLoan && !isFromLoan && !isTimeOff && !isCarryover && roleValue}
+          {!isOnLoan && !isFromLoan && !isTimeOff && !isCarryover && !isSpecialProject && roleValue}
         </div>
+
+        {/* Special Project label — optional, inline-editable */}
+        {isSpecialProject && (
+          editingLabel ? (
+            <div className="emp-sp-edit" onPointerDown={e => e.stopPropagation()}>
+              <input
+                ref={labelInputRef}
+                type="text"
+                className="emp-sp-input"
+                value={labelDraft}
+                onChange={e => setLabelDraft(e.target.value)}
+                onKeyDown={handleLabelKeyDown}
+                onBlur={commitLabel}
+                placeholder="e.g. Relabeling"
+                maxLength={48}
+              />
+            </div>
+          ) : (
+            <div
+              className={`emp-sp-label${specialProjectLabel ? '' : ' emp-sp-label--empty'}`}
+              onClick={openLabelEdit}
+              onPointerDown={e => e.stopPropagation()}
+              title="Click to edit project note"
+            >
+              {specialProjectLabel || '+ add note'}
+            </div>
+          )
+        )}
+
         {editing ? (
           <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
             <input type="time" className="emp-shift-time" value={editStart} onChange={e => setEditStart(e.target.value)} />
