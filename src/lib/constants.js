@@ -14,26 +14,28 @@ export const FACILITY_LIST = Object.values(FACILITIES)
 export const DIAGNOSTIC_TABS = []
 
 export const LANES = [
-  { id: 'shift1', label: '1st Shift' },
-  { id: 'mid',    label: 'Mid Shift' },
-  { id: 'shift2', label: '2nd Shift' },
-  { id: 'shift3', label: '3rd Shift' },
-  { id: 'pto',    label: 'PTO'       },
-  { id: 'callin', label: 'Call-In'   },
+  { id: 'shift1',         label: '1st Shift'       },
+  { id: 'mid',            label: 'Mid Shift'       },
+  { id: 'shift2',         label: '2nd Shift'       },
+  { id: 'shift3',         label: '3rd Shift'       },
+  { id: 'pto',            label: 'PTO'             },
+  { id: 'callin',         label: 'Call-In'         },
+  { id: 'specialProject', label: 'Special Project' },
 ]
 
-// CAL split lanes — 1-2 side and 3.5 side each with 4 shift lanes + shared PTO/Call-In
+// CAL split lanes — 1-2 side and 3.5 side each with 4 shift lanes + shared PTO/Call-In/Special Project
 export const LANES_CAL2 = [
-  { id: 'side12_shift1', label: '1-2 · 1st' },
-  { id: 'side12_mid',    label: '1-2 · Mid'  },
-  { id: 'side12_shift2', label: '1-2 · 2nd'  },
-  { id: 'side12_shift3', label: '1-2 · 3rd'  },
-  { id: 'side35_shift1', label: '3.5 · 1st'  },
-  { id: 'side35_mid',    label: '3.5 · Mid'  },
-  { id: 'side35_shift2', label: '3.5 · 2nd'  },
-  { id: 'side35_shift3', label: '3.5 · 3rd'  },
-  { id: 'pto',           label: 'PTO'         },
-  { id: 'callin',        label: 'Call-In'     },
+  { id: 'side12_shift1',  label: '1-2 · 1st'       },
+  { id: 'side12_mid',     label: '1-2 · Mid'        },
+  { id: 'side12_shift2',  label: '1-2 · 2nd'        },
+  { id: 'side12_shift3',  label: '1-2 · 3rd'        },
+  { id: 'side35_shift1',  label: '3.5 · 1st'        },
+  { id: 'side35_mid',     label: '3.5 · Mid'        },
+  { id: 'side35_shift2',  label: '3.5 · 2nd'        },
+  { id: 'side35_shift3',  label: '3.5 · 3rd'        },
+  { id: 'pto',            label: 'PTO'              },
+  { id: 'callin',         label: 'Call-In'          },
+  { id: 'specialProject', label: 'Special Project'  },
 ]
 
 export const ACTIVE_LANES = ['shift1', 'mid', 'shift2', 'shift3']
