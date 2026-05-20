@@ -425,21 +425,23 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       emps = STUB_EMPLOYEES.map(e => ({ ...e, facility: facId }))
     }
 
-    // Merge carryovers — filter against existing IDs to avoid duplicates
-    const existingIds = new Set([...emps, ...tempEmps].map(e => String(e.id)))
-    const carryoverEmps = carryovers
-      .filter(c => !existingIds.has(String(c.id)))
-      .map(c => ({
-        id:           c.id,
-        name:         c.name,
-        role:         c.role,
-        facility:     facId,
-        is_temp:      false,
-        is_carryover: true,
-        default_lane: c.default_lane,
-        shift_start:  c.shift_start,
-        shift_hours:  c.shift_hours,
-      }))
+    // Carryovers come from B2E with synthetic IDs (e.g. '549__carryover')
+    // so they coexist with the employee's normal today's-shift entry.
+    // We do NOT dedup against existingIds — that was the bug. An employee
+    // can legitimately appear as both: today's 10pm starter AND a carryover
+    // from last night's 10pm shift finishing at 6:30am this morning.
+    const carryoverEmps = carryovers.map(c => ({
+      id:           c.id,           // already has CARRYOVER_ID_SUFFIX
+      originalId:   c.originalId,   // real employee ID, for reference
+      name:         c.name,
+      role:         c.role,
+      facility:     facId,
+      is_temp:      false,
+      is_carryover: true,
+      default_lane: c.default_lane,
+      shift_start:  c.shift_start,
+      shift_hours:  c.shift_hours,
+    }))
 
     const allEmps = [...emps, ...tempEmps, ...carryoverEmps]
     setEmployees(allEmps)
