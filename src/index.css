@@ -396,7 +396,7 @@ input, select { font: inherit; color: inherit; }
 
 /* EST drops — auto-seeded vs manually edited */
 .ht-cell-auto { color: var(--text-secondary); border-bottom-color: var(--text-dim); }
-.ht-cell-auto::before { content: '~'; font-size: 9px; color: var(--text-dim); margin-right: 1px; }
+.ht-cell-auto::before { content: none; }
 .ht-cell-manual { color: var(--text-primary); font-weight: 700; border-bottom-color: var(--brand); }
 .ht-cell-manual::after { content: '✎'; font-size: 8px; color: var(--brand); margin-left: 3px; vertical-align: super; }
 
