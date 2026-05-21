@@ -253,6 +253,34 @@ function normalizeShiftStart(startTime) {
   return Math.round(h * 4) / 4
 }
 
+export function redistributeToIntegers(hourMap) {
+  const entries = Object.entries(hourMap)
+    .map(([h, v]) => ({ hour: Number(h), raw: Number(v) || 0 }))
+    .filter(e => e.raw > 0)
+
+  if (entries.length === 0) return {}
+
+  const targetTotal = Math.round(entries.reduce((s, e) => s + e.raw, 0))
+  if (targetTotal === 0) return {}
+
+  entries.forEach(e => { e.floor = Math.floor(e.raw); e.frac = e.raw - e.floor })
+
+  const floorSum = entries.reduce((s, e) => s + e.floor, 0)
+  let remainder = targetTotal - floorSum
+
+  const ranked = [...entries].sort((a, b) => b.frac - a.frac || a.hour - b.hour)
+
+  const result = {}
+  for (const e of entries) result[e.hour] = e.floor
+  for (const e of ranked) {
+    if (remainder <= 0) break
+    result[e.hour] += 1
+    remainder -= 1
+  }
+
+  return Object.fromEntries(Object.entries(result).filter(([, v]) => v > 0))
+}
+
 function computeShiftHours(startTime, endTime) {
   const sh = parseB2eTime(startTime)
   const eh = parseB2eTime(endTime)
@@ -760,12 +788,13 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     const totalFreq = Object.values(hourFreq).reduce((s, v) => s + v, 0)
     if (totalFreq === 0) return [projectName, {}]
 
-    // Step 4 — distribute dailyForecast proportionally across historical hours
-    const avgs = {}
+    // Step 4 — build decimal proportions, then redistribute to integers via largest-remainder
+    const decimalMap = {}
     for (const [h, freq] of Object.entries(hourFreq)) {
-      avgs[Number(h)] = Math.round(dailyForecast * (freq / totalFreq) * 100) / 100
+      const avg = dailyForecast * (freq / totalFreq)
+      if (avg > 0) decimalMap[Number(h)] = avg
     }
-    return [projectName, avgs]
+    return [projectName, redistributeToIntegers(decimalMap)]
   })
 
   const projectResults = await batchedRun(projectTasks, 2)

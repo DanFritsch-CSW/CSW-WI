@@ -28,11 +28,9 @@ export default function ProjectList({ projects, projectDrops = {}, color, invent
     return name
   }
 
-  // Always display est drops as integers — storage is numeric(6,2) for accuracy
-  // but users don't work in fractions of appointments.
   function fmtDrops(val) {
     const n = Number(val) || 0
-    return n > 0 ? Math.round(n) : '—'
+    return n > 0 ? n : '—'
   }
 
   const isSplit = inventoryData !== null
