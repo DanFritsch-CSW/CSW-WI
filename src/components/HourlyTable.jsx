@@ -199,7 +199,7 @@ export default function HourlyTable({
     const final = r1((r.avail + adj) - r.req)
     cumul = r1(cumul + final)
     const estRaw = estDrops[r.h] ?? null
-    const est = (estRaw != null && Number(estRaw) > 0) ? Number(estRaw) : null
+    const est = (estRaw != null && Number(estRaw) > 0) ? Math.round(Number(estRaw)) : null
     // appts: always integer
     const appts = Math.round(r.appts)
     return { ...r, adj, final, cumul, est, appts, staffed: showStaffed ? (staffedHourly[r.h] ?? 0) : null }
