@@ -841,7 +841,15 @@ export async function fetchHistoricalProjectHourlyDropsCached(
 ) {
   if (!forceRefresh) {
     const cached = await fetchHistoricalDropsCache(facilityId, targetDate, maxAgeMs)
-    if (cached) return cached
+    if (cached) {
+      // Normalize stale decimal values that predate the largest-remainder migration
+      const normalized = {}
+      for (const [proj, hourMap] of Object.entries(cached)) {
+        const hasPositive = Object.values(hourMap).some(v => Number(v) > 0)
+        normalized[proj] = hasPositive ? redistributeToIntegers(hourMap) : hourMap
+      }
+      return normalized
+    }
   }
 
   const fresh = await fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack)
