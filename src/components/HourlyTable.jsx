@@ -207,7 +207,7 @@ export default function HourlyTable({
   })
 
   const tot = {
-    est:   Math.round(rows.reduce((s, r) => s + (r.est ?? 0), 0)),
+    est:   Math.round(Object.values(estDrops).reduce((s, v) => s + Number(v), 0)),
     inb:   rows.reduce((s, r) => s + r.inb,   0),
     out:   rows.reduce((s, r) => s + r.out,   0),
     appts: Math.round(rows.reduce((s, r) => s + r.appts, 0)),
