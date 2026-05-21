@@ -198,9 +198,8 @@ export default function HourlyTable({
     const adj = hourlyAdjustments[r.h] ?? 0
     const final = r1((r.avail + adj) - r.req)
     cumul = r1(cumul + final)
-    // est: round to integer for display (stored as decimal for req math accuracy)
     const estRaw = estDrops[r.h] ?? null
-    const est = estRaw !== null ? Math.round(estRaw) : null
+    const est = (estRaw != null && Number(estRaw) > 0) ? Number(estRaw) : null
     // appts: always integer
     const appts = Math.round(r.appts)
     return { ...r, adj, final, cumul, est, appts, staffed: showStaffed ? (staffedHourly[r.h] ?? 0) : null }
@@ -292,11 +291,11 @@ export default function HourlyTable({
                         </td>
                       ))}
                       <td className="ht-est-col">
-                        {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
+                        {r.est !== null ? r.est : <span className="ht-est-empty">&mdash;</span>}
                       </td>
                     </>
                   : <td className="ht-est-col">
-                      {r.est !== null ? r.est : <span className="ht-est-empty">--</span>}
+                      {r.est !== null ? r.est : <span className="ht-est-empty">&mdash;</span>}
                     </td>
               )}
               {!compact && <td>{r.inb}</td>}

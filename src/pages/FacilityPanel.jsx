@@ -365,7 +365,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const projectDrops = useMemo(() => {
     const result = {}
     for (const [name, hourMap] of Object.entries(visibleProjectHourlyDrops))
-      result[name] = Math.round(Object.values(hourMap).reduce((s, v) => s + Number(typeof v === 'object' ? (v?.est_drops ?? 0) : v), 0))
+      result[name] = Object.values(hourMap).reduce((s, v) => s + Number(typeof v === 'object' ? (v?.est_drops ?? 0) : v), 0)
     return result
   }, [visibleProjectHourlyDrops])
 
@@ -417,7 +417,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   }, [visibleProjectHourlyDrops])
 
   // totalDrops for KPI pill: rounded to integer — users don't track fractional appointments.
-  const totalDrops = useMemo(() => Math.round(Object.values(estDrops).reduce((s, v) => s + Number(v), 0)), [estDrops])
+  const totalDrops = useMemo(() => Object.values(estDrops).reduce((s, v) => s + Number(v), 0), [estDrops])
 
   const rawWithAppts = useMemo(() => {
     if (!rawHourly.length) return rawHourly
