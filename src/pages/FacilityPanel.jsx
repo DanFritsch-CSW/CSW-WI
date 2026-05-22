@@ -206,12 +206,32 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           Object.entries(existing).filter(([name]) => !KEN_STALE_KEYS.has(name))
         )
 
-        // Build seed rows from historical — always overwrite so stale 0s from
-        // prior seed runs don't persist.
+        // Build a set of (project, hour) pairs that are manually edited in the DB.
+        // These rows MUST be preserved across reloads — the auto-seed below skips
+        // them so the L4W refresh never overwrites a user's manual edit.
+        // Without this guard, every page load wipes the manually_edited flag back
+        // to false (because upsertProjectHourlyDropsSeed writes manually_edited:false),
+        // and on the next reload the merge logic drops the edit entirely.
+        // This was the root cause of the "edit one customer, reload, value resets
+        // to L4W average" bug reported by Hill / Dean Dioguardi on 5/22.
+        const manualKeys = new Set()
+        for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
+          for (const [h, v] of Object.entries(hourMap)) {
+            const row = typeof v === 'object' ? v : null
+            if (row && row.manually_edited) {
+              manualKeys.add(`${project_name}|${h}`)
+            }
+          }
+        }
+
+        // Build seed rows from historical — always overwrite EXCEPT for cells
+        // that have a manual edit in the DB. Stale 0s from prior seed runs are
+        // still cleaned up automatically.
         const seedRows = []
         for (const [project_name, hourMap] of Object.entries(historical)) {
           if (!isRuleProject(facility.id, project_name) && !isKen && !hasCustom) continue
           for (const [h, est_drops] of Object.entries(hourMap)) {
+            if (manualKeys.has(`${project_name}|${h}`)) continue
             seedRows.push({ project_name, h: Number(h), est_drops })
           }
         }
