@@ -950,21 +950,33 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
 export async function fetchActiveInventory(facilityId) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
-  const rows = await omniQuery({
-    modelId: GOLD_MODEL_ID,
-    table: VIEW_LP,
-    fields: [
-      `${VIEW_LP_PROJ}.project_name`,
-      `${VIEW_LP}.lookup_code_count_distinct`,
-    ],
-    filters: {
-      [`${VIEW_LP}.archived`]:          { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
-      [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
-    },
-    sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
-    limit: 200,
-  })
-  return rows
+
+  // Paginate: fetch up to 5 pages × 500 rows to avoid the hard 1000-row cap.
+  const PAGE_SIZE = 500
+  const MAX_PAGES = 5
+  const allRows = []
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const rows = await omniQuery({
+      modelId: GOLD_MODEL_ID,
+      table: VIEW_LP,
+      fields: [
+        `${VIEW_LP_PROJ}.project_name`,
+        `${VIEW_LP}.lookup_code_count_distinct`,
+      ],
+      filters: {
+        [`${VIEW_LP}.archived`]:          { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
+        [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [wh], is_negative: false, case_insensitive: true },
+      },
+      sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
+      limit:  PAGE_SIZE,
+      offset: page * PAGE_SIZE,
+    })
+    allRows.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+  }
+
+  return allRows
     .map(r => ({
       name: stripWarehouseSuffix(r[`${VIEW_LP_PROJ}.project_name`] || ''),
       lps:  Number(r[`${VIEW_LP}.lookup_code_count_distinct`]) || 0,
