@@ -1,9 +1,8 @@
 'use strict'
 
 // MotherDuck inventory proxy.
-// home_directory must be set via PRAGMA or connection string, not constructor config.
-// Solution: set HOME env var to /tmp before duckdb loads — the C++ extension
-// falls back to the HOME environment variable when no explicit path is set.
+// Token is passed via motherduck_token env var — NOT in the ATTACH connection string.
+// The MotherDuck extension reads the env var automatically after LOAD.
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -84,10 +83,9 @@ exports.handler = async (event) => {
 
   let db, conn
   try {
-    // Set HOME to /tmp before duckdb initialises — the MotherDuck C++ extension
-    // reads the HOME env var as its home directory fallback.
-    // Must be set before require('duckdb') loads the native module.
+    // HOME=/tmp so MotherDuck C++ init has a writable path for extension files
     process.env.HOME             = '/tmp'
+    // motherduck_token env var is read automatically by the extension after LOAD
     process.env.motherduck_token = TOKEN
 
     const duckdb = require('duckdb')
@@ -99,9 +97,10 @@ exports.handler = async (event) => {
       conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
     })
 
+    // ATTACH using just the database name — token comes from env var, not the string
     await new Promise((resolve, reject) => {
       conn.run(
-        `ATTACH 'md:production_db?motherduck_token=${TOKEN}' AS production_db (READ_ONLY)`,
+        "ATTACH 'md:production_db' AS production_db (READ_ONLY)",
         err => err ? reject(err) : resolve()
       )
     })
