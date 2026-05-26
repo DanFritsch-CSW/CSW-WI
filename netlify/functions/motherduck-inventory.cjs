@@ -1,8 +1,9 @@
 'use strict'
 
 // MotherDuck inventory proxy.
-// Uses same connection pattern as motherduck-labor.cjs which is proven to work.
-// Key: motherduck_token must be set in process.env AND passed as constructor option.
+// Uses in-memory DuckDB + ATTACH pattern — avoids the "Connection was never
+// established" error that occurs when connecting to md: directly at construction.
+// Pattern: connect to :memory:, then ATTACH MotherDuck, then query.
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -81,19 +82,33 @@ exports.handler = async (event) => {
     ORDER BY loc.location_container_name
   `
 
+  let db, conn
   try {
-    // Must set env var AND pass as option — MotherDuck Node extension uses both
     process.env.motherduck_token = TOKEN
 
     const duckdb = require('duckdb')
-    const db   = new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
-    const conn = db.connect()
 
-    // Load MotherDuck extension explicitly (matches labor function pattern)
+    // Connect to in-memory first — avoids the auth-at-construction issue
+    db   = new duckdb.Database(':memory:')
+    conn = db.connect()
+
+    // Install + load MotherDuck extension
+    await new Promise((resolve, reject) => {
+      conn.run('INSTALL motherduck', err => err ? reject(err) : resolve())
+    })
     await new Promise((resolve, reject) => {
       conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
     })
 
+    // Attach MotherDuck with token — this is where auth happens
+    await new Promise((resolve, reject) => {
+      conn.run(
+        `ATTACH 'md:production_db?motherduck_token=${TOKEN}' AS production_db (READ_ONLY)`,
+        err => err ? reject(err) : resolve()
+      )
+    })
+
+    // Now run the inventory query
     const inventoryRows = await new Promise((resolve, reject) => {
       conn.all(inventorySql, (err, result) => err ? reject(err) : resolve(result))
     })
@@ -124,6 +139,8 @@ exports.handler = async (event) => {
       }),
     }
   } catch (e) {
+    try { if (conn) conn.close() } catch {}
+    try { if (db)   db.close()   } catch {}
     return {
       statusCode: 502,
       headers: NO_CACHE_HEADERS,
