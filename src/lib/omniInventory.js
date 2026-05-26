@@ -25,6 +25,9 @@ const LOT     = 'silver__datex_slv_lots'
 const VLOT    = 'silver__datex_slv_vendorlots'
 const MAT     = 'silver__datex_slv_materials'
 
+// Page size per Omni request. 2000 is safe — Omni handles it within timeout.
+const PAGE_SIZE = 2000
+
 // Warehouse name as it appears in Omni per facility
 const FACILITY_WH_NAME = {
   cal: 'CSW-Franksville',
@@ -55,22 +58,25 @@ async function omniQuery(query) {
 }
 
 /**
- * Fetch all LP-level inventory rows for a given facility from Omni.
- * Matches the dashboard SQL exactly:
+ * Fetch ALL LP-level inventory rows for a given facility from Omni.
+ *
+ * Paginates automatically using offset until Omni returns fewer rows than
+ * PAGE_SIZE — meaning we've hit the end of the result set. This removes the
+ * previous 1000-row hard cap that was silently truncating large facilities
+ * like Caledonia (>1000 LPs).
+ *
+ * Matches the dashboard SQL:
  *   - Filter: NOT archived, warehouse_name = '<facility>'
  *   - Fields: warehouse_name, location_container_name, lp lookup_code,
  *             material lookup_code, vendor_lot lookup_code, sys_lot lookup_code,
  *             packaged_amount
  *   - ORDER BY warehouse, location, lp
- *   - LIMIT 1000
- *
- * Returns raw rows as-is from Omni.
  */
 export async function fetchInventoryRawRows(facilityId) {
   const whName = FACILITY_WH_NAME[facilityId]
   if (!whName) throw new Error(`Unknown facilityId: ${facilityId}`)
 
-  const rows = await omniQuery({
+  const baseQuery = {
     modelId: GOLD_MODEL_ID,
     table: LP,
     fields: [
@@ -96,20 +102,39 @@ export async function fetchInventoryRawRows(facilityId) {
       },
     },
     sorts: [
-      { column_name: `${WH}.warehouse_name`,        sort_descending: false },
+      { column_name: `${WH}.warehouse_name`,           sort_descending: false },
       { column_name: `${LOC}.location_container_name`, sort_descending: false },
-      { column_name: `${LP}.lookup_code`,           sort_descending: false },
+      { column_name: `${LP}.lookup_code`,              sort_descending: false },
     ],
-    limit: 1000,
-  })
+    limit: PAGE_SIZE,
+  }
 
-  return rows
+  const allRows = []
+  let offset = 0
+
+  // Safety cap: max 20 pages = 40,000 rows. No CSW facility is anywhere near
+  // that, but this prevents an infinite loop if Omni misbehaves.
+  const MAX_PAGES = 20
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const pageRows = await omniQuery({ ...baseQuery, offset })
+
+    allRows.push(...pageRows)
+
+    // If Omni returned fewer rows than the page size, we've reached the end.
+    if (pageRows.length < PAGE_SIZE) break
+
+    offset += PAGE_SIZE
+  }
+
+  return allRows
 }
 
 /**
  * Derives the aisle/zone label from a location container name.
  * Convention: first 2 chars = aisle prefix (AA, AB, AR, BB, etc.)
  * Returns "Aisle AA", "Aisle AR", etc. or "Other" as fallback.
+ * Zone grouping is reserved for a future sprint.
  */
 function deriveZone(locationName) {
   if (!locationName) return 'Other'
@@ -130,10 +155,6 @@ function deriveZone(locationName) {
  *       { lp, qty, materialCode, vendorLot, sysLot }
  *     ]
  *   }
- *
- * Locations with no LP rows in Omni are occupied-only — empty locations
- * are not returned by the silver view (it only shows LPs with a location).
- * This matches the current Omni limitation discussed in the call transcript.
  */
 export function transformInventoryRows(rows) {
   const locationMap = new Map()
@@ -174,11 +195,8 @@ export function transformInventoryRows(rows) {
     }
   }
 
-  // Sort: by zone then location ID (natural string sort handles AA001A < AA001B < AA002A)
-  return [...locationMap.values()].sort((a, b) => {
-    if (a.zone !== b.zone) return a.zone.localeCompare(b.zone)
-    return a.id.localeCompare(b.id)
-  })
+  // Sort by location ID — zone grouping deferred to future sprint
+  return [...locationMap.values()].sort((a, b) => a.id.localeCompare(b.id))
 }
 
 /**
