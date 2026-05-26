@@ -1,11 +1,11 @@
 'use strict'
 
 // MotherDuck inventory proxy.
-// Uses in-memory DuckDB + ATTACH pattern.
-// Key fixes for Netlify serverless:
-//   - Skip INSTALL motherduck (already bundled, install tries to write to home dir)
-//   - SET home_directory='/tmp' before LOAD so DuckDB has a writable path
-//   - ATTACH with token in connection string after extension is loaded
+// Key Netlify serverless fixes:
+//   - home_directory set in Database constructor config (not as SQL SET)
+//     because LOAD motherduck calls its C++ init before SQL executes
+//   - In-memory + ATTACH pattern avoids auth-at-construction error
+//   - No INSTALL needed — motherduck bundled in duckdb npm package
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -86,27 +86,22 @@ exports.handler = async (event) => {
 
   let db, conn
   try {
-    // Must be set before duckdb init — MotherDuck extension reads this env var
     process.env.motherduck_token = TOKEN
 
     const duckdb = require('duckdb')
 
-    // In-memory DB — no filesystem needed for the base connection
-    db   = new duckdb.Database(':memory:')
+    // Pass home_directory in constructor config — must be set before any extension
+    // init runs. The MotherDuck C++ init function reads home dir at LOAD time,
+    // so a SQL SET afterwards is too late.
+    db   = new duckdb.Database(':memory:', { home_directory: '/tmp' })
     conn = db.connect()
 
-    // Point DuckDB at /tmp (writable in Netlify) before loading any extensions
-    // Avoids: "IO Error: Can't find the home directory at ''"
-    await new Promise((resolve, reject) => {
-      conn.run("SET home_directory='/tmp'", err => err ? reject(err) : resolve())
-    })
-
-    // Load MotherDuck — already bundled in duckdb npm package, no INSTALL needed
+    // Load MotherDuck extension (bundled in npm package, no INSTALL needed)
     await new Promise((resolve, reject) => {
       conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
     })
 
-    // Attach production_db read-only
+    // Attach production_db read-only with token
     await new Promise((resolve, reject) => {
       conn.run(
         `ATTACH 'md:production_db?motherduck_token=${TOKEN}' AS production_db (READ_ONLY)`,
