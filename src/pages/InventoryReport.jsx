@@ -152,18 +152,20 @@ export default function InventoryReport() {
   const [mode,       setMode]       = useState('All')
   const [search,     setSearch]     = useState('')
 
-  const [flags,     setFlags]     = useState(new Set())
-  const [collapsed, setCollapsed] = useState(new Set())
-  const [showDisc,  setShowDisc]  = useState(false)
+  const [flags,    setFlags]    = useState(new Set())
+  // "expanded" tracks which location rows have been tapped open.
+  // Default is collapsed — set starts empty, tap adds to it.
+  const [expanded, setExpanded] = useState(new Set())
+  const [showDisc, setShowDisc] = useState(false)
 
   // ---------------------------------------------------------------------------
-  // Fetch
+  // Fetch — reset expanded state on each load
   // ---------------------------------------------------------------------------
   const doFetch = useCallback(async (facId) => {
     setLoading(true)
     setError(null)
     setFlags(new Set())
-    setCollapsed(new Set())
+    setExpanded(new Set())
     setSearch('')
     try {
       const result = await fetchInventoryLocations(facId)
@@ -181,7 +183,7 @@ export default function InventoryReport() {
   const handleRefresh = () => doFetch(facilityId)
 
   // ---------------------------------------------------------------------------
-  // Flat filtered list — no zone grouping
+  // Flat filtered list
   // ---------------------------------------------------------------------------
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -212,8 +214,9 @@ export default function InventoryReport() {
     })
   }, [])
 
-  const toggleCollapse = useCallback((id) => {
-    setCollapsed(prev => {
+  // Tap a location row to expand; tap again to collapse
+  const toggleExpand = useCallback((id) => {
+    setExpanded(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
@@ -364,17 +367,17 @@ export default function InventoryReport() {
                 </thead>
                 <tbody>
                   {filtered.map(loc => {
-                    const isEmpty     = loc.palletCount === 0
-                    const isFlagged   = flags.has(loc.id)
-                    const isCollapsed = collapsed.has(loc.id)
+                    const isEmpty      = loc.palletCount === 0
+                    const isFlagged    = flags.has(loc.id)
+                    const isExpanded   = expanded.has(loc.id)   // default: NOT expanded
                     const hasInventory = loc.pallets.length > 0
 
                     return (
                       <>
-                        {/* Location row */}
+                        {/* ── Location summary row — always visible ── */}
                         <tr
                           key={loc.id}
-                          onClick={() => hasInventory && toggleCollapse(loc.id)}
+                          onClick={() => hasInventory && toggleExpand(loc.id)}
                           style={{
                             borderBottom: '1px solid var(--border)',
                             background: isFlagged ? 'rgba(239,68,68,0.07)' : 'transparent',
@@ -384,7 +387,7 @@ export default function InventoryReport() {
                           <td style={{ padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
                             {hasInventory && (
                               <span style={{ color: 'var(--text-secondary)', marginRight: 4, fontSize: 10 }}>
-                                {isCollapsed ? '▸' : '▾'}
+                                {isExpanded ? '▾' : '▸'}
                               </span>
                             )}
                             {loc.id}
@@ -404,7 +407,8 @@ export default function InventoryReport() {
                             </span>
                           </td>
                           <td style={{ padding: '8px 10px', color: 'var(--text-secondary)', fontSize: 11 }}>
-                            {hasInventory && isCollapsed
+                            {/* Show hint when collapsed and has pallets */}
+                            {hasInventory && !isExpanded
                               ? `${loc.pallets.length} pallet${loc.pallets.length > 1 ? 's' : ''} — tap to expand`
                               : ''}
                           </td>
@@ -426,8 +430,8 @@ export default function InventoryReport() {
                           </td>
                         </tr>
 
-                        {/* Pallet detail rows */}
-                        {hasInventory && !isCollapsed && loc.pallets.map((p, pi) => (
+                        {/* ── Pallet detail rows — only shown when expanded ── */}
+                        {hasInventory && isExpanded && loc.pallets.map((p, pi) => (
                           <tr
                             key={`${loc.id}-${pi}`}
                             style={{
