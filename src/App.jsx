@@ -2,6 +2,7 @@ import { Component } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import TopNav from './components/TopNav.jsx'
 import LaborPlanning from './pages/LaborPlanning.jsx'
+import InventoryReport from './pages/InventoryReport.jsx'
 import OrderCreator from './pages/OrderCreator.jsx'
 import Analytics from './pages/Analytics.jsx'
 import Settings from './pages/Settings.jsx'
@@ -46,10 +47,11 @@ export default function App() {
         <TopNav />
         <PageErrorBoundary>
           <Routes>
-            <Route path="/"          element={<LaborPlanning />} />
-            <Route path="/orders"    element={<OrderCreator />}  />
-            <Route path="/analytics" element={<Analytics />}     />
-            <Route path="/settings"  element={<Settings />}      />
+            <Route path="/"          element={<LaborPlanning />}    />
+            <Route path="/inventory" element={<InventoryReport />}  />
+            <Route path="/orders"    element={<OrderCreator />}     />
+            <Route path="/analytics" element={<Analytics />}        />
+            <Route path="/settings"  element={<Settings />}         />
           </Routes>
         </PageErrorBoundary>
       </div>

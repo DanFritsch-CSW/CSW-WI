@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 
 const links = [
-  { to: '/',         label: 'Labor Planning' },
-  { to: '/settings', label: 'Settings'       },
+  { to: '/',          label: 'Labor Planning' },
+  { to: '/inventory', label: 'Inventory'      },
+  { to: '/settings',  label: 'Settings'       },
 ]
 
 function useClock() {
