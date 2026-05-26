@@ -1,9 +1,11 @@
 'use strict'
 
 // MotherDuck inventory proxy.
-// Uses in-memory DuckDB + ATTACH pattern — avoids the "Connection was never
-// established" error that occurs when connecting to md: directly at construction.
-// Pattern: connect to :memory:, then ATTACH MotherDuck, then query.
+// Uses in-memory DuckDB + ATTACH pattern.
+// Key fixes for Netlify serverless:
+//   - Skip INSTALL motherduck (already bundled, install tries to write to home dir)
+//   - SET home_directory='/tmp' before LOAD so DuckDB has a writable path
+//   - ATTACH with token in connection string after extension is loaded
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -84,23 +86,27 @@ exports.handler = async (event) => {
 
   let db, conn
   try {
+    // Must be set before duckdb init — MotherDuck extension reads this env var
     process.env.motherduck_token = TOKEN
 
     const duckdb = require('duckdb')
 
-    // Connect to in-memory first — avoids the auth-at-construction issue
+    // In-memory DB — no filesystem needed for the base connection
     db   = new duckdb.Database(':memory:')
     conn = db.connect()
 
-    // Install + load MotherDuck extension
+    // Point DuckDB at /tmp (writable in Netlify) before loading any extensions
+    // Avoids: "IO Error: Can't find the home directory at ''"
     await new Promise((resolve, reject) => {
-      conn.run('INSTALL motherduck', err => err ? reject(err) : resolve())
+      conn.run("SET home_directory='/tmp'", err => err ? reject(err) : resolve())
     })
+
+    // Load MotherDuck — already bundled in duckdb npm package, no INSTALL needed
     await new Promise((resolve, reject) => {
       conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
     })
 
-    // Attach MotherDuck with token — this is where auth happens
+    // Attach production_db read-only
     await new Promise((resolve, reject) => {
       conn.run(
         `ATTACH 'md:production_db?motherduck_token=${TOKEN}' AS production_db (READ_ONLY)`,
@@ -108,7 +114,6 @@ exports.handler = async (event) => {
       )
     })
 
-    // Now run the inventory query
     const inventoryRows = await new Promise((resolve, reject) => {
       conn.all(inventorySql, (err, result) => err ? reject(err) : resolve(result))
     })
