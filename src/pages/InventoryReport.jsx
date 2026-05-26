@@ -388,18 +388,21 @@ export default function InventoryReport() {
   const [discrepancies, setDiscrepancies] = useState(new Map())
 
   // Modal state
-  const [flagModal,  setFlagModal]  = useState(null)   // loc object or null
-  const [showLog,    setShowLog]    = useState(false)
+  const [flagModal, setFlagModal] = useState(null)
+  const [showLog,   setShowLog]   = useState(false)
 
   // ---------------------------------------------------------------------------
   // Fetch
+  // Intentionally does NOT reset search — user may be filtered to an aisle
+  // and want to refresh data without losing their filter context.
+  // Search is only cleared when switching facilities.
   // ---------------------------------------------------------------------------
-  const doFetch = useCallback(async (facId) => {
+  const doFetch = useCallback(async (facId, clearSearch = false) => {
     setLoading(true)
     setError(null)
     setDiscrepancies(new Map())
     setExpanded(new Set())
-    setSearch('')
+    if (clearSearch) setSearch('')
     try {
       const result = await fetchInventoryLocations(facId)
       setData(result)
@@ -411,9 +414,17 @@ export default function InventoryReport() {
     }
   }, [])
 
-  useEffect(() => { doFetch(facilityId) }, [facilityId, doFetch])
+  // On mount — load default facility, no search to clear
+  useEffect(() => { doFetch(facilityId) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleRefresh = () => doFetch(facilityId)
+  // Facility tab switch — clear search since location IDs differ between facilities
+  const handleFacilitySwitch = (facId) => {
+    setFacilityId(facId)
+    doFetch(facId, true)
+  }
+
+  // Refresh button — keep search intact
+  const handleRefresh = () => doFetch(facilityId, false)
 
   // ---------------------------------------------------------------------------
   // Flag handlers
@@ -535,7 +546,7 @@ export default function InventoryReport() {
           {FACILITY_LIST.map(f => (
             <button
               key={f.id}
-              onClick={() => setFacilityId(f.id)}
+              onClick={() => handleFacilitySwitch(f.id)}
               style={{
                 padding: '5px 14px', borderRadius: 'var(--r-md)', border: '1px solid',
                 fontSize: 12, fontWeight: 600, cursor: 'pointer',
