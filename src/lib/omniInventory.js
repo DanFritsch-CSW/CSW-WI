@@ -1,26 +1,18 @@
 // omniInventory.js
-// QUERY STRATEGY — two fast queries (primary load) + one background query (empty locations):
+// QUERY STRATEGY:
 //
-//   Query 1 (LP → Location → Warehouse → LPContents, 4 joins):
-//     lp_code, location_container_name, packaged_amount (SUM per LP+location)
-//     Returns occupied locations with correct on-hand qty.
-//     packaged_amount lives here because Omni groups by LP + location — the SUM
-//     is correct (1 LP per location = sum equals the actual qty).
-//     Previously in Query 2, the 4-join fan-out multiplied qty incorrectly
-//     (405 returned instead of 81 for P029A at WR).
+//   Single query per facility — all 6 fields grouped together:
+//     lp_code, location_name, packaged_amount, material_code, vendor_lot, sys_lot
 //
-//   Query 2 (LP → LPContents → Lots → VendorLots → Materials, 4 joins):
-//     lp_code, material_code, vendor_lot, sys_lot — dimensions only, no qty.
-//     Material/lot lookup merged client-side onto Query 1 rows by LP code.
+//   This mirrors the original dashboard SQL GROUP BY exactly:
+//     GROUP BY packaged_amount, lp_code, location_name, sys_lot, material_code, vendor_lot, warehouse_name
 //
-//   Query 3 (LocationContainers → Warehouse, 2 joins) — BACKGROUND:
-//     location_container_name for ALL facility locations including empty ones.
-//     Called separately after primary load; merged in without blocking the UI.
+//   One query avoids the fan-out multiplication bug that occurred when
+//   packaged_amount was in a separate query from the material/lot joins.
+//   Omni groups all 6 fields together, so each row = one unique LP content entry.
 //
-// PAGINATION STRATEGY:
-//   - PAGE_SIZE = 1000 keeps each individual Omni call well under the 26s timeout
-//   - PROBE: fire page 0 first, then fetch remaining pages in parallel batches
-//   - BATCH_SIZE = 5 parallel pages per batch
+//   PAGINATION: probe page 0, then parallel batches of BATCH_SIZE=2.
+//   Small batch size prevents overwhelming Omni with concurrent requests.
 
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 
@@ -33,8 +25,8 @@ const VLOT   = 'silver__datex_slv_vendorlots'
 const MAT    = 'silver__datex_slv_materials'
 
 const PAGE_SIZE  = 1000
-const MAX_PAGES  = 30
-const BATCH_SIZE = 5
+const MAX_PAGES  = 50     // 50,000 rows max — covers Caledonia (37k LPs)
+const BATCH_SIZE = 2      // Conservative — don't hammer Omni with concurrent calls
 
 export const FACILITY_WH_NAME = {
   cal: 'CSW-Franksville',
@@ -68,17 +60,23 @@ async function omniQuery(query) {
 }
 
 // ---------------------------------------------------------------------------
-// Parallel-paginated fetch
+// Paginated fetch — probe first, then parallel batches of BATCH_SIZE
 // ---------------------------------------------------------------------------
 async function fetchAllPages(baseQuery) {
+  // Probe: page 0
   const probeRows = await omniQuery({ ...baseQuery, limit: PAGE_SIZE, offset: 0 })
   const allRows = [...probeRows]
   if (probeRows.length < PAGE_SIZE) return allRows
 
   let offset = PAGE_SIZE
-  for (let batch = 0; batch < MAX_PAGES; batch += BATCH_SIZE) {
+  let pageCount = 1
+
+  while (pageCount < MAX_PAGES) {
+    // Build a small batch of offsets
     const offsets = []
-    for (let i = 0; i < BATCH_SIZE; i++) offsets.push(offset + i * PAGE_SIZE)
+    for (let i = 0; i < BATCH_SIZE && pageCount + i < MAX_PAGES; i++) {
+      offsets.push(offset + i * PAGE_SIZE)
+    }
 
     const batchResults = await Promise.all(
       offsets.map(off => omniQuery({ ...baseQuery, limit: PAGE_SIZE, offset: off }))
@@ -87,24 +85,23 @@ async function fetchAllPages(baseQuery) {
     let done = false
     for (const rows of batchResults) {
       allRows.push(...rows)
+      pageCount++
       if (rows.length < PAGE_SIZE) { done = true; break }
     }
+
     if (done) break
     offset += BATCH_SIZE * PAGE_SIZE
-    if (allRows.length >= MAX_PAGES * PAGE_SIZE) break
   }
+
   return allRows
 }
 
 // ---------------------------------------------------------------------------
-// Query 1: LP → Location → Warehouse → LPContents (4 joins)
-// Fields: lp_code, location_name, packaged_amount
-// packaged_amount is moved here so Omni groups by (LP, location) — the SUM
-// is correct because each LP occupies exactly one location.
-// Root cause of the qty mismatch: when packaged_amount was in Query 2 alongside
-// material/lot joins, Omni's fan-out multiplied the value (405 vs actual 81).
+// SINGLE inventory query — all fields together, mirrors dashboard SQL GROUP BY
+// lp_code + location + packaged_amount + material + vendor_lot + sys_lot
+// Omni groups all 6 as dimensions → correct one-row-per-LP-content result.
 // ---------------------------------------------------------------------------
-async function fetchLpLocationsQty(whName) {
+async function fetchInventoryRows(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
     table: LP,
@@ -112,29 +109,6 @@ async function fetchLpLocationsQty(whName) {
       `${LP}.lookup_code`,
       `${LOC}.location_container_name`,
       `${LP_CNT}.packaged_amount`,
-    ],
-    filters: {
-      [`${LP}.archived`]: { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
-      [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
-    },
-    sorts: [
-      { column_name: `${LOC}.location_container_name`, sort_descending: false },
-      { column_name: `${LP}.lookup_code`, sort_descending: false },
-    ],
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Query 2: LP → LPContents → Lots → VendorLots → Materials (4 joins)
-// Fields: lp_code, material_code, vendor_lot, sys_lot — dimensions only.
-// No packaged_amount here — see above for why.
-// ---------------------------------------------------------------------------
-async function fetchLpDetail(whName) {
-  return fetchAllPages({
-    modelId: GOLD_MODEL_ID,
-    table: LP,
-    fields: [
-      `${LP}.lookup_code`,
       `${MAT}.lookup_code`,
       `${VLOT}.lookup_code`,
       `${LOT}.lookup_code`,
@@ -143,12 +117,15 @@ async function fetchLpDetail(whName) {
       [`${LP}.archived`]: { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
       [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
     },
-    sorts: [{ column_name: `${LP}.lookup_code`, sort_descending: false }],
+    sorts: [
+      { column_name: `${LOC}.location_container_name`, sort_descending: false },
+      { column_name: `${LP}.lookup_code`,              sort_descending: false },
+    ],
   })
 }
 
 // ---------------------------------------------------------------------------
-// Query 3: LocationContainers → Warehouse (2 joins) — background only
+// Query 3: All location names including empty — background only
 // ---------------------------------------------------------------------------
 export async function fetchAllLocationNames(whName) {
   return fetchAllPages({
@@ -163,36 +140,24 @@ export async function fetchAllLocationNames(whName) {
 }
 
 // ---------------------------------------------------------------------------
-// Transform helpers
+// Transform
 // ---------------------------------------------------------------------------
 function deriveZone(locationName) {
   if (!locationName) return 'Other'
   return `Aisle ${locationName.slice(0, 2).toUpperCase()}`
 }
 
-// Build detail map from Query 2: lp → { materialCode, vendorLot, sysLot }
-// No qty here — qty comes from Query 1.
-function buildDetailMap(lpDetailRows) {
-  const detailMap = new Map()
-  for (const row of lpDetailRows) {
-    const lp = row[`${LP}.lookup_code`] || ''
-    if (!lp || detailMap.has(lp)) continue   // first row wins per LP
-    detailMap.set(lp, {
-      materialCode: row[`${MAT}.lookup_code`]  || '',
-      vendorLot:    row[`${VLOT}.lookup_code`] || '',
-      sysLot:       row[`${LOT}.lookup_code`]  || '',
-    })
-  }
-  return detailMap
-}
-
-// Build location map from Query 1 rows (lp + location + qty) + detail map
-function buildLocationMap(lpLocationRows, detailMap) {
+function buildLocationMap(rows) {
   const locationMap = new Map()
-  for (const row of lpLocationRows) {
+
+  for (const row of rows) {
     const lp      = row[`${LP}.lookup_code`]              || ''
     const locName = row[`${LOC}.location_container_name`] || ''
     const qty     = Number(row[`${LP_CNT}.packaged_amount`]) || 0
+    const mat     = row[`${MAT}.lookup_code`]  || ''
+    const vl      = row[`${VLOT}.lookup_code`] || ''
+    const sl      = row[`${LOT}.lookup_code`]  || ''
+
     if (!lp || !locName) continue
 
     if (!locationMap.has(locName)) {
@@ -202,15 +167,21 @@ function buildLocationMap(lpLocationRows, detailMap) {
       })
     }
 
-    const loc    = locationMap.get(locName)
-    const detail = detailMap.get(lp) ?? { materialCode: '', vendorLot: '', sysLot: '' }
+    const loc = locationMap.get(locName)
 
-    if (!loc.pallets.find(p => p.lp === lp)) {
-      loc.pallets.push({ lp, qty, ...detail })
+    // Deduplicate by LP — Omni may return multiple rows per LP if multi-lot
+    const existing = loc.pallets.find(p => p.lp === lp)
+    if (existing) {
+      // Same LP, additional lot row — accumulate qty, keep first material/lot
+      existing.qty += qty
+      loc.onHand   += qty
+    } else {
+      loc.pallets.push({ lp, qty, materialCode: mat, vendorLot: vl, sysLot: sl })
       loc.palletCount += 1
       loc.onHand      += qty
     }
   }
+
   return locationMap
 }
 
@@ -221,13 +192,8 @@ export async function fetchInventoryLocations(facilityId) {
   const whName = FACILITY_WH_NAME[facilityId]
   if (!whName) throw new Error(`Unknown facilityId: ${facilityId}`)
 
-  const [lpLocationRows, lpDetailRows] = await Promise.all([
-    fetchLpLocationsQty(whName),
-    fetchLpDetail(whName),
-  ])
-
-  const detailMap   = buildDetailMap(lpDetailRows)
-  const locationMap = buildLocationMap(lpLocationRows, detailMap)
+  const rows        = await fetchInventoryRows(whName)
+  const locationMap = buildLocationMap(rows)
 
   return [...locationMap.values()].sort((a, b) => a.id.localeCompare(b.id))
 }
@@ -243,11 +209,12 @@ export async function mergeEmptyLocations(facilityId, occupiedData) {
   try {
     allLocationRows = await fetchAllLocationNames(whName)
   } catch {
-    return occupiedData
+    return occupiedData  // fail silently — occupied data still usable
   }
 
   const occupiedIds = new Set(occupiedData.map(l => l.id))
   const emptyRows = []
+
   for (const row of allLocationRows) {
     const locName = row[`${LOC}.location_container_name`] || ''
     if (!locName || occupiedIds.has(locName)) continue
