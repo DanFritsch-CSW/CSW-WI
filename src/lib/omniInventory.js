@@ -1,25 +1,17 @@
 // omniInventory.js
-// Fetches location-level inventory from Omni using the silver datex views.
+// QUERY STRATEGY — two fast queries (primary load) + one background query (empty locations):
 //
-// QUERY STRATEGY — three parallel lean queries merged client-side:
+//   Query 1 (LP → Location → Warehouse, 3 joins):
+//     lp_code, location_container_name
+//     Returns occupied locations only — fast, renders the page immediately
 //
-//   Query 1 (LP → Location → Warehouse):
-//     Fields: lp_code, location_container_name
-//     Purpose: which LP is in which location (occupied locations only)
+//   Query 2 (LP → LPContents → Lots → VendorLots → Materials, 4 joins):
+//     lp_code, packaged_amount, material_code, vendor_lot, sys_lot
+//     Material/qty detail per LP
 //
-//   Query 2 (LP → LPContents → Lots → VendorLots → Materials):
-//     Fields: lp_code, packaged_amount, material_code, vendor_lot, sys_lot
-//     Purpose: qty and material detail per LP
-//
-//   Query 3 (LocationContainers → Warehouse):
-//     Fields: location_container_name
-//     Purpose: ALL locations that exist for this facility, including empty ones
-//     This is the fix for the "empty location" gap — Queries 1+2 only return
-//     locations that have an active LP. Query 3 gives us the full location
-//     master so we can surface empty locations (no LP assigned).
-//
-//   Merge on location_name + lp_code client-side.
-//   Locations from Query 3 with no LPs in Query 1 → Empty rows.
+//   Query 3 (LocationContainers → Warehouse, 2 joins) — BACKGROUND:
+//     location_container_name for ALL facility locations including empty ones
+//     Called separately after primary load; merged in without blocking the UI
 
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 
@@ -33,7 +25,7 @@ const MAT    = 'silver__datex_slv_materials'
 
 const PAGE_SIZE = 2000
 
-const FACILITY_WH_NAME = {
+export const FACILITY_WH_NAME = {
   cal: 'CSW-Franksville',
   mad: 'CSW-Madison',
   ken: 'CSW-Kenosha',
@@ -41,9 +33,6 @@ const FACILITY_WH_NAME = {
   ec:  'CSW-Eau Claire',
 }
 
-// ---------------------------------------------------------------------------
-// Internal: single omni-query proxy call
-// ---------------------------------------------------------------------------
 async function omniQuery(query) {
   let res
   try {
@@ -64,62 +53,37 @@ async function omniQuery(query) {
   return rows
 }
 
-// ---------------------------------------------------------------------------
-// Internal: paginate any query until exhausted
-// ---------------------------------------------------------------------------
 async function fetchAllPages(baseQuery) {
   const allRows = []
   let offset = 0
-  const MAX_PAGES = 20
-
-  for (let page = 0; page < MAX_PAGES; page++) {
+  for (let page = 0; page < 20; page++) {
     const pageRows = await omniQuery({ ...baseQuery, offset })
     allRows.push(...pageRows)
     if (pageRows.length < PAGE_SIZE) break
     offset += PAGE_SIZE
   }
-
   return allRows
 }
 
-// ---------------------------------------------------------------------------
-// Query 1: LP → Location → Warehouse (3 joins, fast)
-// Returns: lp_code, location_name
-// Only returns locations that have at least one active LP.
-// ---------------------------------------------------------------------------
+// Query 1: LP → Location → Warehouse (3 joins)
 async function fetchLpLocations(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
     table: LP,
-    fields: [
-      `${LP}.lookup_code`,
-      `${LOC}.location_container_name`,
-    ],
+    fields: [`${LP}.lookup_code`, `${LOC}.location_container_name`],
     filters: {
-      [`${LP}.archived`]: {
-        type: 'boolean',
-        is_negative: true,
-        treat_nulls_as_false: false,
-      },
-      [`${WH}.warehouse_name`]: {
-        kind: 'EQUALS',
-        type: 'string',
-        values: [whName],
-        is_negative: false,
-      },
+      [`${LP}.archived`]: { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
+      [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
     },
     sorts: [
       { column_name: `${LOC}.location_container_name`, sort_descending: false },
-      { column_name: `${LP}.lookup_code`,              sort_descending: false },
+      { column_name: `${LP}.lookup_code`, sort_descending: false },
     ],
     limit: PAGE_SIZE,
   })
 }
 
-// ---------------------------------------------------------------------------
 // Query 2: LP → LPContents → Lots → VendorLots → Materials (4 joins)
-// Returns: lp_code, packaged_amount, material_code, vendor_lot, sys_lot
-// ---------------------------------------------------------------------------
 async function fetchLpDetail(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
@@ -132,73 +96,36 @@ async function fetchLpDetail(whName) {
       `${LOT}.lookup_code`,
     ],
     filters: {
-      [`${LP}.archived`]: {
-        type: 'boolean',
-        is_negative: true,
-        treat_nulls_as_false: false,
-      },
-      [`${WH}.warehouse_name`]: {
-        kind: 'EQUALS',
-        type: 'string',
-        values: [whName],
-        is_negative: false,
-      },
+      [`${LP}.archived`]: { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
+      [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
     },
-    sorts: [
-      { column_name: `${LP}.lookup_code`, sort_descending: false },
-    ],
+    sorts: [{ column_name: `${LP}.lookup_code`, sort_descending: false }],
     limit: PAGE_SIZE,
   })
 }
 
-// ---------------------------------------------------------------------------
-// Query 3: LocationContainers → Warehouse (2 joins, very fast)
-// Returns: location_container_name for ALL locations in the facility,
-// including empty ones with no LP assigned.
-// This is the fix for the missing-empty-location gap.
-// ---------------------------------------------------------------------------
-async function fetchAllLocationNames(whName) {
+// Query 3: LocationContainers → Warehouse (2 joins) — background only
+// Returns all location names for the facility including empty ones.
+export async function fetchAllLocationNames(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
     table: LOC,
-    fields: [
-      `${LOC}.location_container_name`,
-    ],
+    fields: [`${LOC}.location_container_name`],
     filters: {
-      [`${WH}.warehouse_name`]: {
-        kind: 'EQUALS',
-        type: 'string',
-        values: [whName],
-        is_negative: false,
-      },
+      [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
     },
-    sorts: [
-      { column_name: `${LOC}.location_container_name`, sort_descending: false },
-    ],
+    sorts: [{ column_name: `${LOC}.location_container_name`, sort_descending: false }],
     limit: PAGE_SIZE,
   })
 }
 
-// ---------------------------------------------------------------------------
-// Derive zone label — reserved for future sprint
-// ---------------------------------------------------------------------------
 function deriveZone(locationName) {
   if (!locationName) return 'Other'
   return `Aisle ${locationName.slice(0, 2).toUpperCase()}`
 }
 
-// ---------------------------------------------------------------------------
-// Transform: merge all three query results into structured location objects
-//
-// Steps:
-//   1. Build detail lookup from Query 2: lp → { qty, materialCode, vendorLot, sysLot }
-//   2. Build occupied location map from Query 1: location → pallets[]
-//   3. Seed location map with ALL location names from Query 3
-//      — locations from Query 3 not in Query 1 get palletCount=0 (Empty)
-//   4. Sort by location ID
-// ---------------------------------------------------------------------------
-export function transformInventoryRows(lpLocationRows, lpDetailRows, allLocationRows) {
-  // Step 1 — detail map: lp_code → { qty, materialCode, vendorLot, sysLot }
+// Build detail map from Query 2 rows
+function buildDetailMap(lpDetailRows) {
   const detailMap = new Map()
   for (const row of lpDetailRows) {
     const lp  = row[`${LP}.lookup_code`] || ''
@@ -215,8 +142,11 @@ export function transformInventoryRows(lpLocationRows, lpDetailRows, allLocation
       })
     }
   }
+  return detailMap
+}
 
-  // Step 2 — build location map from LP→Location rows (occupied only)
+// Build occupied location map from Query 1 rows + detail map
+function buildLocationMap(lpLocationRows, detailMap) {
   const locationMap = new Map()
   for (const row of lpLocationRows) {
     const lp      = row[`${LP}.lookup_code`]              || ''
@@ -225,11 +155,8 @@ export function transformInventoryRows(lpLocationRows, lpDetailRows, allLocation
 
     if (!locationMap.has(locName)) {
       locationMap.set(locName, {
-        id:          locName,
-        zone:        deriveZone(locName),
-        palletCount: 0,
-        onHand:      0,
-        pallets:     [],
+        id: locName, zone: deriveZone(locName),
+        palletCount: 0, onHand: 0, pallets: [],
       })
     }
 
@@ -242,40 +169,61 @@ export function transformInventoryRows(lpLocationRows, lpDetailRows, allLocation
       loc.onHand      += detail.qty
     }
   }
-
-  // Step 3 — seed with ALL locations from Query 3
-  // Any location not already in the map (no LP) becomes an Empty row.
-  for (const row of allLocationRows) {
-    const locName = row[`${LOC}.location_container_name`] || ''
-    if (!locName) continue
-    if (!locationMap.has(locName)) {
-      locationMap.set(locName, {
-        id:          locName,
-        zone:        deriveZone(locName),
-        palletCount: 0,
-        onHand:      0,
-        pallets:     [],
-      })
-    }
-  }
-
-  // Step 4 — sort by location ID
-  return [...locationMap.values()].sort((a, b) => a.id.localeCompare(b.id))
+  return locationMap
 }
 
 // ---------------------------------------------------------------------------
-// Main entry point — fetch all three queries in parallel, then transform
+// PRIMARY export — Queries 1 + 2 in parallel, returns occupied locations fast
 // ---------------------------------------------------------------------------
 export async function fetchInventoryLocations(facilityId) {
   const whName = FACILITY_WH_NAME[facilityId]
   if (!whName) throw new Error(`Unknown facilityId: ${facilityId}`)
 
-  // All three queries are independent — run in parallel
-  const [lpLocationRows, lpDetailRows, allLocationRows] = await Promise.all([
+  const [lpLocationRows, lpDetailRows] = await Promise.all([
     fetchLpLocations(whName),
     fetchLpDetail(whName),
-    fetchAllLocationNames(whName),
   ])
 
-  return transformInventoryRows(lpLocationRows, lpDetailRows, allLocationRows)
+  const detailMap   = buildDetailMap(lpLocationRows.length ? lpDetailRows : [])
+  const locationMap = buildLocationMap(lpLocationRows, detailMap)
+
+  return [...locationMap.values()].sort((a, b) => a.id.localeCompare(b.id))
+}
+
+// ---------------------------------------------------------------------------
+// BACKGROUND export — Query 3 alone, merges empty locations into existing data
+// Call this after fetchInventoryLocations has rendered. Pass the occupied
+// data array and it returns a new merged array with empty rows added.
+// If Query 3 times out, returns the original occupiedData unchanged.
+// ---------------------------------------------------------------------------
+export async function mergeEmptyLocations(facilityId, occupiedData) {
+  const whName = FACILITY_WH_NAME[facilityId]
+  if (!whName) return occupiedData
+
+  let allLocationRows
+  try {
+    allLocationRows = await fetchAllLocationNames(whName)
+  } catch {
+    // Background query failed — silently return occupied data as-is.
+    // User gets occupied locations without empty ones rather than an error.
+    return occupiedData
+  }
+
+  // Build set of already-known location IDs
+  const occupiedIds = new Set(occupiedData.map(l => l.id))
+
+  // Add only locations not already in the occupied set
+  const emptyRows = []
+  for (const row of allLocationRows) {
+    const locName = row[`${LOC}.location_container_name`] || ''
+    if (!locName || occupiedIds.has(locName)) continue
+    emptyRows.push({
+      id: locName, zone: deriveZone(locName),
+      palletCount: 0, onHand: 0, pallets: [],
+    })
+  }
+
+  if (emptyRows.length === 0) return occupiedData
+
+  return [...occupiedData, ...emptyRows].sort((a, b) => a.id.localeCompare(b.id))
 }
