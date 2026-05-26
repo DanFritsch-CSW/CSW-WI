@@ -90,17 +90,18 @@ export async function upsertEmployees(employees) {
 export async function seedRosterAssignments(employees, planDate) {
   if (!supabase || !employees.length) return null
   const rows = employees.map(e => ({
-    facility:      e.facility,
-    employee_id:   e.id,
-    employee_name: e.name,
-    role:          e.role ?? null,
-    lane:          e.default_lane || 'shift1',
-    plan_date:     planDate,
-    shift_start:   e.shift_start ?? null,
-    shift_hours:   e.shift_hours ?? null,
-    is_temp:       false,
-    from_facility: null,
-    on_loan_to:    null,
+    facility:          e.facility,
+    employee_id:       e.id,
+    employee_name:     e.name,
+    role:              e.role ?? null,
+    lane:              e.default_lane || 'shift1',
+    plan_date:         planDate,
+    shift_start:       e.shift_start ?? null,
+    shift_hours:       e.shift_hours ?? null,
+    is_temp:           false,
+    from_facility:     null,
+    on_loan_to:        null,
+    last_b2e_sync_at:  new Date().toISOString(),
   }))
   const { error } = await supabase
     .from('roster_assignments')
@@ -669,4 +670,50 @@ export async function deletePickerAssignment(employeeId) {
     .delete()
     .eq('employee_id', employeeId)
   if (error) console.error('deletePickerAssignment:', error)
+}
+
+// ─── Roster staleness / auto-sync helpers ─────────────────────────────────
+//
+// Used by RosterBoard to decide whether to silently re-sync from B2E on load.
+// The `last_b2e_sync_at` column is stamped by seedRosterAssignments on every
+// B2E pull; checkRosterStaleness reads the most recent stamp for a (facility,
+// plan_date) and compares against `staleHours` (default 24h).
+
+/**
+ * Returns true if the roster for (facility, planDate) has not been synced
+ * from B2E within the last `staleHours` hours, or if no sync timestamp
+ * exists at all (treat missing as stale).
+ */
+export async function checkRosterStaleness(facility, planDate, staleHours = 24) {
+  if (!supabase) return false
+  const { data, error } = await supabase
+    .from('roster_assignments')
+    .select('last_b2e_sync_at')
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .eq('is_temp', false)
+    .not('last_b2e_sync_at', 'is', null)
+    .limit(1)
+  if (error || !data || data.length === 0) return true
+  const syncedAt = new Date(data[0].last_b2e_sync_at).getTime()
+  return Date.now() - syncedAt > staleHours * 60 * 60 * 1000
+}
+
+/**
+ * Stamps `last_b2e_sync_at` on all non-temp rows for (facility, planDate).
+ * Optionally scoped to a specific set of employee IDs via `syncedEmployeeIds`.
+ */
+export async function markRosterRowsAsSynced(facility, planDate, syncedEmployeeIds = null) {
+  if (!supabase) return
+  let query = supabase
+    .from('roster_assignments')
+    .update({ last_b2e_sync_at: new Date().toISOString() })
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .eq('is_temp', false)
+  if (syncedEmployeeIds && syncedEmployeeIds.length > 0) {
+    query = query.in('employee_id', syncedEmployeeIds)
+  }
+  const { error } = await query
+  if (error) console.error('markRosterRowsAsSynced:', error)
 }

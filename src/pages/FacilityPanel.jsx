@@ -5,10 +5,12 @@ import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import PicklinePanel from '../components/PicklinePanel.jsx'
+import AppointmentList from '../components/AppointmentList.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
   isRuleProject, fetchActiveInventory, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
+  fetchAppointmentList,
 } from '../lib/omni.js'
 import {
   fetchProjectHourlyDrops,
@@ -78,8 +80,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [copyProjects, setCopyProjects] = useState(new Set())
   const [copying, setCopying]           = useState(false)
   const [copyMsg, setCopyMsg]           = useState(null)
-  const [fetchedAt, setFetchedAt]       = useState(null)
-  const [retryNonce, setRetryNonce]     = useState(0)
+  const [fetchedAt, setFetchedAt]             = useState(null)
+  const [retryNonce, setRetryNonce]           = useState(0)
+  const [appointmentList, setAppointmentList]           = useState([])
+  const [appointmentListLoading, setAppointmentListLoading] = useState(false)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -106,6 +110,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       if (projectResult.status === 'fulfilled') setProjects(projectResult.value)
       setFetchedAt(new Date())
     } catch { /* non-fatal */ }
+    // Also refresh the row-level appointment list (independent, non-fatal)
+    try {
+      setAppointmentListLoading(true)
+      const list = await fetchAppointmentList(facility.id, planDate)
+      setAppointmentList(list)
+    } catch { /* non-fatal */ } finally {
+      setAppointmentListLoading(false)
+    }
   }, [facility.id, planDate])
 
   useEffect(() => {
@@ -119,6 +131,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [refreshAppointments])
+
+  // ── Appointment list fetch (independent of main loadData flow) ──────────────
+  // A failure here does not block KPIs or the roster board.
+  useEffect(() => {
+    let cancelled = false
+    setAppointmentList([])
+    setAppointmentListLoading(true)
+    fetchAppointmentList(facility.id, planDate)
+      .then(list => { if (!cancelled) setAppointmentList(list) })
+      .catch(() => { if (!cancelled) setAppointmentList([]) })
+      .finally(() => { if (!cancelled) setAppointmentListLoading(false) })
+    return () => { cancelled = true }
+  }, [facility.id, planDate, retryNonce])
 
   useEffect(() => {
     let cancelled = false
@@ -610,6 +635,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
       <RosterBoard facility={facility.id} planDate={planDate} settings={settings}
         onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} />
+
+      <AppointmentList
+        appointments={appointmentList}
+        loading={appointmentListLoading}
+        facilityCode={facility.code}
+        date={planDate}
+      />
     </div>
   )
 

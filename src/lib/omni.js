@@ -565,6 +565,68 @@ export async function fetchProjectData(facilityId, date) {
     .sort((a, b) => b.tot - a.tot)
 }
 
+/**
+ * Fetch row-level appointment list for a facility's operational day (5am→4:59am+1).
+ * Uses the same split-day query pattern as fetchApptHourMap:
+ *   - Query 1: target date, include only hours ≥ 5
+ *   - Query 2: next day,    include only hours 0–4 (overnight tail)
+ *
+ * Excludes cancelled appointments via apptStatusFilter().
+ * Returns an array of rows: { lookup_code, type, scheduled_arrival, project_name,
+ *   carrier_name, notes }
+ */
+export async function fetchAppointmentList(facilityId, date) {
+  const wh = CSW_WAREHOUSE[facilityId]
+  if (!wh) return []
+
+  const FIELDS = [
+    `${VIEW_APPT}.lookup_code`,
+    `${VIEW_APPT}.dock_appointment_type_name`,
+    `${VIEW_APPT}.scheduled_arrival`,
+    `${VIEW_APPT}.project_name`,
+    `${VIEW_APPT}.carrier_name`,
+    `${VIEW_APPT}.notes`,
+  ]
+
+  const warehouseFilter = {
+    [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+  }
+
+  const [dayRows, nextDayRows] = await Promise.all([
+    omniQuery({
+      modelId: GOLD_MODEL_ID, table: VIEW_APPT, fields: FIELDS,
+      filters: { ...warehouseFilter, ...scheduledArrivalDateFilter(date), ...apptStatusFilter() },
+      sorts: [{ column_name: `${VIEW_APPT}.scheduled_arrival`, sort_descending: false }],
+      limit: 500,
+    }),
+    omniQuery({
+      modelId: GOLD_MODEL_ID, table: VIEW_APPT, fields: FIELDS,
+      filters: { ...warehouseFilter, ...scheduledArrivalDateFilter(nextDayISO(date)), ...apptStatusFilter() },
+      sorts: [{ column_name: `${VIEW_APPT}.scheduled_arrival`, sort_descending: false }],
+      limit: 200,
+    }).catch(() => []),
+  ])
+
+  const parseRow = r => ({
+    lookup_code:       r[`${VIEW_APPT}.lookup_code`]                || '',
+    type:              classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`]),
+    scheduled_arrival: r[`${VIEW_APPT}.scheduled_arrival`]          || null,
+    project_name:      r[`${VIEW_APPT}.project_name`]               || '',
+    carrier_name:      r[`${VIEW_APPT}.carrier_name`]               || '',
+    notes:             r[`${VIEW_APPT}.notes`]                      || '',
+  })
+
+  const dayFiltered = dayRows
+    .filter(r => tsToHour(r[`${VIEW_APPT}.scheduled_arrival`]) >= 5)
+    .map(parseRow)
+
+  const nightFiltered = nextDayRows
+    .filter(r => OVERNIGHT_HOURS.has(tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])))
+    .map(parseRow)
+
+  return [...dayFiltered, ...nightFiltered]
+}
+
 export async function fetchProjectHourlyAppointments(facilityId, date, projectNames) {
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh || !projectNames?.length) return {}

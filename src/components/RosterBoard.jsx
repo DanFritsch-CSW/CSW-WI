@@ -19,6 +19,7 @@ import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
   seedRosterAssignments, deleteAssignment, resetAssignmentsForDate,
   sendEmployeeOnLoan, recallLoan, purgeStaleAssignments,
+  checkRosterStaleness, markRosterRowsAsSynced,
 } from '../lib/supabase.js'
 import { fetchB2eRoster, fetchB2eTimeOff } from '../lib/omni.js'
 
@@ -353,7 +354,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   // Special Project auto-edit: tracks which employee just landed in
   // specialProject so EmployeeTile can auto-open the label input.
   const [autoEditLabelId, setAutoEditLabelId] = useState(null)
-  const loadRef = useRef(null)
+  const [syncToast, setSyncToast]             = useState(null) // null | 'visible' | 'leaving'
+  const loadRef            = useRef(null)
+  const autoSyncCheckedRef = useRef(new Set())
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -381,7 +384,11 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         const empIds = withTimeOff.map(e => e.id)
         await purgeStaleAssignments(empIds, facId, date)
         const seeded = await fetchTodayAssignments(facId, date)
-        return _buildState(facId, seeded, timeOffMap, carryovers)
+        _buildState(facId, seeded, timeOffMap, carryovers)
+        // First-visit seed: mark as checked so auto-resync doesn't fire on this load.
+        // The freshly-seeded rows already carry last_b2e_sync_at from seedRosterAssignments.
+        autoSyncCheckedRef.current.add(`${facId}:${date}`)
+        return
       }
     } else {
       // Roster already seeded — apply any time-off overrides that aren't
@@ -401,12 +408,15 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           }
           const overrideMap = new Map(toUpdate.map(r => [r.employee_id, r]))
           const merged = assignments.map(a => overrideMap.get(a.employee_id) ?? a)
-          return _buildState(facId, merged, timeOffMap, carryovers)
+          _buildState(facId, merged, timeOffMap, carryovers)
+          maybeAutoResync(facId, date)
+          return
         }
       }
     }
 
-    return _buildState(facId, assignments, timeOffMap, carryovers)
+    _buildState(facId, assignments, timeOffMap, carryovers)
+    maybeAutoResync(facId, date)
   }
 
   function _buildState(facId, assignments, _timeOffMap, carryovers = []) {
@@ -500,8 +510,16 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     }
   }, [])
 
-  const handleB2eSync = useCallback(async () => {
-    setSyncState('loading')
+  // ── Toast helper — 1.6s visible + 0.25s fade ──────────────────────────────
+  const showSyncToast = useCallback(() => {
+    setSyncToast('visible')
+    setTimeout(() => setSyncToast('leaving'), 1600)
+    setTimeout(() => setSyncToast(null), 1850)
+  }, [])
+
+  // ── Core B2E sync logic (shared by button + auto-resync) ───────────────────
+  const performB2eSync = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setSyncState('loading')
     try {
       const date = planDate || todayISO()
       const [b2eRosterFull, timeOffMap] = await Promise.all([
@@ -509,22 +527,47 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         fetchB2eTimeOff(facility, date),
       ])
       const persistable = withoutCarryovers(b2eRosterFull)
-      if (!persistable.length) { setSyncState('No B2E data found'); return }
+      if (!persistable.length) {
+        if (!silent) setSyncState('No B2E data found')
+        return
+      }
       const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
       const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
-      if (err) { setSyncState(err); return }
+      if (err) { if (!silent) setSyncState(err); return }
       const seedErr = await seedRosterAssignments(withTimeOff, date)
-      if (seedErr) { setSyncState(seedErr); return }
+      if (seedErr) { if (!silent) setSyncState(seedErr); return }
       const empIds = withTimeOff.map(e => e.id)
       await purgeStaleAssignments(empIds, facility, date)
       await load(facility, date)
-      setSyncState('ok')
-      setTimeout(() => setSyncState(null), 3000)
+      if (!silent) {
+        setSyncState('ok')
+        setTimeout(() => setSyncState(null), 3000)
+      }
     } catch (e) {
-      setSyncState(e.message)
+      if (!silent) setSyncState(e.message)
+      else console.warn('Auto-sync failed (non-fatal):', e.message)
     }
   }, [facility, planDate])
+
+  // ── Button handler — thin wrapper ──────────────────────────────────────────
+  const handleB2eSync = useCallback(() => performB2eSync({ silent: false }), [performB2eSync])
+
+  // ── Auto-resync: fires once per (facility, date) pair per session ──────────
+  // Checks last_b2e_sync_at staleness; if stale, shows toast and silently syncs.
+  const maybeAutoResync = useCallback(async (facId, date) => {
+    const key = `${facId}:${date}`
+    if (autoSyncCheckedRef.current.has(key)) return
+    autoSyncCheckedRef.current.add(key)
+    try {
+      const stale = await checkRosterStaleness(facId, date)
+      if (!stale) return
+      showSyncToast()
+      await performB2eSync({ silent: true })
+    } catch (e) {
+      console.warn('maybeAutoResync failed (non-fatal):', e.message)
+    }
+  }, [showSyncToast, performB2eSync])
 
   const handleReset = useCallback(async () => {
     if (!window.confirm('Reset all manual changes for this day and reload from B2E? Temp employees will be preserved.')) return
@@ -808,6 +851,14 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   return (
     <div className="roster-section">
+      {/* ── Auto-sync toast — fixed, centered, appears when stale roster detected ── */}
+      {syncToast && (
+        <div className={`b2e-sync-toast${syncToast === 'leaving' ? ' b2e-sync-toast--leaving' : ''}`}>
+          <span className="b2e-sync-toast-icon">⟳</span>
+          Syncing latest schedules…
+        </div>
+      )}
+
       <div className="roster-header">
         <span className="section-label">
           {isCal

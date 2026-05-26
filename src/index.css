@@ -597,3 +597,220 @@ input, select { font: inherit; color: inherit; }
   cursor: default;
   user-select: none;
 }
+
+/* ─── Appointment List ──────────────────────────────────────────── */
+.appt-list-section {
+  margin-top: 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  overflow: hidden;
+}
+
+.appt-list-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  background: var(--bg1);
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: left;
+  transition: background 0.15s;
+}
+.appt-list-toggle:hover { background: var(--bg3); }
+.appt-list-toggle[aria-expanded="true"] { border-bottom-color: var(--border); }
+
+.appt-list-toggle-chevron {
+  font-size: 9px;
+  color: var(--brand-dim);
+  flex-shrink: 0;
+}
+
+.appt-list-toggle-label {
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.appt-list-toggle-count {
+  color: var(--brand);
+  font-weight: 500;
+}
+
+.appt-list-body {
+  overflow-x: auto;
+}
+
+.appt-list-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.appt-list-table thead tr {
+  background: var(--bg0);
+  border-bottom: 1px solid var(--border);
+}
+
+.appt-list-table th {
+  padding: 5px 12px;
+  text-align: left;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary);
+}
+
+.appt-list-table td {
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.appt-list-table tbody tr:last-child td { border-bottom: none; }
+.appt-list-table tbody tr:hover { background: var(--bg3); }
+.appt-list-table tbody tr:nth-child(even) { background: var(--bg2); }
+
+.appt-list-col-lookup {
+  width: 110px;
+  min-width: 90px;
+}
+
+.appt-list-col-type {
+  width: 90px;
+  min-width: 80px;
+}
+
+.appt-list-col-time {
+  width: 100px;
+  min-width: 80px;
+}
+
+.appt-list-col-notes {
+  min-width: 140px;
+  white-space: normal;
+  max-width: 320px;
+  color: var(--text-secondary);
+}
+
+.appt-list-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.appt-list-type-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.appt-list-type-badge--inbound {
+  background: rgba(42, 114, 184, 0.10);
+  border: 1px solid rgba(42, 114, 184, 0.30);
+  color: #2a72b8;
+}
+
+.appt-list-type-badge--outbound {
+  background: rgba(192, 90, 42, 0.10);
+  border: 1px solid rgba(192, 90, 42, 0.30);
+  color: #c05a2a;
+}
+
+.appt-list-empty {
+  padding: 24px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+/* ─── B2E Auto-Sync Toast ───────────────────────────────────────── */
+/*
+ * Fixed, centered banner that appears briefly when RosterBoard detects
+ * a stale last_b2e_sync_at and kicks off a silent background re-sync.
+ * Lifecycle: 'visible' (1.6s) → 'leaving' (0.25s fade) → removed from DOM.
+ */
+.b2e-sync-toast {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 20px;
+  background: var(--bg1);
+  border: 1px solid var(--brand-dim);
+  border-radius: var(--r-xl);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.10), 0 1px 4px rgba(0, 0, 0, 0.06);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--brand);
+  pointer-events: none;
+  animation: b2e-toast-in 0.20s ease-out both;
+}
+
+.b2e-sync-toast--leaving {
+  animation: b2e-toast-out 0.25s ease-in forwards;
+}
+
+.b2e-sync-toast-icon {
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--brand-light);
+  animation: b2e-toast-spin 1s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes b2e-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes b2e-toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-10px);
+  }
+}
+
+@keyframes b2e-toast-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
