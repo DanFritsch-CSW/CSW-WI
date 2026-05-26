@@ -7,11 +7,17 @@
 //
 //   Query 2 (LP → LPContents → Lots → VendorLots → Materials, 4 joins):
 //     lp_code, packaged_amount, material_code, vendor_lot, sys_lot
-//     Material/qty detail per LP
+//     Material/qty detail per LP — paginated in parallel batches
 //
 //   Query 3 (LocationContainers → Warehouse, 2 joins) — BACKGROUND:
 //     location_container_name for ALL facility locations including empty ones
 //     Called separately after primary load; merged in without blocking the UI
+//
+// PAGINATION STRATEGY:
+//   - PAGE_SIZE = 1000 keeps each individual Omni call well under the 26s timeout
+//   - PROBE: fire page 0 first, check total, then fetch remaining pages in parallel
+//   - This means a 16,800-row facility (Madison) does 1 probe + 16 parallel pages
+//     instead of 17 sequential pages
 
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 
@@ -23,7 +29,9 @@ const LOT    = 'silver__datex_slv_lots'
 const VLOT   = 'silver__datex_slv_vendorlots'
 const MAT    = 'silver__datex_slv_materials'
 
-const PAGE_SIZE = 2000
+const PAGE_SIZE    = 1000   // Safe per-call size — well under Netlify timeout
+const MAX_PAGES    = 30     // Hard ceiling: 30,000 rows max per query
+const BATCH_SIZE   = 5      // Parallel pages per batch — tuned to avoid overwhelming Omni
 
 export const FACILITY_WH_NAME = {
   cal: 'CSW-Franksville',
@@ -33,6 +41,9 @@ export const FACILITY_WH_NAME = {
   ec:  'CSW-Eau Claire',
 }
 
+// ---------------------------------------------------------------------------
+// Core fetch
+// ---------------------------------------------------------------------------
 async function omniQuery(query) {
   let res
   try {
@@ -53,19 +64,50 @@ async function omniQuery(query) {
   return rows
 }
 
+// ---------------------------------------------------------------------------
+// Parallel-paginated fetch
+//   1. Fire page 0 (probe)
+//   2. If probe returned a full page, fire remaining pages in parallel batches
+//   3. Merge all results in offset order
+// ---------------------------------------------------------------------------
 async function fetchAllPages(baseQuery) {
-  const allRows = []
-  let offset = 0
-  for (let page = 0; page < 20; page++) {
-    const pageRows = await omniQuery({ ...baseQuery, offset })
-    allRows.push(...pageRows)
-    if (pageRows.length < PAGE_SIZE) break
-    offset += PAGE_SIZE
+  // Probe — page 0
+  const probeRows = await omniQuery({ ...baseQuery, limit: PAGE_SIZE, offset: 0 })
+  const allRows = [...probeRows]
+
+  if (probeRows.length < PAGE_SIZE) return allRows  // All data fit in one page
+
+  // Fire remaining pages in parallel batches
+  let offset = PAGE_SIZE
+  for (let batch = 0; batch < MAX_PAGES; batch += BATCH_SIZE) {
+    const offsets = []
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      offsets.push(offset + i * PAGE_SIZE)
+    }
+
+    const batchResults = await Promise.all(
+      offsets.map(off => omniQuery({ ...baseQuery, limit: PAGE_SIZE, offset: off }))
+    )
+
+    let done = false
+    for (const rows of batchResults) {
+      allRows.push(...rows)
+      if (rows.length < PAGE_SIZE) { done = true; break }
+    }
+
+    if (done) break
+    offset += BATCH_SIZE * PAGE_SIZE
+
+    // Safety: stop if we've exceeded max rows
+    if (allRows.length >= MAX_PAGES * PAGE_SIZE) break
   }
+
   return allRows
 }
 
-// Query 1: LP → Location → Warehouse (3 joins)
+// ---------------------------------------------------------------------------
+// Query 1: LP → Location → Warehouse (3 joins, lean)
+// ---------------------------------------------------------------------------
 async function fetchLpLocations(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
@@ -79,11 +121,12 @@ async function fetchLpLocations(whName) {
       { column_name: `${LOC}.location_container_name`, sort_descending: false },
       { column_name: `${LP}.lookup_code`, sort_descending: false },
     ],
-    limit: PAGE_SIZE,
   })
 }
 
+// ---------------------------------------------------------------------------
 // Query 2: LP → LPContents → Lots → VendorLots → Materials (4 joins)
+// ---------------------------------------------------------------------------
 async function fetchLpDetail(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
@@ -100,12 +143,12 @@ async function fetchLpDetail(whName) {
       [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
     },
     sorts: [{ column_name: `${LP}.lookup_code`, sort_descending: false }],
-    limit: PAGE_SIZE,
   })
 }
 
+// ---------------------------------------------------------------------------
 // Query 3: LocationContainers → Warehouse (2 joins) — background only
-// Returns all location names for the facility including empty ones.
+// ---------------------------------------------------------------------------
 export async function fetchAllLocationNames(whName) {
   return fetchAllPages({
     modelId: GOLD_MODEL_ID,
@@ -115,16 +158,17 @@ export async function fetchAllLocationNames(whName) {
       [`${WH}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [whName] },
     },
     sorts: [{ column_name: `${LOC}.location_container_name`, sort_descending: false }],
-    limit: PAGE_SIZE,
   })
 }
 
+// ---------------------------------------------------------------------------
+// Transform helpers
+// ---------------------------------------------------------------------------
 function deriveZone(locationName) {
   if (!locationName) return 'Other'
   return `Aisle ${locationName.slice(0, 2).toUpperCase()}`
 }
 
-// Build detail map from Query 2 rows
 function buildDetailMap(lpDetailRows) {
   const detailMap = new Map()
   for (const row of lpDetailRows) {
@@ -145,7 +189,6 @@ function buildDetailMap(lpDetailRows) {
   return detailMap
 }
 
-// Build occupied location map from Query 1 rows + detail map
 function buildLocationMap(lpLocationRows, detailMap) {
   const locationMap = new Map()
   for (const row of lpLocationRows) {
@@ -173,7 +216,7 @@ function buildLocationMap(lpLocationRows, detailMap) {
 }
 
 // ---------------------------------------------------------------------------
-// PRIMARY export — Queries 1 + 2 in parallel, returns occupied locations fast
+// PRIMARY export — Queries 1 + 2 in parallel (both use parallel pagination)
 // ---------------------------------------------------------------------------
 export async function fetchInventoryLocations(facilityId) {
   const whName = FACILITY_WH_NAME[facilityId]
@@ -184,17 +227,15 @@ export async function fetchInventoryLocations(facilityId) {
     fetchLpDetail(whName),
   ])
 
-  const detailMap   = buildDetailMap(lpLocationRows.length ? lpDetailRows : [])
+  const detailMap   = buildDetailMap(lpDetailRows)
   const locationMap = buildLocationMap(lpLocationRows, detailMap)
 
   return [...locationMap.values()].sort((a, b) => a.id.localeCompare(b.id))
 }
 
 // ---------------------------------------------------------------------------
-// BACKGROUND export — Query 3 alone, merges empty locations into existing data
-// Call this after fetchInventoryLocations has rendered. Pass the occupied
-// data array and it returns a new merged array with empty rows added.
-// If Query 3 times out, returns the original occupiedData unchanged.
+// BACKGROUND export — Query 3, merges empty locations silently after primary load
+// Fails silently — returns occupiedData unchanged if Query 3 times out
 // ---------------------------------------------------------------------------
 export async function mergeEmptyLocations(facilityId, occupiedData) {
   const whName = FACILITY_WH_NAME[facilityId]
@@ -204,16 +245,12 @@ export async function mergeEmptyLocations(facilityId, occupiedData) {
   try {
     allLocationRows = await fetchAllLocationNames(whName)
   } catch {
-    // Background query failed — silently return occupied data as-is.
-    // User gets occupied locations without empty ones rather than an error.
     return occupiedData
   }
 
-  // Build set of already-known location IDs
   const occupiedIds = new Set(occupiedData.map(l => l.id))
-
-  // Add only locations not already in the occupied set
   const emptyRows = []
+
   for (const row of allLocationRows) {
     const locName = row[`${LOC}.location_container_name`] || ''
     if (!locName || occupiedIds.has(locName)) continue
