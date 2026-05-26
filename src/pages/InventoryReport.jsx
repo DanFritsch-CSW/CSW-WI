@@ -15,22 +15,6 @@ const FACILITY_LIST = [
 const MODES = ['All', 'Occupied', 'Empty']
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-function statusLabel(loc) {
-  if (loc.palletCount === 0) return { label: 'Empty',     cls: 'status-empty'  }
-  return                            { label: 'Occupied',  cls: 'status-avail'  }
-}
-
-function deriveZones(data) {
-  return ['ALL', ...new Set(data.map(d => d.zone))].sort((a, b) => {
-    if (a === 'ALL') return -1
-    if (b === 'ALL') return 1
-    return a.localeCompare(b)
-  })
-}
-
-// ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
 function FilterPills({ items, active, onSelect }) {
@@ -47,9 +31,9 @@ function FilterPills({ items, active, onSelect }) {
             fontSize: 11,
             fontWeight: 600,
             cursor: 'pointer',
-            borderColor: active === item ? 'var(--gold)'          : 'var(--border)',
-            background:  active === item ? 'rgba(196,160,80,0.12)': 'var(--bg2)',
-            color:       active === item ? 'var(--gold)'          : 'var(--text-secondary)',
+            borderColor: active === item ? 'var(--gold)'           : 'var(--border)',
+            background:  active === item ? 'rgba(196,160,80,0.12)' : 'var(--bg2)',
+            color:       active === item ? 'var(--gold)'           : 'var(--text-secondary)',
           }}
         >
           {item}
@@ -159,19 +143,15 @@ function DiscrepancyModal({ flags, allData, onClose }) {
 // Main Page
 // ---------------------------------------------------------------------------
 export default function InventoryReport() {
-  // Data state
   const [data,        setData]        = useState([])
   const [loading,     setLoading]     = useState(false)
   const [error,       setError]       = useState(null)
   const [lastRefresh, setLastRefresh] = useState(null)
 
-  // Filter state
   const [facilityId, setFacilityId] = useState('cal')
-  const [zone,       setZone]       = useState('ALL')
   const [mode,       setMode]       = useState('All')
   const [search,     setSearch]     = useState('')
 
-  // UI state
   const [flags,     setFlags]     = useState(new Set())
   const [collapsed, setCollapsed] = useState(new Set())
   const [showDisc,  setShowDisc]  = useState(false)
@@ -184,7 +164,6 @@ export default function InventoryReport() {
     setError(null)
     setFlags(new Set())
     setCollapsed(new Set())
-    setZone('ALL')
     setSearch('')
     try {
       const result = await fetchInventoryLocations(facId)
@@ -197,22 +176,16 @@ export default function InventoryReport() {
     }
   }, [])
 
-  // Load on mount and when facility changes
-  useEffect(() => {
-    doFetch(facilityId)
-  }, [facilityId, doFetch])
+  useEffect(() => { doFetch(facilityId) }, [facilityId, doFetch])
 
   const handleRefresh = () => doFetch(facilityId)
 
   // ---------------------------------------------------------------------------
-  // Derived filters
+  // Flat filtered list — no zone grouping
   // ---------------------------------------------------------------------------
-  const allZones = useMemo(() => deriveZones(data), [data])
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return data.filter(loc => {
-      const zm = zone === 'ALL' || loc.zone === zone
       const mm = mode === 'All'
              || (mode === 'Occupied' && loc.palletCount > 0)
              || (mode === 'Empty'    && loc.palletCount === 0)
@@ -223,18 +196,12 @@ export default function InventoryReport() {
                   p.materialCode.toLowerCase().includes(q) ||
                   p.vendorLot.toLowerCase().includes(q)
                 )
-      return zm && mm && sm
+      return mm && sm
     })
-  }, [data, zone, mode, search])
-
-  const byZone = useMemo(() => {
-    const map = {}
-    filtered.forEach(loc => { (map[loc.zone] = map[loc.zone] || []).push(loc) })
-    return map
-  }, [filtered])
+  }, [data, mode, search])
 
   // ---------------------------------------------------------------------------
-  // Interaction handlers
+  // Handlers
   // ---------------------------------------------------------------------------
   const toggleFlag = useCallback((id, e) => {
     e.stopPropagation()
@@ -271,24 +238,20 @@ export default function InventoryReport() {
     table:       { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
     th:          { background: 'var(--bg2)', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'left',  padding: '7px 10px', borderBottom: '1px solid var(--border)', fontSize: 11 },
     thR:         { background: 'var(--bg2)', color: 'var(--text-secondary)', fontWeight: 600, textAlign: 'right', padding: '7px 10px', borderBottom: '1px solid var(--border)', fontSize: 11 },
-    zoneRow:     { background: 'var(--bg2)', color: 'var(--text-secondary)', fontSize: 10, fontWeight: 700, letterSpacing: '.07em', padding: '5px 10px', borderTop: '1px solid var(--border)' },
   }
 
   const statusStyle = {
-    'status-avail': { background: 'rgba(34,197,94,0.15)',  color: '#4ade80' },
-    'status-empty': { background: 'var(--bg3)',            color: 'var(--text-secondary)' },
+    occupied: { background: 'rgba(34,197,94,0.15)',  color: '#4ade80' },
+    empty:    { background: 'var(--bg3)',             color: 'var(--text-secondary)' },
   }
 
   const currentFacility = FACILITY_LIST.find(f => f.id === facilityId)
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
   return (
     <div className="page-content">
       <div style={S.page}>
 
-        {/* ── Page header ── */}
+        {/* ── Header ── */}
         <div style={S.pageHeader}>
           <div>
             <h1 style={S.h1}>
@@ -337,10 +300,6 @@ export default function InventoryReport() {
         {/* ── Filters ── */}
         <div style={S.filterRow}>
           <div style={S.filterGroup}>
-            <span style={S.filterLabel}>AISLE</span>
-            <FilterPills items={allZones} active={zone} onSelect={setZone} />
-          </div>
-          <div style={S.filterGroup}>
             <span style={S.filterLabel}>SHOW</span>
             <FilterPills items={MODES} active={mode} onSelect={setMode} />
           </div>
@@ -354,17 +313,17 @@ export default function InventoryReport() {
               style={{
                 padding: '5px 10px', borderRadius: 'var(--r-md)',
                 border: '1px solid var(--border)', background: 'var(--bg2)',
-                color: 'var(--text-primary)', fontSize: 12, width: 220,
+                color: 'var(--text-primary)', fontSize: 12, width: 240,
                 outline: 'none',
               }}
             />
           </div>
         </div>
 
-        {/* ── Stats bar ── */}
+        {/* ── Stats ── */}
         {!loading && !error && <StatBar rows={filtered} flagCount={flags.size} />}
 
-        {/* ── Loading state ── */}
+        {/* ── Loading ── */}
         {loading && (
           <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>
             <div style={{ fontSize: 24, marginBottom: 8 }}>⟳</div>
@@ -372,7 +331,7 @@ export default function InventoryReport() {
           </div>
         )}
 
-        {/* ── Error state ── */}
+        {/* ── Error ── */}
         {!loading && error && (
           <div style={{
             padding: '1.25rem', borderRadius: 'var(--r-md)',
@@ -380,16 +339,11 @@ export default function InventoryReport() {
             color: 'var(--red)', fontSize: 13, marginBottom: 12,
           }}>
             <strong>Error loading inventory:</strong> {error}
-            <button
-              onClick={handleRefresh}
-              style={{ marginLeft: 12, ...S.btn, fontSize: 11 }}
-            >
-              Retry
-            </button>
+            <button onClick={handleRefresh} style={{ marginLeft: 12, ...S.btn, fontSize: 11 }}>Retry</button>
           </div>
         )}
 
-        {/* ── Table ── */}
+        {/* ── Flat table ── */}
         {!loading && !error && (
           <div style={S.tableWrap}>
             {filtered.length === 0 ? (
@@ -405,117 +359,107 @@ export default function InventoryReport() {
                     <th style={{ ...S.thR, width: 80  }}>Total Qty</th>
                     <th style={{ ...S.th,  width: 90  }}>Status</th>
                     <th style={S.th}>LP · Material · Lots</th>
-                    <th style={{ ...S.th, width: 60 }}></th>
+                    <th style={{ ...S.th,  width: 60  }}></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(byZone).map(([zoneName, locs]) => (
-                    <>
-                      <tr key={`zone-${zoneName}`}>
-                        <td colSpan={6} style={S.zoneRow}>{zoneName.toUpperCase()}</td>
-                      </tr>
-                      {locs.map(loc => {
-                        const { label, cls } = statusLabel(loc)
-                        const isFlagged   = flags.has(loc.id)
-                        const isCollapsed = collapsed.has(loc.id)
-                        const hasInventory = loc.pallets.length > 0
+                  {filtered.map(loc => {
+                    const isEmpty     = loc.palletCount === 0
+                    const isFlagged   = flags.has(loc.id)
+                    const isCollapsed = collapsed.has(loc.id)
+                    const hasInventory = loc.pallets.length > 0
 
-                        return (
-                          <>
-                            {/* Location summary row */}
-                            <tr
-                              key={loc.id}
-                              onClick={() => hasInventory && toggleCollapse(loc.id)}
+                    return (
+                      <>
+                        {/* Location row */}
+                        <tr
+                          key={loc.id}
+                          onClick={() => hasInventory && toggleCollapse(loc.id)}
+                          style={{
+                            borderBottom: '1px solid var(--border)',
+                            background: isFlagged ? 'rgba(239,68,68,0.07)' : 'transparent',
+                            cursor: hasInventory ? 'pointer' : 'default',
+                          }}
+                        >
+                          <td style={{ padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                            {hasInventory && (
+                              <span style={{ color: 'var(--text-secondary)', marginRight: 4, fontSize: 10 }}>
+                                {isCollapsed ? '▸' : '▾'}
+                              </span>
+                            )}
+                            {loc.id}
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-primary)', fontWeight: 600 }}>
+                            {loc.palletCount || '—'}
+                          </td>
+                          <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-secondary)' }}>
+                            {loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}
+                          </td>
+                          <td style={{ padding: '8px 10px' }}>
+                            <span style={{
+                              ...(isEmpty ? statusStyle.empty : statusStyle.occupied),
+                              padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600,
+                            }}>
+                              {isEmpty ? 'Empty' : 'Occupied'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px 10px', color: 'var(--text-secondary)', fontSize: 11 }}>
+                            {hasInventory && isCollapsed
+                              ? `${loc.pallets.length} pallet${loc.pallets.length > 1 ? 's' : ''} — tap to expand`
+                              : ''}
+                          </td>
+                          <td style={{ padding: '8px 10px' }}>
+                            <button
+                              onClick={e => toggleFlag(loc.id, e)}
                               style={{
-                                borderBottom: '1px solid var(--border)',
-                                background: isFlagged ? 'rgba(239,68,68,0.07)' : 'transparent',
-                                cursor: hasInventory ? 'pointer' : 'default',
+                                background: isFlagged ? 'rgba(239,68,68,0.1)' : 'transparent',
+                                border: '1px solid',
+                                borderColor: isFlagged ? 'rgba(239,68,68,0.5)' : 'var(--border)',
+                                borderRadius: 'var(--r-md)',
+                                padding: '3px 9px', fontSize: 10, fontWeight: 600,
+                                color: isFlagged ? 'var(--red)' : 'var(--text-secondary)',
+                                cursor: 'pointer',
                               }}
                             >
-                              <td style={{ padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                                {hasInventory && (
-                                  <span style={{ color: 'var(--text-secondary)', marginRight: 4, fontSize: 10 }}>
-                                    {isCollapsed ? '▸' : '▾'}
-                                  </span>
-                                )}
-                                {loc.id}
-                              </td>
-                              <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-primary)', fontWeight: 600 }}>
-                                {loc.palletCount || '—'}
-                              </td>
-                              <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-secondary)' }}>
-                                {loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}
-                              </td>
-                              <td style={{ padding: '8px 10px' }}>
-                                <span style={{ ...statusStyle[cls], padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600 }}>
-                                  {label}
-                                </span>
-                              </td>
-                              <td style={{ padding: '8px 10px', color: 'var(--text-secondary)', fontSize: 11 }}>
-                                {hasInventory && isCollapsed
-                                  ? `${loc.pallets.length} pallet${loc.pallets.length > 1 ? 's' : ''} — tap to expand`
-                                  : ''}
-                              </td>
-                              <td style={{ padding: '8px 10px' }}>
-                                <button
-                                  onClick={e => toggleFlag(loc.id, e)}
-                                  style={{
-                                    background: isFlagged ? 'rgba(239,68,68,0.1)' : 'transparent',
-                                    border: '1px solid',
-                                    borderColor: isFlagged ? 'rgba(239,68,68,0.5)' : 'var(--border)',
-                                    borderRadius: 'var(--r-md)',
-                                    padding: '3px 9px', fontSize: 10, fontWeight: 600,
-                                    color: isFlagged ? 'var(--red)' : 'var(--text-secondary)',
-                                    cursor: 'pointer',
-                                  }}
-                                >
-                                  {isFlagged ? '⚑ flagged' : '+ flag'}
-                                </button>
-                              </td>
-                            </tr>
+                              {isFlagged ? '⚑ flagged' : '+ flag'}
+                            </button>
+                          </td>
+                        </tr>
 
-                            {/* Pallet detail rows */}
-                            {hasInventory && !isCollapsed && loc.pallets.map((p, pi) => (
-                              <tr
-                                key={`${loc.id}-${pi}`}
-                                style={{
-                                  borderBottom: pi === loc.pallets.length - 1
-                                    ? '1px solid var(--border)'
-                                    : '1px solid rgba(255,255,255,0.04)',
-                                  background: 'rgba(255,255,255,0.015)',
-                                }}
-                              >
-                                <td style={{ padding: '4px 10px 4px 22px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
-                                  ↳ {p.lp}
-                                </td>
-                                <td style={{ padding: '4px 10px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: 11 }}>
-                                  1
-                                </td>
-                                <td style={{ padding: '4px 10px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: 11 }}>
-                                  {p.qty.toLocaleString()}
-                                </td>
-                                <td />
-                                <td style={{ padding: '4px 10px', fontSize: 11 }}>
-                                  <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{p.materialCode}</span>
-                                  {p.vendorLot && (
-                                    <span style={{ color: 'var(--text-secondary)', marginLeft: 10, fontSize: 10 }}>
-                                      VL: {p.vendorLot}
-                                    </span>
-                                  )}
-                                  {p.sysLot && (
-                                    <span style={{ color: 'var(--text-secondary)', marginLeft: 8, fontSize: 10 }}>
-                                      SL: {p.sysLot}
-                                    </span>
-                                  )}
-                                </td>
-                                <td />
-                              </tr>
-                            ))}
-                          </>
-                        )
-                      })}
-                    </>
-                  ))}
+                        {/* Pallet detail rows */}
+                        {hasInventory && !isCollapsed && loc.pallets.map((p, pi) => (
+                          <tr
+                            key={`${loc.id}-${pi}`}
+                            style={{
+                              borderBottom: pi === loc.pallets.length - 1
+                                ? '1px solid var(--border)'
+                                : '1px solid rgba(255,255,255,0.04)',
+                              background: 'rgba(255,255,255,0.015)',
+                            }}
+                          >
+                            <td style={{ padding: '4px 10px 4px 22px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+                              ↳ {p.lp}
+                            </td>
+                            <td style={{ padding: '4px 10px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: 11 }}>1</td>
+                            <td style={{ padding: '4px 10px', textAlign: 'right', color: 'var(--text-secondary)', fontSize: 11 }}>
+                              {p.qty.toLocaleString()}
+                            </td>
+                            <td />
+                            <td style={{ padding: '4px 10px', fontSize: 11 }}>
+                              <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{p.materialCode}</span>
+                              {p.vendorLot && (
+                                <span style={{ color: 'var(--text-secondary)', marginLeft: 10, fontSize: 10 }}>VL: {p.vendorLot}</span>
+                              )}
+                              {p.sysLot && (
+                                <span style={{ color: 'var(--text-secondary)', marginLeft: 8, fontSize: 10 }}>SL: {p.sysLot}</span>
+                              )}
+                            </td>
+                            <td />
+                          </tr>
+                        ))}
+                      </>
+                    )
+                  })}
                 </tbody>
               </table>
             )}
