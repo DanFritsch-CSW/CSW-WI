@@ -1,11 +1,9 @@
 'use strict'
 
 // MotherDuck inventory proxy.
-// Key Netlify serverless fixes:
-//   - home_directory set in Database constructor config (not as SQL SET)
-//     because LOAD motherduck calls its C++ init before SQL executes
-//   - In-memory + ATTACH pattern avoids auth-at-construction error
-//   - No INSTALL needed — motherduck bundled in duckdb npm package
+// home_directory must be set via PRAGMA or connection string, not constructor config.
+// Solution: set HOME env var to /tmp before duckdb loads — the C++ extension
+// falls back to the HOME environment variable when no explicit path is set.
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -86,22 +84,21 @@ exports.handler = async (event) => {
 
   let db, conn
   try {
+    // Set HOME to /tmp before duckdb initialises — the MotherDuck C++ extension
+    // reads the HOME env var as its home directory fallback.
+    // Must be set before require('duckdb') loads the native module.
+    process.env.HOME             = '/tmp'
     process.env.motherduck_token = TOKEN
 
     const duckdb = require('duckdb')
 
-    // Pass home_directory in constructor config — must be set before any extension
-    // init runs. The MotherDuck C++ init function reads home dir at LOAD time,
-    // so a SQL SET afterwards is too late.
-    db   = new duckdb.Database(':memory:', { home_directory: '/tmp' })
+    db   = new duckdb.Database(':memory:')
     conn = db.connect()
 
-    // Load MotherDuck extension (bundled in npm package, no INSTALL needed)
     await new Promise((resolve, reject) => {
       conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
     })
 
-    // Attach production_db read-only with token
     await new Promise((resolve, reject) => {
       conn.run(
         `ATTACH 'md:production_db?motherduck_token=${TOKEN}' AS production_db (READ_ONLY)`,
