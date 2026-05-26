@@ -132,7 +132,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [refreshAppointments])
 
-  // ── Appointment list fetch (independent of main loadData flow) ──────────────
+  // ── Appointment list fetch (independent of main loadData flow) ────────────
   // A failure here does not block KPIs or the roster board.
   useEffect(() => {
     let cancelled = false
