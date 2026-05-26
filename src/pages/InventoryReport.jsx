@@ -180,26 +180,17 @@ export default function InventoryReport() {
   const [flagModal,     setFlagModal]     = useState(null)
   const [showLog,       setShowLog]       = useState(false)
 
-  // ---------------------------------------------------------------------------
-  // Fetch — two phases:
-  //   Phase 1 (blocking): Queries 1+2 — occupied locations, renders immediately
-  //   Phase 2 (background): Query 3 — empty locations merged in silently
-  // ---------------------------------------------------------------------------
   const doFetch = useCallback(async (facId, clearSearch = false) => {
     setLoading(true)
     setError(null)
     setDiscrepancies(new Map())
     setExpanded(new Set())
     if (clearSearch) setSearch('')
-
     try {
-      // Phase 1 — fast, blocks UI
       const occupied = await fetchInventoryLocations(facId)
       setData(occupied)
       setLastRefresh(new Date())
       setLoading(false)
-
-      // Phase 2 — background, non-blocking
       setLoadingEmpty(true)
       const merged = await mergeEmptyLocations(facId, occupied)
       setData(merged)
@@ -221,11 +212,16 @@ export default function InventoryReport() {
   const removeFlag   = useCallback((locId)       => { setDiscrepancies(prev => { const n = new Map(prev); n.delete(locId);  return n }); setFlagModal(null) }, [])
   const toggleExpand = useCallback((id) => { setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n }) }, [])
 
+  // ---------------------------------------------------------------------------
+  // Search: location ID starts-with only.
+  // "P" matches P001A, P002B — not every LP or material containing the letter P.
+  // Keeps the aisle-prefix use case clean (AD, AR, P, C8B, etc.)
+  // ---------------------------------------------------------------------------
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return data.filter(loc => {
       const mm = mode === 'All' || (mode === 'Occupied' && loc.palletCount > 0) || (mode === 'Empty' && loc.palletCount === 0)
-      const sm = !q || loc.id.toLowerCase().includes(q) || loc.pallets.some(p => p.lp.toLowerCase().includes(q) || p.materialCode.toLowerCase().includes(q) || p.vendorLot.toLowerCase().includes(q))
+      const sm = !q || loc.id.toLowerCase().startsWith(q)
       return mm && sm
     })
   }, [data, mode, search])
@@ -285,8 +281,15 @@ export default function InventoryReport() {
             <FilterPills items={MODES} active={mode} onSelect={setMode} />
           </div>
           <div style={S.filterGroup}>
-            <span style={S.filterLabel}>SEARCH (location / LP / material)</span>
-            <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="AA001A, LP-12345, 10003922…" style={{ padding: '5px 10px', borderRadius: 'var(--r-md)', border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text-primary)', fontSize: 12, width: 240, outline: 'none' }} />
+            {/* Label updated: location starts-with search only */}
+            <span style={S.filterLabel}>LOCATION (starts with)</span>
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="P, AD, C8B, F7X…"
+              style={{ padding: '5px 10px', borderRadius: 'var(--r-md)', border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text-primary)', fontSize: 12, width: 200, outline: 'none' }}
+            />
           </div>
         </div>
 
