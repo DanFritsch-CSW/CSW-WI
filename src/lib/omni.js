@@ -73,20 +73,14 @@ function apptStatusFilter() {
   }
 }
 
-// Placeholder "HOLD" appointments — warehouse managers reserve dock time before
-// real work is booked. Stays in Datex/Omni at Open status (so not caught by the
-// Cancelled filter) but generates no labor demand. Filtered client-side because
-// Omni filter kinds don't support regex.
-//
-// Word-boundary match so legitimate codes like "AHOLD MOUNTVILLE" (the Ahold
-// supermarket chain) are preserved — only standalone HOLD tokens are dropped.
-// Confirmed against May 2026 data: 697 placeholder HOLDs across all facilities,
-// 0 false positives on AHOLD MOUNTVILLE.
-const HOLD_LOOKUP_REGEX = /(^|[\s\-(),/])HOLD($|[\s\-(),/])/i
-
-function isHoldAppointment(lookupCode) {
-  return HOLD_LOOKUP_REGEX.test(lookupCode || '')
-}
+// HOLD appointments are PRESERVED in labor demand, EST drops, and the
+// appointment list — explicit product decision per Kay Martin (KEN) and Dean
+// Dioguardi on 2026-05-27. Warehouse managers create placeholder HOLDs in
+// Datex as capacity reservations; ~99% of them convert to real appointments
+// 12–24 hours before showtime (e.g. Richelieu Raw routinely requests 1–3
+// reloads by 6pm same-day). Excluding them caused understaffing. Kay's daily
+// process is to cancel any HOLD that goes unused — that's the control
+// mechanism, not a code filter. See 2026-05-27 Slack thread + changelog.
 
 const OVERNIGHT_HOURS = new Set([0, 1, 2, 3, 4])
 
@@ -377,7 +371,6 @@ async function fetchApptHourMap(filters, date) {
   const rows = await omniQuery({
     modelId: GOLD_MODEL_ID, table: VIEW_APPT,
     fields: [
-      `${VIEW_APPT}.lookup_code`,
       `${VIEW_APPT}.scheduled_arrival`,
       `${VIEW_APPT}.dock_appointment_type_name`,
       `${VIEW_APPT}.count`,
@@ -388,7 +381,6 @@ async function fetchApptHourMap(filters, date) {
 
   const hourMap = {}
   for (const r of rows) {
-    if (isHoldAppointment(r[`${VIEW_APPT}.lookup_code`])) continue
     const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
     if (OVERNIGHT_HOURS.has(h)) continue
     const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
@@ -403,7 +395,6 @@ async function fetchApptHourMap(filters, date) {
     const overnightRows = await omniQuery({
       modelId: GOLD_MODEL_ID, table: VIEW_APPT,
       fields: [
-        `${VIEW_APPT}.lookup_code`,
         `${VIEW_APPT}.scheduled_arrival`,
         `${VIEW_APPT}.dock_appointment_type_name`,
         `${VIEW_APPT}.count`,
@@ -412,7 +403,6 @@ async function fetchApptHourMap(filters, date) {
       sorts: [], limit: 1000,
     })
     for (const r of overnightRows) {
-      if (isHoldAppointment(r[`${VIEW_APPT}.lookup_code`])) continue
       const h     = tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])
       if (!OVERNIGHT_HOURS.has(h)) continue
       const dir   = classifyApptType(r[`${VIEW_APPT}.dock_appointment_type_name`])
@@ -554,7 +544,6 @@ export async function fetchProjectData(facilityId, date) {
     modelId: GOLD_MODEL_ID,
     table: VIEW_APPT,
     fields: [
-      `${VIEW_APPT}.lookup_code`,
       `${VIEW_APPT}.project_name`,
       `${VIEW_APPT}.dock_appointment_type_name`,
       `${VIEW_APPT}.count`,
@@ -569,7 +558,6 @@ export async function fetchProjectData(facilityId, date) {
   })
   const projectMap = new Map()
   for (const r of rows) {
-    if (isHoldAppointment(r[`${VIEW_APPT}.lookup_code`])) continue
     const rawName = r[`${VIEW_APPT}.project_name`] || ''
     if (!rawName) continue
     const name = normalizeProjectName(facilityId, rawName)
@@ -592,9 +580,10 @@ export async function fetchProjectData(facilityId, date) {
  *   - Query 1: target date, include only hours ≥ 5
  *   - Query 2: next day,    include only hours 0–4 (overnight tail)
  *
- * Excludes cancelled appointments via apptStatusFilter() and placeholder HOLD
- * appointments via isHoldAppointment() — both filters match the labor calc so
- * the row count in this list always matches the hourly Inb/Out totals.
+ * Excludes cancelled appointments via apptStatusFilter(). HOLD appointments
+ * ARE included — they represent real capacity reservations that typically
+ * convert to bookings 12–24h before arrival (per Kay/Dean 5/27). Kay cancels
+ * unused HOLDs daily as her control.
  *
  * Returns an array of rows: { lookup_code, type, scheduled_arrival, project_name,
  *   carrier_name, notes }
@@ -641,12 +630,10 @@ export async function fetchAppointmentList(facilityId, date) {
   })
 
   const dayFiltered = dayRows
-    .filter(r => !isHoldAppointment(r[`${VIEW_APPT}.lookup_code`]))
     .filter(r => tsToHour(r[`${VIEW_APPT}.scheduled_arrival`]) >= 5)
     .map(parseRow)
 
   const nightFiltered = nextDayRows
-    .filter(r => !isHoldAppointment(r[`${VIEW_APPT}.lookup_code`]))
     .filter(r => OVERNIGHT_HOURS.has(tsToHour(r[`${VIEW_APPT}.scheduled_arrival`])))
     .map(parseRow)
 
@@ -683,7 +670,6 @@ export async function fetchNetworkKpis(date) {
     modelId: GOLD_MODEL_ID,
     table: VIEW_APPT,
     fields: [
-      `${VIEW_APPT}.lookup_code`,
       `${VIEW_APPT}.warehouse_name`,
       `${VIEW_APPT}.dock_appointment_type_name`,
       `${VIEW_APPT}.count`,
@@ -712,7 +698,6 @@ export async function fetchNetworkKpis(date) {
     }
   }
   for (const r of apptRows) {
-    if (isHoldAppointment(r[`${VIEW_APPT}.lookup_code`])) continue
     const wh    = r[`${VIEW_APPT}.warehouse_name`]
     const facId = CSW_WAREHOUSE_TO_FAC[wh]
     if (!facId) continue
@@ -774,7 +759,6 @@ async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
   return rows
     .filter(r => {
       const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
-      if (isHoldAppointment(code)) return false
       const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
       if (!type.startsWith('inbound')) return false
       if (rule.method === 'inbound_all' || rule.method === 'inbound_all_merged') return true
@@ -813,7 +797,6 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
   const hourCounts = {}
   for (const r of rows) {
     const code = (r[`${VIEW_APPT}.lookup_code`] || '').toUpperCase()
-    if (isHoldAppointment(code)) continue
     const type = (r[`${VIEW_APPT}.dock_appointment_type_name`] || '').toLowerCase()
     if (!type.startsWith('inbound')) continue
     if (rule.method === 'inbound_exclude_lookup') {
