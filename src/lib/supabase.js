@@ -430,6 +430,57 @@ export async function deleteProjectHourlyDropsForProject(facilityId, planDate, p
   if (error) console.error('deleteProjectHourlyDropsForProject:', error)
 }
 
+/**
+ * Removes seed-origin (manually_edited=false) rows for (facility, plan_date)
+ * whose (project_name, hour) is NOT in this run's `validKeys`. This is the
+ * orphan-cleanup pass that runs alongside every Phase 3 seed write.
+ *
+ * Without this, stale seed rows from prior weeks accumulate forever because
+ * the seed only upserts, never deletes — so the DB grows divergent from the
+ * actual L4W aggregate as the rolling window shifts. After the DB-is-truth
+ * refactor (Phase 3 reads state directly from DB instead of from a merged
+ * historical+manual view), those orphans would otherwise appear in the UI.
+ *
+ * validKeys: array of "{project_name}|{hour}" strings — every (project, hour)
+ * the seed run is keeping. Manual edits (manually_edited=true) are never
+ * touched regardless of whether they're in validKeys.
+ *
+ * Implementation: PostgREST has no native "delete WHERE (a,b) NOT IN (...)"
+ * across a composite key, so we fetch the universe of non-manual rows, diff
+ * client-side, and bulk-delete by project (one .in('hour', […]) per project
+ * to keep the URL bounded).
+ */
+export async function deleteOrphanSeedRows(facilityId, planDate, validKeys) {
+  if (!supabase) return
+  const validSet = new Set(validKeys)
+  const { data, error } = await supabase
+    .from('project_hourly_drops_forecast')
+    .select('project_name, hour')
+    .eq('facility', facilityId)
+    .eq('plan_date', planDate)
+    .eq('manually_edited', false)
+  if (error) { console.error('deleteOrphanSeedRows fetch:', error); return }
+  if (!data || !data.length) return
+  const orphans = data.filter(r => !validSet.has(`${r.project_name}|${r.hour}`))
+  if (!orphans.length) return
+  const byProject = {}
+  for (const r of orphans) {
+    if (!byProject[r.project_name]) byProject[r.project_name] = []
+    byProject[r.project_name].push(r.hour)
+  }
+  for (const [project_name, hours] of Object.entries(byProject)) {
+    const { error: delErr } = await supabase
+      .from('project_hourly_drops_forecast')
+      .delete()
+      .eq('facility', facilityId)
+      .eq('plan_date', planDate)
+      .eq('project_name', project_name)
+      .eq('manually_edited', false)
+      .in('hour', hours)
+    if (delErr) console.error('deleteOrphanSeedRows delete:', delErr)
+  }
+}
+
 export async function clearExpiredManualEdits(facilityId, beforeDate) {
   if (!supabase) return
   const { error } = await supabase

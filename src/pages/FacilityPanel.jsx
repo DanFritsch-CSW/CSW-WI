@@ -17,6 +17,7 @@ import {
   upsertProjectHourlyDrops,
   upsertProjectHourlyDropsSeed,
   deleteProjectHourlyDropsForProject,
+  deleteOrphanSeedRows,
   clearExpiredManualEdits,
   fetchHourlyAdjustments,
   upsertHourlyAdjustment,
@@ -203,11 +204,35 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         setOmniWarning(`Omni couldn't load: ${omniFailures.join(', ')}. Showing empty data — click Retry to try again.`)
       }
 
-      // ── Phase 3: EST drops seeding ──
-      // Historical drops are fetched via the cached wrapper. On cache hit (< 24h
-      // old), this is ~0ms instead of ~28 Omni queries on KEN. Cache TTL of 24h
-      // guarantees daily refresh — avoids the future-date drift problem where a
-      // cached aggregate goes stale as the rolling 4-week window shifts.
+      // ── Phase 3: EST drops seeding + sync ──
+      //
+      // Design (DB-is-truth model — refactored 2026-05-27 to fix Dean's
+      // revert bug and the silent orphan-row drift that grew alongside it):
+      //
+      //   1. Fetch existing DB state + historical L4W in parallel.
+      //   2. Identify manual edits in DB → exclude them from any seed write.
+      //   3. Compute the valid (project, hour) keyset = today's historical
+      //      (the things this seed run is keeping). Manual edits are kept
+      //      regardless and merged into validKeys.
+      //   4. deleteOrphanSeedRows: delete any non-manual DB rows whose
+      //      (project, hour) ISN'T in validKeys. This is what prevents stale
+      //      seed values from prior L4W windows accumulating forever — they
+      //      previously stuck around because the seed upsert never deleted.
+      //   5. Upsert the new seed rows (historical, minus manualKeys).
+      //   6. Re-fetch DB → that's the state. No more historical+manual merge
+      //      step. DB is the single source of truth for what the UI shows.
+      //
+      // Why the old merge was buggy:
+      //   - State was historical + manual edits overlaid.
+      //   - DB was historical + manual + orphan rows from prior weeks.
+      //   - The UI showed state, but the DB had drift the UI couldn't see.
+      //   - When users manually edited and reloaded, the merge could pick a
+      //     different cell shape than what they expected because of the
+      //     historical-vs-DB shape mismatch.
+      //
+      // After this change: edit → write to DB → reload → re-fetch DB → see
+      // exactly what's in DB. End of story. (Manual edit revert bug
+      // diagnosed by Dean Dioguardi / Hill Hamrick on 5/22.)
       const hasCustom = customRows.length > 0
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
@@ -231,14 +256,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           Object.entries(existing).filter(([name]) => !KEN_STALE_KEYS.has(name))
         )
 
-        // Build a set of (project, hour) pairs that are manually edited in the DB.
-        // These rows MUST be preserved across reloads — the auto-seed below skips
-        // them so the L4W refresh never overwrites a user's manual edit.
-        // Without this guard, every page load wipes the manually_edited flag back
-        // to false (because upsertProjectHourlyDropsSeed writes manually_edited:false),
-        // and on the next reload the merge logic drops the edit entirely.
-        // This was the root cause of the "edit one customer, reload, value resets
-        // to L4W average" bug reported by Hill / Dean Dioguardi on 5/22.
+        // Identify cells the user has manually edited — these are preserved
+        // through orphan-cleanup AND skipped by the seed upsert.
         const manualKeys = new Set()
         for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
           for (const [h, v] of Object.entries(hourMap)) {
@@ -249,44 +268,47 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
           }
         }
 
-        // Build seed rows from historical — always overwrite EXCEPT for cells
-        // that have a manual edit in the DB. Stale 0s from prior seed runs are
-        // still cleaned up automatically.
+        // Build seed rows = today's historical, minus the cells the user has
+        // manually edited. These get upserted with manually_edited=false.
         const seedRows = []
+        const seedKeys = new Set()
         for (const [project_name, hourMap] of Object.entries(historical)) {
           if (!isRuleProject(facility.id, project_name) && !isKen && !hasCustom) continue
           for (const [h, est_drops] of Object.entries(hourMap)) {
-            if (manualKeys.has(`${project_name}|${h}`)) continue
+            const key = `${project_name}|${h}`
+            if (manualKeys.has(key)) continue
             seedRows.push({ project_name, h: Number(h), est_drops })
+            seedKeys.add(key)
           }
         }
 
-        if (seedRows.length > 0) {
-          await upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows)
-        }
+        // The set of (project, hour) pairs that should remain as non-manual
+        // rows after this run. Anything NOT in this set gets deleted by
+        // deleteOrphanSeedRows (manual rows are preserved regardless because
+        // the helper filters on manually_edited=false).
+        const validKeys = [...seedKeys, ...manualKeys]
 
-        // Build merged state in object shape { [project]: { [hour]: { est_drops, manually_edited } } }
-        // historical returns plain numbers — wrap them; filteredExisting already returns objects.
-        const merged = {}
-        for (const [proj, hourMap] of Object.entries(historical)) {
-          merged[proj] = {}
-          for (const [h, v] of Object.entries(hourMap)) {
-            merged[proj][h] = { est_drops: Number(v), manually_edited: false }
-          }
-        }
-        for (const [project_name, hourMap] of Object.entries(filteredExisting)) {
-          for (const [h, v] of Object.entries(hourMap)) {
-            const row = typeof v === 'object' ? v : { est_drops: Number(v ?? 0), manually_edited: false }
-            if (row.manually_edited) {
-              if (!merged[project_name]) merged[project_name] = {}
-              merged[project_name][h] = row
-            }
-          }
-        }
+        // Run cleanup + seed in parallel — they touch disjoint row sets
+        // (cleanup deletes non-manual rows outside validKeys; seed upserts
+        // non-manual rows in seedKeys ⊆ validKeys).
+        await Promise.all([
+          deleteOrphanSeedRows(facility.id, planDate, validKeys),
+          seedRows.length > 0 ? upsertProjectHourlyDropsSeed(facility.id, planDate, seedRows) : Promise.resolve(),
+        ])
+        if (cancelled) return
 
-        if (!cancelled) setProjectHourlyDrops(merged)
+        // Re-fetch DB — this is now the authoritative state. No client-side
+        // merge. Whatever is in the DB is what shows in the UI.
+        const finalState = await fetchProjectHourlyDrops(facility.id, planDate)
+        if (cancelled) return
+        const finalFiltered = Object.fromEntries(
+          Object.entries(finalState).filter(([name]) => !KEN_STALE_KEYS.has(name))
+        )
+        setProjectHourlyDrops(finalFiltered)
       } catch (e) {
         console.error('EST drops seed error:', e)
+        // On error, fall back to whatever's currently in DB so the user
+        // still sees a reasonable view rather than an empty table.
         try {
           const existing = await fetchProjectHourlyDrops(facility.id, planDate)
           if (!cancelled && Object.keys(existing).length > 0) setProjectHourlyDrops(existing)
