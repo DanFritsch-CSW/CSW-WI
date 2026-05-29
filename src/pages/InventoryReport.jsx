@@ -1,5 +1,11 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { fetchInventoryLocations, mergeEmptyLocations } from '../lib/omniInventory.js'
+import {
+  fetchInventoryDiscrepancies,
+  upsertInventoryDiscrepancy,
+  deleteInventoryDiscrepancy,
+  purgeExpiredInventoryDiscrepancies,
+} from '../lib/supabase.js'
 
 const FACILITY_LIST = [
   { id: 'cal', label: 'Caledonia',       whName: 'CSW-Franksville' },
@@ -100,6 +106,55 @@ function DiscrepancyLogModal({ discrepancies, allData, onClose }) {
   const flaggedIds = [...discrepancies.keys()]
   const items = flaggedIds.map(id => ({ loc: allData.find(l => l.id === id), note: discrepancies.get(id) })).filter(x => x.loc)
   const typeLabel = val => DISC_TYPES.find(t => t.value === val)?.label ?? val
+  const handlePrint = () => {
+    const typeLabel = val => DISC_TYPES.find(t => t.value === val)?.label ?? val
+    const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+    const rows = items.map(({ loc, note }) => {
+      const palletLines = loc.pallets.slice(0, 3).map(p =>
+        `<div style="padding-left:14px;font-family:monospace;font-size:11px;color:#666;margin-top:2px">↳ ${p.lp} · ${p.materialCode} · VL: ${p.vendorLot} · ${p.qty} units</div>`
+      ).join('')
+      const moreLine = loc.pallets.length > 3
+        ? `<div style="padding-left:14px;font-size:10px;color:#999">+ ${loc.pallets.length - 3} more…</div>`
+        : ''
+      const systemLine = loc.palletCount === 0
+        ? 'No inventory in system'
+        : `${loc.palletCount} pallet${loc.palletCount !== 1 ? 's' : ''} · ${loc.onHand.toLocaleString()} units`
+      return `
+        <div style="border:1px solid #e5e5e5;border-radius:6px;padding:12px 14px;margin-bottom:10px;page-break-inside:avoid">
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+            <span style="font-family:monospace;font-weight:700;font-size:13px">${loc.id}</span>
+            <span style="font-size:10px;font-weight:600;padding:1px 7px;border-radius:8px;background:#fee2e2;color:#dc2626">${typeLabel(note.discType)}</span>
+            ${note.initials ? `<span style="font-size:10px;color:#999;margin-left:auto">${note.initials} · ${new Date(note.flaggedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>` : ''}
+          </div>
+          <div style="font-size:11px;color:#555;margin-bottom:${note.notes || note.lpRef ? '8' : '0'}px">
+            <strong>System:</strong> ${systemLine}
+            ${palletLines}${moreLine}
+          </div>
+          ${note.lpRef ? `<div style="font-size:11px;color:#555;margin-bottom:4px"><strong>Physical LP:</strong> <span style="font-family:monospace">${note.lpRef}</span></div>` : ''}
+          ${note.notes ? `<div style="margin-top:6px;padding:6px 10px;background:#f9f9f9;border-radius:4px;font-size:12px;line-height:1.5">${note.notes}</div>` : ''}
+        </div>`
+    }).join('')
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Discrepancy Log</title>
+      <style>
+        body { font-family: -apple-system, sans-serif; padding: 24px; color: #111; }
+        h2 { margin: 0 0 4px; font-size: 18px; }
+        p  { margin: 0 0 16px; font-size: 12px; color: #666; }
+        @page { margin: 0.75in; }
+        @media print { body { padding: 0; } }
+      </style></head><body>
+      <h2>⚑ Discrepancy Log — Cycle Count</h2>
+      <p>${dateStr} · ${items.length} location${items.length !== 1 ? 's' : ''} flagged</p>
+      ${rows}
+    </body></html>`
+
+    const win = window.open('', '_blank', 'width=800,height=900')
+    if (!win) { alert('Please allow popups to print the discrepancy log.'); return }
+    win.document.write(html)
+    win.document.close()
+    win.focus()
+    setTimeout(() => { win.print(); win.close() }, 300)
+  }
   return (
     <Modal onClose={onClose} maxWidth={620}>
       <div style={{ marginBottom: 16 }}>
@@ -131,7 +186,7 @@ function DiscrepancyLogModal({ discrepancies, allData, onClose }) {
         </div>
       ))}
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-        <button onClick={() => window.print()} style={{ padding: '7px 14px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text-primary)', cursor: 'pointer' }}>Print / Save PDF</button>
+        <button onClick={handlePrint} style={{ padding: '7px 14px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text-primary)', cursor: 'pointer' }}>Print / Save PDF</button>
         <button onClick={onClose} style={{ padding: '7px 14px', borderRadius: 'var(--r-md)', fontSize: 12, fontWeight: 500, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text-secondary)', cursor: 'pointer' }}>Close</button>
       </div>
     </Modal>
@@ -180,12 +235,18 @@ export default function InventoryReport() {
   const [flagModal,     setFlagModal]     = useState(null)
   const [showLog,       setShowLog]       = useState(false)
 
+  const loadDiscrepancies = useCallback(async (facId) => {
+    const map = await fetchInventoryDiscrepancies(facId)
+    setDiscrepancies(map)
+  }, [])
+
   const doFetch = useCallback(async (facId, clearSearch = false) => {
     setLoading(true)
     setError(null)
-    setDiscrepancies(new Map())
     setExpanded(new Set())
     if (clearSearch) setSearch('')
+    loadDiscrepancies(facId)
+    purgeExpiredInventoryDiscrepancies()
     try {
       const occupied = await fetchInventoryLocations(facId)
       setData(occupied)
@@ -200,7 +261,7 @@ export default function InventoryReport() {
       setLoading(false)
       setLoadingEmpty(false)
     }
-  }, [])
+  }, [loadDiscrepancies])
 
   useEffect(() => { doFetch(facilityId) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -208,8 +269,16 @@ export default function InventoryReport() {
   const handleRefresh        = ()      => doFetch(facilityId, false)
 
   const openFlagForm = useCallback((loc, e) => { e.stopPropagation(); setFlagModal(loc) }, [])
-  const saveFlag     = useCallback((locId, note) => { setDiscrepancies(prev => { const n = new Map(prev); n.set(locId, note); return n }); setFlagModal(null) }, [])
-  const removeFlag   = useCallback((locId)       => { setDiscrepancies(prev => { const n = new Map(prev); n.delete(locId);  return n }); setFlagModal(null) }, [])
+  const saveFlag = useCallback((locId, note) => {
+    setDiscrepancies(prev => { const n = new Map(prev); n.set(locId, note); return n })
+    setFlagModal(null)
+    upsertInventoryDiscrepancy(facilityId, locId, note)
+  }, [facilityId])
+  const removeFlag = useCallback((locId) => {
+    setDiscrepancies(prev => { const n = new Map(prev); n.delete(locId); return n })
+    setFlagModal(null)
+    deleteInventoryDiscrepancy(facilityId, locId)
+  }, [facilityId])
   const toggleExpand = useCallback((id) => { setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n }) }, [])
 
   // ---------------------------------------------------------------------------

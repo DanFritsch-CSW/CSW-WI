@@ -768,3 +768,49 @@ export async function markRosterRowsAsSynced(facility, planDate, syncedEmployeeI
   const { error } = await query
   if (error) console.error('markRosterRowsAsSynced:', error)
 }
+
+// ─── Inventory Discrepancies ───────────────────────────────────────────────
+
+export async function fetchInventoryDiscrepancies(facilityId) {
+  if (!supabase) return new Map()
+  const now = new Date().toISOString()
+  const { data, error } = await supabase
+    .from('inventory_discrepancies')
+    .select('location_id, flag_data')
+    .eq('facility', facilityId)
+    .gt('expires_at', now)
+  if (error) { console.error('fetchInventoryDiscrepancies:', error); return new Map() }
+  return new Map((data ?? []).map(r => [r.location_id, r.flag_data]))
+}
+
+export async function upsertInventoryDiscrepancy(facilityId, locationId, flagData) {
+  if (!supabase) return
+  const now = new Date()
+  const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
+  const { error } = await supabase
+    .from('inventory_discrepancies')
+    .upsert(
+      { facility: facilityId, location_id: locationId, flag_data: flagData, flagged_at: now.toISOString(), expires_at: expires },
+      { onConflict: 'facility,location_id' }
+    )
+  if (error) console.error('upsertInventoryDiscrepancy:', error)
+}
+
+export async function deleteInventoryDiscrepancy(facilityId, locationId) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('inventory_discrepancies')
+    .delete()
+    .eq('facility', facilityId)
+    .eq('location_id', locationId)
+  if (error) console.error('deleteInventoryDiscrepancy:', error)
+}
+
+export async function purgeExpiredInventoryDiscrepancies() {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('inventory_discrepancies')
+    .delete()
+    .lt('expires_at', new Date().toISOString())
+  if (error) console.error('purgeExpiredInventoryDiscrepancies:', error)
+}
