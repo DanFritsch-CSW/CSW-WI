@@ -16,11 +16,20 @@ export async function fetchTodayAssignments(facility, planDate) {
   return data ?? []
 }
 
-export async function upsertAssignment(assignment) {
+// upsertAssignment — by default stamps manually_edited=true with a timestamp
+// so the row is protected from B2E auto-sync / seedRosterAssignments overwrites.
+// Pass { automatic: true } when the write is NOT a human action (e.g. auto-PTO
+// override in RosterBoard.load()) so the protection flag is NOT set.
+export async function upsertAssignment(assignment, opts = {}) {
   if (!supabase) return
+  const row = { ...assignment }
+  if (opts.automatic !== true) {
+    row.manually_edited = true
+    row.manually_edited_at = new Date().toISOString()
+  }
   const { error } = await supabase
     .from('roster_assignments')
-    .upsert(assignment, { onConflict: 'facility,employee_id,plan_date' })
+    .upsert(row, { onConflict: 'facility,employee_id,plan_date' })
   if (error) console.error('upsertAssignment:', error)
 }
 
@@ -87,9 +96,29 @@ export async function upsertEmployees(employees) {
   return null
 }
 
+// seedRosterAssignments — writes B2E roster data to Supabase as the baseline.
+// CRITICAL: rows already marked manually_edited=true are NEVER touched. This
+// protects user-made lane moves / PTO / call-in assignments / shift edits
+// from being overwritten when a B2E sync (manual or auto-resync) runs.
 export async function seedRosterAssignments(employees, planDate) {
   if (!supabase || !employees.length) return null
-  const rows = employees.map(e => ({
+  const facility = employees[0]?.facility
+  // Fetch existing manual rows so we can exclude them from the seed write.
+  let manualIds = new Set()
+  if (facility) {
+    const { data: manualRows, error: mErr } = await supabase
+      .from('roster_assignments')
+      .select('employee_id')
+      .eq('facility', facility)
+      .eq('plan_date', planDate)
+      .eq('manually_edited', true)
+    if (mErr) { console.error('seedRosterAssignments fetch manual:', mErr); return mErr.message }
+    manualIds = new Set((manualRows ?? []).map(r => String(r.employee_id)))
+  }
+  const filtered = employees.filter(e => !manualIds.has(String(e.id)))
+  if (!filtered.length) return null
+  const nowIso = new Date().toISOString()
+  const rows = filtered.map(e => ({
     facility:          e.facility,
     employee_id:       e.id,
     employee_name:     e.name,
@@ -101,7 +130,9 @@ export async function seedRosterAssignments(employees, planDate) {
     is_temp:           false,
     from_facility:     null,
     on_loan_to:        null,
-    last_b2e_sync_at:  new Date().toISOString(),
+    last_b2e_sync_at:  nowIso,
+    manually_edited:   false,
+    manually_edited_at: null,
   }))
   const { error } = await supabase
     .from('roster_assignments')
@@ -110,6 +141,10 @@ export async function seedRosterAssignments(employees, planDate) {
   return null
 }
 
+// purgeStaleAssignments — removes future rows for employees at facilities
+// they no longer belong to (e.g. after a B2E transfer). The .eq('manually_edited',
+// false) guard protects manual cross-facility placements (loans, manual moves)
+// from being purged.
 export async function purgeStaleAssignments(employeeIds, correctFacility, fromDate) {
   if (!supabase || !employeeIds.length) return null
   const { error } = await supabase
@@ -118,6 +153,7 @@ export async function purgeStaleAssignments(employeeIds, correctFacility, fromDa
     .in('employee_id', employeeIds)
     .neq('facility', correctFacility)
     .is('from_facility', null)
+    .eq('manually_edited', false)
     .gte('plan_date', fromDate)
   if (error) { console.error('purgeStaleAssignments:', error); return error.message }
   return null
@@ -148,9 +184,10 @@ export async function resetAssignmentsForDate(facility, planDate) {
 
 export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourceFacility, destFacility, destLane, planDate, shiftStart, shiftHours }) {
   if (!supabase) return 'Supabase not configured'
+  const nowIso = new Date().toISOString()
   const { error: srcErr } = await supabase
     .from('roster_assignments')
-    .update({ on_loan_to: destFacility })
+    .update({ on_loan_to: destFacility, manually_edited: true, manually_edited_at: nowIso })
     .eq('facility', sourceFacility)
     .eq('employee_id', employeeId)
     .eq('plan_date', planDate)
@@ -169,6 +206,8 @@ export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourc
       is_temp:       false,
       from_facility: sourceFacility,
       on_loan_to:    null,
+      manually_edited: true,
+      manually_edited_at: nowIso,
     }, { onConflict: 'facility,employee_id,plan_date' })
   if (dstErr) { console.error('sendEmployeeOnLoan dst:', dstErr); return dstErr.message }
   return null
@@ -176,9 +215,10 @@ export async function sendEmployeeOnLoan({ employeeId, employeeName, role, sourc
 
 export async function recallLoan({ employeeId, sourceFacility, destFacility, planDate }) {
   if (!supabase) return 'Supabase not configured'
+  const nowIso = new Date().toISOString()
   const { error: srcErr } = await supabase
     .from('roster_assignments')
-    .update({ on_loan_to: null })
+    .update({ on_loan_to: null, manually_edited: true, manually_edited_at: nowIso })
     .eq('facility', sourceFacility)
     .eq('employee_id', employeeId)
     .eq('plan_date', planDate)

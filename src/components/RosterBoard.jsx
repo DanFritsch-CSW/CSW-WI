@@ -17,7 +17,7 @@ import AddTempModal from './AddTempModal.jsx'
 import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, FACILITIES, FACILITY_LIST } from '../lib/constants.js'
 import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
-  seedRosterAssignments, deleteAssignment, resetAssignmentsForDate,
+  seedRosterAssignments, deleteAssignment,
   sendEmployeeOnLoan, recallLoan, purgeStaleAssignments,
   checkRosterStaleness, markRosterRowsAsSynced,
 } from '../lib/supabase.js'
@@ -345,7 +345,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [isLoading, setIsLoading]         = useState(true)
   const [activeId, setActiveId]           = useState(null)
   const [syncState, setSyncState]         = useState(null)
-  const [resetState, setResetState]       = useState(null)
   const [showAddTemp, setShowAddTemp]     = useState(false)
   const [pendingWrites, setPendingWrites] = useState(0)
   const [sortOrder, setSortOrder]         = useState('default')
@@ -404,7 +403,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         }
         if (toUpdate.length > 0) {
           for (const row of toUpdate) {
-            upsertAssignment(row).catch(e => console.warn('time-off upsert:', e))
+            // automatic:true — auto-PTO is NOT a manual edit; don't set the
+            // manually_edited protection flag so future B2E syncs can still
+            // correct this employee's lane if they return from PTO.
+            upsertAssignment(row, { automatic: true }).catch(e => console.warn('time-off upsert:', e))
           }
           const overrideMap = new Map(toUpdate.map(r => [r.employee_id, r]))
           const merged = assignments.map(a => overrideMap.get(a.employee_id) ?? a)
@@ -535,6 +537,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
       if (err) { if (!silent) setSyncState(err); return }
+      // seedRosterAssignments now skips rows where manually_edited=true,
+      // so manual moves / PTO / temp assignments survive every sync.
       const seedErr = await seedRosterAssignments(withTimeOff, date)
       if (seedErr) { if (!silent) setSyncState(seedErr); return }
       const empIds = withTimeOff.map(e => e.id)
@@ -555,6 +559,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   // ── Auto-resync: fires once per (facility, date) pair per session ──────────
   // Checks last_b2e_sync_at staleness; if stale, shows toast and silently syncs.
+  // Manually edited rows are protected at the seedRosterAssignments layer.
   const maybeAutoResync = useCallback(async (facId, date) => {
     const key = `${facId}:${date}`
     if (autoSyncCheckedRef.current.has(key)) return
@@ -568,35 +573,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       console.warn('maybeAutoResync failed (non-fatal):', e.message)
     }
   }, [showSyncToast, performB2eSync])
-
-  const handleReset = useCallback(async () => {
-    if (!window.confirm('Reset all manual changes for this day and reload from B2E? Temp employees will be preserved.')) return
-    setResetState('loading')
-    try {
-      const date = planDate || todayISO()
-      const err = await resetAssignmentsForDate(facility, date)
-      if (err) { setResetState(`Delete failed: ${err}`); return }
-      const [b2eRosterFull, timeOffMap] = await Promise.all([
-        fetchB2eRoster(facility, date),
-        fetchB2eTimeOff(facility, date),
-      ])
-      const persistable = withoutCarryovers(b2eRosterFull)
-      if (!persistable.length) { setResetState('No B2E data found'); return }
-      const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
-      const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
-      const replErr = await replaceEmployees(facility, empRows)
-      if (replErr) { setResetState(`Employee sync failed: ${replErr}`); return }
-      const seedErr = await seedRosterAssignments(withTimeOff, date)
-      if (seedErr) { setResetState(`Seed failed: ${seedErr}`); return }
-      const empIds = withTimeOff.map(e => e.id)
-      await purgeStaleAssignments(empIds, facility, date)
-      await load(facility, date)
-      setResetState('ok')
-      setTimeout(() => setResetState(null), 3000)
-    } catch (e) {
-      setResetState(e.message)
-    }
-  }, [facility, planDate])
 
   const handleAddTemp = useCallback((tempEmp) => {
     setEmployees(prev => [...prev, tempEmp])
@@ -874,19 +850,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           {pendingWrites > 0 && <span className="roster-saving">Saving…</span>}
           <button className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`} onClick={nextSort} title="Cycle sort">{currentSort.label}</button>
           <button className="b2e-sync-btn" onClick={() => setShowAddTemp(true)}>+ Add Temp</button>
-          <button className="b2e-sync-btn" onClick={handleB2eSync} disabled={syncState === 'loading'}>
+          <button className="b2e-sync-btn" onClick={handleB2eSync} disabled={syncState === 'loading'} title="Pull latest shift schedules from B2E. Manual lane/shift changes you've made are preserved.">
             {syncState === 'loading' ? 'Syncing…' : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
           </button>
           {syncState && syncState !== 'loading' && syncState !== 'ok' && <span className="b2e-sync-err">{syncState}</span>}
-          <button
-            className="b2e-sync-btn b2e-reset-btn"
-            onClick={handleReset}
-            disabled={resetState === 'loading'}
-            title="Discard all manual lane/shift changes for today and reload fresh from B2E. Temp employees are preserved."
-          >
-            {resetState === 'loading' ? 'Resetting…' : resetState === 'ok' ? 'Reset ✓' : 'Reset to B2E'}
-          </button>
-          {resetState && resetState !== 'loading' && resetState !== 'ok' && <span className="b2e-sync-err">{resetState}</span>}
         </div>
       </div>
 
