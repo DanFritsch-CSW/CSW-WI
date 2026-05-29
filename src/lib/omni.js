@@ -84,6 +84,119 @@ function apptStatusFilter() {
 
 const OVERNIGHT_HOURS = new Set([0, 1, 2, 3, 4])
 
+// ── US observed holidays — sampled L4W dates that fall on these days are
+// SKIPPED and replaced by walking further back, so e.g. Memorial Day Monday
+// doesn't drag down a typical Monday's drop average to zero.
+//
+// Federal holidays observed by most freight customers / 3PL operations:
+//   New Year's Day        — Jan 1   (observed on adjacent weekday if weekend)
+//   MLK Day               — 3rd Monday of January
+//   Presidents Day        — 3rd Monday of February
+//   Memorial Day          — last Monday of May
+//   Juneteenth            — Jun 19
+//   Independence Day      — Jul 4
+//   Labor Day             — 1st Monday of September
+//   Thanksgiving          — 4th Thursday of November
+//   Day after Thanksgiving — Friday following Thanksgiving (most facilities closed)
+//   Christmas             — Dec 25
+//   New Year's Eve        — Dec 31 (many customers run reduced schedules)
+//
+// This is intentionally conservative — we'd rather walk back one extra week
+// than count a half-empty holiday day toward the L4W average.
+function getObservedHolidayDates(year) {
+  const dates = new Set()
+
+  // Fixed-date holidays (observed on weekday-adjusted dates when they fall on a weekend)
+  const fixedDates = [
+    { month: 1,  day: 1  }, // New Year's Day
+    { month: 6,  day: 19 }, // Juneteenth
+    { month: 7,  day: 4  }, // Independence Day
+    { month: 12, day: 24 }, // Christmas Eve (often half-day)
+    { month: 12, day: 25 }, // Christmas
+    { month: 12, day: 31 }, // NYE
+  ]
+  for (const { month, day } of fixedDates) {
+    const d = new Date(Date.UTC(year, month - 1, day))
+    dates.add(d.toISOString().slice(0, 10))
+    // Also add the observed-on date if it falls on a weekend
+    const dow = d.getUTCDay()
+    if (dow === 0) { // Sunday → observed Monday
+      const obs = new Date(d); obs.setUTCDate(d.getUTCDate() + 1)
+      dates.add(obs.toISOString().slice(0, 10))
+    } else if (dow === 6) { // Saturday → observed Friday
+      const obs = new Date(d); obs.setUTCDate(d.getUTCDate() - 1)
+      dates.add(obs.toISOString().slice(0, 10))
+    }
+  }
+
+  // Nth-weekday-of-month holidays
+  // Helper: get the date of the Nth occurrence of weekday (0=Sun..6=Sat) in given month
+  function nthWeekdayOfMonth(year, month, weekday, n) {
+    const first = new Date(Date.UTC(year, month - 1, 1))
+    const offset = (weekday - first.getUTCDay() + 7) % 7
+    const day = 1 + offset + (n - 1) * 7
+    return new Date(Date.UTC(year, month - 1, day))
+  }
+  // Helper: get the LAST occurrence of weekday in given month
+  function lastWeekdayOfMonth(year, month, weekday) {
+    const last = new Date(Date.UTC(year, month, 0)) // last day of month
+    const offset = (last.getUTCDay() - weekday + 7) % 7
+    return new Date(Date.UTC(year, month - 1, last.getUTCDate() - offset))
+  }
+
+  dates.add(nthWeekdayOfMonth(year, 1,  1, 3).toISOString().slice(0, 10)) // MLK: 3rd Mon Jan
+  dates.add(nthWeekdayOfMonth(year, 2,  1, 3).toISOString().slice(0, 10)) // Presidents: 3rd Mon Feb
+  dates.add(lastWeekdayOfMonth(year, 5, 1).toISOString().slice(0, 10))    // Memorial: last Mon May
+  dates.add(nthWeekdayOfMonth(year, 9,  1, 1).toISOString().slice(0, 10)) // Labor: 1st Mon Sep
+  const thx = nthWeekdayOfMonth(year, 11, 4, 4)                            // Thanksgiving: 4th Thu Nov
+  dates.add(thx.toISOString().slice(0, 10))
+  const dayAfterThx = new Date(thx); dayAfterThx.setUTCDate(thx.getUTCDate() + 1)
+  dates.add(dayAfterThx.toISOString().slice(0, 10))                        // Day after Thanksgiving
+
+  return dates
+}
+
+// Cache holidays per year so we don't recompute on every L4W lookup.
+const HOLIDAY_CACHE = new Map()
+function isObservedHoliday(isoDate) {
+  const year = parseInt(isoDate.slice(0, 4), 10)
+  if (!HOLIDAY_CACHE.has(year)) HOLIDAY_CACHE.set(year, getObservedHolidayDates(year))
+  return HOLIDAY_CACHE.get(year).has(isoDate)
+}
+
+/**
+ * Build a list of N valid same-weekday past dates for L4W sampling.
+ *
+ * Walks back week-by-week from targetDate, skipping any date that is:
+ *   - Strictly in the future (relative to "now") — Datex/Omni won't have
+ *     real appointment data for those days yet; counting them drags the
+ *     average to zero.
+ *   - A US observed holiday (Memorial Day, July 4, Thanksgiving, etc.) —
+ *     reduced/skeleton operations distort the typical-weekday average.
+ *
+ * If we can't find `count` valid dates within `maxLookback` weeks, returns
+ * whatever we found (caller should still average over `count` so a partial
+ * sample window scales down naturally).
+ */
+function buildValidPastDates(targetDate, count = 4, maxLookback = 12) {
+  const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
+  const base = new Date(targetDate + 'T00:00:00Z')
+  const todayIso = new Date().toISOString().slice(0, 10)
+  const valid = []
+  const skipped = []
+  for (let i = 1; i <= maxLookback && valid.length < count; i++) {
+    const d = new Date(base.getTime() - i * MS_PER_WEEK)
+    const iso = d.toISOString().slice(0, 10)
+    if (iso >= todayIso) { skipped.push(`${iso} (future)`); continue }
+    if (isObservedHoliday(iso)) { skipped.push(`${iso} (holiday)`); continue }
+    valid.push(iso)
+  }
+  if (skipped.length) {
+    console.debug(`L4W sampling for ${targetDate}: using ${valid.join(', ')} | skipped ${skipped.join(', ')}`)
+  }
+  return valid
+}
+
 function nextDayISO(date) {
   const d = new Date(date + 'T00:00:00Z')
   d.setUTCDate(d.getUTCDate() + 1)
@@ -725,17 +838,13 @@ async function batchedRun(tasks, concurrency = 2) {
 }
 
 export async function fetchHistoricalHourlyDrops(facilityId, targetDate, weeksBack = 4) {
-  const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
-  const base = new Date(targetDate + 'T00:00:00Z')
-  const pastDates = Array.from({ length: weeksBack }, (_, i) => {
-    const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
-    return d.toISOString().slice(0, 10)
-  })
+  const pastDates = buildValidPastDates(targetDate, weeksBack)
   const results = await Promise.all(pastDates.map(d => fetchHourlyData(facilityId, d).catch(() => [])))
   const sums = {}
   for (const rows of results)
     for (const row of rows) { sums[row.h] = (sums[row.h] ?? 0) + row.drops }
-  return Object.entries(sums).map(([h, total]) => ({ h: Number(h), est: Math.round(total / weeksBack) }))
+  const divisor = pastDates.length || weeksBack
+  return Object.entries(sums).map(([h, total]) => ({ h: Number(h), est: Math.round(total / divisor) }))
 }
 
 async function fetchProjectDropsByRule(facilityId, date, projectName, rule) {
@@ -812,12 +921,10 @@ async function fetchProjectHourlyDropsByRule(facilityId, date, projectName, rule
 }
 
 export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack = 4) {
-  const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
-  const base = new Date(targetDate + 'T00:00:00Z')
-  const pastDates = Array.from({ length: weeksBack }, (_, i) => {
-    const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
-    return d.toISOString().slice(0, 10)
-  })
+  const pastDates = buildValidPastDates(targetDate, weeksBack)
+  // If we couldn't find any valid past dates, return empty (caller fallback handles it).
+  if (!pastDates.length) return {}
+  const effectiveWeeks = pastDates.length
 
   const results = []
   for (const d of pastDates)
@@ -849,8 +956,9 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
       Object.values(hourMap).reduce((s, v) => s + v, 0)
     )
 
-    // Step 2 — L4W daily average, rounded to integer
-    const dailyForecast = Math.round(dailyTotals.reduce((s, v) => s + v, 0) / weeksBack)
+    // Step 2 — L4W daily average over the dates that actually counted
+    // (excludes future + holiday dates). Rounded to integer.
+    const dailyForecast = Math.round(dailyTotals.reduce((s, v) => s + v, 0) / effectiveWeeks)
 
     if (dailyForecast === 0) return [projectName, {}]
 
@@ -892,27 +1000,31 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
  * Cached wrapper around fetchHistoricalProjectHourlyDrops.
  *
  * Reads from est_drops_historical_cache first. If the cache is fresh
- * (default: < 24h since computed_at), returns the cached result without
+ * (default: < 7 days since computed_at), returns the cached result without
  * hitting Omni — saves ~28 Omni queries on KEN facility loads.
  *
  * On cache miss / stale cache / forceRefresh: re-queries Omni via the
  * uncached function, then writes the result back to the cache.
  *
- * The 24h TTL avoids the future-date drift problem that killed our first
- * caching attempt: the rolling 4-week window shifts every 7 days, so any
- * cache value computed >24h ago for a future date will be re-queried before
- * it has a chance to silently go stale.
+ * 7-day TTL rationale (per Dean Dioguardi, 2026-05-29): L4W is by definition
+ * a slow-moving signal — daily/weekly fluctuations are noise relative to the
+ * underlying weekly pattern. Refreshing more often than once a week trades
+ * 28 Omni queries × every facility load for negligible signal improvement.
+ * The per-project ↺ refresh button (which calls this with forceRefresh:true)
+ * is the escape hatch when something genuinely needs to be recomputed.
  *
  * Options:
  *   - forceRefresh: bypass cache read, always query Omni (used by the
  *     per-project ↺ refresh button, which already invalidates the cache
  *     before calling, but this is a belt-and-suspenders guarantee).
- *   - maxAgeMs: override the 24h TTL.
+ *   - maxAgeMs: override the 7-day TTL.
  */
+const L4W_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
 export async function fetchHistoricalProjectHourlyDropsCached(
   facilityId,
   targetDate,
-  { forceRefresh = false, maxAgeMs, weeksBack = 4 } = {}
+  { forceRefresh = false, maxAgeMs = L4W_CACHE_TTL_MS, weeksBack = 4 } = {}
 ) {
   if (!forceRefresh) {
     const cached = await fetchHistoricalDropsCache(facilityId, targetDate, maxAgeMs)
@@ -940,12 +1052,9 @@ export async function fetchHistoricalProjectHourlyDropsCached(
 }
 
 export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksBack = 4) {
-  const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
-  const base = new Date(targetDate + 'T00:00:00Z')
-  const pastDates = Array.from({ length: weeksBack }, (_, i) => {
-    const d = new Date(base.getTime() - (i + 1) * MS_PER_WEEK)
-    return d.toISOString().slice(0, 10)
-  })
+  const pastDates = buildValidPastDates(targetDate, weeksBack)
+  if (!pastDates.length) return []
+  const effectiveWeeks = pastDates.length
   const results = await Promise.all(pastDates.map(d => fetchProjectData(facilityId, d).catch(() => [])))
   const sums = {}
   const ruleProjects = [...new Set(results.flat().map(r => r.name).filter(n => isRuleProject(facilityId, n)))]
@@ -957,7 +1066,7 @@ export async function fetchHistoricalProjectDrops(facilityId, targetDate, weeksB
   })
   const counts = await batchedRun(tasks, 2)
   for (const [name, total] of counts) sums[name] = total
-  return Object.entries(sums).map(([project_name, total]) => ({ project_name, est_drops: Math.round(total / weeksBack) }))
+  return Object.entries(sums).map(([project_name, total]) => ({ project_name, est_drops: Math.round(total / effectiveWeeks) }))
 }
 
 export async function fetchActiveInventory(facilityId) {
