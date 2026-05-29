@@ -286,12 +286,6 @@ export async function upsertProjectDrops(facilityId, planDate, rows) {
 
 const BREAK_MULS = [0.83, 1.00, 0.75, 1.00, 0.50, 1.00, 0.75, 1.00]
 
-/**
- * Break-adjusted hours for a single employee's shift.
- * Handles fractional shift lengths (e.g. 8.5h) by running floor(h) full
- * iterations then adding one partial iteration scaled by the remainder.
- * BREAK_MULS[i] defaults to 1.0 beyond index 7.
- */
 function breakAdjustedHours(rawHours) {
   const h         = rawHours != null ? Number(rawHours) : 8
   const fullHours = Math.floor(h)
@@ -380,7 +374,6 @@ export async function fetchAllFacilitiesEstDrops(planDate) {
   return result
 }
 
-// Overwrites existing rows — used by manual edits and Copy to dates
 export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (!supabase) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
@@ -397,10 +390,6 @@ export async function upsertProjectHourlyDrops(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectHourlyDrops:', error)
 }
 
-// Auto-seed: always overwrites with fresh L4W data so stale 0s from old seed
-// runs (different rules, cancelled-filter era, etc.) are replaced on every load.
-// Manual edits use upsertProjectHourlyDrops directly and will be overwritten on
-// next page load — acceptable tradeoff vs. the alternative of permanently stuck 0s.
 export async function upsertProjectHourlyDropsSeed(facilityId, planDate, rows) {
   if (!supabase || !rows.length) return
   const records = rows.map(({ project_name, h, est_drops }) => ({
@@ -417,8 +406,6 @@ export async function upsertProjectHourlyDropsSeed(facilityId, planDate, rows) {
   if (error) console.error('upsertProjectHourlyDropsSeed:', error)
 }
 
-// Deletes all EST drop rows for a single project on a given date.
-// Used by the per-project Refresh L4W button — clears stale data before re-seeding.
 export async function deleteProjectHourlyDropsForProject(facilityId, planDate, projectName) {
   if (!supabase) return
   const { error } = await supabase
@@ -430,26 +417,6 @@ export async function deleteProjectHourlyDropsForProject(facilityId, planDate, p
   if (error) console.error('deleteProjectHourlyDropsForProject:', error)
 }
 
-/**
- * Removes seed-origin (manually_edited=false) rows for (facility, plan_date)
- * whose (project_name, hour) is NOT in this run's `validKeys`. This is the
- * orphan-cleanup pass that runs alongside every Phase 3 seed write.
- *
- * Without this, stale seed rows from prior weeks accumulate forever because
- * the seed only upserts, never deletes — so the DB grows divergent from the
- * actual L4W aggregate as the rolling window shifts. After the DB-is-truth
- * refactor (Phase 3 reads state directly from DB instead of from a merged
- * historical+manual view), those orphans would otherwise appear in the UI.
- *
- * validKeys: array of "{project_name}|{hour}" strings — every (project, hour)
- * the seed run is keeping. Manual edits (manually_edited=true) are never
- * touched regardless of whether they're in validKeys.
- *
- * Implementation: PostgREST has no native "delete WHERE (a,b) NOT IN (...)"
- * across a composite key, so we fetch the universe of non-manual rows, diff
- * client-side, and bulk-delete by project (one .in('hour', […]) per project
- * to keep the URL bounded).
- */
 export async function deleteOrphanSeedRows(facilityId, planDate, validKeys) {
   if (!supabase) return
   const validSet = new Set(validKeys)
@@ -524,31 +491,7 @@ export async function deleteCustomDropProject(id) {
 }
 
 // ─── Historical EST Drops Cache ────────────────────────────────────────────
-//
-// Caches the result of fetchHistoricalProjectHourlyDrops keyed by (facility,
-// plan_date, project, hour). Application-level TTL (default 24h) — if the
-// cache is fresher than TTL, use it; otherwise the caller re-queries Omni
-// and writes the result back via writeHistoricalDropsCache.
-//
-// Why this exists: the L4W historical pull fires ~28 Omni queries on KEN
-// (7 projects × 4 weeks). Caching it eliminates that load on every facility
-// open during the same day.
-//
-// Why TTL (not infinite cache): the rolling 4-week window shifts every 7
-// days. A cache entry computed weeks ago for a future date would no longer
-// reflect the actual rolling window. TTL of 24h ensures every project's
-// historical aggregate refreshes daily — small Omni cost, big freshness
-// guarantee, no future-date drift.
 
-/**
- * Returns the cached historical drops as { [project]: { [hour]: number } },
- * or null if no fresh cache entry exists for (facility, planDate).
- *
- * "Fresh" = max(computed_at) for that (facility, planDate) is within
- * maxAgeMs (default 24h).
- *
- * Returns null on any error or stale cache so callers fall through to Omni.
- */
 export async function fetchHistoricalDropsCache(facilityId, planDate, maxAgeMs = 24 * 60 * 60 * 1000) {
   if (!supabase) return null
   const { data, error } = await supabase
@@ -558,17 +501,12 @@ export async function fetchHistoricalDropsCache(facilityId, planDate, maxAgeMs =
     .eq('plan_date', planDate)
   if (error) { console.error('fetchHistoricalDropsCache:', error); return null }
   if (!data || data.length === 0) return null
-
-  // Freshness check: use the most recent computed_at across all rows for this
-  // (facility, planDate). A single timestamp gates the entire cache for that
-  // key — all rows are written in the same transaction so they share an age.
   let newest = 0
   for (const r of data) {
     const ts = new Date(r.computed_at).getTime()
     if (ts > newest) newest = ts
   }
   if (Date.now() - newest > maxAgeMs) return null
-
   const result = {}
   for (const r of data) {
     if (!result[r.project_name]) result[r.project_name] = {}
@@ -577,62 +515,28 @@ export async function fetchHistoricalDropsCache(facilityId, planDate, maxAgeMs =
   return result
 }
 
-/**
- * Writes a fresh historical drops aggregate to the cache.
- *
- * historicalDrops: { [project]: { [hour]: number } } — exactly the shape
- * returned by fetchHistoricalProjectHourlyDrops.
- *
- * Strategy: delete-then-insert for this (facility, planDate). This guarantees
- * we don't accumulate stale project rows for projects that have since dropped
- * out of the L4W window (e.g. a customer that hasn't received an appointment
- * in 4 weeks should not still appear in the cache).
- */
 export async function writeHistoricalDropsCache(facilityId, planDate, historicalDrops) {
   if (!supabase) return
-
-  // Delete-then-insert pattern (so projects that disappeared from L4W don't
-  // linger in the cache). Done in two statements; brief race window is
-  // acceptable for a labor planning tool.
   const { error: delErr } = await supabase
     .from('est_drops_historical_cache')
     .delete()
     .eq('facility', facilityId)
     .eq('plan_date', planDate)
-  if (delErr) {
-    console.error('writeHistoricalDropsCache delete:', delErr)
-    return
-  }
-
+  if (delErr) { console.error('writeHistoricalDropsCache delete:', delErr); return }
   const rows = []
   const computedAt = new Date().toISOString()
   for (const [project_name, hourMap] of Object.entries(historicalDrops || {})) {
     for (const [h, est_drops] of Object.entries(hourMap)) {
-      rows.push({
-        facility:     facilityId,
-        plan_date:    planDate,
-        project_name,
-        hour:         Number(h),
-        est_drops:    Number(est_drops) || 0,
-        computed_at:  computedAt,
-      })
+      rows.push({ facility: facilityId, plan_date: planDate, project_name, hour: Number(h), est_drops: Number(est_drops) || 0, computed_at: computedAt })
     }
   }
   if (!rows.length) return
-
   const { error: insErr } = await supabase
     .from('est_drops_historical_cache')
     .insert(rows)
   if (insErr) console.error('writeHistoricalDropsCache insert:', insErr)
 }
 
-/**
- * Invalidates the cache for a single project under (facility, planDate).
- * Used by the per-project ↺ refresh button — after the user clicks refresh,
- * we want the next read to bypass the cache for that project specifically.
- * The simplest correct behavior is to invalidate the whole (facility,
- * planDate) entry so the next page load reseeds everything from Omni.
- */
 export async function invalidateHistoricalDropsCache(facilityId, planDate) {
   if (!supabase) return
   const { error } = await supabase
@@ -700,7 +604,6 @@ export async function fetchPickerAssignments() {
 }
 
 export async function upsertPickerAssignment(employeeId, employeeName, zone) {
-  // zone = 1-12 or null (unassigned)
   if (!supabase) return null
   const { data, error } = await supabase
     .from('wr_picker_assignments')
@@ -724,17 +627,7 @@ export async function deletePickerAssignment(employeeId) {
 }
 
 // ─── Roster staleness / auto-sync helpers ─────────────────────────────────
-//
-// Used by RosterBoard to decide whether to silently re-sync from B2E on load.
-// The `last_b2e_sync_at` column is stamped by seedRosterAssignments on every
-// B2E pull; checkRosterStaleness reads the most recent stamp for a (facility,
-// plan_date) and compares against `staleHours` (default 24h).
 
-/**
- * Returns true if the roster for (facility, planDate) has not been synced
- * from B2E within the last `staleHours` hours, or if no sync timestamp
- * exists at all (treat missing as stale).
- */
 export async function checkRosterStaleness(facility, planDate, staleHours = 24) {
   if (!supabase) return false
   const { data, error } = await supabase
@@ -750,10 +643,6 @@ export async function checkRosterStaleness(facility, planDate, staleHours = 24) 
   return Date.now() - syncedAt > staleHours * 60 * 60 * 1000
 }
 
-/**
- * Stamps `last_b2e_sync_at` on all non-temp rows for (facility, planDate).
- * Optionally scoped to a specific set of employee IDs via `syncedEmployeeIds`.
- */
 export async function markRosterRowsAsSynced(facility, planDate, syncedEmployeeIds = null) {
   if (!supabase) return
   let query = supabase
@@ -767,4 +656,54 @@ export async function markRosterRowsAsSynced(facility, planDate, syncedEmployeeI
   }
   const { error } = await query
   if (error) console.error('markRosterRowsAsSynced:', error)
+}
+
+// ─── Inventory Discrepancies ───────────────────────────────────────────────
+//
+// Persists flagged location discrepancies from the Inventory tab to Supabase
+// so they survive page refreshes and accumulate across a full count session.
+// Each row is keyed on (facility, location_id) with a 24h expiry.
+
+export async function fetchInventoryDiscrepancies(facilityId) {
+  if (!supabase) return new Map()
+  const now = new Date().toISOString()
+  const { data, error } = await supabase
+    .from('inventory_discrepancies')
+    .select('location_id, flag_data')
+    .eq('facility', facilityId)
+    .gt('expires_at', now)
+  if (error) { console.error('fetchInventoryDiscrepancies:', error); return new Map() }
+  return new Map((data ?? []).map(r => [r.location_id, r.flag_data]))
+}
+
+export async function upsertInventoryDiscrepancy(facilityId, locationId, flagData) {
+  if (!supabase) return
+  const now = new Date()
+  const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
+  const { error } = await supabase
+    .from('inventory_discrepancies')
+    .upsert(
+      { facility: facilityId, location_id: locationId, flag_data: flagData, flagged_at: now.toISOString(), expires_at: expires },
+      { onConflict: 'facility,location_id' }
+    )
+  if (error) console.error('upsertInventoryDiscrepancy:', error)
+}
+
+export async function deleteInventoryDiscrepancy(facilityId, locationId) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('inventory_discrepancies')
+    .delete()
+    .eq('facility', facilityId)
+    .eq('location_id', locationId)
+  if (error) console.error('deleteInventoryDiscrepancy:', error)
+}
+
+export async function purgeExpiredInventoryDiscrepancies() {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('inventory_discrepancies')
+    .delete()
+    .lt('expires_at', new Date().toISOString())
+  if (error) console.error('purgeExpiredInventoryDiscrepancies:', error)
 }
