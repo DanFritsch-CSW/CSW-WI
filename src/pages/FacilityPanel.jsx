@@ -201,7 +201,19 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) }).catch(() => {})
 
       if (!cancelled && omniFailures.length > 0) {
-        setOmniWarning(`Omni couldn't load: ${omniFailures.join(', ')}. Showing empty data — click Retry to try again.`)
+        // Only show the banner when there's truly nothing usable on screen.
+        // If hourly OR appts OR projects came back, Kay/Dean can still work
+        // with what we have; the missing piece just shows as empty/zero. A
+        // loud red banner for partial failures is more disruptive than the
+        // partial data is helpful — and Phase 3 (EST drops) has its own
+        // DB cache fallback, so even a total Phase 1+2 wipe usually leaves
+        // historical drop values on the screen.
+        const hasHourly  = hourlyResult.status === 'fulfilled' && hourlyResult.value.length > 0
+        const hasAppts   = apptsResult.status === 'fulfilled' && Object.keys(apptsResult.value || {}).length > 0
+        const hasProjects = fetchedProjects.length > 0
+        if (!hasHourly && !hasAppts && !hasProjects) {
+          setOmniWarning(`Live Omni data unavailable (${omniFailures.join(', ')}). Showing cached values where available.`)
+        }
       }
 
       // ── Phase 3: EST drops seeding + sync ──
