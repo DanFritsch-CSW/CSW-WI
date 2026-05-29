@@ -178,7 +178,7 @@ function isObservedHoliday(isoDate) {
  * whatever we found (caller should still average over `count` so a partial
  * sample window scales down naturally).
  */
-function buildValidPastDates(targetDate, count = 4, maxLookback = 12) {
+export function buildValidPastDates(targetDate, count = 4, maxLookback = 12) {
   const MS_PER_WEEK = 7 * 24 * 60 * 60 * 1000
   const base = new Date(targetDate + 'T00:00:00Z')
   const todayIso = new Date().toISOString().slice(0, 10)
@@ -1021,6 +1021,47 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
  */
 const L4W_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
+// ── Phase 1 MotherDuck migration ──────────────────────────────────────────
+//
+// fetchHistoricalProjectHourlyDropsMD replaces the Omni-based equivalent
+// with a single SQL query against MotherDuck via /netlify/functions/motherduck-l4w.
+// ~28 sequential Omni queries collapse into 1 round trip.
+//
+// Toggle: VITE_USE_MD_L4W='true' in the build env. Defaults to false so
+// the Omni path stays canonical until we've validated parity in production.
+// On any MD error the cached wrapper falls back to Omni automatically so a
+// flag flip is safe to roll out.
+//
+// Date logic stays client-side (buildValidPastDates) so the server doesn't
+// need to know about holidays or "today". The server just receives a list
+// of ISO dates and aggregates appointments for those exact dates.
+const USE_MD_L4W = (import.meta?.env?.VITE_USE_MD_L4W === 'true')
+
+export async function fetchHistoricalProjectHourlyDropsMD(facilityId, targetDate, weeksBack = 4) {
+  const validDates = buildValidPastDates(targetDate, weeksBack)
+  // Pass through the same custom-rules cache the Omni path uses so MD has
+  // the omni_name → display_name map for facility_custom_drop_projects.
+  const customRules = CUSTOM_DROP_RULES_CACHE[facilityId] ?? []
+
+  const res = await fetch('/.netlify/functions/motherduck-l4w', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facilityId, validDates, customRules }),
+  })
+  if (!res.ok) {
+    let body = {}
+    try { body = await res.json() } catch { /* non-json */ }
+    throw new OmniQueryError(
+      body.error || `motherduck-l4w ${res.status}`,
+      { status: res.status, reason: body.stack }
+    )
+  }
+  const { result } = await res.json()
+  // Server already applied redistributeToIntegers and the KEN/custom backfill.
+  // Result shape matches fetchHistoricalProjectHourlyDrops exactly: { [project]: { [hour]: int } }.
+  return result || {}
+}
+
 export async function fetchHistoricalProjectHourlyDropsCached(
   facilityId,
   targetDate,
@@ -1039,11 +1080,27 @@ export async function fetchHistoricalProjectHourlyDropsCached(
     }
   }
 
-  const fresh = await fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack)
+  // Try MotherDuck first when the feature flag is on. Fall back to Omni on
+  // any error (network, 500, schema mismatch) so flipping the flag is safe
+  // even if MD has a hiccup.
+  let fresh
+  if (USE_MD_L4W) {
+    try {
+      const t0 = performance.now?.() ?? Date.now()
+      fresh = await fetchHistoricalProjectHourlyDropsMD(facilityId, targetDate, weeksBack)
+      const t1 = performance.now?.() ?? Date.now()
+      console.debug(`L4W via MotherDuck (${facilityId}, ${targetDate}): ${Math.round(t1 - t0)}ms`)
+    } catch (e) {
+      console.warn(`L4W MotherDuck failed, falling back to Omni: ${e.message}`)
+      fresh = await fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack)
+    }
+  } else {
+    fresh = await fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack)
+  }
 
   // Write back to cache — fire-and-forget. If write fails (RLS, transient
   // network) we still return the fresh result to the caller; next page load
-  // will just re-query Omni.
+  // will just re-query the upstream.
   writeHistoricalDropsCache(facilityId, targetDate, fresh).catch(e =>
     console.warn('writeHistoricalDropsCache failed (non-fatal):', e?.message)
   )
