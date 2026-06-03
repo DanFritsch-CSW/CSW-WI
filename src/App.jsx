@@ -1,11 +1,25 @@
-import { Component } from 'react'
+import { Component, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import TopNav from './components/TopNav.jsx'
-import LaborPlanning from './pages/LaborPlanning.jsx'
-import InventoryReport from './pages/InventoryReport.jsx'
-import OrderCreator from './pages/OrderCreator.jsx'
-import Analytics from './pages/Analytics.jsx'
-import Settings from './pages/Settings.jsx'
+
+// Route-level code splitting — each page ships as its own chunk so the
+// initial JS payload only contains the active route. Subsequent route
+// visits fetch their chunk once and cache it for the session.
+const LaborPlanning   = lazy(() => import('./pages/LaborPlanning.jsx'))
+const InventoryReport = lazy(() => import('./pages/InventoryReport.jsx'))
+const OrderCreator    = lazy(() => import('./pages/OrderCreator.jsx'))
+const Analytics       = lazy(() => import('./pages/Analytics.jsx'))
+const Settings        = lazy(() => import('./pages/Settings.jsx'))
+
+function PageLoading() {
+  return (
+    <div className="page-content">
+      <div className="stub-page" style={{ opacity: 0.6 }}>
+        <p style={{ color: 'var(--text-secondary)', fontSize: 13, margin: 0 }}>Loading…</p>
+      </div>
+    </div>
+  )
+}
 
 class PageErrorBoundary extends Component {
   constructor(props) {
@@ -17,20 +31,31 @@ class PageErrorBoundary extends Component {
   }
   render() {
     if (this.state.error) {
+      // Detect stale-chunk error — happens when Netlify deploys a new
+      // build while a user has an old tab open and they click a route
+      // they haven't visited yet (the old chunk URL no longer exists).
+      const msg = this.state.error.message || ''
+      const isChunkError = /Loading chunk|Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(msg)
       return (
         <div className="page-content">
           <div className="stub-page">
-            <h2>Something went wrong</h2>
+            <h2>{isChunkError ? 'App was updated' : 'Something went wrong'}</h2>
             <p style={{ color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-              {this.state.error.message}
+              {isChunkError ? 'A new version was deployed. Reload to continue.' : msg}
             </p>
             <button
               style={{ marginTop: 12, padding: '6px 16px', borderRadius: 'var(--r-md)',
                 background: 'var(--bg3)', border: '1px solid var(--border)',
                 color: 'var(--text-secondary)', cursor: 'pointer' }}
-              onClick={() => this.setState({ error: null })}
+              onClick={() => {
+                if (isChunkError) {
+                  window.location.reload()
+                } else {
+                  this.setState({ error: null })
+                }
+              }}
             >
-              Retry
+              {isChunkError ? 'Reload' : 'Retry'}
             </button>
           </div>
         </div>
@@ -46,13 +71,15 @@ export default function App() {
       <div className="app-shell">
         <TopNav />
         <PageErrorBoundary>
-          <Routes>
-            <Route path="/"          element={<LaborPlanning />}    />
-            <Route path="/inventory" element={<InventoryReport />}  />
-            <Route path="/orders"    element={<OrderCreator />}     />
-            <Route path="/analytics" element={<Analytics />}        />
-            <Route path="/settings"  element={<Settings />}         />
-          </Routes>
+          <Suspense fallback={<PageLoading />}>
+            <Routes>
+              <Route path="/"          element={<LaborPlanning />}    />
+              <Route path="/inventory" element={<InventoryReport />}  />
+              <Route path="/orders"    element={<OrderCreator />}     />
+              <Route path="/analytics" element={<Analytics />}        />
+              <Route path="/settings"  element={<Settings />}         />
+            </Routes>
+          </Suspense>
         </PageErrorBoundary>
       </div>
     </BrowserRouter>
