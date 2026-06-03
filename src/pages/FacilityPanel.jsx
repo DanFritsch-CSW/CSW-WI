@@ -1,10 +1,9 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
 import KpiPills from '../components/KpiPills.jsx'
 import HourlyChart from '../components/HourlyChart.jsx'
 import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
-import PicklinePanel from '../components/PicklinePanel.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
@@ -24,6 +23,10 @@ import {
 } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, buildRosterStaffedHeadcount } from '../lib/laborCalc.js'
+
+// PicklinePanel is WR-only and ships the CSV parser + full pick planning UI.
+// Lazy-loaded so users on non-WR facilities never download that chunk.
+const PicklinePanel = lazy(() => import('../components/PicklinePanel.jsx'))
 
 const CAL2_SIDE35_PROJECTS = new Set([
   'Palermos CALEDONIA finished', "Palermo's CALEDONIA finished", 'PALERMOS CALEDONIA FINISHED',
@@ -660,14 +663,16 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         </div>
         {wrTab === 'warehouse'
           ? warehouseContent
-          : <PicklinePanel
-              snapshot={picklineSnapshot}
-              hourOverrides={picklineOverrides}
-              onSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
-              onOverridesChange={setPicklineOverrides}
-              onClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
-              planDate={planDate}
-            />
+          : <Suspense fallback={<div style={{ padding: 20, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>Loading Pickline…</div>}>
+              <PicklinePanel
+                snapshot={picklineSnapshot}
+                hourOverrides={picklineOverrides}
+                onSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
+                onOverridesChange={setPicklineOverrides}
+                onClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
+                planDate={planDate}
+              />
+            </Suspense>
         }
       </div>
     )
