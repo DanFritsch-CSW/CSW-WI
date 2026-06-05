@@ -70,7 +70,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [omniWarning, setOmniWarning]       = useState(null)
   const [projects, setProjects]             = useState([])
   const [laborCount, setLaborCount]         = useState(0)
-  const [rosterState, setRosterState]       = useState({ employees: [], laneMap: {}, assignmentMap: {} })
+  const [rosterState, setRosterState]       = useState({ employees: [], laneMap: {}, assignmentMap: {}, breaksMap: new Map() })
   const [projectHourlyDrops, setProjectHourlyDrops] = useState({})
   const [seedingDrops, setSeedingDrops]             = useState(false)
   const [refreshingProject, setRefreshingProject]   = useState(null) // project name being refreshed
@@ -420,7 +420,14 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const rosterAvail = useMemo(() => {
     if (!rosterState.employees.length) return null
-    return buildRosterAvailability(rosterState.employees, rosterState.laneMap, settings, rosterState.assignmentMap, laneFilter)
+    return buildRosterAvailability(
+      rosterState.employees,
+      rosterState.laneMap,
+      settings,
+      rosterState.assignmentMap,
+      laneFilter,
+      rosterState.breaksMap
+    )
   }, [rosterState, settings, laneFilter])
 
   const rosterStaffed = useMemo(() => {
