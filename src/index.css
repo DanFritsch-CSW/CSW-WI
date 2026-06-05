@@ -885,3 +885,163 @@ input, select { font: inherit; color: inherit; }
   color: var(--text-secondary);
   font-style: italic;
 }
+
+/* ─── Employee tile break override panel ────────────────────────── */
+.emp-tile.emp-tile-expanded {
+  flex-direction: column;
+  align-items: stretch;
+  cursor: default;
+  gap: 0;
+}
+
+.emp-tile-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.emp-break-chevron {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+  transition: color 0.12s, background 0.12s;
+}
+.emp-break-chevron:hover { color: var(--text-secondary); background: var(--bg4); }
+.emp-break-chevron--open { color: var(--brand); background: var(--brand-bg); }
+.emp-break-chevron--active { color: var(--brand); }
+
+.emp-break-badge {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--brand);
+  margin-left: 4px;
+  vertical-align: middle;
+  cursor: default;
+}
+
+.emp-break-panel {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0 0 var(--r-sm) var(--r-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: default;
+}
+
+.emp-break-panel-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand);
+  margin-bottom: 2px;
+}
+.emp-break-panel-help {
+  font-size: 8px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+.emp-break-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.emp-break-row-label {
+  width: 78px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.emp-break-time {
+  width: 88px;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  color-scheme: light;
+}
+.emp-break-time:focus { outline: none; border-color: var(--brand-dim); }
+.emp-break-for {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+.emp-break-min {
+  width: 44px;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  text-align: right;
+  color-scheme: light;
+}
+.emp-break-min:focus { outline: none; border-color: var(--brand-dim); }
+.emp-break-min-unit {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.emp-break-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.emp-break-save {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 12px;
+  border-radius: var(--r-sm);
+  background: var(--brand);
+  color: #000;
+  letter-spacing: 0.04em;
+  transition: background 0.15s;
+}
+.emp-break-save:hover:not(:disabled) { background: var(--brand-light); }
+.emp-break-save:disabled { opacity: 0.4; cursor: default; background: var(--bg5); color: var(--text-dim); }
+
+.emp-break-clear {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid rgba(224, 90, 90, 0.4);
+  background: transparent;
+  color: #c8352b;
+}
+.emp-break-clear:hover { background: rgba(224, 90, 90, 0.08); border-color: #c8352b; }
+
+.emp-break-cancel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.emp-break-cancel:hover { background: var(--bg3); color: var(--text-primary); }
