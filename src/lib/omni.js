@@ -765,6 +765,80 @@ export async function fetchProjectHourlyAppointments(facilityId, date, projectNa
   )
 }
 
+// Session-level cache — project names change slowly; one load per page visit is enough.
+let _knownProjectsCache = null
+
+/**
+ * Returns a Map of facility-id → sorted unique project names that have
+ * had at least one appointment in the past `daysBack` days.
+ *
+ * Single Omni call. CAL split view (`cal2`) is rolled up into `cal`.
+ * Returns empty Map on failure (does not throw).
+ *
+ * @param {number} daysBack - Lookback window in days. Default 30.
+ * @returns {Promise<Map<string, string[]>>}
+ */
+export async function fetchKnownProjectsByFacility(daysBack = 30) {
+  if (_knownProjectsCache) return _knownProjectsCache
+
+  const today = new Date().toISOString().slice(0, 10)
+  const startD = new Date(today + 'T00:00:00Z')
+  startD.setUTCDate(startD.getUTCDate() - daysBack)
+  const fromDate = startD.toISOString().slice(0, 10)
+
+  let rows
+  try {
+    rows = await omniQuery({
+      modelId: GOLD_MODEL_ID,
+      table: VIEW_APPT,
+      fields: [
+        `${VIEW_APPT}.warehouse_name`,
+        `${VIEW_APPT}.project_name`,
+      ],
+      filters: {
+        // TIME_FOR_UNIT_DURATION with left_side = start date and offset = daysBack
+        // gives a daysBack-day window. BETWEEN silently returns unfiltered on timestamps.
+        [`${VIEW_APPT}.scheduled_arrival`]: {
+          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+          isFiscal: false, left_side: fromDate, is_negative: false,
+          offset_interval_string: `${daysBack} days`,
+        },
+        ...apptStatusFilter(),
+      },
+      sorts: [
+        { column_name: `${VIEW_APPT}.warehouse_name`, sort_descending: false },
+        { column_name: `${VIEW_APPT}.project_name`,   sort_descending: false },
+      ],
+      limit: 2000,
+    })
+  } catch (err) {
+    console.warn('fetchKnownProjectsByFacility failed', err)
+    return new Map()
+  }
+
+  const byFac = new Map()
+  for (const r of rows) {
+    const wh  = r[`${VIEW_APPT}.warehouse_name`]
+    const raw = r[`${VIEW_APPT}.project_name`]
+    if (!wh || !raw) continue
+    const facId = CSW_WAREHOUSE_TO_FAC[wh]
+    if (!facId) continue
+    const name = normalizeProjectName(facId, raw)
+    if (!byFac.has(facId)) byFac.set(facId, new Set())
+    byFac.get(facId).add(name)
+  }
+
+  // Convert sets to sorted arrays (cal2 is already merged into cal via CSW_WAREHOUSE_TO_FAC)
+  const result = new Map(
+    [...byFac.entries()].map(([facId, names]) => [
+      facId,
+      [...names].sort((a, b) => a.localeCompare(b)),
+    ])
+  )
+  _knownProjectsCache = result
+  return result
+}
+
 export async function fetchNetworkKpis(date) {
   const laborRows = await omniQuery({
     modelId: MODEL_ID,

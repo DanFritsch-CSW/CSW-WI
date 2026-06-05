@@ -4,10 +4,10 @@ import {
   fetchFacilitySettings, upsertFacilitySettings,
   fetchCal2Employees, upsertEmployeeDockSide,
   fetchCustomDropProjects, addCustomDropProject, deleteCustomDropProject,
-  fetchAllFacilityProjectNames, fetchProjectLaborAssumptions,
+  fetchProjectLaborAssumptions,
   upsertProjectLaborAssumption, deleteProjectLaborAssumption,
 } from '../lib/supabase.js'
-import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS } from '../lib/omni.js'
+import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 
 // ── Tab nav ────────────────────────────────────────────────
 
@@ -41,8 +41,8 @@ const SYSTEM_DROP_PROJECTS = {
 
 const DEFAULTS = { hours_per_appt: 1.5 }
 
-function ProjectHpaEditor({ facility, facilityHpa }) {
-  const [projects, setProjects] = useState([])
+function ProjectHpaEditor({ facility, facilityHpa, knownProjects, knownProjectsLoading }) {
+  const [customNames, setCustomNames] = useState([])
   const [overrides, setOverrides] = useState(new Map())
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(null)
@@ -52,22 +52,12 @@ function ProjectHpaEditor({ facility, facilityHpa }) {
     ;(async () => {
       setLoading(true)
       try {
-        const [dbNames, overrideMap] = await Promise.all([
-          fetchAllFacilityProjectNames(facility),
+        const [customRows, overrideMap] = await Promise.all([
+          fetchCustomDropProjects(facility),
           fetchProjectLaborAssumptions(facility),
         ])
-
-        const ruleNames = Object.entries(PROJECT_DROP_RULES || {})
-          .filter(([, rule]) => rule?.facility === facility)
-          .map(([name]) => name)
-        const guaranteed = facility === 'ken' ? (KEN_GUARANTEED_PROJECTS || []) : []
-
-        const all = Array.from(new Set([...dbNames, ...ruleNames, ...guaranteed]))
-          .filter(Boolean)
-          .sort((a, b) => a.localeCompare(b))
-
         if (cancelled) return
-        setProjects(all)
+        setCustomNames(customRows.map(r => r.project_name))
         setOverrides(overrideMap)
       } catch (err) {
         console.error('ProjectHpaEditor load', err)
@@ -99,6 +89,21 @@ function ProjectHpaEditor({ facility, facilityHpa }) {
       alert(`HPA must be a number between 0 and 99 (got "${trimmed}")`)
       return
     }
+    // Treat "same as facility default" as clear rather than saving a no-op row.
+    if (Math.abs(num - facilityHpa) < 0.001) {
+      if (overrides.has(projectName)) {
+        setSaving(projectName)
+        try {
+          await deleteProjectLaborAssumption(facility, projectName)
+          setOverrides(m => { const n = new Map(m); n.delete(projectName); return n })
+        } catch (err) {
+          alert(`Failed to clear override for ${projectName}: ${err.message}`)
+        } finally {
+          setSaving(null)
+        }
+      }
+      return
+    }
     setSaving(projectName)
     try {
       await upsertProjectLaborAssumption(facility, projectName, num)
@@ -110,7 +115,15 @@ function ProjectHpaEditor({ facility, facilityHpa }) {
     }
   }
 
-  if (loading) return <div className="project-hpa-loading">Loading projects…</div>
+  const ruleNames = Object.entries(PROJECT_DROP_RULES || {})
+    .filter(([, rule]) => rule?.facility === facility)
+    .map(([name]) => name)
+  const guaranteed = facility === 'ken' ? (KEN_GUARANTEED_PROJECTS || []) : []
+  const projects = Array.from(new Set([...(knownProjects || []), ...ruleNames, ...guaranteed, ...customNames]))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+
+  if (loading || knownProjectsLoading) return <div className="project-hpa-loading">Loading projects…</div>
 
   if (projects.length === 0) {
     return <div className="project-hpa-empty">No projects found for this facility yet.</div>
@@ -172,7 +185,7 @@ function ProjectHpaEditor({ facility, facilityHpa }) {
   )
 }
 
-function FacilitySettingsCard({ facility }) {
+function FacilitySettingsCard({ facility, knownProjects, knownProjectsLoading }) {
   const [hpa, setHpa]        = useState(DEFAULTS.hours_per_appt)
   const [saveState, setSave] = useState(null)
 
@@ -213,7 +226,12 @@ function FacilitySettingsCard({ facility }) {
           />
         </label>
       </div>
-      <ProjectHpaEditor facility={facility.id} facilityHpa={hpa} />
+      <ProjectHpaEditor
+        facility={facility.id}
+        facilityHpa={hpa}
+        knownProjects={knownProjects}
+        knownProjectsLoading={knownProjectsLoading}
+      />
       <div className="settings-card-footer">
         <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
           {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
@@ -512,6 +530,18 @@ function EstDropProjectsEditor() {
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState('labor')
+  const [knownProjects, setKnownProjects] = useState(null) // null = loading
+
+  useEffect(() => {
+    let cancelled = false
+    fetchKnownProjectsByFacility(30)
+      .then(map => { if (!cancelled) setKnownProjects(map) })
+      .catch(err => {
+        console.warn('fetchKnownProjectsByFacility failed', err)
+        if (!cancelled) setKnownProjects(new Map())
+      })
+    return () => { cancelled = true }
+  }, [])
 
   return (
     <div className="page-content">
@@ -534,7 +564,14 @@ export default function Settings() {
             <p className="settings-page-sub">Per-facility hours per appointment used to calculate labor requirements.</p>
           </div>
           <div className="settings-grid">
-            {FACILITY_LIST.map(f => <FacilitySettingsCard key={f.id} facility={f} />)}
+            {FACILITY_LIST.map(f => (
+              <FacilitySettingsCard
+                key={f.id}
+                facility={f}
+                knownProjects={knownProjects?.get(f.id) ?? []}
+                knownProjectsLoading={knownProjects === null}
+              />
+            ))}
           </div>
         </>
       )}
