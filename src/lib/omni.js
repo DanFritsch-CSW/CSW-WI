@@ -241,7 +241,7 @@ const KEN_OMNI_NAME_MAP = new Map([
 
 const CUSTOM_OMNI_NAME_MAPS = {}
 
-const PROJECT_DROP_RULES = {
+export const PROJECT_DROP_RULES = {
   'Palermos CALEDONIA finished': {
     facility: 'cal',
     method: 'inbound_exclude_lookup',

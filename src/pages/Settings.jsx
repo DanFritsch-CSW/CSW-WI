@@ -4,7 +4,10 @@ import {
   fetchFacilitySettings, upsertFacilitySettings,
   fetchCal2Employees, upsertEmployeeDockSide,
   fetchCustomDropProjects, addCustomDropProject, deleteCustomDropProject,
+  fetchAllFacilityProjectNames, fetchProjectLaborAssumptions,
+  upsertProjectLaborAssumption, deleteProjectLaborAssumption,
 } from '../lib/supabase.js'
+import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS } from '../lib/omni.js'
 
 // ── Tab nav ────────────────────────────────────────────────
 
@@ -37,6 +40,137 @@ const SYSTEM_DROP_PROJECTS = {
 // ── Labor Settings ─────────────────────────────────────────
 
 const DEFAULTS = { hours_per_appt: 1.5 }
+
+function ProjectHpaEditor({ facility, facilityHpa }) {
+  const [projects, setProjects] = useState([])
+  const [overrides, setOverrides] = useState(new Map())
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      try {
+        const [dbNames, overrideMap] = await Promise.all([
+          fetchAllFacilityProjectNames(facility),
+          fetchProjectLaborAssumptions(facility),
+        ])
+
+        const ruleNames = Object.entries(PROJECT_DROP_RULES || {})
+          .filter(([, rule]) => rule?.facility === facility)
+          .map(([name]) => name)
+        const guaranteed = facility === 'ken' ? (KEN_GUARANTEED_PROJECTS || []) : []
+
+        const all = Array.from(new Set([...dbNames, ...ruleNames, ...guaranteed]))
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b))
+
+        if (cancelled) return
+        setProjects(all)
+        setOverrides(overrideMap)
+      } catch (err) {
+        console.error('ProjectHpaEditor load', err)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [facility])
+
+  async function handleSave(projectName, rawValue) {
+    const trimmed = (rawValue ?? '').toString().trim()
+    if (trimmed === '') {
+      if (overrides.has(projectName)) {
+        setSaving(projectName)
+        try {
+          await deleteProjectLaborAssumption(facility, projectName)
+          setOverrides(m => { const n = new Map(m); n.delete(projectName); return n })
+        } catch (err) {
+          alert(`Failed to clear override for ${projectName}: ${err.message}`)
+        } finally {
+          setSaving(null)
+        }
+      }
+      return
+    }
+    const num = Number(trimmed)
+    if (!Number.isFinite(num) || num <= 0 || num > 99) {
+      alert(`HPA must be a number between 0 and 99 (got "${trimmed}")`)
+      return
+    }
+    setSaving(projectName)
+    try {
+      await upsertProjectLaborAssumption(facility, projectName, num)
+      setOverrides(m => { const n = new Map(m); n.set(projectName, num); return n })
+    } catch (err) {
+      alert(`Failed to save override for ${projectName}: ${err.message}`)
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  if (loading) return <div className="project-hpa-loading">Loading projects…</div>
+
+  if (projects.length === 0) {
+    return <div className="project-hpa-empty">No projects found for this facility yet.</div>
+  }
+
+  return (
+    <div className="project-hpa-editor">
+      <div className="project-hpa-header">
+        <h4>Per-project Hours/Appt</h4>
+        <span className="project-hpa-help">
+          Overrides facility default ({facilityHpa}). Blank = use facility default.
+        </span>
+      </div>
+      <table className="project-hpa-table">
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th>Hrs/Appt</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {projects.map(name => {
+            const hasOverride = overrides.has(name)
+            const value = hasOverride ? overrides.get(name) : ''
+            const isSaving = saving === name
+            return (
+              <tr key={name} className={hasOverride ? 'project-hpa-row--override' : ''}>
+                <td className="project-hpa-name">{name}</td>
+                <td>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="99"
+                    defaultValue={value}
+                    placeholder={String(facilityHpa)}
+                    disabled={isSaving}
+                    onBlur={e => handleSave(name, e.target.value)}
+                  />
+                </td>
+                <td>
+                  {hasOverride && (
+                    <button
+                      className="project-hpa-clear"
+                      disabled={isSaving}
+                      onClick={() => handleSave(name, '')}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 function FacilitySettingsCard({ facility }) {
   const [hpa, setHpa]        = useState(DEFAULTS.hours_per_appt)
@@ -79,6 +213,7 @@ function FacilitySettingsCard({ facility }) {
           />
         </label>
       </div>
+      <ProjectHpaEditor facility={facility.id} facilityHpa={hpa} />
       <div className="settings-card-footer">
         <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
           {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}

@@ -258,6 +258,81 @@ export async function upsertFacilitySettings(facilityId, values) {
   if (error) console.error('upsertFacilitySettings:', error)
 }
 
+// ─── Project-level Hours-Per-Appointment Overrides ──────────────────────────
+// Falls back to facility_settings.hours_per_appt when no row exists for a project.
+
+export async function fetchProjectLaborAssumptions(facility) {
+  if (!supabase) return new Map()
+  const { data, error } = await supabase
+    .from('project_labor_assumptions')
+    .select('project_name, hours_per_appt')
+    .eq('facility', facility)
+  if (error) {
+    console.error('fetchProjectLaborAssumptions', error)
+    return new Map()
+  }
+  const map = new Map()
+  for (const row of data || []) {
+    map.set(row.project_name, Number(row.hours_per_appt))
+  }
+  return map
+}
+
+export async function upsertProjectLaborAssumption(facility, projectName, hoursPerAppt) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('project_labor_assumptions')
+    .upsert(
+      {
+        facility,
+        project_name: projectName,
+        hours_per_appt: hoursPerAppt,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'facility,project_name', ignoreDuplicates: false }
+    )
+  if (error) {
+    console.error('upsertProjectLaborAssumption', error)
+    throw error
+  }
+}
+
+export async function deleteProjectLaborAssumption(facility, projectName) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('project_labor_assumptions')
+    .delete()
+    .eq('facility', facility)
+    .eq('project_name', projectName)
+  if (error) {
+    console.error('deleteProjectLaborAssumption', error)
+    throw error
+  }
+}
+
+// Union of project names known for this facility from DB sources only.
+// Code-constant sources (PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS) are added
+// in the consumer (Settings.jsx) since they live in omni.js.
+export async function fetchAllFacilityProjectNames(facility) {
+  if (!supabase) return []
+  const [dropsRes, customRes] = await Promise.all([
+    supabase
+      .from('project_hourly_drops_forecast')
+      .select('project_name')
+      .eq('facility', facility),
+    supabase
+      .from('facility_custom_drop_projects')
+      .select('project_name')
+      .eq('facility', facility),
+  ])
+  if (dropsRes.error) console.warn('fetchAllFacilityProjectNames drops', dropsRes.error)
+  if (customRes.error) console.warn('fetchAllFacilityProjectNames custom', customRes.error)
+  const names = new Set()
+  for (const row of dropsRes.data || []) names.add(row.project_name)
+  for (const row of customRes.data || []) names.add(row.project_name)
+  return Array.from(names)
+}
+
 export async function fetchAllFacilitiesSettings() {
   const defaults = {}
   for (const key of ['cal', 'ken', 'mad', 'wr', 'ec']) {
