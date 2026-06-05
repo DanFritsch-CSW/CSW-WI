@@ -23,12 +23,26 @@ function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
 }
 
-export function applySettings(hourlyData, settings) {
+/**
+ * Apply facility settings to hourly data, producing the `req` column.
+ *
+ * @param {Array} hourlyData  - 24-row array from Omni.
+ * @param {Object} settings   - { hours_per_appt, break_hour_1..8, ... }.
+ * @param {Array<number>|null} perHourReq - Optional 24-element array of
+ *   pre-computed req values (e.g. blended from per-project HPAs). When
+ *   provided, used directly; otherwise falls back to appts × hours_per_appt.
+ */
+export function applySettings(hourlyData, settings, perHourReq = null) {
   const hpa = settings?.hours_per_appt ?? 1.5
-  return hourlyData.map(row => ({
-    ...row,
-    req: Math.round(row.appts * hpa * 10) / 10,
-  }))
+  return hourlyData.map((row, i) => {
+    let req
+    if (perHourReq && Number.isFinite(perHourReq[i])) {
+      req = Math.round(perHourReq[i] * 10) / 10
+    } else {
+      req = Math.round((row.appts ?? 0) * hpa * 10) / 10
+    }
+    return { ...row, req }
+  })
 }
 
 export function computeDailyKpis(hourly) {

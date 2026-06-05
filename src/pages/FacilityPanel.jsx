@@ -88,6 +88,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [retryNonce, setRetryNonce]           = useState(0)
   const [appointmentList, setAppointmentList]           = useState([])
   const [appointmentListLoading, setAppointmentListLoading] = useState(false)
+  const [perProjectHourly, setPerProjectHourly] = useState(null)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -100,7 +101,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
   const [picklineOverrides, setPicklineOverrides] = useState({})
 
-  const { settings, loading: settingsLoading } = useSettings(facility.id)
+  const { settings, loading: settingsLoading, projectHpa } = useSettings(facility.id)
 
   const lastRefreshRef = useRef(0)
 
@@ -387,6 +388,22 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     fetchProjectHourlyAppointments(facility.id, planDate, names).then(setSideHourlyAppts).catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
+  // Fetch per-project hourly appointments when HPA overrides exist for this facility.
+  // Only fires when there are overrides — zero perf cost for facilities without them.
+  useEffect(() => {
+    if (!projects || projects.length === 0) { setPerProjectHourly(null); return }
+    if (!projectHpa || projectHpa.size === 0) { setPerProjectHourly(null); return }
+    let cancelled = false
+    const names = projects.map(p => p.name)
+    fetchProjectHourlyAppointments(facility.id, planDate, names)
+      .then(map => { if (!cancelled) setPerProjectHourly(map) })
+      .catch(err => {
+        console.warn('per-project HPA fetch failed, falling back to aggregate', err)
+        if (!cancelled) setPerProjectHourly(null)
+      })
+    return () => { cancelled = true }
+  }, [facility.id, planDate, projects, projectHpa, retryNonce])
+
   const handleLaborCount   = useCallback((count) => setLaborCount(count), [])
   const handleRosterChange = useCallback(state => setRosterState(state), [])
 
@@ -480,11 +497,32 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     })
   }, [rawHourly, hourlyAppts, estDrops, isCal2, sideTab, sideHourlyAppts])
 
+  const perHourReq = useMemo(() => {
+    if (!perProjectHourly) return null
+    if (!projectHpa || projectHpa.size === 0) return null
+    if (!projects || projects.length === 0) return null
+    const defaultHpa = settings?.hours_per_appt ?? 1.5
+    const arr = new Array(24).fill(0)
+    for (let h = 0; h < 24; h++) {
+      const hourMap = perProjectHourly[h] || {}
+      let sum = 0
+      for (const proj of projects) {
+        const counts = hourMap[proj.name]
+        const apptCount = (counts?.inb ?? 0) + (counts?.out ?? 0)
+        if (apptCount === 0) continue
+        const hpa = projectHpa.get(proj.name) ?? defaultHpa
+        sum += apptCount * hpa
+      }
+      arr[h] = sum
+    }
+    return arr
+  }, [perProjectHourly, projectHpa, settings?.hours_per_appt, projects])
+
   const hourly = useMemo(() => {
-    const base = settingsLoading ? rawWithAppts : applySettings(rawWithAppts, settings)
+    const base = settingsLoading ? rawWithAppts : applySettings(rawWithAppts, settings, perHourReq)
     if (!rosterAvail) return base
     return base.map(row => ({ ...row, avail: rosterAvail[row.h] ?? 0 }))
-  }, [rawWithAppts, settings, settingsLoading, rosterAvail])
+  }, [rawWithAppts, settings, settingsLoading, rosterAvail, perHourReq])
 
   const { util, delta } = computeDailyKpis(hourly)
 

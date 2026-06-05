@@ -814,3 +814,74 @@ input, select { font: inherit; color: inherit; }
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
+
+/* Project HPA editor (Settings → Labor Planning) */
+.project-hpa-editor {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+.project-hpa-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.project-hpa-header h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.project-hpa-help {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.project-hpa-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.project-hpa-table th {
+  text-align: left;
+  padding: 6px 8px;
+  background: var(--bg0);
+  color: var(--text-secondary);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.project-hpa-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.project-hpa-row--override {
+  background: rgba(42, 114, 184, 0.04);
+}
+.project-hpa-row--override .project-hpa-name {
+  font-weight: 600;
+}
+.project-hpa-table input[type="number"] {
+  width: 64px;
+  padding: 4px 6px;
+  font-size: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.project-hpa-clear {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.project-hpa-clear:hover { color: var(--danger); border-color: var(--danger); }
+.project-hpa-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+.project-hpa-loading,
+.project-hpa-empty {
+  padding: 8px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
