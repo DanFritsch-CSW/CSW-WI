@@ -26,18 +26,24 @@ function getBreakMultipliers(settings) {
 /**
  * Apply facility settings to hourly data, producing the `req` column.
  *
- * @param {Array} hourlyData  - 24-row array from Omni.
+ * @param {Array} hourlyData  - 24-row array from Omni; each row has `h` (0-23).
  * @param {Object} settings   - { hours_per_appt, break_hour_1..8, ... }.
  * @param {Array<number>|null} perHourReq - Optional 24-element array of
- *   pre-computed req values (e.g. blended from per-project HPAs). When
- *   provided, used directly; otherwise falls back to appts × hours_per_appt.
+ *   pre-computed req values INDEXED BY HOUR (perHourReq[h] = req for hour h),
+ *   e.g. blended from per-project HPAs. When provided, used directly via
+ *   row.h lookup; otherwise falls back to appts × hours_per_appt.
+ *
+ *   IMPORTANT: hourlyData is typically in operational-day order (5am first,
+ *   4am last), so the array index does NOT match the clock hour. Always
+ *   look up perHourReq[row.h], never perHourReq[i].
  */
 export function applySettings(hourlyData, settings, perHourReq = null) {
   const hpa = settings?.hours_per_appt ?? 1.5
-  return hourlyData.map((row, i) => {
+  return hourlyData.map(row => {
     let req
-    if (perHourReq && Number.isFinite(perHourReq[i])) {
-      req = Math.round(perHourReq[i] * 10) / 10
+    const h = row.h
+    if (perHourReq && typeof h === 'number' && Number.isFinite(perHourReq[h])) {
+      req = Math.round(perHourReq[h] * 10) / 10
     } else {
       req = Math.round((row.appts ?? 0) * hpa * 10) / 10
     }
