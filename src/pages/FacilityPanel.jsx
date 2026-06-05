@@ -497,26 +497,43 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     })
   }, [rawHourly, hourlyAppts, estDrops, isCal2, sideTab, sideHourlyAppts])
 
+  // Per-hour labor req with project-level HPA overrides applied.
+  //
+  // Strategy: only apply the override HPA to projects that ACTUALLY have an
+  // override. Everything else (non-overridden projects, EST drops, and any
+  // gaps in the per-project Omni data) gets the facility default HPA. This
+  // means:
+  //   1. When no overrides apply to actual appointments → math equals
+  //      aggregate (totalAppts × defaultHpa).
+  //   2. When perProjectHourly is empty {} or any hour is missing → override
+  //      portion is 0 and everything falls through to the facility default —
+  //      labor req still computes correctly (does NOT collapse to 0).
+  //   3. Drops are always priced at the facility default (per-project Omni
+  //      data covers only inb + out, not drops).
   const perHourReq = useMemo(() => {
-    if (!perProjectHourly) return null
     if (!projectHpa || projectHpa.size === 0) return null
     if (!projects || projects.length === 0) return null
     const defaultHpa = settings?.hours_per_appt ?? 1.5
     const arr = new Array(24).fill(0)
     for (let h = 0; h < 24; h++) {
-      const hourMap = perProjectHourly[h] || {}
-      let sum = 0
+      const hourMap = (perProjectHourly && perProjectHourly[h]) || {}
+      const row = rawWithAppts.find(r => r.h === h)
+      const totalAppts = row?.appts ?? 0
+      let overrideHours = 0
+      let overrideAppts = 0
       for (const proj of projects) {
+        if (!projectHpa.has(proj.name)) continue
         const counts = hourMap[proj.name]
         const apptCount = (counts?.inb ?? 0) + (counts?.out ?? 0)
         if (apptCount === 0) continue
-        const hpa = projectHpa.get(proj.name) ?? defaultHpa
-        sum += apptCount * hpa
+        overrideHours += apptCount * projectHpa.get(proj.name)
+        overrideAppts += apptCount
       }
-      arr[h] = sum
+      const remainingAppts = Math.max(0, totalAppts - overrideAppts)
+      arr[h] = overrideHours + remainingAppts * defaultHpa
     }
     return arr
-  }, [perProjectHourly, projectHpa, settings?.hours_per_appt, projects])
+  }, [perProjectHourly, projectHpa, settings?.hours_per_appt, projects, rawWithAppts])
 
   const hourly = useMemo(() => {
     const base = settingsLoading ? rawWithAppts : applySettings(rawWithAppts, settings, perHourReq)

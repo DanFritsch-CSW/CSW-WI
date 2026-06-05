@@ -89,6 +89,21 @@ function ProjectHpaEditor({ facility, facilityHpa, knownProjects, knownProjectsL
       alert(`HPA must be a number between 0 and 99 (got "${trimmed}")`)
       return
     }
+    // Treat "same as facility default" as clear rather than saving a no-op row.
+    if (Math.abs(num - facilityHpa) < 0.001) {
+      if (overrides.has(projectName)) {
+        setSaving(projectName)
+        try {
+          await deleteProjectLaborAssumption(facility, projectName)
+          setOverrides(m => { const n = new Map(m); n.delete(projectName); return n })
+        } catch (err) {
+          alert(`Failed to clear override for ${projectName}: ${err.message}`)
+        } finally {
+          setSaving(null)
+        }
+      }
+      return
+    }
     setSaving(projectName)
     try {
       await upsertProjectLaborAssumption(facility, projectName, num)
