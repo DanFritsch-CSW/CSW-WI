@@ -822,3 +822,66 @@ export async function purgeExpiredInventoryDiscrepancies() {
     .lt('expires_at', new Date().toISOString())
   if (error) console.error('purgeExpiredInventoryDiscrepancies:', error)
 }
+
+// ─── Employee Break Schedule Overrides ──────────────────────────────────────
+// Per-employee clock-time break schedule. When a row exists, it replaces the
+// facility's BREAK_DEFAULTS multipliers for that employee in labor calc.
+// All three break times are REQUIRED (NOT NULL in DB) — atomic override.
+
+export async function fetchEmployeeBreaks(facility) {
+  if (!supabase) return new Map()
+  const { data, error } = await supabase
+    .from('employee_breaks')
+    .select('*')
+    .eq('facility', facility)
+  if (error) {
+    console.error('fetchEmployeeBreaks:', error)
+    return new Map()
+  }
+  const map = new Map()
+  for (const row of data || []) {
+    map.set(String(row.employee_id), {
+      facility:              row.facility,
+      first_break_at:        Number(row.first_break_at),
+      first_break_minutes:   Number(row.first_break_minutes),
+      lunch_at:              Number(row.lunch_at),
+      lunch_minutes:         Number(row.lunch_minutes),
+      second_break_at:       Number(row.second_break_at),
+      second_break_minutes:  Number(row.second_break_minutes),
+    })
+  }
+  return map
+}
+
+export async function upsertEmployeeBreak({ employeeId, facility, firstBreakAt, firstBreakMinutes, lunchAt, lunchMinutes, secondBreakAt, secondBreakMinutes }) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('employee_breaks')
+    .upsert({
+      employee_id:           String(employeeId),
+      facility,
+      first_break_at:        firstBreakAt,
+      first_break_minutes:   firstBreakMinutes,
+      lunch_at:              lunchAt,
+      lunch_minutes:         lunchMinutes,
+      second_break_at:       secondBreakAt,
+      second_break_minutes:  secondBreakMinutes,
+      updated_at:            new Date().toISOString(),
+    }, { onConflict: 'employee_id', ignoreDuplicates: false })
+  if (error) {
+    console.error('upsertEmployeeBreak:', error)
+    throw error
+  }
+}
+
+export async function deleteEmployeeBreak(employeeId) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('employee_breaks')
+    .delete()
+    .eq('employee_id', String(employeeId))
+  if (error) {
+    console.error('deleteEmployeeBreak:', error)
+    throw error
+  }
+}
