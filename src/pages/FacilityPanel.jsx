@@ -499,41 +499,57 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   // Per-hour labor req with project-level HPA overrides applied.
   //
-  // Strategy: only apply the override HPA to projects that ACTUALLY have an
-  // override. Everything else (non-overridden projects, EST drops, and any
-  // gaps in the per-project Omni data) gets the facility default HPA. This
-  // means:
-  //   1. When no overrides apply to actual appointments → math equals
-  //      aggregate (totalAppts × defaultHpa).
-  //   2. When perProjectHourly is empty {} or any hour is missing → override
-  //      portion is 0 and everything falls through to the facility default —
-  //      labor req still computes correctly (does NOT collapse to 0).
-  //   3. Drops are always priced at the facility default (per-project Omni
-  //      data covers only inb + out, not drops).
+  // Strategy: for each overridden project, sum its full contribution at the
+  // hour — live appointments (inb + out from the per-project Omni fetch) PLUS
+  // its EST drops (from visibleProjectHourlyDropsFlat). Apply the override
+  // HPA to that combined count. Everything else (non-overridden projects,
+  // unattributed appts) gets the facility default HPA.
+  //
+  //   req(h) = Σ_overridden ( (projectAppts_h + projectDrops_h) × overrideHpa )
+  //          + (totalAppts_h − overrideAttributedAppts_h) × defaultHpa
+  //
+  // Guarantees:
+  //   1. No overrides set → returns null → applySettings uses pure aggregate.
+  //   2. Override exists but project has 0 appts AND 0 drops at this hour →
+  //      contribution is 0, falls through to facility default.
+  //   3. perProjectHourly is empty {} → override-via-live-appts portion is 0,
+  //      but override-via-drops portion still applies (drops live in
+  //      visibleProjectHourlyDropsFlat which is from the DB, not Omni).
+  //   4. Overall: when no override actually applies to any visible activity,
+  //      result equals aggregate (totalAppts × defaultHpa).
   const perHourReq = useMemo(() => {
     if (!projectHpa || projectHpa.size === 0) return null
     if (!projects || projects.length === 0) return null
     const defaultHpa = settings?.hours_per_appt ?? 1.5
     const arr = new Array(24).fill(0)
+    // Build a quick lookup of projects-with-overrides so we can include
+    // drops-only override projects that may not appear in `projects`
+    // (e.g. a project we have drops for but no live appts).
+    const overrideNames = new Set([
+      ...projects.map(p => p.name),
+      ...projectHpa.keys(),
+    ])
     for (let h = 0; h < 24; h++) {
       const hourMap = (perProjectHourly && perProjectHourly[h]) || {}
       const row = rawWithAppts.find(r => r.h === h)
       const totalAppts = row?.appts ?? 0
       let overrideHours = 0
       let overrideAppts = 0
-      for (const proj of projects) {
-        if (!projectHpa.has(proj.name)) continue
-        const counts = hourMap[proj.name]
-        const apptCount = (counts?.inb ?? 0) + (counts?.out ?? 0)
-        if (apptCount === 0) continue
-        overrideHours += apptCount * projectHpa.get(proj.name)
-        overrideAppts += apptCount
+      for (const name of overrideNames) {
+        if (!projectHpa.has(name)) continue
+        const counts = hourMap[name]
+        const liveAppts = (counts?.inb ?? 0) + (counts?.out ?? 0)
+        const dropCount = Number(visibleProjectHourlyDropsFlat?.[name]?.[h] ?? 0) || 0
+        const projectTotal = liveAppts + dropCount
+        if (projectTotal === 0) continue
+        overrideHours += projectTotal * projectHpa.get(name)
+        overrideAppts += projectTotal
       }
       const remainingAppts = Math.max(0, totalAppts - overrideAppts)
       arr[h] = overrideHours + remainingAppts * defaultHpa
     }
     return arr
-  }, [perProjectHourly, projectHpa, settings?.hours_per_appt, projects, rawWithAppts])
+  }, [perProjectHourly, projectHpa, settings?.hours_per_appt, projects, rawWithAppts, visibleProjectHourlyDropsFlat])
 
   const hourly = useMemo(() => {
     const base = settingsLoading ? rawWithAppts : applySettings(rawWithAppts, settings, perHourReq)
