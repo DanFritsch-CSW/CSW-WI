@@ -45,7 +45,6 @@ function facilityCode(facId) {
   return FACILITIES[facId]?.code ?? facId?.toUpperCase() ?? '?'
 }
 
-// Time-off badge labels that come from the role field when seeded by B2E time-off
 const TIME_OFF_LABELS = new Set(['PTO', 'FMLA', 'Unpaid', 'Bereave'])
 
 export default function EmployeeTile({
@@ -59,8 +58,7 @@ export default function EmployeeTile({
   autoEditLabel,
   onAutoEditConsumed,
   breakOverride,
-  onBreakSave,
-  onBreakClear,
+  onBreakEdit,
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: employee.id,
@@ -74,15 +72,6 @@ export default function EmployeeTile({
   const [labelDraft, setLabelDraft]     = useState('')
   const labelInputRef = useRef(null)
 
-  // Break panel state
-  const [breaksExpanded, setBreaksExpanded] = useState(false)
-  const [brk1Time, setBrk1Time] = useState('')
-  const [brk1Min, setBrk1Min]   = useState('15')
-  const [lunchTime, setLunchTime] = useState('')
-  const [lunchMin, setLunchMin]   = useState('30')
-  const [brk2Time, setBrk2Time] = useState('')
-  const [brk2Min, setBrk2Min]   = useState('15')
-
   const style = { transform: CSS.Transform.toString(transform), transition }
 
   const color      = avatarColor(employee.name)
@@ -94,16 +83,13 @@ export default function EmployeeTile({
   const currentLane = assignment?.lane ?? employee.default_lane
   const isSpecialProject = currentLane === 'specialProject'
 
-  // Time-off badge: stored in role field when auto-placed in PTO lane by B2E sync
   const roleValue   = assignment?.role ?? employee.role
   const isTimeOff   = TIME_OFF_LABELS.has(roleValue)
-
-  // Special Project label = role value when in specialProject lane
   const specialProjectLabel = isSpecialProject ? (roleValue || '') : ''
 
-  // Break override availability — hidden for carryover (read-only)
+  // Break override indicator + edit trigger
   const hasBreakOverride = !!breakOverride
-  const canEditBreaks    = !isCarryover && typeof onBreakSave === 'function'
+  const canEditBreaks    = !isCarryover && typeof onBreakEdit === 'function'
 
   // Auto-open label editor when employee is just dropped into Special Project
   useEffect(() => {
@@ -114,7 +100,6 @@ export default function EmployeeTile({
     }
   }, [autoEditLabel, isSpecialProject])
 
-  // Focus the label input when it opens
   useEffect(() => {
     if (editingLabel && labelInputRef.current) {
       labelInputRef.current.focus()
@@ -122,29 +107,10 @@ export default function EmployeeTile({
     }
   }, [editingLabel])
 
-  // When opening the break panel, seed inputs from existing override (or blank if none).
-  useEffect(() => {
-    if (breaksExpanded) {
-      if (breakOverride) {
-        setBrk1Time(decToTimeStr(breakOverride.first_break_at))
-        setBrk1Min(String(breakOverride.first_break_minutes))
-        setLunchTime(decToTimeStr(breakOverride.lunch_at))
-        setLunchMin(String(breakOverride.lunch_minutes))
-        setBrk2Time(decToTimeStr(breakOverride.second_break_at))
-        setBrk2Min(String(breakOverride.second_break_minutes))
-      } else {
-        setBrk1Time(''); setBrk1Min('15')
-        setLunchTime(''); setLunchMin('30')
-        setBrk2Time(''); setBrk2Min('15')
-      }
-    }
-  }, [breaksExpanded, breakOverride])
-
   const effectiveStart = assignment?.shift_start ?? laneSettings?.defaultStart ?? null
   const effectiveHours = assignment?.shift_hours ?? laneSettings?.defaultHours ?? 8
   const shiftLabel     = fmtShift(effectiveStart, effectiveHours)
 
-  // End-time label for the carryover badge (renormalized start + tail hours)
   const carryoverEndLabel = isCarryover && effectiveStart != null
     ? fmtHour((Number(effectiveStart) + Number(effectiveHours ?? 0)) % 24)
     : null
@@ -201,33 +167,10 @@ export default function EmployeeTile({
     }
   }
 
-  function toggleBreaks(e) {
+  function handleBreakChevronClick(e) {
     e.stopPropagation()
     if (!canEditBreaks) return
-    setBreaksExpanded(v => !v)
-  }
-
-  const breakSaveEnabled = !!(brk1Time && lunchTime && brk2Time &&
-    Number(brk1Min) > 0 && Number(lunchMin) > 0 && Number(brk2Min) > 0)
-
-  function handleBreakSave(e) {
-    e.stopPropagation()
-    if (!breakSaveEnabled) return
-    onBreakSave?.(employee.id, {
-      firstBreakAt:        timeStrToDec(brk1Time),
-      firstBreakMinutes:   Number(brk1Min),
-      lunchAt:             timeStrToDec(lunchTime),
-      lunchMinutes:        Number(lunchMin),
-      secondBreakAt:       timeStrToDec(brk2Time),
-      secondBreakMinutes:  Number(brk2Min),
-    })
-    setBreaksExpanded(false)
-  }
-
-  function handleBreakClear(e) {
-    e.stopPropagation()
-    onBreakClear?.(employee.id)
-    setBreaksExpanded(false)
+    onBreakEdit?.(employee)
   }
 
   return (
@@ -241,199 +184,116 @@ export default function EmployeeTile({
         isFromLoan        ? ' emp-from-loan'     : ''}${
         isTimeOff         ? ' emp-time-off'      : ''}${
         isCarryover       ? ' emp-carryover'     : ''}${
-        isSpecialProject  ? ' emp-special-project' : ''}${
-        breaksExpanded    ? ' emp-tile-expanded' : ''}`}
+        isSpecialProject  ? ' emp-special-project' : ''}`}
       title={employee.name}
       {...attributes}
       {...(isCarryover ? {} : listeners)}
     >
-      <div className="emp-tile-main">
-        <div className="emp-avatar" style={{ background: color, opacity: (isOnLoan || isCarryover) ? 0.45 : 0.9 }}>
-          {initials(employee.name)}
-        </div>
-        <div className="emp-info">
-          <div className="emp-name">
-            {employee.name}
-            {hasBreakOverride && !breaksExpanded && (
-              <span className="emp-break-badge" title="Custom break schedule">⏱</span>
-            )}
-          </div>
-          <div className="emp-role">
-            {isTemp     && <span className="emp-temp-badge">TEMP</span>}
-            {isCarryover && (
-              <span className="emp-carryover-badge">↪ Until {carryoverEndLabel ?? '?'}</span>
-            )}
-            {isOnLoan   && <span className="emp-loan-badge emp-loan-badge--out">ON LOAN → {facilityCode(assignment.on_loan_to)}</span>}
-            {isFromLoan && <span className="emp-loan-badge emp-loan-badge--in">FROM: {facilityCode(assignment.from_facility)}</span>}
-            {isTimeOff  && !isOnLoan && !isFromLoan && !isSpecialProject && (
-              <span className="emp-timeoff-badge">{roleValue}</span>
-            )}
-            {!isOnLoan && !isFromLoan && !isTimeOff && !isCarryover && !isSpecialProject && roleValue}
-          </div>
-
-          {/* Special Project label — optional, inline-editable */}
-          {isSpecialProject && (
-            editingLabel ? (
-              <div className="emp-sp-edit" onPointerDown={e => e.stopPropagation()}>
-                <input
-                  ref={labelInputRef}
-                  type="text"
-                  className="emp-sp-input"
-                  value={labelDraft}
-                  onChange={e => setLabelDraft(e.target.value)}
-                  onKeyDown={handleLabelKeyDown}
-                  onBlur={commitLabel}
-                  placeholder="e.g. Relabeling"
-                  maxLength={48}
-                />
-              </div>
-            ) : (
-              <div
-                className={`emp-sp-label${specialProjectLabel ? '' : ' emp-sp-label--empty'}`}
-                onClick={openLabelEdit}
-                onPointerDown={e => e.stopPropagation()}
-                title="Click to edit project note"
-              >
-                {specialProjectLabel || '+ add note'}
-              </div>
-            )
+      <div className="emp-avatar" style={{ background: color, opacity: (isOnLoan || isCarryover) ? 0.45 : 0.9 }}>
+        {initials(employee.name)}
+      </div>
+      <div className="emp-info">
+        <div className="emp-name">
+          {employee.name}
+          {hasBreakOverride && (
+            <span className="emp-break-badge" title="Custom break schedule">⏱</span>
           )}
+        </div>
+        <div className="emp-role">
+          {isTemp     && <span className="emp-temp-badge">TEMP</span>}
+          {isCarryover && (
+            <span className="emp-carryover-badge">↪ Until {carryoverEndLabel ?? '?'}</span>
+          )}
+          {isOnLoan   && <span className="emp-loan-badge emp-loan-badge--out">ON LOAN → {facilityCode(assignment.on_loan_to)}</span>}
+          {isFromLoan && <span className="emp-loan-badge emp-loan-badge--in">FROM: {facilityCode(assignment.from_facility)}</span>}
+          {isTimeOff  && !isOnLoan && !isFromLoan && !isSpecialProject && (
+            <span className="emp-timeoff-badge">{roleValue}</span>
+          )}
+          {!isOnLoan && !isFromLoan && !isTimeOff && !isCarryover && !isSpecialProject && roleValue}
+        </div>
 
-          {editing ? (
-            <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
-              <input type="time" className="emp-shift-time" value={editStart} onChange={e => setEditStart(e.target.value)} />
-              <span className="emp-shift-sep">–</span>
-              <input type="time" className="emp-shift-time" value={editEnd}   onChange={e => setEditEnd(e.target.value)} />
-              <button className="emp-shift-save"   onClick={handleSave}>✓</button>
-              <button className="emp-shift-cancel" onClick={handleCancel}>✕</button>
+        {/* Special Project label — optional, inline-editable */}
+        {isSpecialProject && (
+          editingLabel ? (
+            <div className="emp-sp-edit" onPointerDown={e => e.stopPropagation()}>
+              <input
+                ref={labelInputRef}
+                type="text"
+                className="emp-sp-input"
+                value={labelDraft}
+                onChange={e => setLabelDraft(e.target.value)}
+                onKeyDown={handleLabelKeyDown}
+                onBlur={commitLabel}
+                placeholder="e.g. Relabeling"
+                maxLength={48}
+              />
             </div>
           ) : (
-            shiftLabel && (
-              <div
-                className="emp-shift-label"
-                onClick={openEdit}
-                onPointerDown={e => e.stopPropagation()}
-                title={isCarryover ? 'Carryover shift (read-only)' : 'Click to edit shift times'}
-              >
-                {shiftLabel}
-              </div>
-            )
-          )}
-        </div>
+            <div
+              className={`emp-sp-label${specialProjectLabel ? '' : ' emp-sp-label--empty'}`}
+              onClick={openLabelEdit}
+              onPointerDown={e => e.stopPropagation()}
+              title="Click to edit project note"
+            >
+              {specialProjectLabel || '+ add note'}
+            </div>
+          )
+        )}
 
-        {/* Action button: delete temp | recall loan | carryover icon | drag handle */}
-        {onDelete ? (
-          <button className="emp-delete-btn" onClick={e => { e.stopPropagation(); onDelete() }}
-            title="Remove temp employee" onPointerDown={e => e.stopPropagation()}>×</button>
-        ) : isOnLoan && onRecall ? (
-          <button className="emp-delete-btn emp-recall-btn"
-            onClick={e => { e.stopPropagation(); onRecall() }}
-            title="Recall employee back from loan"
-            onPointerDown={e => e.stopPropagation()}>↩</button>
-        ) : isCarryover ? (
-          <span className="emp-carryover-icon" title="Carryover from prior shift">↪</span>
+        {editing ? (
+          <div className="emp-shift-edit" onPointerDown={e => e.stopPropagation()}>
+            <input type="time" className="emp-shift-time" value={editStart} onChange={e => setEditStart(e.target.value)} />
+            <span className="emp-shift-sep">–</span>
+            <input type="time" className="emp-shift-time" value={editEnd}   onChange={e => setEditEnd(e.target.value)} />
+            <button className="emp-shift-save"   onClick={handleSave}>✓</button>
+            <button className="emp-shift-cancel" onClick={handleCancel}>✕</button>
+          </div>
         ) : (
-          <>
-            {canEditBreaks && (
-              <button
-                className={`emp-break-chevron${breaksExpanded ? ' emp-break-chevron--open' : ''}${hasBreakOverride ? ' emp-break-chevron--active' : ''}`}
-                onClick={toggleBreaks}
-                onPointerDown={e => e.stopPropagation()}
-                title={hasBreakOverride ? 'Custom break schedule (click to edit)' : 'Set custom break schedule'}
-              >
-                {breaksExpanded ? '▴' : '▾'}
-              </button>
-            )}
-            <svg className="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-              <rect x="2" y="2" width="2" height="2" rx="1"/>
-              <rect x="6" y="2" width="2" height="2" rx="1"/>
-              <rect x="2" y="5" width="2" height="2" rx="1"/>
-              <rect x="6" y="5" width="2" height="2" rx="1"/>
-              <rect x="2" y="8" width="2" height="2" rx="1"/>
-              <rect x="6" y="8" width="2" height="2" rx="1"/>
-            </svg>
-          </>
+          shiftLabel && (
+            <div
+              className="emp-shift-label"
+              onClick={openEdit}
+              onPointerDown={e => e.stopPropagation()}
+              title={isCarryover ? 'Carryover shift (read-only)' : 'Click to edit shift times'}
+            >
+              {shiftLabel}
+            </div>
+          )
         )}
       </div>
 
-      {/* Break override expansion panel */}
-      {breaksExpanded && (
-        <div className="emp-break-panel" onPointerDown={e => e.stopPropagation()}>
-          <div className="emp-break-panel-title">
-            Custom break schedule
-            <span className="emp-break-panel-help">All three required</span>
-          </div>
-          <div className="emp-break-row">
-            <span className="emp-break-row-label">First break</span>
-            <input
-              type="time"
-              className="emp-break-time"
-              value={brk1Time}
-              onChange={e => setBrk1Time(e.target.value)}
-            />
-            <span className="emp-break-for">for</span>
-            <input
-              type="number"
-              className="emp-break-min"
-              min="1" max="120"
-              value={brk1Min}
-              onChange={e => setBrk1Min(e.target.value)}
-            />
-            <span className="emp-break-min-unit">min</span>
-          </div>
-          <div className="emp-break-row">
-            <span className="emp-break-row-label">Lunch</span>
-            <input
-              type="time"
-              className="emp-break-time"
-              value={lunchTime}
-              onChange={e => setLunchTime(e.target.value)}
-            />
-            <span className="emp-break-for">for</span>
-            <input
-              type="number"
-              className="emp-break-min"
-              min="1" max="120"
-              value={lunchMin}
-              onChange={e => setLunchMin(e.target.value)}
-            />
-            <span className="emp-break-min-unit">min</span>
-          </div>
-          <div className="emp-break-row">
-            <span className="emp-break-row-label">Second break</span>
-            <input
-              type="time"
-              className="emp-break-time"
-              value={brk2Time}
-              onChange={e => setBrk2Time(e.target.value)}
-            />
-            <span className="emp-break-for">for</span>
-            <input
-              type="number"
-              className="emp-break-min"
-              min="1" max="120"
-              value={brk2Min}
-              onChange={e => setBrk2Min(e.target.value)}
-            />
-            <span className="emp-break-min-unit">min</span>
-          </div>
-          <div className="emp-break-actions">
+      {/* Action button: delete temp | recall loan | carryover icon | break chevron + drag handle */}
+      {onDelete ? (
+        <button className="emp-delete-btn" onClick={e => { e.stopPropagation(); onDelete() }}
+          title="Remove temp employee" onPointerDown={e => e.stopPropagation()}>×</button>
+      ) : isOnLoan && onRecall ? (
+        <button className="emp-delete-btn emp-recall-btn"
+          onClick={e => { e.stopPropagation(); onRecall() }}
+          title="Recall employee back from loan"
+          onPointerDown={e => e.stopPropagation()}>↩</button>
+      ) : isCarryover ? (
+        <span className="emp-carryover-icon" title="Carryover from prior shift">↪</span>
+      ) : (
+        <>
+          {canEditBreaks && (
             <button
-              className="emp-break-save"
-              onClick={handleBreakSave}
-              disabled={!breakSaveEnabled}
-              title={breakSaveEnabled ? 'Save break override' : 'Fill all three break times'}
+              className={`emp-break-chevron${hasBreakOverride ? ' emp-break-chevron--active' : ''}`}
+              onClick={handleBreakChevronClick}
+              onPointerDown={e => e.stopPropagation()}
+              title={hasBreakOverride ? 'Edit custom break schedule' : 'Set custom break schedule'}
             >
-              Save
+              ⏱
             </button>
-            {hasBreakOverride && (
-              <button className="emp-break-clear" onClick={handleBreakClear} title="Remove override (use facility default)">
-                Clear
-              </button>
-            )}
-            <button className="emp-break-cancel" onClick={toggleBreaks}>Cancel</button>
-          </div>
-        </div>
+          )}
+          <svg className="drag-handle" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+            <rect x="2" y="2" width="2" height="2" rx="1"/>
+            <rect x="6" y="2" width="2" height="2" rx="1"/>
+            <rect x="2" y="5" width="2" height="2" rx="1"/>
+            <rect x="6" y="5" width="2" height="2" rx="1"/>
+            <rect x="2" y="8" width="2" height="2" rx="1"/>
+            <rect x="6" y="8" width="2" height="2" rx="1"/>
+          </svg>
+        </>
       )}
     </div>
   )

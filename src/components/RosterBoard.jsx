@@ -14,6 +14,7 @@ import {
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
+import BreakOverrideModal from './BreakOverrideModal.jsx'
 import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, FACILITIES, FACILITY_LIST } from '../lib/constants.js'
 import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
@@ -51,13 +52,11 @@ const SORT_MODES = [
   { key: 'last',    label: 'A–Z Last' },
 ]
 
-// Droppable ID for the send-to-facility zone — encodes source lane
 const SEND_ZONE_PREFIX = '__send__'
 function sendZoneId(laneId) { return `${SEND_ZONE_PREFIX}${laneId}` }
 function isSendZone(id)     { return String(id).startsWith(SEND_ZONE_PREFIX) }
 function laneFromSendZone(id) { return String(id).slice(SEND_ZONE_PREFIX.length) }
 
-// Active (labor-counting) lanes — PTO/callin/specialProject excluded
 const STANDARD_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2', 'shift3'])
 const CAL_ACTIVE_LANES = new Set([
   'side12_shift1','side12_mid','side12_shift2','side12_shift3',
@@ -151,19 +150,10 @@ function laneSideClass(laneId) {
   return ''
 }
 
-/**
- * Filter carryovers out before any DB write — they are NOT persisted.
- */
 function withoutCarryovers(employees) {
   return employees.filter(e => !e.is_carryover)
 }
 
-/**
- * Apply time-off overrides to a list of B2E employees before seeding.
- * Employees found in the timeOffMap get their default_lane set to 'pto'
- * and their role set to the time-off label (e.g. 'FMLA', 'PTO') so the
- * tile badge survives a page refresh.
- */
 function applyTimeOffOverrides(employees, timeOffMap) {
   if (!timeOffMap.size) return employees
   return employees.map(emp => {
@@ -173,14 +163,11 @@ function applyTimeOffOverrides(employees, timeOffMap) {
   })
 }
 
-// Resolve the key used to look up a per-employee break override.
-// Carryovers' .id has a __carryover suffix; the real B2E employee id is on
-// .originalId. Per-employee break rows are keyed on the real id.
+// Per-employee break override lookup key (originalId for carryovers).
 function breakLookupKey(emp) {
   return String(emp.originalId ?? emp.id)
 }
 
-// ── Send-to-Facility Drop Zone ───────────────────────────────────
 function SendZone({ laneId }) {
   const { setNodeRef, isOver } = useDroppable({ id: sendZoneId(laneId) })
   return (
@@ -194,7 +181,6 @@ function SendZone({ laneId }) {
   )
 }
 
-// ── Loan Modal ───────────────────────────────────────────────────
 function LoanModal({ employee, sourceFacility, onConfirm, onCancel }) {
   const otherFacilities = FACILITY_LIST.filter(f => f.id !== sourceFacility)
   const [destFacility, setDestFacility] = useState(otherFacilities[0]?.id ?? '')
@@ -256,8 +242,7 @@ function LoanModal({ employee, sourceFacility, onConfirm, onCancel }) {
   )
 }
 
-// ── DroppableLane ────────────────────────────────────────────────
-function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings, onDeleteTemp, onShiftChange, onRecall, onSpecialProjectLabelChange, autoEditLabelId, onAutoEditConsumed, sortOrder, isActiveLane, breaksMap, onBreakSave, onBreakClear }) {
+function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings, onDeleteTemp, onShiftChange, onRecall, onSpecialProjectLabelChange, autoEditLabelId, onAutoEditConsumed, sortOrder, isActiveLane, breaksMap, onBreakEdit }) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id })
   const sorted       = sortEmployees(employees, sortOrder)
   const ids          = sorted.map(e => e.id)
@@ -265,7 +250,6 @@ function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings,
   const laneSettings = getLaneSettings(lane.id, settings)
   const sideClass    = laneSideClass(lane.id)
 
-  // Lane header headcount excludes carryovers (already counted on prior day).
   const headcount = employees.filter(e => !carryoverMap?.[e.id]).length
 
   function renderTile(emp) {
@@ -282,8 +266,7 @@ function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings,
         autoEditLabel={autoEditLabelId === emp.id}
         onAutoEditConsumed={onAutoEditConsumed}
         breakOverride={breaksMap?.get(breakLookupKey(emp)) ?? null}
-        onBreakSave={emp.is_carryover ? null : onBreakSave}
-        onBreakClear={emp.is_carryover ? null : onBreakClear}
+        onBreakEdit={emp.is_carryover ? null : onBreakEdit}
       />
     )
   }
@@ -313,7 +296,6 @@ function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings,
           ) : (
             sorted.map(renderTile)
           )}
-          {/* Send zone — only shown on active (labor-counting) lanes */}
           {isActiveLane && <SendZone laneId={lane.id} />}
         </div>
       </SortableContext>
@@ -350,14 +332,11 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [showAddTemp, setShowAddTemp]     = useState(false)
   const [pendingWrites, setPendingWrites] = useState(0)
   const [sortOrder, setSortOrder]         = useState('default')
-  // Per-employee break overrides — Map<employee_id, breakRow>
   const [breaksMap, setBreaksMap]         = useState(new Map())
-  // Loan modal state
-  const [loanEmployee, setLoanEmployee]   = useState(null) // emp being sent
-  // Special Project auto-edit: tracks which employee just landed in
-  // specialProject so EmployeeTile can auto-open the label input.
+  const [editingBreakEmployee, setEditingBreakEmployee] = useState(null)
+  const [loanEmployee, setLoanEmployee]   = useState(null)
   const [autoEditLabelId, setAutoEditLabelId] = useState(null)
-  const [syncToast, setSyncToast]             = useState(null) // null | 'visible' | 'leaving'
+  const [syncToast, setSyncToast]             = useState(null)
   const loadRef            = useRef(null)
   const autoSyncCheckedRef = useRef(new Set())
 
@@ -366,8 +345,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   async function load(facId, date) {
     setIsLoading(true)
 
-    // Fetch B2E roster ALWAYS (for live carryover data) in parallel with
-    // assignments, time-off, and break overrides.
     const [assignments, timeOffMap, b2eRosterFull, breaksMapResult] = await Promise.all([
       fetchTodayAssignments(facId, date),
       fetchB2eTimeOff(facId, date).catch(() => new Map()),
@@ -380,7 +357,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     const carryovers = b2eRosterFull.filter(e => e.is_carryover)
 
     if (assignments.length === 0) {
-      // First-time seed — persist non-carryover entries only
       const persistable = withoutCarryovers(b2eRosterFull)
       if (persistable.length > 0) {
         const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
@@ -391,15 +367,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         await purgeStaleAssignments(empIds, facId, date)
         const seeded = await fetchTodayAssignments(facId, date)
         _buildState(facId, seeded, timeOffMap, carryovers)
-        // First-visit seed: mark as checked so auto-resync doesn't fire on this load.
-        // The freshly-seeded rows already carry last_b2e_sync_at from seedRosterAssignments.
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
         return
       }
     } else {
-      // Roster already seeded — apply any time-off overrides that aren't
-      // already in the PTO lane. PTO wins over Special Project too —
-      // they're not in the building, so PTO is the stronger constraint.
       if (timeOffMap.size > 0) {
         const toUpdate = []
         for (const asg of assignments) {
@@ -410,9 +381,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         }
         if (toUpdate.length > 0) {
           for (const row of toUpdate) {
-            // automatic:true — auto-PTO is NOT a manual edit; don't set the
-            // manually_edited protection flag so future B2E syncs can still
-            // correct this employee's lane if they return from PTO.
             upsertAssignment(row, { automatic: true }).catch(e => console.warn('time-off upsert:', e))
           }
           const overrideMap = new Map(toUpdate.map(r => [r.employee_id, r]))
@@ -455,11 +423,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       emps = STUB_EMPLOYEES.map(e => ({ ...e, facility: facId }))
     }
 
-    // Carryovers come from B2E with synthetic IDs (e.g. '549__carryover')
-    // so they coexist with the employee's normal today's-shift entry.
     const carryoverEmps = carryovers.map(c => ({
-      id:           c.id,           // already has CARRYOVER_ID_SUFFIX
-      originalId:   c.originalId,   // real employee ID, for reference
+      id:           c.id,
+      originalId:   c.originalId,
       name:         c.name,
       role:         c.role,
       facility:     facId,
@@ -482,7 +448,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     for (const c of carryoverEmps) map[c.id] = c.default_lane
     setLaneMap(map)
 
-    // Synthetic assignments for carryovers — ephemeral, never upserted.
     const asgMap = {}
     assignments.forEach(a => { asgMap[a.employee_id] = a })
     for (const c of carryoverEmps) {
@@ -519,14 +484,12 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     }
   }, [])
 
-  // ── Toast helper — 1.6s visible + 0.25s fade ──────────────────────────────
   const showSyncToast = useCallback(() => {
     setSyncToast('visible')
     setTimeout(() => setSyncToast('leaving'), 1600)
     setTimeout(() => setSyncToast(null), 1850)
   }, [])
 
-  // ── Core B2E sync logic (shared by button + auto-resync) ───────────────────
   const performB2eSync = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setSyncState('loading')
     try {
@@ -544,8 +507,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
       if (err) { if (!silent) setSyncState(err); return }
-      // seedRosterAssignments now skips rows where manually_edited=true,
-      // so manual moves / PTO / temp assignments survive every sync.
       const seedErr = await seedRosterAssignments(withTimeOff, date)
       if (seedErr) { if (!silent) setSyncState(seedErr); return }
       const empIds = withTimeOff.map(e => e.id)
@@ -561,12 +522,8 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     }
   }, [facility, planDate])
 
-  // ── Button handler — thin wrapper ──────────────────────────────────────────
   const handleB2eSync = useCallback(() => performB2eSync({ silent: false }), [performB2eSync])
 
-  // ── Auto-resync: fires once per (facility, date) pair per session ──────────
-  // Checks last_b2e_sync_at staleness; if stale, shows toast and silently syncs.
-  // Manually edited rows are protected at the seedRosterAssignments layer.
   const maybeAutoResync = useCallback(async (facId, date) => {
     const key = `${facId}:${date}`
     if (autoSyncCheckedRef.current.has(key)) return
@@ -617,8 +574,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
   }, [employees, assignmentMap, laneMap, facility, planDate, trackedUpsert])
 
-  // ── Special Project label change: persist the user-typed note into role.
-  // Reuses the `role` column on roster_assignments — no schema change needed.
   const handleSpecialProjectLabelChange = useCallback(async (empId, label) => {
     const emp = employees.find(e => e.id === empId)
     if (!emp || emp.is_carryover) return
@@ -637,7 +592,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       ...existing,
       role:          trimmed,
     }
-    // Optimistic: update local state immediately so the tile reflects the new label.
     setAssignmentMap(prev => ({ ...prev, [empId]: updated }))
     setEmployees(prev => prev.map(e => e.id === empId ? { ...e, role: trimmed } : e))
     await trackedUpsert(updated)
@@ -645,9 +599,20 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   const handleAutoEditConsumed = useCallback(() => setAutoEditLabelId(null), [])
 
-  // ── Break override save/clear — optimistic local update, async DB write
-  const handleBreakSave = useCallback(async (empId, payload) => {
-    const key = String(empId)
+  // ── Break override modal handlers ──────────────────────────────────────────
+  // Chevron click opens the modal; modal save/clear wrap the underlying DB
+  // calls and close the modal on success.
+  const handleBreakEdit = useCallback((emp) => {
+    setEditingBreakEmployee(emp)
+  }, [])
+
+  const closeBreakModal = useCallback(() => {
+    setEditingBreakEmployee(null)
+  }, [])
+
+  const handleBreakModalSave = useCallback(async (payload) => {
+    if (!editingBreakEmployee) return
+    const empId = String(editingBreakEmployee.originalId ?? editingBreakEmployee.id)
     const row = {
       facility,
       first_break_at:        payload.firstBreakAt,
@@ -657,11 +622,12 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       second_break_at:       payload.secondBreakAt,
       second_break_minutes:  payload.secondBreakMinutes,
     }
-    setBreaksMap(prev => { const n = new Map(prev); n.set(key, row); return n })
+    setBreaksMap(prev => { const n = new Map(prev); n.set(empId, row); return n })
+    setEditingBreakEmployee(null)
     setPendingWrites(n => n + 1)
     try {
       await upsertEmployeeBreak({
-        employeeId:           key,
+        employeeId:           empId,
         facility,
         firstBreakAt:         payload.firstBreakAt,
         firstBreakMinutes:    payload.firstBreakMinutes,
@@ -671,26 +637,27 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         secondBreakMinutes:   payload.secondBreakMinutes,
       })
     } catch (e) {
-      console.error('handleBreakSave failed:', e)
+      console.error('handleBreakModalSave failed:', e)
     } finally {
       setPendingWrites(n => n - 1)
     }
-  }, [facility])
+  }, [editingBreakEmployee, facility])
 
-  const handleBreakClear = useCallback(async (empId) => {
-    const key = String(empId)
-    setBreaksMap(prev => { const n = new Map(prev); n.delete(key); return n })
+  const handleBreakModalClear = useCallback(async () => {
+    if (!editingBreakEmployee) return
+    const empId = String(editingBreakEmployee.originalId ?? editingBreakEmployee.id)
+    setBreaksMap(prev => { const n = new Map(prev); n.delete(empId); return n })
+    setEditingBreakEmployee(null)
     setPendingWrites(n => n + 1)
     try {
-      await deleteEmployeeBreak(key)
+      await deleteEmployeeBreak(empId)
     } catch (e) {
-      console.error('handleBreakClear failed:', e)
+      console.error('handleBreakModalClear failed:', e)
     } finally {
       setPendingWrites(n => n - 1)
     }
-  }, [])
+  }, [editingBreakEmployee])
 
-  // ── Loan: drop on send zone → open modal
   const handleSendConfirm = useCallback(async (destFacility, destLane) => {
     if (!loanEmployee) return
     const date     = planDate || todayISO()
@@ -721,7 +688,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setLoanEmployee(null)
   }, [loanEmployee, assignmentMap, facility, planDate])
 
-  // ── Recall: ↩ button on ON LOAN tile
   const handleRecall = useCallback(async (emp) => {
     const date       = planDate || todayISO()
     const assignment = assignmentMap[emp.id]
@@ -771,7 +737,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     const emp = employees.find(e => e.id === employeeId)
     if (emp?.is_carryover) return
 
-    // Dropped on the send zone → open loan modal
     if (isSendZone(overId)) {
       const emp = employees.find(e => e.id === employeeId)
       if (emp && !assignmentMap[emp.id]?.on_loan_to) {
@@ -796,10 +761,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setLaneMap(prev => ({ ...prev, [employeeId]: laneId }))
     setAssignmentMap(prev => {
       const existing = prev[employeeId] ?? {}
-      // When moving INTO specialProject, clear any prior role so the tile
-      // starts with an empty label (user will type or skip).
-      // When moving OUT of specialProject, also clear role so the previous
-      // note doesn't bleed into the new lane's role display.
       const isEnteringSP = laneId === 'specialProject'
       const isLeavingSP  = previousLane === 'specialProject' && laneId !== 'specialProject'
       const nextRole     = (isEnteringSP || isLeavingSP) ? null : existing.role
@@ -809,14 +770,10 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (!emp) return
     if (emp.is_carryover) return
 
-    // Clear role on the in-memory employee record too, so the tile picks
-    // up the cleared value immediately (EmployeeTile falls back to
-    // employee.role when assignment.role is undefined).
     if (laneId === 'specialProject' || previousLane === 'specialProject') {
       setEmployees(prev => prev.map(e => e.id === employeeId ? { ...e, role: null } : e))
     }
 
-    // Trigger auto-prompt when entering Special Project lane
     if (laneId === 'specialProject') {
       setAutoEditLabelId(employeeId)
     }
@@ -864,8 +821,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setSortOrder(SORT_MODES[(idx + 1) % SORT_MODES.length].key)
   }
 
-  // Grid: standard = 7 lanes (4 active + pto + callin + specialProject)
-  //       CAL      = 11 lanes (8 active + pto + callin + specialProject)
   const gridCols  = isCal ? 'repeat(11, minmax(0, 1fr))' : 'repeat(7, minmax(0, 1fr))'
   const gridStyle = { gridTemplateColumns: gridCols }
 
@@ -879,7 +834,6 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   return (
     <div className="roster-section">
-      {/* ── Auto-sync toast — fixed, centered, appears when stale roster detected ── */}
       {syncToast && (
         <div className={`b2e-sync-toast${syncToast === 'leaving' ? ' b2e-sync-toast--leaving' : ''}`}>
           <span className="b2e-sync-toast-icon">⟳</span>
@@ -940,8 +894,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
               autoEditLabelId={autoEditLabelId}
               onAutoEditConsumed={handleAutoEditConsumed}
               breaksMap={breaksMap}
-              onBreakSave={handleBreakSave}
-              onBreakClear={handleBreakClear}
+              onBreakEdit={handleBreakEdit}
             />
           ))}
         </div>
@@ -965,6 +918,16 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           sourceFacility={facility}
           onConfirm={handleSendConfirm}
           onCancel={() => setLoanEmployee(null)}
+        />
+      )}
+
+      {editingBreakEmployee && (
+        <BreakOverrideModal
+          employee={editingBreakEmployee}
+          breakOverride={breaksMap.get(String(editingBreakEmployee.originalId ?? editingBreakEmployee.id)) ?? null}
+          onSave={handleBreakModalSave}
+          onClear={handleBreakModalClear}
+          onCancel={closeBreakModal}
         />
       )}
     </div>
