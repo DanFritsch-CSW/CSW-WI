@@ -24,6 +24,41 @@ function getBreakMultipliers(settings) {
 }
 
 /**
+ * Compute per-clock-hour break multipliers for an employee with a custom
+ * break schedule. Returns Array(24) where each element is the productivity
+ * multiplier (0..1) for that clock hour, accounting for break-minute
+ * overlap.
+ *
+ * Each break is a (start_decimal_hour, duration_minutes) window. For each
+ * clock hour h, we compute total HOURS the employee is on break during
+ * [h, h+1), and multiplier = 1 − (totalBreakHoursInHour).
+ *
+ * @param {Object|null} brk - { first_break_at, first_break_minutes,
+ *                              lunch_at,        lunch_minutes,
+ *                              second_break_at, second_break_minutes }
+ */
+function getEmployeeBreakMultipliers(brk) {
+  const muls = new Array(24).fill(1)
+  if (!brk) return muls
+  const breaks = [
+    [Number(brk.first_break_at),  Number(brk.first_break_minutes)  / 60],
+    [Number(brk.lunch_at),        Number(brk.lunch_minutes)        / 60],
+    [Number(brk.second_break_at), Number(brk.second_break_minutes) / 60],
+  ]
+  for (let h = 0; h < 24; h++) {
+    let breakHoursInHour = 0
+    for (const [start, durHours] of breaks) {
+      if (!Number.isFinite(start) || !Number.isFinite(durHours) || durHours <= 0) continue
+      const end = start + durHours
+      const overlap = Math.max(0, Math.min(h + 1, end) - Math.max(h, start))
+      breakHoursInHour += overlap
+    }
+    muls[h] = Math.max(0, 1 - breakHoursInHour)
+  }
+  return muls
+}
+
+/**
  * Apply facility settings to hourly data, producing the `req` column.
  *
  * @param {Array} hourlyData  - 24-row array from Omni; each row has `h` (0-23).
@@ -124,10 +159,17 @@ function resolveEmployeeShift(emp, laneMap, assignmentMap, laneFilter) {
  * Build a 24-element array of roster-based available labor hours per hour of day.
  *
  * Operational day = 5am–4:59am. Carryovers are renormalized to start at 5am
- * with only their tail hours counted. break_hour index uses realShiftStart.
+ * with only their tail hours counted.
+ *
+ * Break multiplier source per employee:
+ *   - If `breaksMap` has an entry for emp.originalId ?? emp.id → use
+ *     clock-time-based per-hour multipliers (getEmployeeBreakMultipliers).
+ *   - Otherwise → use facility BREAK_DEFAULTS indexed by shift-hour-offset.
+ *
+ * @param {Map|null} breaksMap - Map<employee_id, breakOverride> (optional).
  */
-export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
-  const breakMuls   = getBreakMultipliers(settings)
+export function buildRosterAvailability(employees, laneMap, settings, assignmentMap = {}, laneFilter = null, breaksMap = null) {
+  const facilityBreakMuls = getBreakMultipliers(settings)
   const hourlyAvail = new Array(24).fill(0)
 
   for (const emp of employees) {
@@ -137,6 +179,11 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
     const { resolvedStart, resolvedHours, realShiftStart, isCarryover } = shift
     const fullHours = Math.floor(resolvedHours)
     const frac      = resolvedHours - fullHours
+
+    // Per-employee override (clock-time based)
+    const empKey = String(emp.originalId ?? emp.id)
+    const breakOverride = breaksMap?.get?.(empKey) ?? null
+    const empMuls = breakOverride ? getEmployeeBreakMultipliers(breakOverride) : null
 
     // For carryover: at 5am today, the employee is in shift-hour
     // (OP_DAY_START + 24 - realShiftStart). E.g. 10pm start → 5+24-22 = 7
@@ -149,14 +196,19 @@ export function buildRosterAvailability(employees, laneMap, settings, assignment
       const hLinear = resolvedStart + i
       if (hLinear >= OP_DAY_END_LINEAR) break
       const hMod = hLinear % 24
-      const mul  = breakMuls[i + breakIdxOffset] ?? 1
+      const mul = empMuls
+        ? (empMuls[hMod] ?? 1)
+        : (facilityBreakMuls[i + breakIdxOffset] ?? 1)
       hourlyAvail[hMod] += mul
     }
     if (frac > 0) {
       const hLinear = resolvedStart + fullHours
       if (hLinear < OP_DAY_END_LINEAR) {
         const hMod = hLinear % 24
-        hourlyAvail[hMod] += frac * (breakMuls[fullHours + breakIdxOffset] ?? 1)
+        const mul = empMuls
+          ? (empMuls[hMod] ?? 1)
+          : (facilityBreakMuls[fullHours + breakIdxOffset] ?? 1)
+        hourlyAvail[hMod] += frac * mul
       }
     }
   }
@@ -230,9 +282,11 @@ export function buildRosterStaffedHeadcount(employees, laneMap, assignmentMap = 
 /**
  * Compute break-adjusted total hours for a set of employees.
  * Respects the 5am operational day cap for overnight shifts.
+ * Optionally accepts a breaksMap of per-employee overrides; same selection
+ * logic as buildRosterAvailability (override → clock-time muls, else facility).
  */
-export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null) {
-  const breakMuls = getBreakMultipliers(settings)
+export function computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap = {}, laneFilter = null, breaksMap = null) {
+  const facilityBreakMuls = getBreakMultipliers(settings)
   let total = 0
 
   for (const emp of employees) {
@@ -245,6 +299,10 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
       ? OP_DAY_END_LINEAR - resolvedStart
       : resolvedHours
 
+    const empKey = String(emp.originalId ?? emp.id)
+    const breakOverride = breaksMap?.get?.(empKey) ?? null
+    const empMuls = breakOverride ? getEmployeeBreakMultipliers(breakOverride) : null
+
     const breakIdxOffset = isCarryover
       ? Math.floor((OP_DAY_START + 24) - realShiftStart)
       : 0
@@ -252,10 +310,18 @@ export function computeBreakAdjustedTotalHours(employees, laneMap, settings, ass
     const fullHours = Math.floor(cappedHours)
     const frac      = cappedHours - fullHours
     for (let i = 0; i < fullHours; i++) {
-      total += breakMuls[i + breakIdxOffset] ?? 1
+      const hMod = (resolvedStart + i) % 24
+      const mul = empMuls
+        ? (empMuls[hMod] ?? 1)
+        : (facilityBreakMuls[i + breakIdxOffset] ?? 1)
+      total += mul
     }
     if (frac > 0) {
-      total += frac * (breakMuls[fullHours + breakIdxOffset] ?? 1)
+      const hMod = (resolvedStart + fullHours) % 24
+      const mul = empMuls
+        ? (empMuls[hMod] ?? 1)
+        : (facilityBreakMuls[fullHours + breakIdxOffset] ?? 1)
+      total += frac * mul
     }
   }
 
