@@ -20,6 +20,7 @@ import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
   seedRosterAssignments, deleteAssignment,
   sendEmployeeOnLoan, recallLoan, purgeStaleAssignments,
+  purgeTerminatedAssignments,
   checkRosterStaleness, markRosterRowsAsSynced,
   fetchEmployeeBreaks, upsertEmployeeBreak, deleteEmployeeBreak,
 } from '../lib/supabase.js'
@@ -365,6 +366,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         await seedRosterAssignments(withTimeOff, date)
         const empIds = withTimeOff.map(e => e.id)
         await purgeStaleAssignments(empIds, facId, date)
+        await purgeTerminatedAssignments(facId, date, empIds)
         const seeded = await fetchTodayAssignments(facId, date)
         _buildState(facId, seeded, timeOffMap, carryovers)
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
@@ -511,6 +513,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       if (seedErr) { if (!silent) setSyncState(seedErr); return }
       const empIds = withTimeOff.map(e => e.id)
       await purgeStaleAssignments(empIds, facility, date)
+      await purgeTerminatedAssignments(facility, date, empIds)
       await load(facility, date)
       if (!silent) {
         setSyncState('ok')
@@ -599,7 +602,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
 
   const handleAutoEditConsumed = useCallback(() => setAutoEditLabelId(null), [])
 
-  // ── Break override modal handlers ──────────────────────────────────────────
+  // ── Break override modal handlers ──────────────────────────────────
   // Chevron click opens the modal; modal save/clear wrap the underlying DB
   // calls and close the modal on success.
   const handleBreakEdit = useCallback((emp) => {

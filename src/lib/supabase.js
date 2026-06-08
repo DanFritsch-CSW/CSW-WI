@@ -159,6 +159,53 @@ export async function purgeStaleAssignments(employeeIds, correctFacility, fromDa
   return null
 }
 
+// purgeTerminatedAssignments — deletes roster_assignments rows for a facility
+// where the employee_id is no longer in the latest B2E pull. Called by every
+// B2E sync (manual + silent auto-resync). Closes the loop where terminated
+// employees previously persisted forever because seedRosterAssignments only
+// upserts — it has no DELETE step.
+//
+// Protections (rows that are preserved):
+//   - is_temp = true         → manual temps live independent of B2E
+//   - from_facility != null  → incoming loans; the home facility's B2E owns
+//                              the active/terminated status of that employee
+//
+// Intentionally NOT protected by manually_edited. If B2E says the person no
+// longer exists at this facility, a manual lane move for them (to callin / PTO /
+// specialProject) is just a manager working around the absence of a proper
+// "remove employee" path — and that workaround is exactly what this purge
+// replaces. The B2E source of truth wins.
+//
+// Scope: current plan_date only. Future-dated rows clean themselves up when
+// a user visits that date and the next sync runs.
+export async function purgeTerminatedAssignments(facility, planDate, currentB2eEmpIds) {
+  if (!supabase) return null
+  const { data, error: fetchErr } = await supabase
+    .from('roster_assignments')
+    .select('employee_id')
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .eq('is_temp', false)
+    .is('from_facility', null)
+  if (fetchErr) { console.error('purgeTerminatedAssignments fetch:', fetchErr); return fetchErr.message }
+  if (!data || !data.length) return null
+  const activeSet = new Set((currentB2eEmpIds ?? []).map(String))
+  const staleIds = data
+    .map(r => String(r.employee_id))
+    .filter(id => !activeSet.has(id))
+  if (!staleIds.length) return null
+  const { error: delErr } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .eq('is_temp', false)
+    .is('from_facility', null)
+    .in('employee_id', staleIds)
+  if (delErr) { console.error('purgeTerminatedAssignments delete:', delErr); return delErr.message }
+  return null
+}
+
 export async function deleteAssignment(facility, employeeId, planDate) {
   if (!supabase) return
   const { error } = await supabase
