@@ -262,6 +262,84 @@ export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, from
   return null
 }
 
+// seedForwardHorizon — projects today's active B2E roster forward across the
+// next N plan_dates at a facility, inserting a row only where one does NOT
+// already exist for (facility, employee_id, plan_date). Closes the new-hire
+// gap: previously a freshly-added B2E employee only appeared on dates the
+// manager had visited+synced (because seedRosterAssignments runs per-date).
+// Now one Sync from B2E populates them across the whole forward window.
+//
+// `b2eRoster` should be the RAW persistable roster (no time-off overrides) —
+// not `withTimeOff`. Today's PTO labels must NOT propagate forward; that's
+// what tomorrow's B2E sync is for.
+//
+// Skip-if-exists guard: any pre-existing row on (facility, employee_id,
+// plan_date) is preserved untouched. Manual edits, prior seeds, outgoing
+// loans (on_loan_to != null), and incoming loans (from_facility != null) all
+// survive. The function never overwrites — it only fills gaps.
+//
+// Tradeoff: when a manager first visits date+5, the rows are now pre-populated
+// from today's B2E rather than fetching B2E for date+5 specifically. Most
+// warehouse shifts repeat week-to-week so drift is rare; if a date-specific
+// schedule matters, the manager clicks Sync from B2E and that path pulls the
+// date-specific roster correctly via fetchB2eRoster(facility, date).
+//
+// Scope: dates strictly AFTER fromDate, daysForward in count (default 14).
+// fromDate itself is not touched — seedRosterAssignments owns that.
+export async function seedForwardHorizon(facility, b2eRoster, fromDate, daysForward = 14) {
+  if (!supabase || !b2eRoster?.length) return null
+  // Build the list of forward plan_dates (skip fromDate itself).
+  const dates = []
+  const base = new Date(fromDate + 'T00:00:00')
+  for (let i = 1; i <= daysForward; i++) {
+    const d = new Date(base)
+    d.setDate(d.getDate() + i)
+    dates.push(d.toISOString().slice(0, 10))
+  }
+  // Fetch every existing (employee_id, plan_date) pair at this facility in
+  // the window. One query for the whole horizon — keeps round-trips at 2.
+  const { data: existing, error: fErr } = await supabase
+    .from('roster_assignments')
+    .select('employee_id, plan_date')
+    .eq('facility', facility)
+    .in('plan_date', dates)
+  if (fErr) { console.error('seedForwardHorizon fetch:', fErr); return fErr.message }
+  const existingKeys = new Set((existing ?? []).map(r => `${r.employee_id}|${r.plan_date}`))
+  // Build rows for every (employee, date) pair NOT already in DB.
+  const nowIso = new Date().toISOString()
+  const rows = []
+  for (const e of b2eRoster) {
+    for (const date of dates) {
+      if (existingKeys.has(`${e.id}|${date}`)) continue
+      rows.push({
+        facility:           e.facility ?? facility,
+        employee_id:        e.id,
+        employee_name:      e.name,
+        role:               e.role ?? null,
+        lane:               e.default_lane || 'shift1',
+        plan_date:          date,
+        shift_start:        e.shift_start ?? null,
+        shift_hours:        e.shift_hours ?? null,
+        is_temp:            false,
+        from_facility:      null,
+        on_loan_to:         null,
+        last_b2e_sync_at:   nowIso,
+        manually_edited:    false,
+        manually_edited_at: null,
+      })
+    }
+  }
+  if (!rows.length) return null
+  // Upsert with ignoreDuplicates as a belt-and-suspenders against any race
+  // between the existing-keys read and this write. The skip-if-exists guard
+  // is the primary safeguard.
+  const { error: insErr } = await supabase
+    .from('roster_assignments')
+    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: true })
+  if (insErr) { console.error('seedForwardHorizon insert:', insErr); return insErr.message }
+  return null
+}
+
 export async function deleteAssignment(facility, employeeId, planDate) {
   if (!supabase) return
   const { error } = await supabase
