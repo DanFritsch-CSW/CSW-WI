@@ -531,7 +531,7 @@ async function fetchApptHourMap(filters, date) {
   return hourMap
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────────────
+// ── Public API ───────────────────────────────────────────────────────────────────────────
 
 export async function fetchHourlyData(facilityId, date) {
   const wh = LABOR_WAREHOUSE[facilityId]
@@ -563,7 +563,7 @@ export async function fetchHourlyData(facilityId, date) {
   }))
 }
 
-// ── KEN v2 / Diagnostic Mirror ──────────────────────────────────────────────────
+// ── KEN v2 / Diagnostic Mirror ──────────────────────────────────────────────────────────────────
 //
 // Mirrors the Omni dashboard table for KEN v2. Queries ALL columns from
 // hourly_labor_required_vs_available using activity_date (a real base column),
@@ -1095,7 +1095,7 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
  */
 const L4W_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
-// ── Phase 1 MotherDuck migration ──────────────────────────────────────────
+// ── Phase 1 MotherDuck migration ─────────────────────────────────────────────
 //
 // fetchHistoricalProjectHourlyDropsMD replaces the Omni-based equivalent
 // with a single SQL query against MotherDuck via /netlify/functions/motherduck-l4w.
@@ -1422,6 +1422,47 @@ export async function fetchB2eRoster(facilityId, date) {
     }))
 
   return [...todayRoster, ...carryovers].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * Fetch the set of currently-active employee IDs at a facility from B2E's
+ * master roster (silver.b2e_slv_employeeroster). Independent of any specific
+ * date's schedule — represents who is on the books right now.
+ *
+ * Used by purgeTerminatedAcrossFuture (in supabase.js) to identify which
+ * roster_assignments rows belong to terminated employees or employees who've
+ * transferred to a different facility. Distinct from fetchB2eRoster, which
+ * joins the master roster against per-date schedule entries — we deliberately
+ * skip that join here because someone can be Active but legitimately off-
+ * schedule on any given day (weekend, PTO). Master roster status is the
+ * ground truth for "are they an employee here at all?"
+ *
+ * Filters: location matches facility, employee_status = 'Active', job_code 205.
+ *
+ * Returns Set<string> of employee_ids. Returns empty Set on Omni failure —
+ * callers MUST treat an empty set as "skip the purge" to avoid wiping rows
+ * on a transient outage. purgeTerminatedAcrossFuture has this guard.
+ */
+export async function fetchActiveB2eEmployees(facilityId) {
+  const location = B2E_LOCATION[facilityId]
+  if (!location) return new Set()
+  try {
+    const rosterRows = await omniQuery({
+      modelId: B2E_MODEL_ID, table: ROSTER,
+      fields: [`${ROSTER}.employee_id`],
+      filters: {
+        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
+        [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: ['205'] },
+      },
+      sorts: [],
+      limit: 500,
+    })
+    return new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
+  } catch (e) {
+    console.warn('fetchActiveB2eEmployees failed (non-fatal):', e.message)
+    return new Set()
+  }
 }
 
 export async function fetchWrPickers(date) {
