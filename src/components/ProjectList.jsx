@@ -3,16 +3,26 @@ import { Fragment } from 'react'
 // Weekly projects table.
 //
 // Renders the current week (7 days, Mon–Sun) as a grid:
-//   Project name | Mon | Tue | Wed | Thu | Fri | Sat | Sun | Wk Total
+//   Project | Mon | Tue | Wed | Thu | Fri | Sat | Sun | DR | IN | OUT | TOTAL
 //
-// Each day cell shows 4 numbers in a compact 2-line layout:
-//   line 1 (small, dim): "<drops>d  <inb>·<out>"
-//   line 2 (bold):       "<inb+out>"           ← the headline appointment count
+// Each day cell shows 4 numbers in a labeled compact layout:
+//   line 1 (small, dim):  "<drops>dr  <inb>in  <out>out"
+//   line 2 (bold):        "<inb+out>"       ← headline total appointments
+//
+// Letter suffixes (dr / in / out) make every number self-explanatory so
+// non-CSR staff can read the table without a legend.
 //
 // The selected day's column is tinted with the facility brand color so the
 // planner sees at a glance which day is driving the rest of the page below.
+// Empty day cells render a centered em-dash.
 //
-// Empty cells render a centered em-dash.
+// At the right edge, week totals are broken out into 4 explicit columns:
+//   DR  — weekly drops forecast
+//   IN  — weekly inbound appointment count
+//   OUT — weekly outbound appointment count
+//   TOTAL — weekly IN + OUT (the headline appointment number)
+// Drops are forecast volume, NOT booked appointments — they're shown as a
+// separate column rather than rolled into TOTAL.
 //
 // MAD no longer gets a special inventory split — it uses the same layout
 // as every other facility. Dan/Dean asked for parity in the rebuild.
@@ -89,14 +99,13 @@ export default function ProjectList({
 
   if (!rows.length) return null
 
-  // Grid template: project name | 7 days | week total
-  // Min widths chosen so the table works at the existing right-half width
-  // (~620–700px on desktop) and gracefully scrolls horizontally on narrower
-  // viewports without breaking the layout.
-  const gridTemplate = 'minmax(140px, 1.5fr) repeat(7, minmax(56px, 1fr)) minmax(64px, 0.9fr)'
+  // Grid template: project name | 7 day columns | 4 week total columns.
+  // Day columns bumped to 72px min to fit "6dr 7in 18out" on one dim line.
+  // Week total subcolumns at ~48px each, separated visually from days.
+  const gridTemplate = 'minmax(140px, 1.4fr) repeat(7, minmax(72px, 1fr)) repeat(4, minmax(48px, 0.55fr))'
 
-  const dimLabelStyle = { fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', lineHeight: 1.15 }
-  const totalStyle    = { fontSize: 13, fontWeight: 600, lineHeight: 1.15, fontFamily: 'var(--font-mono)' }
+  const dimLabelStyle = { fontSize: 9,  color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', lineHeight: 1.15, whiteSpace: 'nowrap' }
+  const totalStyle    = { fontSize: 13, fontWeight: 600,           lineHeight: 1.15, fontFamily: 'var(--font-mono)' }
   const headerCellBase = {
     padding: '6px 4px',
     fontSize: 10,
@@ -110,9 +119,12 @@ export default function ProjectList({
     return d === selectedDate ? { background: 'rgba(255,255,255,0.04)', boxShadow: `inset 0 0 0 1px ${color}40` } : null
   }
 
+  // Background tint for the four week-total cells (subtle, distinct from days).
+  const wkTotBg = { background: 'rgba(255,255,255,0.025)' }
+
   return (
     <div className="project-list" style={{ overflowX: 'auto' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, minWidth: 620 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, minWidth: 760 }}>
         {/* ── Header row ── */}
         <div style={{ ...headerCellBase, textAlign: 'left', paddingLeft: 8 }}>Project</div>
         {weekDays.map((d, i) => {
@@ -131,7 +143,10 @@ export default function ProjectList({
             </div>
           )
         })}
-        <div style={{ ...headerCellBase, color: 'var(--text-secondary)', fontWeight: 600 }}>Wk Tot</div>
+        <div style={{ ...headerCellBase, ...wkTotBg }}>DR</div>
+        <div style={{ ...headerCellBase, ...wkTotBg }}>IN</div>
+        <div style={{ ...headerCellBase, ...wkTotBg }}>OUT</div>
+        <div style={{ ...headerCellBase, ...wkTotBg, fontWeight: 600, color: 'var(--text-secondary)' }}>TOTAL</div>
 
         {/* ── Data rows ── */}
         {rows.map(r => (
@@ -155,12 +170,11 @@ export default function ProjectList({
             {weekDays.map(d => {
               const cell = r.perDay[d]
               const empty = cell.drops === 0 && cell.inb === 0 && cell.out === 0
-              const sel = d === selectedDate
               return (
                 <div
                   key={d}
                   style={{
-                    padding: '4px 2px',
+                    padding: '4px 3px',
                     textAlign: 'center',
                     borderBottom: '1px solid var(--border-subtle)',
                     ...(selectedBg(d) || {}),
@@ -171,9 +185,11 @@ export default function ProjectList({
                   ) : (
                     <>
                       <div style={dimLabelStyle}>
-                        {cell.drops > 0 ? `${cell.drops}d` : ''}
-                        {cell.drops > 0 && (cell.inb > 0 || cell.out > 0) ? '  ' : ''}
-                        {(cell.inb > 0 || cell.out > 0) ? `${cell.inb}·${cell.out}` : ''}
+                        {cell.drops > 0 ? `${cell.drops}dr` : ''}
+                        {cell.drops > 0 && (cell.inb > 0 || cell.out > 0) ? ' ' : ''}
+                        {cell.inb > 0 ? `${cell.inb}in` : ''}
+                        {cell.inb > 0 && cell.out > 0 ? ' ' : ''}
+                        {cell.out > 0 ? `${cell.out}out` : ''}
                       </div>
                       <div style={{ ...totalStyle, color: cell.tot > 0 ? color : 'var(--text-dim)' }}>
                         {cell.tot > 0 ? cell.tot : (cell.drops > 0 ? cell.drops : '—')}
@@ -183,24 +199,35 @@ export default function ProjectList({
                 </div>
               )
             })}
-            {/* Week total cell */}
-            <div
-              style={{
-                padding: '4px 4px',
+            {/* ── Week total: 4 distinct columns ── */}
+            {(() => {
+              const wkCellBase = {
+                padding: '6px 4px',
                 textAlign: 'center',
                 borderBottom: '1px solid var(--border-subtle)',
-                background: 'rgba(255,255,255,0.02)',
-              }}
-            >
-              <div style={dimLabelStyle}>
-                {r.wkDrops > 0 ? `${r.wkDrops}d` : ''}
-                {r.wkDrops > 0 && (r.wkIn > 0 || r.wkOut > 0) ? '  ' : ''}
-                {(r.wkIn > 0 || r.wkOut > 0) ? `${r.wkIn}·${r.wkOut}` : ''}
-              </div>
-              <div style={{ ...totalStyle, color }}>
-                {r.wkTot > 0 ? r.wkTot : (r.wkDrops > 0 ? r.wkDrops : '—')}
-              </div>
-            </div>
+                fontFamily: 'var(--font-mono)',
+                ...wkTotBg,
+              }
+              const numStyle    = { fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }
+              const totalNumStyle = { fontSize: 13, fontWeight: 700, color }
+              const dim = { color: 'var(--text-dim)', fontWeight: 400 }
+              return (
+                <>
+                  <div style={wkCellBase}>
+                    <span style={r.wkDrops > 0 ? numStyle : dim}>{r.wkDrops > 0 ? r.wkDrops : '—'}</span>
+                  </div>
+                  <div style={wkCellBase}>
+                    <span style={r.wkIn > 0 ? numStyle : dim}>{r.wkIn > 0 ? r.wkIn : '—'}</span>
+                  </div>
+                  <div style={wkCellBase}>
+                    <span style={r.wkOut > 0 ? numStyle : dim}>{r.wkOut > 0 ? r.wkOut : '—'}</span>
+                  </div>
+                  <div style={wkCellBase}>
+                    <span style={r.wkTot > 0 ? totalNumStyle : dim}>{r.wkTot > 0 ? r.wkTot : '—'}</span>
+                  </div>
+                </>
+              )
+            })()}
           </Fragment>
         ))}
       </div>
