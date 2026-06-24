@@ -636,6 +636,35 @@ export async function fetchProjectHourlyDrops(facilityId, planDate) {
   return result
 }
 
+/**
+ * Fetch the entire week's EST drops in a single query, returning a
+ * per-day per-project total. Powers the weekly projects table.
+ *
+ * Shape: { [planDate]: { [projectName]: totalEstDrops } }
+ *
+ * Single SELECT with date range filter; client-side groups + sums across hours
+ * to produce one number per project per day. Returns {} on failure (caller
+ * should treat absence as zero so the rest of the table still renders).
+ */
+export async function fetchWeeklyProjectDrops(facilityId, fromDate, toDate) {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('project_hourly_drops_forecast')
+    .select('project_name, plan_date, est_drops')
+    .eq('facility', facilityId)
+    .gte('plan_date', fromDate)
+    .lte('plan_date', toDate)
+  if (error) { console.error('fetchWeeklyProjectDrops:', error); return {} }
+  const result = {}
+  for (const r of (data || [])) {
+    const d = r.plan_date
+    const n = r.project_name
+    if (!result[d]) result[d] = {}
+    result[d][n] = (result[d][n] ?? 0) + Number(r.est_drops)
+  }
+  return result
+}
+
 export async function fetchHourlyAdjustments(facilityId, planDate) {
   if (!supabase) return {}
   const { data, error } = await supabase

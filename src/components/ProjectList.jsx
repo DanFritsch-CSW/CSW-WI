@@ -1,169 +1,209 @@
-// inventoryData: array of { name, lps } | null
-// When provided (MAD only), renders side-by-side layout:
-//   left  — appointments table (project / est drops / inb / out / tot)
-//   right — active inventory table (project / active LPs)
-// Both columns cap at 15 rows visible; overflow scrolls independently.
+import { Fragment } from 'react'
 
-export default function ProjectList({ projects, projectDrops = {}, color, inventoryData = null }) {
-  if (!projects?.length) return null
+// Weekly projects table.
+//
+// Renders the current week (7 days, Mon–Sun) as a grid:
+//   Project name | Mon | Tue | Wed | Thu | Fri | Sat | Sun | Wk Total
+//
+// Each day cell shows 4 numbers in a compact 2-line layout:
+//   line 1 (small, dim): "<drops>d  <inb>·<out>"
+//   line 2 (bold):       "<inb+out>"           ← the headline appointment count
+//
+// The selected day's column is tinted with the facility brand color so the
+// planner sees at a glance which day is driving the rest of the page below.
+//
+// Empty cells render a centered em-dash.
+//
+// MAD no longer gets a special inventory split — it uses the same layout
+// as every other facility. Dan/Dean asked for parity in the rebuild.
+//
+// Props:
+//   weekDays     — array of 7 ISO date strings (Mon..Sun)
+//   selectedDate — ISO string of the day driving the rest of the page
+//                  (highlighted column)
+//   weeklyAppts  — { [iso]: { [projectName]: { inb, out } } }
+//   weeklyDrops  — { [iso]: { [projectName]: totalDropsForDay } }
+//   color        — facility brand color (hex / CSS color)
+//   projectFilter — optional (projectName: string) => boolean predicate;
+//                   used by CAL split tabs (1-2 / 3.5)
 
-  // Include named projects that have appointments OR EST drops (e.g. BossBites before first appointment)
-  const named      = projects.filter(p => p.name && (p.tot > 0 || (projectDrops[p.name] ?? 0) > 0))
-  const unassigned = projects.filter(p => !p.name && p.tot > 0)
-  const unassignedInb = unassigned.reduce((s, p) => s + p.inb, 0)
-  const unassignedOut = unassigned.reduce((s, p) => s + p.out, 0)
-  const unassignedTot = unassigned.reduce((s, p) => s + p.tot, 0)
-  const maxTot = Math.max(...named.map(p => p.tot), unassignedTot, 1)
+const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-  const CSW_SUFFIXES = [
-    ' - CSW-Madison', ' - CSW-Franksville', ' - CSW-Kenosha',
-    ' - CSW-Wisconsin Rapids', ' - CSW-Eau Claire',
-    '-CSW-Madison', ' - Madison',
-  ]
-  function stripSuffix(name) {
-    if (!name) return name
-    for (const s of CSW_SUFFIXES) {
-      if (name.endsWith(s)) return name.slice(0, -s.length)
+function formatMDD(iso) {
+  const d = new Date(iso + 'T00:00:00')
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+const CSW_SUFFIXES = [
+  ' - CSW-Madison', ' - CSW-Franksville', ' - CSW-Kenosha',
+  ' - CSW-Wisconsin Rapids', ' - CSW-Eau Claire',
+  '-CSW-Madison', ' - Madison',
+]
+function stripSuffix(name) {
+  if (!name) return name
+  for (const s of CSW_SUFFIXES) {
+    if (name.endsWith(s)) return name.slice(0, -s.length)
+  }
+  return name
+}
+
+export default function ProjectList({
+  weekDays = [],
+  selectedDate,
+  weeklyAppts = {},
+  weeklyDrops = {},
+  color,
+  projectFilter,
+}) {
+  if (!weekDays.length) return null
+
+  // Gather the union of all project names that appear ANYWHERE in the week —
+  // appts OR drops. A drops-only project still gets a row.
+  const projectNamesSet = new Set()
+  for (const d of weekDays) {
+    for (const name of Object.keys(weeklyAppts[d] || {})) projectNamesSet.add(name)
+    for (const name of Object.keys(weeklyDrops[d] || {})) projectNamesSet.add(name)
+  }
+
+  const rows = []
+  for (const name of projectNamesSet) {
+    if (projectFilter && !projectFilter(name)) continue
+    let wkIn = 0, wkOut = 0, wkDrops = 0
+    const perDay = {}
+    for (const d of weekDays) {
+      const appt  = (weeklyAppts[d] || {})[name] || { inb: 0, out: 0 }
+      const drops = Number((weeklyDrops[d] || {})[name] ?? 0)
+      const inb   = Number(appt.inb ?? 0)
+      const out   = Number(appt.out ?? 0)
+      perDay[d]   = { drops, inb, out, tot: inb + out }
+      wkIn       += inb
+      wkOut      += out
+      wkDrops    += drops
     }
-    return name
+    rows.push({ name, perDay, wkIn, wkOut, wkDrops, wkTot: wkIn + wkOut })
   }
 
-  function fmtDrops(val) {
-    const n = Number(val) || 0
-    return n > 0 ? n : '—'
+  // Sort by busiest first — appts dominate, then drops as tiebreak so
+  // drops-only projects still rank by activity.
+  rows.sort((a, b) => (b.wkTot - a.wkTot) || (b.wkDrops - a.wkDrops))
+
+  if (!rows.length) return null
+
+  // Grid template: project name | 7 days | week total
+  // Min widths chosen so the table works at the existing right-half width
+  // (~620–700px on desktop) and gracefully scrolls horizontally on narrower
+  // viewports without breaking the layout.
+  const gridTemplate = 'minmax(140px, 1.5fr) repeat(7, minmax(56px, 1fr)) minmax(64px, 0.9fr)'
+
+  const dimLabelStyle = { fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', lineHeight: 1.15 }
+  const totalStyle    = { fontSize: 13, fontWeight: 600, lineHeight: 1.15, fontFamily: 'var(--font-mono)' }
+  const headerCellBase = {
+    padding: '6px 4px',
+    fontSize: 10,
+    color: 'var(--text-secondary)',
+    fontFamily: 'var(--font-mono)',
+    textAlign: 'center',
+    borderBottom: '1px solid var(--border)',
   }
 
-  const isSplit = inventoryData !== null
+  function selectedBg(d) {
+    return d === selectedDate ? { background: 'rgba(255,255,255,0.04)', boxShadow: `inset 0 0 0 1px ${color}40` } : null
+  }
 
-  if (isSplit) {
-    const invRows    = inventoryData ?? []
-    const invLoading = inventoryData === null
+  return (
+    <div className="project-list" style={{ overflowX: 'auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, minWidth: 620 }}>
+        {/* ── Header row ── */}
+        <div style={{ ...headerCellBase, textAlign: 'left', paddingLeft: 8 }}>Project</div>
+        {weekDays.map((d, i) => {
+          const sel = d === selectedDate
+          return (
+            <div
+              key={d}
+              style={{
+                ...headerCellBase,
+                ...(sel ? { color, fontWeight: 600 } : {}),
+                ...(selectedBg(d) || {}),
+              }}
+            >
+              <div>{DAY_LABELS[i]}</div>
+              <div style={{ fontSize: 9, opacity: 0.7 }}>{formatMDD(d)}</div>
+            </div>
+          )
+        })}
+        <div style={{ ...headerCellBase, color: 'var(--text-secondary)', fontWeight: 600 }}>Wk Tot</div>
 
-    return (
-      <div className="project-list project-list--split">
-        {/* ── Left: Appointments ── */}
-        <div className="project-list-col project-list-col--appt">
-          <div className="project-list-header project-list-header--appt">
-            <span>Project</span>
-            <span style={{ textAlign: 'right' }}>Drops</span>
-            <span style={{ textAlign: 'right' }}>Inb</span>
-            <span style={{ textAlign: 'right' }}>Out</span>
-            <span style={{ textAlign: 'right' }}>Tot</span>
-          </div>
-          <div className="project-list-body">
-            {named.map((p, i) => {
-              const estVal = projectDrops[p.name] ?? 0
+        {/* ── Data rows ── */}
+        {rows.map(r => (
+          <Fragment key={r.name}>
+            <div
+              style={{
+                padding: '6px 8px',
+                fontSize: 11,
+                color: 'var(--text-primary)',
+                borderBottom: '1px solid var(--border-subtle)',
+                display: 'flex',
+                alignItems: 'center',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={r.name}
+            >
+              {stripSuffix(r.name)}
+            </div>
+            {weekDays.map(d => {
+              const cell = r.perDay[d]
+              const empty = cell.drops === 0 && cell.inb === 0 && cell.out === 0
+              const sel = d === selectedDate
               return (
-                <div key={i} className="project-row project-row--appt">
-                  <div className="project-bar-wrap">
-                    <div className="project-bar">
-                      <div className="project-bar-fill" style={{ width: `${(p.tot / maxTot) * 100}%`, background: color }} />
-                    </div>
-                    <span className="project-name">{stripSuffix(p.name)}</span>
-                  </div>
-                  <span className="project-num">{fmtDrops(estVal)}</span>
-                  <span className="project-num">{p.inb}</span>
-                  <span className="project-num">{p.out}</span>
-                  <span className="project-num" style={{ color }}>{p.tot || '—'}</span>
+                <div
+                  key={d}
+                  style={{
+                    padding: '4px 2px',
+                    textAlign: 'center',
+                    borderBottom: '1px solid var(--border-subtle)',
+                    ...(selectedBg(d) || {}),
+                  }}
+                >
+                  {empty ? (
+                    <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>—</span>
+                  ) : (
+                    <>
+                      <div style={dimLabelStyle}>
+                        {cell.drops > 0 ? `${cell.drops}d` : ''}
+                        {cell.drops > 0 && (cell.inb > 0 || cell.out > 0) ? '  ' : ''}
+                        {(cell.inb > 0 || cell.out > 0) ? `${cell.inb}·${cell.out}` : ''}
+                      </div>
+                      <div style={{ ...totalStyle, color: cell.tot > 0 ? color : 'var(--text-dim)' }}>
+                        {cell.tot > 0 ? cell.tot : (cell.drops > 0 ? cell.drops : '—')}
+                      </div>
+                    </>
+                  )}
                 </div>
               )
             })}
-            {unassignedTot > 0 && (
-              <div className="project-row project-row--appt project-row--unassigned">
-                <div className="project-bar-wrap">
-                  <div className="project-bar">
-                    <div className="project-bar-fill project-bar-fill--unassigned" style={{ width: `${(unassignedTot / maxTot) * 100}%` }} />
-                  </div>
-                  <span className="project-name project-name--unassigned">
-                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ marginRight: 5, flexShrink: 0, position: 'relative', top: 1 }}>
-                      <path d="M8 1.5L14.5 13.5H1.5L8 1.5Z" stroke="currentColor" strokeWidth="1.5" fill="none" />
-                      <path d="M8 6.5V9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                      <circle cx="8" cy="11.5" r="0.75" fill="currentColor" />
-                    </svg>
-                    {unassignedTot === 1 ? '1 unassigned' : `${unassignedTot} unassigned`}
-                  </span>
-                </div>
-                <span className="project-num project-num--unassigned">—</span>
-                <span className="project-num project-num--unassigned">{unassignedInb || '—'}</span>
-                <span className="project-num project-num--unassigned">{unassignedOut || '—'}</span>
-                <span className="project-num project-num--unassigned">{unassignedTot}</span>
+            {/* Week total cell */}
+            <div
+              style={{
+                padding: '4px 4px',
+                textAlign: 'center',
+                borderBottom: '1px solid var(--border-subtle)',
+                background: 'rgba(255,255,255,0.02)',
+              }}
+            >
+              <div style={dimLabelStyle}>
+                {r.wkDrops > 0 ? `${r.wkDrops}d` : ''}
+                {r.wkDrops > 0 && (r.wkIn > 0 || r.wkOut > 0) ? '  ' : ''}
+                {(r.wkIn > 0 || r.wkOut > 0) ? `${r.wkIn}·${r.wkOut}` : ''}
               </div>
-            )}
-          </div>
-        </div>
-
-        {/* ── Divider ── */}
-        <div className="project-list-divider" />
-
-        {/* ── Right: Active Inventory ── */}
-        <div className="project-list-col project-list-col--inv">
-          <div className="project-list-header project-list-header--inv">
-            <span>Project</span>
-            <span style={{ textAlign: 'right' }}>Active LPs</span>
-          </div>
-          <div className="project-list-body">
-            {invLoading && <div className="project-inv-loading">Loading…</div>}
-            {!invLoading && invRows.length === 0 && <div className="project-inv-loading">No inventory data</div>}
-            {!invLoading && invRows.map((r, i) => (
-              <div key={i} className="project-row project-row--inv">
-                <span className="project-name">{r.name}</span>
-                <span className="project-num project-num--lp">{r.lps.toLocaleString()}</span>
+              <div style={{ ...totalStyle, color }}>
+                {r.wkTot > 0 ? r.wkTot : (r.wkDrops > 0 ? r.wkDrops : '—')}
               </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Default single-column layout (all other facilities) ──
-  return (
-    <div className="project-list">
-      <div className="project-list-header">
-        <span>Project</span>
-        <span style={{ textAlign: 'right' }}>Est Drops</span>
-        <span style={{ textAlign: 'right' }}>Inbound</span>
-        <span style={{ textAlign: 'right' }}>Outbound</span>
-        <span style={{ textAlign: 'right' }}>Total</span>
-      </div>
-      {named.map((p, i) => {
-        const estVal = projectDrops[p.name] ?? 0
-        return (
-          <div key={i} className="project-row">
-            <div className="project-bar-wrap">
-              <div className="project-bar">
-                <div className="project-bar-fill" style={{ width: `${(p.tot / maxTot) * 100}%`, background: color }} />
-              </div>
-              <span className="project-name">{p.name}</span>
             </div>
-            <span className="project-num">{fmtDrops(estVal)}</span>
-            <span className="project-num">{p.inb || '—'}</span>
-            <span className="project-num">{p.out || '—'}</span>
-            <span className="project-num" style={{ color: p.tot ? color : 'var(--text-dim)' }}>{p.tot || '—'}</span>
-          </div>
-        )
-      })}
-      {unassignedTot > 0 && (
-        <div className="project-row project-row--unassigned">
-          <div className="project-bar-wrap">
-            <div className="project-bar">
-              <div className="project-bar-fill project-bar-fill--unassigned" style={{ width: `${(unassignedTot / maxTot) * 100}%` }} />
-            </div>
-            <span className="project-name project-name--unassigned">
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ marginRight: 5, flexShrink: 0, position: 'relative', top: 1 }}>
-                <path d="M8 1.5L14.5 13.5H1.5L8 1.5Z" stroke="currentColor" strokeWidth="1.5" fill="none" />
-                <path d="M8 6.5V9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                <circle cx="8" cy="11.5" r="0.75" fill="currentColor" />
-              </svg>
-              {unassignedTot === 1 ? '1 unassigned appointment' : `${unassignedTot} unassigned appointments`}
-            </span>
-          </div>
-          <span className="project-num project-num--unassigned">—</span>
-          <span className="project-num project-num--unassigned">{unassignedInb || '—'}</span>
-          <span className="project-num project-num--unassigned">{unassignedOut || '—'}</span>
-          <span className="project-num project-num--unassigned">{unassignedTot}</span>
-        </div>
-      )}
+          </Fragment>
+        ))}
+      </div>
     </div>
   )
 }

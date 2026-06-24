@@ -8,7 +8,7 @@ import AppointmentList from '../components/AppointmentList.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
-  isRuleProject, fetchActiveInventory, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
+  isRuleProject, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
   fetchAppointmentList,
 } from '../lib/omni.js'
 import {
@@ -20,6 +20,7 @@ import {
   clearExpiredManualEdits,
   fetchHourlyAdjustments,
   upsertHourlyAdjustment,
+  fetchWeeklyProjectDrops,
 } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, buildRosterStaffedHeadcount } from '../lib/laborCalc.js'
@@ -63,6 +64,15 @@ function addDays(iso, n) {
   const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
 }
 
+// Monday of week containing iso (UTC, Mon=1..Sun=0 → -6 shift)
+function mondayOfWeek(iso) {
+  const d = new Date(iso + 'T00:00:00Z')
+  const day = d.getUTCDay()
+  const diff = day === 0 ? -6 : 1 - day
+  d.setUTCDate(d.getUTCDate() + diff)
+  return d.toISOString().slice(0, 10)
+}
+
 export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed, onKpiComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
@@ -75,7 +85,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [seedingDrops, setSeedingDrops]             = useState(false)
   const [refreshingProject, setRefreshingProject]   = useState(null) // project name being refreshed
   const [hourlyAdjustments, setHourlyAdjustments]   = useState({})
-  const [activeInventory, setActiveInventory]       = useState(null)
   const [sideHourlyAppts, setSideHourlyAppts]       = useState({})
   const [customDropProjects, setCustomDropProjects] = useState([])
   const [copyOpen, setCopyOpen]         = useState(false)
@@ -89,6 +98,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [appointmentList, setAppointmentList]           = useState([])
   const [appointmentListLoading, setAppointmentListLoading] = useState(false)
   const [perProjectHourly, setPerProjectHourly] = useState(null)
+  const [weeklyProjectAppts, setWeeklyProjectAppts] = useState({})
+  const [weeklyProjectDrops, setWeeklyProjectDrops] = useState({})
+  const [weeklyLoading, setWeeklyLoading]           = useState(false)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -104,6 +116,44 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const { settings, loading: settingsLoading, projectHpa } = useSettings(facility.id)
 
   const lastRefreshRef = useRef(0)
+
+  // ── Weekly projects table data — current Mon–Sun window ──
+  // Refetches only when the week changes, not on every planDate within the
+  // same week. Clicking Mon→Tue within the same week reuses the cached set.
+  const weekStart = useMemo(() => mondayOfWeek(planDate), [planDate])
+  const weekDays  = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart])
+  const weekEnd   = weekDays[6]
+
+  useEffect(() => {
+    let cancelled = false
+    setWeeklyLoading(true)
+    async function loadWeekly() {
+      try {
+        const [apptsResults, dropsMap] = await Promise.all([
+          Promise.all(weekDays.map(d => fetchProjectData(facility.id, d).catch(() => []))),
+          fetchWeeklyProjectDrops(facility.id, weekStart, weekEnd).catch(() => ({})),
+        ])
+        if (cancelled) return
+        const appts = {}
+        for (let i = 0; i < weekDays.length; i++) {
+          const day = weekDays[i]
+          appts[day] = {}
+          for (const p of apptsResults[i]) {
+            if (!p.name) continue
+            appts[day][p.name] = { inb: p.inb ?? 0, out: p.out ?? 0 }
+          }
+        }
+        setWeeklyProjectAppts(appts)
+        setWeeklyProjectDrops(dropsMap)
+      } catch (e) {
+        console.warn('Weekly projects fetch failed (non-fatal):', e?.message)
+      } finally {
+        if (!cancelled) setWeeklyLoading(false)
+      }
+    }
+    loadWeekly()
+    return () => { cancelled = true }
+  }, [facility.id, weekStart, weekEnd, retryNonce])
 
   const refreshAppointments = useCallback(async () => {
     try {
@@ -153,7 +203,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   useEffect(() => {
     let cancelled = false
     setRawHourly([]); setHourlyAppts({}); setHourlyErr(null); setOmniWarning(null); setProjects([])
-    setProjectHourlyDrops({}); setHourlyAdjustments({}); setSideHourlyAppts({}); setActiveInventory(null)
+    setProjectHourlyDrops({}); setHourlyAdjustments({}); setSideHourlyAppts({})
     setFetchedAt(null)
 
     async function loadData() {
@@ -199,9 +249,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       }
       if (cancelled) return
 
-      if (isMad) {
-        fetchActiveInventory(facility.id).then(d => { if (!cancelled) setActiveInventory(d) }).catch(() => { if (!cancelled) setActiveInventory([]) })
-      }
       fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) }).catch(() => {})
 
       if (!cancelled && omniFailures.length > 0) {
@@ -334,25 +381,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setCopyProjects(prev => { const next = new Set(prev); next.has(name) ? next.delete(name) : next.add(name); return next })
   }
 
-  // handleCopy — copy EST drops from current planDate to a range of destination dates.
-  //
-  // BOLD-EVERYWHERE BEHAVIOR (per Dean, 2026-06-03):
-  // For each selected project, write all 24 hours (0–23) on each destination
-  // date. Source value if the hour exists in the source map, else 0. Every
-  // cell written goes through upsertProjectHourlyDrops, which stamps
-  // manually_edited=true. Result on the destination day:
-  //   1. The entire column for that project shows bold in HourlyTable
-  //      (the manuallyEdited prop drives the .ht-cell-manual class).
-  //   2. The L4W seed in Phase 3 of loadData() reads manualKeys from DB and
-  //      skips those (project, hour) pairs entirely — so the column is
-  //      locked from automatic re-seeding.
-  //   3. deleteOrphanSeedRows filters on manually_edited=false at the query
-  //      level, so the cells can't be deleted by orphan cleanup either.
-  //
-  // The lock is released when (a) the CSR edits a cell again (still manual),
-  // (b) the CSR clicks the per-project ⇺ refresh button (which deletes + re-
-  // seeds from fresh L4W), or (c) the week rolls over and
-  // clearExpiredManualEdits prunes the past-week rows.
   async function handleCopy() {
     if (!copyFrom || !copyTo || copyFrom > copyTo) { setCopyMsg({ err: true, text: 'Invalid date range.' }); return }
     if (copyProjects.size === 0) { setCopyMsg({ err: true, text: 'Select at least one project.' }); return }
@@ -360,9 +388,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     if (!dates.length) { setCopyMsg({ err: true, text: 'No dates to copy to.' }); return }
     setCopying(true); setCopyMsg(null)
     try {
-      // Build full 24-hour rows for each selected project. This is what
-      // makes the destination column bold across every hour, including
-      // hours where the source had no value (those write as 0).
       const rows = []
       for (const [project_name, hourMap] of Object.entries(projectHourlyDrops)) {
         if (!copyProjects.has(project_name)) continue
@@ -388,8 +413,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     fetchProjectHourlyAppointments(facility.id, planDate, names).then(setSideHourlyAppts).catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
-  // Fetch per-project hourly appointments when HPA overrides exist for this facility.
-  // Only fires when there are overrides — zero perf cost for facilities without them.
   useEffect(() => {
     if (!projects || projects.length === 0) { setPerProjectHourly(null); return }
     if (!projectHpa || projectHpa.size === 0) { setPerProjectHourly(null); return }
@@ -412,6 +435,13 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     if (sideTab === 'side35') return projects.filter(p => CAL2_SIDE35_PROJECTS.has(p.name))
     return projects.filter(p => !CAL2_SIDE35_PROJECTS.has(p.name))
   }, [projects, isCal2, sideTab])
+
+  // Filter applied to the weekly projects table (CAL split).
+  const projectFilter = useMemo(() => {
+    if (!isCal2 || sideTab === 'all') return null
+    if (sideTab === 'side35') return (name) => CAL2_SIDE35_PROJECTS.has(name)
+    return (name) => !CAL2_SIDE35_PROJECTS.has(name)
+  }, [isCal2, sideTab])
 
   const laneFilter = useMemo(() => {
     if (!isCal2 || sideTab === 'all') return null
@@ -450,15 +480,6 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       result[name] = Math.round(Object.values(hourMap).reduce((s, v) => s + Number(typeof v === 'object' ? (v?.est_drops ?? 0) : v), 0))
     return result
   }, [visibleProjectHourlyDrops])
-
-  const mergedProjects = useMemo(() => {
-    const apptNames = new Set(visibleProjects.map(p => p.name))
-    const dropsOnlyRows = Object.keys(projectDrops)
-      .filter(name => name && !apptNames.has(name) && (projectDrops[name] ?? 0) > 0)
-      .map(name => ({ name, inb: 0, out: 0, tot: 0 }))
-    if (!dropsOnlyRows.length) return visibleProjects
-    return [...visibleProjects, ...dropsOnlyRows]
-  }, [visibleProjects, projectDrops])
 
   const estDrops = useMemo(() => {
     const sums = {}
@@ -504,34 +525,11 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     })
   }, [rawHourly, hourlyAppts, estDrops, isCal2, sideTab, sideHourlyAppts])
 
-  // Per-hour labor req with project-level HPA overrides applied.
-  //
-  // Strategy: for each overridden project, sum its full contribution at the
-  // hour — live appointments (inb + out from the per-project Omni fetch) PLUS
-  // its EST drops (from visibleProjectHourlyDropsFlat). Apply the override
-  // HPA to that combined count. Everything else (non-overridden projects,
-  // unattributed appts) gets the facility default HPA.
-  //
-  //   req(h) = Σ_overridden ( (projectAppts_h + projectDrops_h) × overrideHpa )
-  //          + (totalAppts_h − overrideAttributedAppts_h) × defaultHpa
-  //
-  // Guarantees:
-  //   1. No overrides set → returns null → applySettings uses pure aggregate.
-  //   2. Override exists but project has 0 appts AND 0 drops at this hour →
-  //      contribution is 0, falls through to facility default.
-  //   3. perProjectHourly is empty {} → override-via-live-appts portion is 0,
-  //      but override-via-drops portion still applies (drops live in
-  //      visibleProjectHourlyDropsFlat which is from the DB, not Omni).
-  //   4. Overall: when no override actually applies to any visible activity,
-  //      result equals aggregate (totalAppts × defaultHpa).
   const perHourReq = useMemo(() => {
     if (!projectHpa || projectHpa.size === 0) return null
     if (!projects || projects.length === 0) return null
     const defaultHpa = settings?.hours_per_appt ?? 1.5
     const arr = new Array(24).fill(0)
-    // Build a quick lookup of projects-with-overrides so we can include
-    // drops-only override projects that may not appear in `projects`
-    // (e.g. a project we have drops for but no live appts).
     const overrideNames = new Set([
       ...projects.map(p => p.name),
       ...projectHpa.keys(),
@@ -624,9 +622,17 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
       <div className="panel-top-grid">
         <KpiPills data={kpiData} color={facility.color} />
         <div>
-          <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
-          <ProjectList projects={mergedProjects} projectDrops={projectDrops} color={facility.color}
-            inventoryData={isMad ? activeInventory : null} />
+          <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>
+            Projects {weeklyLoading && <span style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>· loading week…</span>}
+          </div>
+          <ProjectList
+            weekDays={weekDays}
+            selectedDate={planDate}
+            weeklyAppts={weeklyProjectAppts}
+            weeklyDrops={weeklyProjectDrops}
+            color={facility.color}
+            projectFilter={projectFilter}
+          />
         </div>
       </div>
 
