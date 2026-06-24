@@ -7,7 +7,8 @@ import { Fragment } from 'react'
 //
 // Each day cell shows 4 numbers in a labeled compact layout:
 //   line 1 (small, dim):  "<drops>dr  <inb>in  <out>out"
-//   line 2 (bold):        "<inb+out>"       ← headline total appointments
+//   line 2 (bold):        "<drops + inb + out>"    ← total volume
+//                                                    (matches KPI "Total Appointments")
 //
 // Letter suffixes (dr / in / out) make every number self-explanatory so
 // non-CSR staff can read the table without a legend.
@@ -20,9 +21,9 @@ import { Fragment } from 'react'
 //   DR  — weekly drops forecast
 //   IN  — weekly inbound appointment count
 //   OUT — weekly outbound appointment count
-//   TOTAL — weekly IN + OUT (the headline appointment number)
-// Drops are forecast volume, NOT booked appointments — they're shown as a
-// separate column rather than rolled into TOTAL.
+//   TOTAL — weekly DR + IN + OUT (matches the KPI "Total Appointments" semantic)
+// All three components are also displayed individually so planners can see
+// the breakdown alongside the headline total.
 //
 // MAD no longer gets a special inventory split — it uses the same layout
 // as every other facility. Dan/Dean asked for parity in the rebuild.
@@ -85,12 +86,12 @@ export default function ProjectList({
       const drops = Number((weeklyDrops[d] || {})[name] ?? 0)
       const inb   = Number(appt.inb ?? 0)
       const out   = Number(appt.out ?? 0)
-      perDay[d]   = { drops, inb, out, tot: inb + out }
+      perDay[d]   = { drops, inb, out, tot: drops + inb + out }
       wkIn       += inb
       wkOut      += out
       wkDrops    += drops
     }
-    rows.push({ name, perDay, wkIn, wkOut, wkDrops, wkTot: wkIn + wkOut })
+    rows.push({ name, perDay, wkIn, wkOut, wkDrops, wkTot: wkDrops + wkIn + wkOut })
   }
 
   // Sort by busiest first — appts dominate, then drops as tiebreak so
@@ -192,7 +193,7 @@ export default function ProjectList({
                         {cell.out > 0 ? `${cell.out}out` : ''}
                       </div>
                       <div style={{ ...totalStyle, color: cell.tot > 0 ? color : 'var(--text-dim)' }}>
-                        {cell.tot > 0 ? cell.tot : (cell.drops > 0 ? cell.drops : '—')}
+                        {cell.tot > 0 ? cell.tot : '—'}
                       </div>
                     </>
                   )}
