@@ -20,11 +20,11 @@ import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
   seedRosterAssignments, deleteAssignment,
   sendEmployeeOnLoan, recallLoan, purgeStaleAssignments,
-  purgeTerminatedAssignments,
+  purgeTerminatedAssignments, purgeTerminatedAcrossFuture,
   checkRosterStaleness, markRosterRowsAsSynced,
   fetchEmployeeBreaks, upsertEmployeeBreak, deleteEmployeeBreak,
 } from '../lib/supabase.js'
-import { fetchB2eRoster, fetchB2eTimeOff } from '../lib/omni.js'
+import { fetchB2eRoster, fetchB2eTimeOff, fetchActiveB2eEmployees } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
   shift1: { start: 'shift1_start', hours: 'shift1_hours' },
@@ -367,6 +367,11 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         const empIds = withTimeOff.map(e => e.id)
         await purgeStaleAssignments(empIds, facId, date)
         await purgeTerminatedAssignments(facId, date, empIds)
+        // Broader-scope cleanup: catch rows on OTHER future dates that the
+        // per-date purge above doesn't see. Uses master-roster Active set so
+        // someone off-schedule today isn't accidentally purged.
+        const activeRoster = await fetchActiveB2eEmployees(facId)
+        await purgeTerminatedAcrossFuture(facId, activeRoster, date)
         const seeded = await fetchTodayAssignments(facId, date)
         _buildState(facId, seeded, timeOffMap, carryovers)
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
@@ -514,6 +519,11 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       const empIds = withTimeOff.map(e => e.id)
       await purgeStaleAssignments(empIds, facility, date)
       await purgeTerminatedAssignments(facility, date, empIds)
+      // Broader-scope cleanup: catch terminated/transferred employees who
+      // still have rows on OTHER future dates the manager hasn't visited.
+      // Per-date purge above only handles the currently-viewed date.
+      const activeRoster = await fetchActiveB2eEmployees(facility)
+      await purgeTerminatedAcrossFuture(facility, activeRoster, date)
       await load(facility, date)
       if (!silent) {
         setSyncState('ok')
