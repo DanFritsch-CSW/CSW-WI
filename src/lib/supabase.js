@@ -176,8 +176,9 @@ export async function purgeStaleAssignments(employeeIds, correctFacility, fromDa
 // "remove employee" path — and that workaround is exactly what this purge
 // replaces. The B2E source of truth wins.
 //
-// Scope: current plan_date only. Future-dated rows clean themselves up when
-// a user visits that date and the next sync runs.
+// Scope: current plan_date only. For broader cleanup across all future dates
+// (catches stale rows on dates the manager hasn't visited+synced), use
+// purgeTerminatedAcrossFuture below.
 export async function purgeTerminatedAssignments(facility, planDate, currentB2eEmpIds) {
   if (!supabase) return null
   const { data, error: fetchErr } = await supabase
@@ -203,6 +204,61 @@ export async function purgeTerminatedAssignments(facility, planDate, currentB2eE
     .is('from_facility', null)
     .in('employee_id', staleIds)
   if (delErr) { console.error('purgeTerminatedAssignments delete:', delErr); return delErr.message }
+  return null
+}
+
+// purgeTerminatedAcrossFuture — broader-scope cleanup that runs on every B2E
+// sync alongside the per-date purgeTerminatedAssignments. Scans ALL future-dated
+// rows (>= fromDate) at the facility and deletes any whose employee_id is not
+// in the supplied active set.
+//
+// Why this exists: the per-date purge only cleans the plan_date the manager is
+// looking at. Terminated/transferred employees keep rows on every other future
+// date until the manager visits each one and clicks Sync from B2E. Dean reported
+// hitting this exact pattern — Hykeem/Marquise/Edward had rows scattered across
+// 6/24 through 7/27 and only the visited date got cleaned. Cross-facility
+// transfers (Chris Turpin KEN→CAL) had the same problem at his old facility.
+//
+// activeEmpIdSet should come from the B2E master roster (employee_status=Active
+// at the facility location), NOT from a per-date schedule query. A person can
+// be Active but legitimately off-schedule for some date (weekend, PTO) — purging
+// them globally because they don't have a schedule entry today would be a bug.
+// Use fetchActiveB2eEmployees in omni.js to get the right set.
+//
+// Safety: if activeEmpIdSet is empty (Omni outage), the function NO-OPS rather
+// than risk wiping a facility's roster on a transient failure.
+//
+// Same row-level protections as the per-date variant: preserves is_temp=true
+// (manual temps) and from_facility!=null (incoming loans). Not protected by
+// manually_edited — B2E truth wins over manager workarounds.
+export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, fromDate) {
+  if (!supabase) return null
+  if (!activeEmpIdSet || activeEmpIdSet.size === 0) {
+    console.warn('purgeTerminatedAcrossFuture skipped: empty activeEmpIdSet')
+    return null
+  }
+  const { data, error: fetchErr } = await supabase
+    .from('roster_assignments')
+    .select('employee_id')
+    .eq('facility', facility)
+    .gte('plan_date', fromDate)
+    .eq('is_temp', false)
+    .is('from_facility', null)
+  if (fetchErr) { console.error('purgeTerminatedAcrossFuture fetch:', fetchErr); return fetchErr.message }
+  if (!data || !data.length) return null
+  const staleIds = [...new Set(
+    data.map(r => String(r.employee_id)).filter(id => !activeEmpIdSet.has(id))
+  )]
+  if (!staleIds.length) return null
+  const { error: delErr } = await supabase
+    .from('roster_assignments')
+    .delete()
+    .eq('facility', facility)
+    .gte('plan_date', fromDate)
+    .eq('is_temp', false)
+    .is('from_facility', null)
+    .in('employee_id', staleIds)
+  if (delErr) { console.error('purgeTerminatedAcrossFuture delete:', delErr); return delErr.message }
   return null
 }
 
