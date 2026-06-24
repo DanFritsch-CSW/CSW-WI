@@ -5,10 +5,17 @@ import { Fragment } from 'react'
 // Renders the current week (7 days, Mon–Sun) as a grid:
 //   Project | Mon | Tue | Wed | Thu | Fri | Sat | Sun | DR | IN | OUT | TOTAL
 //
-// Each day cell shows 4 numbers in a labeled compact layout:
-//   line 1 (small, dim):  "<drops>dr  <inb>in  <out>out"
-//   line 2 (bold):        "<drops + inb + out>"    ← total volume
-//                                                    (matches KPI "Total Appointments")
+// Each day cell shows up to 4 numbers, stacked vertically:
+//   line 1 (small, dim):  "<drops>dr"   (only if drops > 0)
+//   line 2 (small, dim):  "<inb>in"     (only if inb > 0)
+//   line 3 (small, dim):  "<out>out"    (only if out > 0)
+//   line 4 (bold):        "<drops + inb + out>"
+//                          ← total volume (matches KPI "Total Appointments")
+//
+// Stacking removes the horizontal-overflow problem that hit busy projects
+// (Palermos: "35dr 38in 52out" was ~15 chars, blowing past any reasonable
+// column width). Each value on its own line means cells are bulletproof
+// regardless of how big the numbers get.
 //
 // Letter suffixes (dr / in / out) make every number self-explanatory so
 // non-CSR staff can read the table without a legend.
@@ -101,12 +108,13 @@ export default function ProjectList({
   if (!rows.length) return null
 
   // Grid template: project name | 7 day columns | 4 week total columns.
-  // Day columns bumped to 72px min to fit "6dr 7in 18out" on one dim line.
+  // Day columns at 56px min since values are stacked vertically — no longer
+  // need to fit "33dr 31in 35out" on a single horizontal line.
   // Week total subcolumns at ~48px each, separated visually from days.
-  const gridTemplate = 'minmax(140px, 1.4fr) repeat(7, minmax(72px, 1fr)) repeat(4, minmax(48px, 0.55fr))'
+  const gridTemplate = 'minmax(140px, 1.4fr) repeat(7, minmax(56px, 1fr)) repeat(4, minmax(48px, 0.55fr))'
 
-  const dimLabelStyle = { fontSize: 9,  color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', lineHeight: 1.15, whiteSpace: 'nowrap' }
-  const totalStyle    = { fontSize: 13, fontWeight: 600,           lineHeight: 1.15, fontFamily: 'var(--font-mono)' }
+  const dimLabelStyle = { fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', lineHeight: 1.2 }
+  const totalStyle    = { fontSize: 13, fontWeight: 600,           lineHeight: 1.2, fontFamily: 'var(--font-mono)', marginTop: 1 }
   const headerCellBase = {
     padding: '6px 4px',
     fontSize: 10,
@@ -125,7 +133,7 @@ export default function ProjectList({
 
   return (
     <div className="project-list" style={{ overflowX: 'auto' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, minWidth: 760 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, minWidth: 640 }}>
         {/* ── Header row ── */}
         <div style={{ ...headerCellBase, textAlign: 'left', paddingLeft: 8 }}>Project</div>
         {weekDays.map((d, i) => {
@@ -185,13 +193,9 @@ export default function ProjectList({
                     <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>—</span>
                   ) : (
                     <>
-                      <div style={dimLabelStyle}>
-                        {cell.drops > 0 ? `${cell.drops}dr` : ''}
-                        {cell.drops > 0 && (cell.inb > 0 || cell.out > 0) ? ' ' : ''}
-                        {cell.inb > 0 ? `${cell.inb}in` : ''}
-                        {cell.inb > 0 && cell.out > 0 ? ' ' : ''}
-                        {cell.out > 0 ? `${cell.out}out` : ''}
-                      </div>
+                      {cell.drops > 0 && <div style={dimLabelStyle}>{cell.drops}dr</div>}
+                      {cell.inb   > 0 && <div style={dimLabelStyle}>{cell.inb}in</div>}
+                      {cell.out   > 0 && <div style={dimLabelStyle}>{cell.out}out</div>}
                       <div style={{ ...totalStyle, color: cell.tot > 0 ? color : 'var(--text-dim)' }}>
                         {cell.tot > 0 ? cell.tot : '—'}
                       </div>
