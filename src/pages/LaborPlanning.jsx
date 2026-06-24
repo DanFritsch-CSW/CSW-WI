@@ -7,8 +7,21 @@ import AllFacilities from './AllFacilities.jsx'
 import FacilityPanel from './FacilityPanel.jsx'
 
 function todayISO() { return new Date().toISOString().slice(0, 10) }
-function tomorrowISO() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10) }
 function addDays(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
+
+// Monday of the week containing `iso`. Mon=1..Sat=6, Sun=0 → -6 shift.
+function mondayOf(iso) {
+  const d = new Date(iso + 'T00:00:00')
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + diff)
+  return d.toISOString().slice(0, 10)
+}
+function formatMDD(iso) {
+  const d = new Date(iso + 'T00:00:00')
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const ALL_TAB = { id: 'all', code: 'ALL', name: 'All Facilities', color: '#8a9899' }
 const TABS = [ALL_TAB, ...FACILITY_LIST]
@@ -81,8 +94,9 @@ export default function LaborPlanning() {
     fetchAllFacilitiesSettings().then(setFacilitySettings)
   }, [planDate])
 
-  const isToday    = planDate === todayISO()
-  const isTomorrow = planDate === tomorrowISO()
+  const today     = todayISO()
+  const weekStart = mondayOf(planDate)
+  const weekDays  = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i))
 
   return (
     <div className="page-content" ref={pageRef}>
@@ -92,9 +106,52 @@ export default function LaborPlanning() {
           <div className="page-subtitle">CSW 3PL · 5 Wisconsin Facilities</div>
         </div>
         <div className="day-selector">
-          <button className={`day-btn${isToday ? ' today' : ''}`} onClick={() => setPlanDate(todayISO())}>Today</button>
-          <button className={`day-btn${isTomorrow ? ' today' : ''}`} onClick={() => setPlanDate(tomorrowISO())}>Tomorrow</button>
-          <button className="day-btn day-btn--next" onClick={() => stepDay(1)} title="Advance one day">Next Day &rarr;</button>
+          <button
+            className="day-btn"
+            onClick={() => stepDay(-7)}
+            title="Previous week"
+            style={{ padding: '6px 10px', fontSize: 14 }}
+          >‹</button>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {weekDays.map((iso, idx) => {
+              const isActive   = iso === planDate
+              const isTodayTab = iso === today
+              return (
+                <button
+                  key={iso}
+                  className="day-btn"
+                  onClick={() => setPlanDate(iso)}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    gap: 1, padding: '4px 10px', minWidth: 50, position: 'relative',
+                    ...(isActive ? {
+                      borderColor: 'var(--brand)',
+                      color: 'var(--brand)',
+                      fontWeight: 600,
+                    } : { color: 'var(--text-secondary)' }),
+                  }}
+                >
+                  <span style={{ fontSize: 10, opacity: 0.7 }}>{DAY_LABELS[idx]}</span>
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>{formatMDD(iso)}</span>
+                  {isTodayTab && (
+                    <span
+                      style={{
+                        width: 5, height: 5, borderRadius: '50%',
+                        background: 'var(--brand)',
+                        position: 'absolute', bottom: 2,
+                      }}
+                    />
+                  )}
+                </button>
+              )
+            })}
+          </div>
+          <button
+            className="day-btn"
+            onClick={() => stepDay(7)}
+            title="Next week"
+            style={{ padding: '6px 10px', fontSize: 14 }}
+          >›</button>
           <input type="date" className="day-input" value={planDate} onChange={e => setPlanDate(e.target.value)} />
           {activeTab !== 'all' && (
             <button className="snapshot-btn" onClick={handleSnapshot}>{snapLabel}</button>
