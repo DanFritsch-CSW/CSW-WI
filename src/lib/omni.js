@@ -1425,6 +1425,125 @@ export async function fetchB2eRoster(facilityId, date) {
 }
 
 /**
+ * Fetch B2E rosters for a forward window in a SINGLE Omni round trip.
+ *
+ * Returns { [iso_date]: Employee[] } — one entry per (employee, date) pair
+ * that B2E actually has scheduled in [fromDate, fromDate + daysForward).
+ *
+ * Replaces the prior "project today's roster across N future days" cartesian
+ * pattern in seedForwardHorizon, which created false rows for employees on
+ * partial-week schedules (4/10, Mon-Wed only, etc). With per-date B2E truth,
+ * employees off-schedule on a given day simply have no entry for that date —
+ * no row gets seeded.
+ *
+ * Carryover logic is intentionally omitted: carryover is a DISPLAY concept
+ * (faded prior-night tiles) recomputed live by fetchB2eRoster when the user
+ * visits the date. Forward-window seeding writes one row per (employee, date);
+ * the per-date view re-fetches carryovers fresh.
+ *
+ * Single Omni window query (TIME_FOR_UNIT_DURATION with daysForward offset)
+ * keeps this at 2 round trips total (roster + schedule in parallel) vs 14+
+ * for a per-date approach.
+ */
+export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) {
+  const location = B2E_LOCATION[facilityId]
+  if (!location) return {}
+  const isCal = facilityId === 'cal'
+
+  const [rosterRows, scheduleRows, dockAssignments] = await Promise.all([
+    omniQuery({
+      modelId: B2E_MODEL_ID, table: ROSTER,
+      fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
+      filters: {
+        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
+      },
+      limit: 500,
+    }),
+    omniQuery({
+      modelId: B2E_MODEL_ID, table: SCHEDULE,
+      fields: [
+        `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
+        `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
+        `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
+        `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`, `${SCHEDULE}.entry_date`,
+      ],
+      filters: {
+        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
+        [`${SCHEDULE}.entry_date`]: {
+          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+          isFiscal: false, left_side: fromDate, is_negative: false,
+          offset_interval_string: `${daysForward} days`,
+        },
+      },
+      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
+      limit: 5000,
+    }),
+    isCal ? fetchCal2DockAssignments() : Promise.resolve(new Map()),
+  ])
+
+  const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
+
+  // Dedup by (employee_id, entry_date), most recent ingestion_ts wins.
+  // Mirrors fetchB2eRosterForEntryDate's single-date dedup behavior.
+  const byDateEmp = new Map() // dateIso -> Map<empId, {row, ts}>
+  for (const r of scheduleRows) {
+    const id = String(r[`${SCHEDULE}.employee_id`])
+    if (!activeIds.has(id)) continue
+    if (!ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
+    const dateRaw = r[`${SCHEDULE}.entry_date`]
+    if (!dateRaw) continue
+    const dateIso = typeof dateRaw === 'string'
+      ? dateRaw.slice(0, 10)
+      : new Date(dateRaw).toISOString().slice(0, 10)
+    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    if (!byDateEmp.has(dateIso)) byDateEmp.set(dateIso, new Map())
+    const empMap = byDateEmp.get(dateIso)
+    if (!empMap.has(id) || ts > empMap.get(id).ts) empMap.set(id, { row: r, ts })
+  }
+
+  const result = {}
+  for (const [dateIso, empMap] of byDateEmp.entries()) {
+    const employees = []
+    for (const [id, { row: r }] of empMap.entries()) {
+      const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
+      const endTime   = r[`${SCHEDULE}.modified_end_time`]   ?? r[`${SCHEDULE}.end_time`]
+      const firstName = r[`${SCHEDULE}.first_name`] || ''
+      const lastName  = r[`${SCHEDULE}.last_name`]  || ''
+      const fullName  = [firstName, lastName].filter(Boolean).join(' ')
+      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+
+      let defaultLane
+      if (isCal) {
+        const savedLane = dockAssignments.get(id)
+        if (savedLane) {
+          const side = savedLane.startsWith('side35') ? 'side35' : 'side12'
+          defaultLane = `${side}_${shiftLane}`
+        } else {
+          defaultLane = cal2FallbackLane(fullName, shiftLane)
+        }
+      } else {
+        defaultLane = shiftLane
+      }
+
+      employees.push({
+        id,
+        name:         fullName,
+        role:         null,
+        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
+        default_lane: defaultLane,
+        shift_start:  normalizeShiftStart(startTime),
+        shift_hours:  computeShiftHours(startTime, endTime),
+        facility:     facilityId,
+      })
+    }
+    result[dateIso] = employees
+  }
+
+  return result
+}
+
+/**
  * Fetch the set of currently-active employee IDs at a facility from B2E's
  * master roster (silver.b2e_slv_employeeroster). Independent of any specific
  * date's schedule — represents who is on the books right now.
