@@ -25,7 +25,7 @@ import {
   checkRosterStaleness, markRosterRowsAsSynced,
   fetchEmployeeBreaks, upsertEmployeeBreak, deleteEmployeeBreak,
 } from '../lib/supabase.js'
-import { fetchB2eRoster, fetchB2eTimeOff, fetchActiveB2eEmployees } from '../lib/omni.js'
+import { fetchB2eRoster, fetchB2eRosterForRange, fetchB2eTimeOff, fetchActiveB2eEmployees } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
   shift1: { start: 'shift1_start', hours: 'shift1_hours' },
@@ -373,12 +373,15 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         // someone off-schedule today isn't accidentally purged.
         const activeRoster = await fetchActiveB2eEmployees(facId)
         await purgeTerminatedAcrossFuture(facId, activeRoster, date)
-        // Forward-fill 14 days so new-hire B2E rows appear on future dates
-        // without each one requiring a manager visit + Sync. Uses raw
-        // persistable (no PTO overrides) — today's time-off must not
-        // propagate forward. Skip-if-exists guard preserves manual edits,
-        // loans, and prior seeds.
-        await seedForwardHorizon(facId, persistable, date)
+        // Forward-seed: pull B2E for the next 14 plan_dates in ONE round trip
+        // and write per-date rows. Replaces the old cartesian projection that
+        // wrote rows for every employee on every future date — created false
+        // rows for 4/10, part-time, and Mon-Wed-only schedules. Now each
+        // (employee, date) only exists in roster_assignments if B2E actually
+        // has them scheduled. Also reconciles existing rows: anything B2E
+        // doesn't have gets deleted (manual/temp/loan rows still protected).
+        const b2eRosterByDate = await fetchB2eRosterForRange(facId, date, 14).catch(() => ({}))
+        await seedForwardHorizon(facId, b2eRosterByDate, date)
         const seeded = await fetchTodayAssignments(facId, date)
         _buildState(facId, seeded, timeOffMap, carryovers)
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
@@ -531,11 +534,12 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       // Per-date purge above only handles the currently-viewed date.
       const activeRoster = await fetchActiveB2eEmployees(facility)
       await purgeTerminatedAcrossFuture(facility, activeRoster, date)
-      // Forward-fill 14 days so any new B2E hires propagate across the
-      // forward window without requiring a per-date Sync. Raw persistable
-      // (no PTO overrides) so today's time-off doesn't carry forward.
-      // Skip-if-exists preserves all manual edits, loans, and prior seeds.
-      await seedForwardHorizon(facility, persistable, date)
+      // Forward-seed: pull B2E for the next 14 plan_dates and reconcile.
+      // Inserts new-hire rows AND deletes false rows (employees no longer
+      // scheduled on a given day) in one pass. Manual/temp/loan rows are
+      // never touched. See comments on seedForwardHorizon in supabase.js.
+      const b2eRosterByDate = await fetchB2eRosterForRange(facility, date, 14).catch(() => ({}))
+      await seedForwardHorizon(facility, b2eRosterByDate, date)
       await load(facility, date)
       if (!silent) {
         setSyncState('ok')
