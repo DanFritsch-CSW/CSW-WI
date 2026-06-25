@@ -101,6 +101,10 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const [weeklyProjectAppts, setWeeklyProjectAppts] = useState({})
   const [weeklyProjectDrops, setWeeklyProjectDrops] = useState({})
   const [weeklyLoading, setWeeklyLoading]           = useState(false)
+  // Per Fathom call 2026-06-25 (Dean): HourlyChart defaults to collapsed in the
+  // Daily view so the panel reads less cluttered. Click the header to expand.
+  // State is per-FacilityPanel-mount; switching facilities resets to collapsed.
+  const [hourlyChartOpen, setHourlyChartOpen] = useState(false)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -381,6 +385,25 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     setCopyProjects(prev => { const next = new Set(prev); next.has(name) ? next.delete(name) : next.add(name); return next })
   }
 
+  // handleCopy — copy EST drops from current planDate to a range of destination dates.
+  //
+  // BOLD-EVERYWHERE BEHAVIOR (per Dean, 2026-06-03):
+  // For each selected project, write all 24 hours (0–23) on each destination
+  // date. Source value if the hour exists in the source map, else 0. Every
+  // cell written goes through upsertProjectHourlyDrops, which stamps
+  // manually_edited=true. Result on the destination day:
+  //   1. The entire column for that project shows bold in HourlyTable
+  //      (the manuallyEdited prop drives the .ht-cell-manual class).
+  //   2. The L4W seed in Phase 3 of loadData() reads manualKeys from DB and
+  //      skips those (project, hour) pairs entirely — so the column is
+  //      locked from automatic re-seeding.
+  //   3. deleteOrphanSeedRows filters on manually_edited=false at the query
+  //      level, so the cells can't be deleted by orphan cleanup either.
+  //
+  // The lock is released when (a) the CSR edits a cell again (still manual),
+  // (b) the CSR clicks the per-project ⇺ refresh button (which deletes + re-
+  // seeds from fresh L4W), or (c) the week rolls over and
+  // clearExpiredManualEdits prunes the past-week rows.
   async function handleCopy() {
     if (!copyFrom || !copyTo || copyFrom > copyTo) { setCopyMsg({ err: true, text: 'Invalid date range.' }); return }
     if (copyProjects.size === 0) { setCopyMsg({ err: true, text: 'Select at least one project.' }); return }
@@ -388,6 +411,9 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     if (!dates.length) { setCopyMsg({ err: true, text: 'No dates to copy to.' }); return }
     setCopying(true); setCopyMsg(null)
     try {
+      // Build full 24-hour rows for each selected project. This is what
+      // makes the destination column bold across every hour, including
+      // hours where the source had no value (those write as 0).
       const rows = []
       for (const [project_name, hourMap] of Object.entries(projectHourlyDrops)) {
         if (!copyProjects.has(project_name)) continue
@@ -413,6 +439,8 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     fetchProjectHourlyAppointments(facility.id, planDate, names).then(setSideHourlyAppts).catch(() => setSideHourlyAppts({}))
   }, [isCal2, sideTab, projects, facility.id, planDate])
 
+  // Fetch per-project hourly appointments when HPA overrides exist for this facility.
+  // Only fires when there are overrides — zero perf cost for facilities without them.
   useEffect(() => {
     if (!projects || projects.length === 0) { setPerProjectHourly(null); return }
     if (!projectHpa || projectHpa.size === 0) { setPerProjectHourly(null); return }
@@ -525,11 +553,34 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     })
   }, [rawHourly, hourlyAppts, estDrops, isCal2, sideTab, sideHourlyAppts])
 
+  // Per-hour labor req with project-level HPA overrides applied.
+  //
+  // Strategy: for each overridden project, sum its full contribution at the
+  // hour — live appointments (inb + out from the per-project Omni fetch) PLUS
+  // its EST drops (from visibleProjectHourlyDropsFlat). Apply the override
+  // HPA to that combined count. Everything else (non-overridden projects,
+  // unattributed appts) gets the facility default HPA.
+  //
+  //   req(h) = Σ_overridden ( (projectAppts_h + projectDrops_h) × overrideHpa )
+  //          + (totalAppts_h − overrideAttributedAppts_h) × defaultHpa
+  //
+  // Guarantees:
+  //   1. No overrides set → returns null → applySettings uses pure aggregate.
+  //   2. Override exists but project has 0 appts AND 0 drops at this hour →
+  //      contribution is 0, falls through to facility default.
+  //   3. perProjectHourly is empty {} → override-via-live-appts portion is 0,
+  //      but override-via-drops portion still applies (drops live in
+  //      visibleProjectHourlyDropsFlat which is from the DB, not Omni).
+  //   4. Overall: when no override actually applies to any visible activity,
+  //      result equals aggregate (totalAppts × defaultHpa).
   const perHourReq = useMemo(() => {
     if (!projectHpa || projectHpa.size === 0) return null
     if (!projects || projects.length === 0) return null
     const defaultHpa = settings?.hours_per_appt ?? 1.5
     const arr = new Array(24).fill(0)
+    // Build a quick lookup of projects-with-overrides so we can include
+    // drops-only override projects that may not appear in `projects`
+    // (e.g. a project we have drops for but no live appts).
     const overrideNames = new Set([
       ...projects.map(p => p.name),
       ...projectHpa.keys(),
@@ -636,7 +687,33 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         </div>
       </div>
 
-      <HourlyChart hourlyData={hourly} color={facility.color} />
+      <div className="collapsible-section">
+        <button
+          type="button"
+          className="collapsible-header"
+          onClick={() => setHourlyChartOpen(o => !o)}
+          aria-expanded={hourlyChartOpen}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            width: '100%', padding: '8px 10px', marginTop: 8,
+            background: 'var(--bg0)', border: '1px solid var(--border)', borderRadius: 4,
+            cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 12,
+            color: 'var(--text-primary)', textAlign: 'left',
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>Hourly Chart</span>
+          <span style={{
+            fontSize: 10, color: 'var(--text-secondary)',
+            transform: hourlyChartOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s ease',
+          }}>▶</span>
+        </button>
+        {hourlyChartOpen && (
+          <div style={{ marginTop: 6 }}>
+            <HourlyChart hourlyData={hourly} color={facility.color} />
+          </div>
+        )}
+      </div>
 
       <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span>Hourly Breakdown</span>
