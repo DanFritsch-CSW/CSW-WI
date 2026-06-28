@@ -5,22 +5,23 @@ import { useState, useEffect, useMemo } from 'react'
 // view per Kay Martin's request — snippable white card she can crop and share
 // with external customers.
 //
-// Data approach: EIGHT PARALLEL Omni queries (one per week). Each query asks
-// for raw appointment rows (project, type, timestamp, lookup_code) over a
-// 7-day window. We flatten all results client-side and bucket by
-// (customer, week, weekday, type).
+// Data approach: 56 PER-DAY Omni queries (8 weeks × 7 days), batched 12 at a
+// time. Each query returns (project_name, type, lookup_code) for one specific
+// date. The date is known from the query parameter so we tag each returned
+// row with its (weekIdx, weekdayIdx) before flattening.
 //
-// Why 8 separate queries instead of one big 56-day query:
-//   1. Omni's serverless proxy silently caps result sets (~1000 rows on the
-//      observed deployment), so a single 8-week query at busy facilities
-//      returns partial data with no error. Per-week queries fit under the cap.
-//   2. We deliberately omit the `count` measure — including it triggers Omni's
-//      group-by-dimensions aggregation which can collapse the timestamp
-//      dimension to a coarser granularity, returning ~tens of rows total
-//      instead of one row per appointment. Without `count`, lookup_code's
-//      uniqueness keeps every row as a single appointment.
+// Why per-day instead of per-week or 56-day windows:
+//   When `scheduled_arrival` appears in the SELECT list of an Omni query with
+//   a multi-day `TIME_FOR_UNIT_DURATION` filter, Omni collapses to the START
+//   day of the window — we verified this against MotherDuck (MAD Tue-Sun data
+//   exists but never came back). The single-day `offset_interval_string: '0
+//   days'` pattern is rock-solid (it's what `fetchAppointmentList` uses).
+//   `fetchKnownProjectsByFacility` works with 30-day windows specifically
+//   because it omits `scheduled_arrival` from the SELECT — Omni then doesn't
+//   touch the time dimension.
 //
-// Each row in the result is one appointment; we count it as 1 in bucketing.
+// We don't need `scheduled_arrival` in the response anyway — the query date IS
+// the appointment date, so we attach (weekIdx, weekdayIdx) at query time.
 //
 // Type taxonomy:
 //   - Outbound:  dock_appointment_type_name starts with "Outbound"
@@ -43,7 +44,6 @@ const CSW_WAREHOUSE = {
   ec:  'CSW-Eau Claire',
 }
 
-// Mirrors the KEN-only normalization in omni.js — same Omni dataset, same logic.
 const KEN_OMNI_NAME_MAP = new Map([
   ['FAIR OAKS FARMS', 'Fair Oaks Farms'],
   ['FAIR OAKS FARMS WEST', 'Fair Oaks Farms'],
@@ -51,9 +51,6 @@ const KEN_OMNI_NAME_MAP = new Map([
   ['BOSSB5', 'BossBites'],
 ])
 
-// Drop classification rules — mirrors PROJECT_DROP_RULES in omni.js.
-// KEN customers in this map have their inbound appointments classified as drops
-// based on lookup_code patterns. Non-listed customers/facilities → no drops.
 const DROP_RULES = {
   ken: new Map([
     ['CROWN BAKERIES',                  { method: 'all' }],
@@ -110,13 +107,6 @@ async function omniQuery(query) {
   return rows || []
 }
 
-// 0=Mon..6=Sun (Monday-anchored, matches the rest of the app)
-function isoToWeekday(isoDate) {
-  const d = new Date(isoDate + 'T00:00:00Z')
-  const jsDay = d.getUTCDay()
-  return jsDay === 0 ? 6 : jsDay - 1
-}
-
 function mondayOf(iso) {
   const d = new Date(iso + 'T00:00:00Z')
   const jsDay = d.getUTCDay()
@@ -143,10 +133,12 @@ const TYPES = [
   { id: 'dr',  label: 'Drops' },
 ]
 const NUM_WEEKS = 8
+const BATCH_SIZE = 12  // concurrent omni queries per chunk
 
 export default function CustomerSnapshot({ facilityId, planDate, color }) {
   const [rows, setRows] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [progress, setProgress] = useState(0)  // 0..56
   const [error, setError] = useState(null)
 
   const [selTypes, setSelTypes] = useState(['out'])
@@ -168,45 +160,63 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
     setLoading(true)
     setError(null)
     setRows(null)
+    setProgress(0)
 
     async function load() {
       try {
         const wh = CSW_WAREHOUSE[facilityId]
         if (!wh) { setLoading(false); return }
 
-        // 8 parallel weekly queries — see header comment for rationale.
-        const weeklyResults = await Promise.all(weeks.map(weekMon =>
-          omniQuery({
-            modelId: GOLD_MODEL_ID,
-            table: VIEW_APPT,
-            fields: [
-              `${VIEW_APPT}.project_name`,
-              `${VIEW_APPT}.dock_appointment_type_name`,
-              `${VIEW_APPT}.scheduled_arrival`,
-              `${VIEW_APPT}.lookup_code`,
-            ],
-            filters: {
-              [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-              [`${VIEW_APPT}.scheduled_arrival`]: {
-                kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-                isFiscal: false, left_side: weekMon, is_negative: false,
-                offset_interval_string: '7 days',
+        // Build all 56 (date, weekIdx, weekdayIdx) tuples
+        const tuples = []
+        weeks.forEach((weekMon, wIdx) => {
+          for (let d = 0; d < 7; d++) {
+            tuples.push({ date: addDaysIso(weekMon, d), weekIdx: wIdx, weekdayIdx: d })
+          }
+        })
+
+        const allRows = []
+        let completed = 0
+        // Sequential chunks of BATCH_SIZE parallel queries
+        for (let i = 0; i < tuples.length; i += BATCH_SIZE) {
+          if (cancelled) return
+          const batch = tuples.slice(i, i + BATCH_SIZE)
+          const batchResults = await Promise.all(batch.map(t =>
+            omniQuery({
+              modelId: GOLD_MODEL_ID,
+              table: VIEW_APPT,
+              fields: [
+                `${VIEW_APPT}.project_name`,
+                `${VIEW_APPT}.dock_appointment_type_name`,
+                `${VIEW_APPT}.lookup_code`,
+              ],
+              filters: {
+                [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+                [`${VIEW_APPT}.scheduled_arrival`]: {
+                  kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+                  isFiscal: false, left_side: t.date, is_negative: false,
+                  offset_interval_string: '0 days',
+                },
+                [`${VIEW_APPT}.dock_status_name`]: {
+                  kind: 'EQUALS', type: 'string', values: ['Cancelled'], is_negative: true,
+                },
               },
-              // Exclude Cancelled, keep HOLD (capacity reservations).
-              [`${VIEW_APPT}.dock_status_name`]: {
-                kind: 'EQUALS', type: 'string', values: ['Cancelled'], is_negative: true,
-              },
-            },
-            sorts: [],
-            limit: 1000,
-          })
-        ))
+              sorts: [],
+              limit: 500,
+            })
+              .then(dayRows => dayRows.map(r => ({ r, weekIdx: t.weekIdx, weekdayIdx: t.weekdayIdx })))
+              .catch(() => [])
+          ))
+          for (const arr of batchResults) allRows.push(...arr)
+          completed += batch.length
+          if (!cancelled) setProgress(completed)
+        }
 
         if (cancelled) return
-        const flat = weeklyResults.flat()
-        const perWeekCounts = weeklyResults.map(r => r.length).join(',')
-        console.log(`[CustomerSnapshot] ${facilityId}: ${flat.length} total rows (per-week: ${perWeekCounts})`)
-        setRows(flat)
+        const perWeekTotals = Array(NUM_WEEKS).fill(0)
+        for (const x of allRows) perWeekTotals[x.weekIdx]++
+        console.log(`[CustomerSnapshot] ${facilityId}: ${allRows.length} total appointments across 56 days (per-week: ${perWeekTotals.join(',')})`)
+        setRows(allRows)
       } catch (e) {
         if (!cancelled) setError(e.message || 'Failed to load')
       } finally {
@@ -217,32 +227,21 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
     return () => { cancelled = true }
   }, [facilityId, weeks])
 
-  // Bucket rows by (customer, weekIdx, weekdayIdx, bucketType). Each row = 1 appointment.
-  // bucketType: 'in' (non-drop inbound), 'out', 'dr' (rule-classified drops)
+  // Bucket rows. Each row already carries weekIdx + weekdayIdx from the fetch.
   const buckets = useMemo(() => {
     if (!rows) return null
     const map = {}
     const customers = new Set()
     let skippedNoName = 0
     let skippedNoType = 0
-    let skippedNoWeek = 0
-    for (const r of rows) {
+    for (const { r, weekIdx, weekdayIdx } of rows) {
       const rawName = r[`${VIEW_APPT}.project_name`] || ''
       if (!rawName) { skippedNoName++; continue }
       const name = normalizeProjectName(facilityId, rawName)
-      const ts = r[`${VIEW_APPT}.scheduled_arrival`]
       const typeName = r[`${VIEW_APPT}.dock_appointment_type_name`]
       const lookupCode = r[`${VIEW_APPT}.lookup_code`]
       const type = classifyType(typeName)
       if (!type) { skippedNoType++; continue }
-
-      const isoDate = typeof ts === 'string'
-        ? ts.slice(0, 10)
-        : new Date(ts).toISOString().slice(0, 10)
-      const weekdayIdx = isoToWeekday(isoDate)
-      const dayMon = mondayOf(isoDate)
-      const weekIdx = weeks.indexOf(dayMon)
-      if (weekIdx < 0) { skippedNoWeek++; continue }
 
       let bucketType
       if (isDrop(facilityId, name, lookupCode, type)) bucketType = 'dr'
@@ -253,14 +252,14 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
       map[key] = (map[key] || 0) + 1
       customers.add(name)
     }
-    if (skippedNoName || skippedNoType || skippedNoWeek) {
-      console.log(`[CustomerSnapshot] ${facilityId}: bucketing skips — noName:${skippedNoName} noType:${skippedNoType} noWeek:${skippedNoWeek}`)
+    if (skippedNoName || skippedNoType) {
+      console.log(`[CustomerSnapshot] ${facilityId}: skipped ${skippedNoName} no-name + ${skippedNoType} no-type rows`)
     }
     return {
       data: map,
       customers: [...customers].sort((a, b) => a.localeCompare(b)),
     }
-  }, [rows, facilityId, weeks])
+  }, [rows, facilityId])
 
   // Default the two cards to the top customers when data arrives.
   useEffect(() => {
@@ -279,7 +278,6 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
       for (const t of types) {
         sched[dow] += buckets.data[`${customer}|${weekIdx}|${dow}|${t}`] || 0
       }
-      // Normal = median over the OTHER 7 weeks for the same weekday + selected types
       const samples = []
       for (let w = 0; w < NUM_WEEKS; w++) {
         if (w === weekIdx) continue
@@ -383,27 +381,26 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
     )
   }
 
-  // Week options — reversed so most-recent is at the top of the dropdown
   const weekOptions = weeks.map((mon, i) => ({
     value: i,
     label: `${i === NUM_WEEKS - 1 ? 'This week · ' : ''}${fmtMD(mon)} – ${fmtMD(addDaysIso(mon, 6))}`,
   })).reverse()
 
-  // Status banner — appears between filter row and cards when relevant
   let statusBanner = null
   if (loading) {
-    statusBanner = <div className="snap-status">Loading customer snapshot…</div>
+    statusBanner = (
+      <div className="snap-status">
+        Loading customer snapshot… {progress > 0 && <span>({progress}/56 days)</span>}
+      </div>
+    )
   } else if (error) {
     statusBanner = <div className="snap-status snap-error">Snapshot unavailable: {error}</div>
   } else if (buckets && buckets.customers.length === 0) {
-    const rowCount = rows?.length ?? 0
     statusBanner = (
       <div className="snap-status">
         No customer activity in the past 8 weeks.
         <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-dim)' }}>
-          {rowCount === 0
-            ? 'Omni returned no rows.'
-            : `Omni returned ${rowCount} rows but none were bucketable — check the browser console for [CustomerSnapshot] log to see where rows were skipped.`}
+          Check the browser console for the [CustomerSnapshot] log to see how many rows came back per week.
         </div>
       </div>
     )
