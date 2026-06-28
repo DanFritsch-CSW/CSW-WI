@@ -5,6 +5,7 @@ import HourlyTable from '../components/HourlyTable.jsx'
 import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
+import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
@@ -858,12 +859,11 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
       )}
 
       {!isDaily && (
-        <div className="weekly-stub" style={{ marginTop: 24 }}>
-          <div className="weekly-stub-title">Customer Snapshot</div>
-          <div className="weekly-stub-sub">
-            Per-customer weekly volume vs. baseline · coming in next commit.
-          </div>
-        </div>
+        <CustomerSnapshot
+          facilityId={facility.id}
+          planDate={planDate}
+          color={facility.color}
+        />
       )}
     </div>
   )
