@@ -690,7 +690,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         </div>
       )}
 
-      {isDaily ? (
+      {isDaily && (
         <div className="panel-top-grid">
           <KpiPills data={kpiData} color={facility.color} />
           <div>
@@ -719,8 +719,6 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
             </div>
           </div>
         </div>
-      ) : (
-        <KpiPills data={kpiData} color={facility.color} />
       )}
 
       {isDaily && (

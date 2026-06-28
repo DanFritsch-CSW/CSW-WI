@@ -189,6 +189,7 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
           limit: 5000,
         })
         if (cancelled) return
+        console.log(`[CustomerSnapshot] ${facilityId}: omni returned ${apiRows?.length ?? 'null'} rows for window starting ${fromDate}`)
         setRows(apiRows)
       } catch (e) {
         if (!cancelled) setError(e.message || 'Failed to load')
@@ -362,7 +363,16 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
   if (loading) return <div className="snap-status">Loading customer snapshot…</div>
   if (error)   return <div className="snap-status snap-error">Snapshot unavailable: {error}</div>
   if (!buckets || buckets.customers.length === 0) {
-    return <div className="snap-status">No customer activity in the past 8 weeks.</div>
+    const rowCount = rows?.length ?? 0
+    const detail = rowCount === 0
+      ? 'Omni returned no rows for this facility in the past 8 weeks.'
+      : `Omni returned ${rowCount} rows but none were bucketable (check console for [CustomerSnapshot] log; likely a date-parsing or warehouse-name mismatch).`
+    return (
+      <div className="snap-status">
+        No customer activity in the past 8 weeks.
+        <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-dim)' }}>{detail}</div>
+      </div>
+    )
   }
 
   // Week options — reversed so most-recent is at the top of the dropdown
