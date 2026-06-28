@@ -188,22 +188,29 @@ export default function LaborPlanning() {
         ))}
       </div>
 
-      {/* ALL tab */}
+      {/* ALL tab — Daily shows network summary, Weekly shows a stub */}
       <div style={{ display: activeTab === 'all' ? undefined : 'none' }}>
-        <AllFacilities
-          networkData={networkData}
-          facilityEstDrops={facilityEstDrops}
-          facilityLaborCounts={facilityLaborCounts}
-          facilitySettings={facilitySettings}
-          facilityDeltas={facilityDeltas}
-          facilityKpis={facilityKpis}
-          planDate={planDate}
-          view={view}
-          onFacilityClick={setActiveTab}
-        />
+        {view === 'daily' ? (
+          <AllFacilities
+            networkData={networkData}
+            facilityEstDrops={facilityEstDrops}
+            facilityLaborCounts={facilityLaborCounts}
+            facilitySettings={facilitySettings}
+            facilityDeltas={facilityDeltas}
+            facilityKpis={facilityKpis}
+            planDate={planDate}
+            onFacilityClick={setActiveTab}
+          />
+        ) : (
+          <div className="weekly-stub">
+            <div className="weekly-stub-title">Weekly View — All Facilities</div>
+            <div className="weekly-stub-sub">Select a facility tab above to see the weekly Projects grid and Customer Snapshot.</div>
+          </div>
+        )}
       </div>
 
-      {/* Facility panels — mounted once on first visit, hidden via CSS otherwise */}
+      {/* Facility panels — mounted once on first visit, hidden via CSS otherwise.
+          FacilityPanel internally branches on the `view` prop. */}
       {FACILITY_LIST.map(fac => {
         const isActive = activeTab === fac.id
         if (!mountedTabs.has(fac.id)) return null

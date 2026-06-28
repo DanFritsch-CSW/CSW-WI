@@ -65,7 +65,7 @@
   letter-spacing: 0.04em;
 }
 
-/* Daily Projects single-column list — shown in Daily view */
+/* Daily Projects panel — single-column per-day list (today only) */
 .daily-project-list {
   background: var(--bg2);
   border: 1px solid var(--border);
@@ -73,7 +73,7 @@
   overflow: hidden;
 }
 
-.daily-project-list .dpl-header {
+.dpl-header {
   display: grid;
   grid-template-columns: 1fr 72px 64px 64px 80px;
   padding: 6px 14px;
@@ -86,12 +86,11 @@
   background: var(--bg1);
 }
 
-.daily-project-list .dpl-header .dpl-r,
-.daily-project-list .dpl-row .dpl-num {
+.dpl-header > div:not(:first-child) {
   text-align: right;
 }
 
-.daily-project-list .dpl-row {
+.dpl-row {
   display: grid;
   grid-template-columns: 1fr 72px 64px 64px 80px;
   align-items: center;
@@ -99,33 +98,52 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.daily-project-list .dpl-row:last-child {
+.dpl-row:last-child {
   border-bottom: none;
 }
 
-.daily-project-list .dpl-name {
+.dpl-name {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-primary);
-  overflow: hidden;
   white-space: nowrap;
+  overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.daily-project-list .dpl-num {
+.dpl-num {
   font-family: var(--font-mono);
   font-size: 12px;
+  text-align: right;
   color: var(--text-secondary);
 }
 
-.daily-project-list .dpl-tot {
+.dpl-tot {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: right;
   font-weight: 600;
 }
 
-.daily-project-list .dpl-empty {
-  padding: 16px 14px;
+.dpl-empty {
+  padding: 24px 14px;
+  text-align: center;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* Weekly view placeholder for Customer Snapshot (filled in next commit) */
+.snap-placeholder {
+  margin-top: 20px;
+  padding: 40px 24px;
   text-align: center;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl, 16px);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
