@@ -147,3 +147,241 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+
+/* ── Customer Snapshot widget (Weekly view) ─────────────────────────── */
+.snap-wrap { margin-top: 20px; }
+
+.snap-intro {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.snap-filters {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+
+.snap-flbl {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.snap-sel {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: var(--r-md, 8px);
+  cursor: pointer;
+  min-width: 172px;
+}
+
+.type-multi {
+  display: flex;
+  gap: 6px;
+}
+
+.type-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 6px 13px;
+  border-radius: var(--r-md, 8px);
+  border: 1px solid var(--border);
+  background: var(--bg1);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.type-chip:hover {
+  border-color: var(--brand);
+}
+
+.type-chip.on {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+.snap-combo {
+  position: relative;
+  display: inline-block;
+}
+
+.snap-input {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: var(--r-md, 8px);
+  min-width: 240px;
+  outline: none;
+}
+
+.snap-input:focus {
+  border-color: var(--brand);
+}
+
+.snap-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 280px;
+  max-height: 248px;
+  overflow-y: auto;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 8px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  padding: 4px 0;
+}
+
+.snap-opt {
+  padding: 7px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.snap-opt:hover {
+  background: var(--bg2);
+  color: var(--text-primary);
+}
+
+.snap-opt.on {
+  color: var(--brand);
+}
+
+.snap-noopt {
+  padding: 7px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.snap-compare {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.snap-col {
+  flex: 1;
+  min-width: 430px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The white card itself — light-themed because it gets cropped and shared with customers */
+.snap-card {
+  background: #ffffff;
+  border: 1px solid #E0E0DA;
+  border-radius: 8px;
+  padding: 32px 36px;
+  color: #16110d;
+  font-family: 'Inter', sans-serif;
+  max-width: 720px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+}
+
+.snap-head {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.015em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+.snap-sub {
+  font-size: 13px;
+  color: #7a766d;
+  margin-top: 6px;
+  font-weight: 500;
+}
+
+.snap-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 24px;
+}
+
+.sn-corner { width: 140px; }
+
+.sn-th {
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: #16110d;
+  padding: 0 0 12px 16px;
+}
+
+.sn-rowlbl {
+  text-align: left;
+  font-size: 13px;
+  color: #7a766d;
+  font-weight: 500;
+  padding: 9px 0;
+  white-space: nowrap;
+}
+
+.sn-cell {
+  text-align: right;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  padding: 9px 0 9px 16px;
+  color: #16110d;
+  font-weight: 500;
+}
+
+.sn-pct { font-weight: 600; }
+.pct-green { color: #1f8a4c; }
+.pct-amber { color: #c07e0a; }
+.pct-dim   { color: #bdbcb2; font-weight: 500; }
+
+.sn-divide td { border-top: 1px solid #ece9e1; }
+
+.snap-note {
+  margin-top: 16px;
+  font-size: 11px;
+  color: #9a968c;
+  font-style: italic;
+}
+
+.snap-foot {
+  margin-top: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: #b0aca2;
+}
+
+.snap-status {
+  padding: 40px 24px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.snap-status.snap-error {
+  color: var(--text-secondary);
+}
