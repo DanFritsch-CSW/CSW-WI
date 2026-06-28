@@ -1,0 +1,66 @@
+/* Daily / Weekly global view tabs — placed above facility tabs in LaborPlanning */
+.view-tab-row {
+  display: flex;
+  gap: 4px;
+  padding: 14px 0 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.view-tab {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 8px 22px 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+
+.view-tab:hover {
+  background: var(--bg2);
+  color: var(--text-primary);
+}
+
+.view-tab.active {
+  color: var(--brand);
+  border-bottom-color: var(--brand);
+}
+
+.view-hint {
+  margin-left: auto;
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-right: 2px;
+}
+
+.weekly-stub {
+  padding: 80px 24px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.weekly-stub-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.weekly-stub-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}

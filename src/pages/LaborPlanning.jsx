@@ -5,6 +5,7 @@ import { fetchNetworkKpis } from '../lib/omni.js'
 import { fetchAllFacilitiesEstDrops, fetchAllFacilitiesLaborCounts, fetchAllFacilitiesSettings } from '../lib/supabase.js'
 import AllFacilities from './AllFacilities.jsx'
 import FacilityPanel from './FacilityPanel.jsx'
+import '../styles/view-tabs.css'
 
 function todayISO() { return new Date().toISOString().slice(0, 10) }
 function addDays(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
@@ -30,9 +31,11 @@ export default function LaborPlanning() {
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTab = searchParams.get('fac') || 'all'
   const planDate  = searchParams.get('date') || todayISO()
+  const view      = searchParams.get('view') === 'weekly' ? 'weekly' : 'daily'
 
   function setActiveTab(tab) { setSearchParams(prev => { prev.set('fac', tab); return prev }, { replace: true }) }
   function setPlanDate(date) { setSearchParams(prev => { prev.set('date', date); return prev }, { replace: true }) }
+  function setView(v) { setSearchParams(prev => { prev.set('view', v); return prev }, { replace: true }) }
   function stepDay(n) { setPlanDate(addDays(planDate, n)) }
 
   const [networkData, setNetworkData]                 = useState(null)
@@ -159,6 +162,19 @@ export default function LaborPlanning() {
         </div>
       </div>
 
+      {/* Global Daily / Weekly view tabs — applies to all facilities */}
+      <div className="view-tab-row">
+        <button
+          className={`view-tab${view === 'daily' ? ' active' : ''}`}
+          onClick={() => setView('daily')}
+        >Daily</button>
+        <button
+          className={`view-tab${view === 'weekly' ? ' active' : ''}`}
+          onClick={() => setView('weekly')}
+        >Weekly</button>
+        <span className="view-hint">Global · applies to all facilities</span>
+      </div>
+
       <div className="facility-tabs">
         {TABS.map(tab => (
           <button key={tab.id}
@@ -172,36 +188,47 @@ export default function LaborPlanning() {
         ))}
       </div>
 
-      {/* ALL tab */}
-      <div style={{ display: activeTab === 'all' ? undefined : 'none' }}>
-        <AllFacilities
-          networkData={networkData}
-          facilityEstDrops={facilityEstDrops}
-          facilityLaborCounts={facilityLaborCounts}
-          facilitySettings={facilitySettings}
-          facilityDeltas={facilityDeltas}
-          facilityKpis={facilityKpis}
-          planDate={planDate}
-          onFacilityClick={setActiveTab}
-        />
-      </div>
-
-      {/* Facility panels — mounted once on first visit, hidden via CSS otherwise */}
-      {FACILITY_LIST.map(fac => {
-        const isActive = activeTab === fac.id
-        if (!mountedTabs.has(fac.id)) return null
-        return (
-          <div key={fac.id} style={{ display: isActive ? undefined : 'none' }}>
-            <FacilityPanel
-              facility={fac}
+      {view === 'daily' ? (
+        <>
+          {/* ALL tab */}
+          <div style={{ display: activeTab === 'all' ? undefined : 'none' }}>
+            <AllFacilities
+              networkData={networkData}
+              facilityEstDrops={facilityEstDrops}
+              facilityLaborCounts={facilityLaborCounts}
+              facilitySettings={facilitySettings}
+              facilityDeltas={facilityDeltas}
+              facilityKpis={facilityKpis}
               planDate={planDate}
-              networkKpi={networkData?.[fac.id]}
-              onDeltaComputed={handleDeltaComputed}
-              onKpiComputed={handleKpiComputed}
+              onFacilityClick={setActiveTab}
             />
           </div>
-        )
-      })}
+
+          {/* Facility panels — mounted once on first visit, hidden via CSS otherwise */}
+          {FACILITY_LIST.map(fac => {
+            const isActive = activeTab === fac.id
+            if (!mountedTabs.has(fac.id)) return null
+            return (
+              <div key={fac.id} style={{ display: isActive ? undefined : 'none' }}>
+                <FacilityPanel
+                  facility={fac}
+                  planDate={planDate}
+                  networkKpi={networkData?.[fac.id]}
+                  onDeltaComputed={handleDeltaComputed}
+                  onKpiComputed={handleKpiComputed}
+                />
+              </div>
+            )
+          })}
+        </>
+      ) : (
+        <div className="weekly-stub">
+          <div className="weekly-stub-title">Weekly View</div>
+          <div className="weekly-stub-sub">
+            Weekly grid + Customer Snapshot coming in next commit.
+          </div>
+        </div>
+      )}
     </div>
   )
 }
