@@ -1,0 +1,67 @@
+/* DailyProjectList — single-day per-project table for the Daily view */
+.daily-project-list {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl, 16px);
+  overflow: hidden;
+}
+
+.dpl-header {
+  display: grid;
+  grid-template-columns: 1fr 64px 56px 56px 64px;
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg1);
+}
+
+.dpl-r {
+  text-align: right;
+}
+
+.dpl-row {
+  display: grid;
+  grid-template-columns: 1fr 64px 56px 56px 64px;
+  align-items: center;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.dpl-row:last-child {
+  border-bottom: none;
+}
+
+.dpl-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dpl-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: right;
+  color: var(--text-secondary);
+}
+
+.dpl-tot {
+  font-weight: 600;
+}
+
+.daily-project-list-empty {
+  padding: 24px 16px;
+  text-align: center;
+}
+
+.dpl-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
