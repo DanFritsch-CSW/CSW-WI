@@ -73,7 +73,7 @@ function mondayOfWeek(iso) {
   return d.toISOString().slice(0, 10)
 }
 
-export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaComputed, onKpiComputed }) {
+export default function FacilityPanel({ facility, planDate, view, networkKpi, onDeltaComputed, onKpiComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
   const [hourlyErr, setHourlyErr]           = useState(null)
@@ -110,6 +110,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
   const isMad  = facility.id === 'mad'
   const isKen  = facility.id === 'ken'
   const isWr   = facility.id === 'wr'
+  const isDaily = view !== 'weekly'
 
   const [sideTab, setSideTab] = useState('all')
   const [wrTab, setWrTab]     = useState('warehouse')
@@ -191,7 +192,7 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [refreshAppointments])
 
-  // ── Appointment list fetch (independent of main loadData flow) ────────────
+  // ── Appointment list fetch (independent of main loadData flow) ──────────
   // A failure here does not block KPIs or the roster board.
   useEffect(() => {
     let cancelled = false
@@ -544,6 +545,24 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
 
   const totalDrops = useMemo(() => Math.round(Object.values(estDrops).reduce((s, v) => s + Number(v), 0)), [estDrops])
 
+  // Daily projects list (busiest first) — used only in Daily view.
+  // Combines today's live appointments with seeded/edited drops for the day.
+  const dailyProjectRows = useMemo(() => {
+    const rows = visibleProjects.map(p => {
+      const dr = projectDrops[p.name] ?? 0
+      const inb = p.inb ?? 0
+      const out = p.out ?? 0
+      return { name: p.name, dr, inb, out, total: dr + inb + out }
+    })
+    // Surface drops-only projects that may not be in the appt-derived projects list
+    for (const name of Object.keys(projectDrops)) {
+      if (rows.some(r => r.name === name)) continue
+      if (!projectDrops[name]) continue
+      rows.push({ name, dr: projectDrops[name], inb: 0, out: 0, total: projectDrops[name] })
+    }
+    return rows.sort((a, b) => b.total - a.total)
+  }, [visibleProjects, projectDrops])
+
   const rawWithAppts = useMemo(() => {
     if (!rawHourly.length) return rawHourly
     return rawHourly.map(row => {
@@ -674,139 +693,178 @@ export default function FacilityPanel({ facility, planDate, networkKpi, onDeltaC
         <KpiPills data={kpiData} color={facility.color} />
         <div>
           <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>
-            Projects {weeklyLoading && <span style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>· loading week…</span>}
+            Projects
+            {!isDaily && weeklyLoading && <span style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400, marginLeft: 8 }}>· loading week…</span>}
           </div>
-          <ProjectList
-            weekDays={weekDays}
-            selectedDate={planDate}
-            weeklyAppts={weeklyProjectAppts}
-            weeklyDrops={weeklyProjectDrops}
-            color={facility.color}
-            projectFilter={projectFilter}
-          />
+          {isDaily ? (
+            <div className="daily-project-list">
+              <div className="dpl-header">
+                <div>Project</div>
+                <div className="dpl-r">Drops</div>
+                <div className="dpl-r">Inb</div>
+                <div className="dpl-r">Out</div>
+                <div className="dpl-r">Total</div>
+              </div>
+              {dailyProjectRows.length === 0 ? (
+                <div className="dpl-empty">No projects scheduled.</div>
+              ) : (
+                dailyProjectRows.map(r => (
+                  <div key={r.name} className="dpl-row">
+                    <div className="dpl-name">{r.name}</div>
+                    <div className="dpl-num">{r.dr || '—'}</div>
+                    <div className="dpl-num">{r.inb || '—'}</div>
+                    <div className="dpl-num">{r.out || '—'}</div>
+                    <div className="dpl-num dpl-tot" style={{ color: facility.color }}>{r.total || '—'}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : (
+            <ProjectList
+              weekDays={weekDays}
+              selectedDate={planDate}
+              weeklyAppts={weeklyProjectAppts}
+              weeklyDrops={weeklyProjectDrops}
+              color={facility.color}
+              projectFilter={projectFilter}
+            />
+          )}
         </div>
       </div>
 
-      <div className="collapsible-section">
-        <button
-          type="button"
-          className="collapsible-header"
-          onClick={() => setHourlyChartOpen(o => !o)}
-          aria-expanded={hourlyChartOpen}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            width: '100%', padding: '8px 10px', marginTop: 8,
-            background: 'var(--bg0)', border: '1px solid var(--border)', borderRadius: 4,
-            cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 12,
-            color: 'var(--text-primary)', textAlign: 'left',
-          }}
-        >
-          <span style={{ fontWeight: 600 }}>Hourly Chart</span>
-          <span style={{
-            fontSize: 10, color: 'var(--text-secondary)',
-            transform: hourlyChartOpen ? 'rotate(90deg)' : 'rotate(0deg)',
-            transition: 'transform 0.15s ease',
-          }}>▶</span>
-        </button>
-        {hourlyChartOpen && (
-          <div style={{ marginTop: 6 }}>
-            <HourlyChart hourlyData={hourly} color={facility.color} />
-          </div>
-        )}
-      </div>
-
-      <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <span>Hourly Breakdown</span>
-        {seedingDrops
-          ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
-          : hasDropData && (
-            <>
-              <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                {copyProjectNames.map(name => (
-                  <button
-                    key={name}
-                    className="est-reset-btn"
-                    style={{ opacity: refreshingProject === name ? 0.6 : 1 }}
-                    disabled={refreshingProject !== null}
-                    onClick={() => handleRefreshProject(name)}
-                    title={`Refresh L4W average for ${name}`}
-                  >
-                    {refreshingProject === name ? '...' : '↺'} {name.length > 22 ? name.slice(0, 22) + '…' : name}
-                  </button>
-                ))}
+      {isDaily && (
+        <>
+          <div className="collapsible-section">
+            <button
+              type="button"
+              className="collapsible-header"
+              onClick={() => setHourlyChartOpen(o => !o)}
+              aria-expanded={hourlyChartOpen}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                width: '100%', padding: '8px 10px', marginTop: 8,
+                background: 'var(--bg0)', border: '1px solid var(--border)', borderRadius: 4,
+                cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 12,
+                color: 'var(--text-primary)', textAlign: 'left',
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>Hourly Chart</span>
+              <span style={{
+                fontSize: 10, color: 'var(--text-secondary)',
+                transform: hourlyChartOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                transition: 'transform 0.15s ease',
+              }}>▶</span>
+            </button>
+            {hourlyChartOpen && (
+              <div style={{ marginTop: 6 }}>
+                <HourlyChart hourlyData={hourly} color={facility.color} />
               </div>
-            </>
-          )
-        }
-      </div>
+            )}
+          </div>
 
-      {copyOpen && (
-        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-            <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Copy EST drops from {planDate} to:</span>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>From<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyFrom} onChange={e => setCopyFrom(e.target.value)} /></label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>To<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyTo} onChange={e => setCopyTo(e.target.value)} /></label>
+          <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span>Hourly Breakdown</span>
+            {seedingDrops
+              ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
+              : hasDropData && (
+                <>
+                  <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    {copyProjectNames.map(name => (
+                      <button
+                        key={name}
+                        className="est-reset-btn"
+                        style={{ opacity: refreshingProject === name ? 0.6 : 1 }}
+                        disabled={refreshingProject !== null}
+                        onClick={() => handleRefreshProject(name)}
+                        title={`Refresh L4W average for ${name}`}
+                      >
+                        {refreshingProject === name ? '...' : '↺'} {name.length > 22 ? name.slice(0, 22) + '…' : name}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )
+            }
           </div>
-          <div style={{ marginBottom: 8, padding: '6px 10px', background: 'var(--bg1)', border: '1px solid var(--border-subtle)', borderRadius: 6, color: 'var(--text-secondary)', fontSize: 10, lineHeight: 1.5 }}>
-            All 24 hours of each selected project will be marked as manually edited on the destination dates (entire column bolds). This locks those columns from L4W auto-reseed until you edit them again or click the ↺ refresh button.
-          </div>
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span>Projects to copy:</span>
-              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
-              <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set())}>Clear</button>
+
+          {copyOpen && (
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Copy EST drops from {planDate} to:</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>From<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyFrom} onChange={e => setCopyFrom(e.target.value)} /></label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>To<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyTo} onChange={e => setCopyTo(e.target.value)} /></label>
+              </div>
+              <div style={{ marginBottom: 8, padding: '6px 10px', background: 'var(--bg1)', border: '1px solid var(--border-subtle)', borderRadius: 6, color: 'var(--text-secondary)', fontSize: 10, lineHeight: 1.5 }}>
+                All 24 hours of each selected project will be marked as manually edited on the destination dates (entire column bolds). This locks those columns from L4W auto-reseed until you edit them again or click the ↺ refresh button.
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>Projects to copy:</span>
+                  <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
+                  <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set())}>Clear</button>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px' }}>
+                  {copyProjectNames.map(name => (
+                    <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={copyProjects.has(name)} onChange={() => toggleCopyProject(name)} />
+                      <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>{name.length > 28 ? name.slice(0, 28) + '...' : name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>{copying ? 'Copying...' : 'Copy'}</button>
+                <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
+                {copyMsg && <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>}
+              </div>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px' }}>
-              {copyProjectNames.map(name => (
-                <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={copyProjects.has(name)} onChange={() => toggleCopyProject(name)} />
-                  <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>{name.length > 28 ? name.slice(0, 28) + '...' : name}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>{copying ? 'Copying...' : 'Copy'}</button>
-            <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
-            {copyMsg && <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>}
+          )}
+
+          {hourlyErr
+            ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
+            : <HourlyTable
+                hourlyData={hourly} estDrops={estDrops}
+                projectHourlyDrops={visibleProjectHourlyDropsFlat}
+                manuallyEdited={manuallyEdited}
+                hourlyAdjustments={hourlyAdjustments}
+                staffedHourly={rosterStaffed?.hourly}
+                staffedByHour={rosterStaffed?.byHour}
+                onProjectHourlyChange={(projectName, h, val) => {
+                  setProjectHourlyDrops(prev => ({
+                    ...prev,
+                    [projectName]: { ...(prev[projectName] ?? {}), [h]: { est_drops: val, manually_edited: true } },
+                  }))
+                  upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
+                }}
+                onAdjustmentChange={(h, val) => {
+                  setHourlyAdjustments(prev => ({ ...prev, [h]: val }))
+                  upsertHourlyAdjustment(facility.id, planDate, h, val)
+                }}
+                color={facility.color}
+              />
+          }
+
+          <RosterBoard facility={facility.id} planDate={planDate} settings={settings}
+            onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} />
+
+          <AppointmentList
+            appointments={appointmentList}
+            loading={appointmentListLoading}
+            facilityCode={facility.code}
+            date={planDate}
+          />
+        </>
+      )}
+
+      {!isDaily && (
+        <div className="weekly-stub" style={{ marginTop: 24 }}>
+          <div className="weekly-stub-title">Customer Snapshot</div>
+          <div className="weekly-stub-sub">
+            Per-customer weekly volume vs. baseline · coming in next commit.
           </div>
         </div>
       )}
-
-      {hourlyErr
-        ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
-        : <HourlyTable
-            hourlyData={hourly} estDrops={estDrops}
-            projectHourlyDrops={visibleProjectHourlyDropsFlat}
-            manuallyEdited={manuallyEdited}
-            hourlyAdjustments={hourlyAdjustments}
-            staffedHourly={rosterStaffed?.hourly}
-            staffedByHour={rosterStaffed?.byHour}
-            onProjectHourlyChange={(projectName, h, val) => {
-              setProjectHourlyDrops(prev => ({
-                ...prev,
-                [projectName]: { ...(prev[projectName] ?? {}), [h]: { est_drops: val, manually_edited: true } },
-              }))
-              upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
-            }}
-            onAdjustmentChange={(h, val) => {
-              setHourlyAdjustments(prev => ({ ...prev, [h]: val }))
-              upsertHourlyAdjustment(facility.id, planDate, h, val)
-            }}
-            color={facility.color}
-          />
-      }
-
-      <RosterBoard facility={facility.id} planDate={planDate} settings={settings}
-        onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} />
-
-      <AppointmentList
-        appointments={appointmentList}
-        loading={appointmentListLoading}
-        facilityCode={facility.code}
-        date={planDate}
-      />
     </div>
   )
 
