@@ -5,9 +5,22 @@ import { useState, useEffect, useMemo } from 'react'
 // view per Kay Martin's request — snippable white card she can crop and share
 // with external customers.
 //
-// Data: ONE Omni query against gold__truck_appointments covering the trailing
-// 8-week window for the facility. Raw rows get bucketed client-side by
-// (customer, week, weekday, type). Customer is project_name (with KEN normalization).
+// Data approach: EIGHT PARALLEL Omni queries (one per week). Each query asks
+// for raw appointment rows (project, type, timestamp, lookup_code) over a
+// 7-day window. We flatten all results client-side and bucket by
+// (customer, week, weekday, type).
+//
+// Why 8 separate queries instead of one big 56-day query:
+//   1. Omni's serverless proxy silently caps result sets (~1000 rows on the
+//      observed deployment), so a single 8-week query at busy facilities
+//      returns partial data with no error. Per-week queries fit under the cap.
+//   2. We deliberately omit the `count` measure — including it triggers Omni's
+//      group-by-dimensions aggregation which can collapse the timestamp
+//      dimension to a coarser granularity, returning ~tens of rows total
+//      instead of one row per appointment. Without `count`, lookup_code's
+//      uniqueness keeps every row as a single appointment.
+//
+// Each row in the result is one appointment; we count it as 1 in bucketing.
 //
 // Type taxonomy:
 //   - Outbound:  dock_appointment_type_name starts with "Outbound"
@@ -94,7 +107,7 @@ async function omniQuery(query) {
     throw new Error(body.error || `omni-query ${res.status}`)
   }
   const { rows } = await res.json()
-  return rows
+  return rows || []
 }
 
 // 0=Mon..6=Sun (Monday-anchored, matches the rest of the app)
@@ -150,8 +163,6 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
     )
   }, [planDate])
 
-  const fromDate = weeks[0]
-
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -162,35 +173,40 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
       try {
         const wh = CSW_WAREHOUSE[facilityId]
         if (!wh) { setLoading(false); return }
-        const apiRows = await omniQuery({
-          modelId: GOLD_MODEL_ID,
-          table: VIEW_APPT,
-          fields: [
-            `${VIEW_APPT}.project_name`,
-            `${VIEW_APPT}.dock_appointment_type_name`,
-            `${VIEW_APPT}.scheduled_arrival`,
-            `${VIEW_APPT}.count`,
-            `${VIEW_APPT}.lookup_code`,
-          ],
-          filters: {
-            [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-            // 8-week window via TIME_FOR_UNIT_DURATION (BETWEEN is broken on timestamps — see omni.js comments).
-            [`${VIEW_APPT}.scheduled_arrival`]: {
-              kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-              isFiscal: false, left_side: fromDate, is_negative: false,
-              offset_interval_string: `${NUM_WEEKS * 7} days`,
+
+        // 8 parallel weekly queries — see header comment for rationale.
+        const weeklyResults = await Promise.all(weeks.map(weekMon =>
+          omniQuery({
+            modelId: GOLD_MODEL_ID,
+            table: VIEW_APPT,
+            fields: [
+              `${VIEW_APPT}.project_name`,
+              `${VIEW_APPT}.dock_appointment_type_name`,
+              `${VIEW_APPT}.scheduled_arrival`,
+              `${VIEW_APPT}.lookup_code`,
+            ],
+            filters: {
+              [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+              [`${VIEW_APPT}.scheduled_arrival`]: {
+                kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
+                isFiscal: false, left_side: weekMon, is_negative: false,
+                offset_interval_string: '7 days',
+              },
+              // Exclude Cancelled, keep HOLD (capacity reservations).
+              [`${VIEW_APPT}.dock_status_name`]: {
+                kind: 'EQUALS', type: 'string', values: ['Cancelled'], is_negative: true,
+              },
             },
-            // Exclude Cancelled, keep HOLD (capacity reservations — see omni.js KAY/DEAN comments).
-            [`${VIEW_APPT}.dock_status_name`]: {
-              kind: 'EQUALS', type: 'string', values: ['Cancelled'], is_negative: true,
-            },
-          },
-          sorts: [],
-          limit: 5000,
-        })
+            sorts: [],
+            limit: 1000,
+          })
+        ))
+
         if (cancelled) return
-        console.log(`[CustomerSnapshot] ${facilityId}: omni returned ${apiRows?.length ?? 'null'} rows for window starting ${fromDate}`)
-        setRows(apiRows)
+        const flat = weeklyResults.flat()
+        const perWeekCounts = weeklyResults.map(r => r.length).join(',')
+        console.log(`[CustomerSnapshot] ${facilityId}: ${flat.length} total rows (per-week: ${perWeekCounts})`)
+        setRows(flat)
       } catch (e) {
         if (!cancelled) setError(e.message || 'Failed to load')
       } finally {
@@ -199,25 +215,26 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
     }
     load()
     return () => { cancelled = true }
-  }, [facilityId, fromDate])
+  }, [facilityId, weeks])
 
-  // Bucket rows by (customer, weekIdx, weekdayIdx, bucketType).
+  // Bucket rows by (customer, weekIdx, weekdayIdx, bucketType). Each row = 1 appointment.
   // bucketType: 'in' (non-drop inbound), 'out', 'dr' (rule-classified drops)
   const buckets = useMemo(() => {
     if (!rows) return null
     const map = {}
     const customers = new Set()
+    let skippedNoName = 0
+    let skippedNoType = 0
+    let skippedNoWeek = 0
     for (const r of rows) {
       const rawName = r[`${VIEW_APPT}.project_name`] || ''
-      if (!rawName) continue
+      if (!rawName) { skippedNoName++; continue }
       const name = normalizeProjectName(facilityId, rawName)
       const ts = r[`${VIEW_APPT}.scheduled_arrival`]
       const typeName = r[`${VIEW_APPT}.dock_appointment_type_name`]
       const lookupCode = r[`${VIEW_APPT}.lookup_code`]
-      const count = Number(r[`${VIEW_APPT}.count`]) || 0
-      if (!count) continue
       const type = classifyType(typeName)
-      if (!type) continue
+      if (!type) { skippedNoType++; continue }
 
       const isoDate = typeof ts === 'string'
         ? ts.slice(0, 10)
@@ -225,7 +242,7 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
       const weekdayIdx = isoToWeekday(isoDate)
       const dayMon = mondayOf(isoDate)
       const weekIdx = weeks.indexOf(dayMon)
-      if (weekIdx < 0) continue
+      if (weekIdx < 0) { skippedNoWeek++; continue }
 
       let bucketType
       if (isDrop(facilityId, name, lookupCode, type)) bucketType = 'dr'
@@ -233,8 +250,11 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
       else bucketType = 'out'
 
       const key = `${name}|${weekIdx}|${weekdayIdx}|${bucketType}`
-      map[key] = (map[key] || 0) + count
+      map[key] = (map[key] || 0) + 1
       customers.add(name)
+    }
+    if (skippedNoName || skippedNoType || skippedNoWeek) {
+      console.log(`[CustomerSnapshot] ${facilityId}: bucketing skips — noName:${skippedNoName} noType:${skippedNoType} noWeek:${skippedNoWeek}`)
     }
     return {
       data: map,
@@ -283,10 +303,12 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
   }
 
   function renderCard(card, setCard, key) {
+    const allCustomers = buckets?.customers || []
     const filtered = card.query
-      ? buckets.customers.filter(c => c.toLowerCase().includes(card.query.toLowerCase()))
-      : buckets.customers
-    const data = card.customer ? weekRowFor(card.customer, selWeekIdx) : null
+      ? allCustomers.filter(c => c.toLowerCase().includes(card.query.toLowerCase()))
+      : allCustomers
+    const hasData = !!buckets && card.customer && allCustomers.includes(card.customer)
+    const data = hasData ? weekRowFor(card.customer, selWeekIdx) : null
     const weekMon = weeks[selWeekIdx]
     const weekSun = addDaysIso(weekMon, 6)
     const weekYear = new Date(weekMon + 'T00:00:00Z').getUTCFullYear()
@@ -297,12 +319,13 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
           <input
             className="snap-input"
             value={card.open ? card.query : card.customer}
-            placeholder={card.customer || 'Select a customer'}
-            onFocus={(e) => { setCard({ ...card, open: true, query: '' }); e.target.select() }}
+            placeholder={card.customer || (allCustomers.length ? 'Select a customer' : 'No customers available')}
+            disabled={allCustomers.length === 0}
+            onFocus={(e) => { if (allCustomers.length === 0) return; setCard({ ...card, open: true, query: '' }); e.target.select() }}
             onBlur={() => setTimeout(() => setCard(c => ({ ...c, open: false })), 150)}
             onChange={(e) => setCard({ ...card, query: e.target.value, open: true })}
           />
-          {card.open && (
+          {card.open && allCustomers.length > 0 && (
             <div className="snap-menu">
               {filtered.length === 0 ? (
                 <div className="snap-noopt">No matching customers</div>
@@ -360,26 +383,31 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
     )
   }
 
-  if (loading) return <div className="snap-status">Loading customer snapshot…</div>
-  if (error)   return <div className="snap-status snap-error">Snapshot unavailable: {error}</div>
-  if (!buckets || buckets.customers.length === 0) {
-    const rowCount = rows?.length ?? 0
-    const detail = rowCount === 0
-      ? 'Omni returned no rows for this facility in the past 8 weeks.'
-      : `Omni returned ${rowCount} rows but none were bucketable (check console for [CustomerSnapshot] log; likely a date-parsing or warehouse-name mismatch).`
-    return (
-      <div className="snap-status">
-        No customer activity in the past 8 weeks.
-        <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-dim)' }}>{detail}</div>
-      </div>
-    )
-  }
-
   // Week options — reversed so most-recent is at the top of the dropdown
   const weekOptions = weeks.map((mon, i) => ({
     value: i,
     label: `${i === NUM_WEEKS - 1 ? 'This week · ' : ''}${fmtMD(mon)} – ${fmtMD(addDaysIso(mon, 6))}`,
   })).reverse()
+
+  // Status banner — appears between filter row and cards when relevant
+  let statusBanner = null
+  if (loading) {
+    statusBanner = <div className="snap-status">Loading customer snapshot…</div>
+  } else if (error) {
+    statusBanner = <div className="snap-status snap-error">Snapshot unavailable: {error}</div>
+  } else if (buckets && buckets.customers.length === 0) {
+    const rowCount = rows?.length ?? 0
+    statusBanner = (
+      <div className="snap-status">
+        No customer activity in the past 8 weeks.
+        <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-dim)' }}>
+          {rowCount === 0
+            ? 'Omni returned no rows.'
+            : `Omni returned ${rowCount} rows but none were bucketable — check the browser console for [CustomerSnapshot] log to see where rows were skipped.`}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="snap-wrap">
@@ -412,6 +440,7 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
         {renderCard(card1, setCard1, 'c1')}
         {renderCard(card2, setCard2, 'c2')}
       </div>
+      {statusBanner}
     </div>
   )
 }
