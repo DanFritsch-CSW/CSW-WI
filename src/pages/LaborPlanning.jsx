@@ -188,47 +188,38 @@ export default function LaborPlanning() {
         ))}
       </div>
 
-      {view === 'daily' ? (
-        <>
-          {/* ALL tab */}
-          <div style={{ display: activeTab === 'all' ? undefined : 'none' }}>
-            <AllFacilities
-              networkData={networkData}
-              facilityEstDrops={facilityEstDrops}
-              facilityLaborCounts={facilityLaborCounts}
-              facilitySettings={facilitySettings}
-              facilityDeltas={facilityDeltas}
-              facilityKpis={facilityKpis}
+      {/* ALL tab */}
+      <div style={{ display: activeTab === 'all' ? undefined : 'none' }}>
+        <AllFacilities
+          networkData={networkData}
+          facilityEstDrops={facilityEstDrops}
+          facilityLaborCounts={facilityLaborCounts}
+          facilitySettings={facilitySettings}
+          facilityDeltas={facilityDeltas}
+          facilityKpis={facilityKpis}
+          planDate={planDate}
+          view={view}
+          onFacilityClick={setActiveTab}
+        />
+      </div>
+
+      {/* Facility panels — mounted once on first visit, hidden via CSS otherwise */}
+      {FACILITY_LIST.map(fac => {
+        const isActive = activeTab === fac.id
+        if (!mountedTabs.has(fac.id)) return null
+        return (
+          <div key={fac.id} style={{ display: isActive ? undefined : 'none' }}>
+            <FacilityPanel
+              facility={fac}
               planDate={planDate}
-              onFacilityClick={setActiveTab}
+              view={view}
+              networkKpi={networkData?.[fac.id]}
+              onDeltaComputed={handleDeltaComputed}
+              onKpiComputed={handleKpiComputed}
             />
           </div>
-
-          {/* Facility panels — mounted once on first visit, hidden via CSS otherwise */}
-          {FACILITY_LIST.map(fac => {
-            const isActive = activeTab === fac.id
-            if (!mountedTabs.has(fac.id)) return null
-            return (
-              <div key={fac.id} style={{ display: isActive ? undefined : 'none' }}>
-                <FacilityPanel
-                  facility={fac}
-                  planDate={planDate}
-                  networkKpi={networkData?.[fac.id]}
-                  onDeltaComputed={handleDeltaComputed}
-                  onKpiComputed={handleKpiComputed}
-                />
-              </div>
-            )
-          })}
-        </>
-      ) : (
-        <div className="weekly-stub">
-          <div className="weekly-stub-title">Weekly View</div>
-          <div className="weekly-stub-sub">
-            Weekly grid + Customer Snapshot coming in next commit.
-          </div>
-        </div>
-      )}
+        )
+      })}
     </div>
   )
 }

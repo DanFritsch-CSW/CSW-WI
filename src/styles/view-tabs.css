@@ -64,3 +64,68 @@
   color: var(--text-dim);
   letter-spacing: 0.04em;
 }
+
+/* Daily Projects single-column list — shown in Daily view */
+.daily-project-list {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl, 16px);
+  overflow: hidden;
+}
+
+.daily-project-list .dpl-header {
+  display: grid;
+  grid-template-columns: 1fr 72px 64px 64px 80px;
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg1);
+}
+
+.daily-project-list .dpl-header .dpl-r,
+.daily-project-list .dpl-row .dpl-num {
+  text-align: right;
+}
+
+.daily-project-list .dpl-row {
+  display: grid;
+  grid-template-columns: 1fr 72px 64px 64px 80px;
+  align-items: center;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.daily-project-list .dpl-row:last-child {
+  border-bottom: none;
+}
+
+.daily-project-list .dpl-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.daily-project-list .dpl-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.daily-project-list .dpl-tot {
+  font-weight: 600;
+}
+
+.daily-project-list .dpl-empty {
+  padding: 16px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+}
