@@ -690,14 +690,11 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         </div>
       )}
 
-      <div className="panel-top-grid">
-        <KpiPills data={kpiData} color={facility.color} />
-        <div>
-          <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>
-            Projects
-            {!isDaily && weeklyLoading && <span style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400, marginLeft: 8 }}>· loading week…</span>}
-          </div>
-          {isDaily ? (
+      {isDaily ? (
+        <div className="panel-top-grid">
+          <KpiPills data={kpiData} color={facility.color} />
+          <div>
+            <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Projects</div>
             <div className="daily-project-list">
               <div className="dpl-header">
                 <div>Project</div>
@@ -720,18 +717,11 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
                 ))
               )}
             </div>
-          ) : (
-            <ProjectList
-              weekDays={weekDays}
-              selectedDate={planDate}
-              weeklyAppts={weeklyProjectAppts}
-              weeklyDrops={weeklyProjectDrops}
-              color={facility.color}
-              projectFilter={projectFilter}
-            />
-          )}
+          </div>
         </div>
-      </div>
+      ) : (
+        <KpiPills data={kpiData} color={facility.color} />
+      )}
 
       {isDaily && (
         <>
