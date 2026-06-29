@@ -32,13 +32,28 @@
 //   4. SET home_directory='/tmp' explicitly on the connection.
 //   5. INSTALL motherduck + LOAD motherduck. Cold start fetches the
 //      extension (~10-20 MB) from extensions.duckdb.org into /tmp.
-//   6. ATTACH 'md:production_db' WITHOUT an alias, then USE production_db.
-//      Attaching with AS prod broke schema resolution — queries that
-//      reference `silver.<table>` produced "Catalog 'production_db' does
-//      not exist" because MotherDuck internally addresses the catalog by
-//      its real name and the alias 'prod' broke that resolution path.
-//      Attaching without an alias keeps the catalog name = production_db
-//      so 2-part names resolve correctly.
+//   6. ATTACH 'md:production_db' WITHOUT an alias. Attaching with AS prod
+//      broke schema resolution — queries that reference `silver.<table>`
+//      produced "Catalog 'production_db' does not exist" because MotherDuck
+//      internally addresses the catalog by its real name and the alias
+//      'prod' broke that resolution path. Attaching without an alias keeps
+//      the catalog name = production_db so 3-part names resolve correctly.
+//
+// ── Filtering: dock appointments, not requested_delivery_date ───────────────
+//
+// Phase 7c switched the order date filter from requested_delivery_date to
+// scheduled_arrival on the dock appointment. Reason: orders in Datex often
+// carry a stale requested_delivery_date after rescheduling, while the dock
+// appointment is the actual "this truck is leaving today" signal. Example
+// caught in production: order 973305 (QT Midlothian) had req_date 6/26 but
+// appointment scheduled 6/29 18:00 — the old filter excluded it; the new
+// one catches it AND flags it stale because the appt time is in the past.
+//
+// Join path: order → dockappointmentitems (item_entity_type='Order',
+// item_entity_id=order_id) → dockappointments → dockappointmentstatuses.
+// Filter excludes Cancelled/Completed appointment statuses. If an order
+// has multiple active appointments, takes the earliest scheduled_arrival
+// (ROW_NUMBER OVER PARTITION).
 //
 // ── Schema / data architecture (per Phase 7a recon) ─────────────────────────
 //   - hardallocations.shipment_line_id is always null in this Datex instance.
@@ -47,6 +62,11 @@
 //     happens at pick time. We return lot-level data with LP counts.
 //   - Lot lookup_codes carry the date per-project (YDDDHHMMSS / MMDDYYYY /
 //     PPW+MMDDYYYY). Server-side parsers compute the sortable k integer.
+//   - Silver timestamps are CDT-naive. duckdb returns them as JS Date
+//     objects interpreted as UTC. For display we use the UTC accessors
+//     (getUTCHours etc) which return the wall-clock CDT face value. For
+//     past/now comparison both sides are offset by the same 5 hours so
+//     relative ordering is preserved.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -131,6 +151,24 @@ function parseLotDateKey(lookupCode, dateFormat) {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
+function arrivalToDate(scheduledArrival) {
+  if (!scheduledArrival) return null
+  if (scheduledArrival instanceof Date) return scheduledArrival
+  const d = new Date(scheduledArrival)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function fmtApptTime(scheduledArrival) {
+  // Format silver-naive CDT timestamp as HH:MM (24-hour) for display.
+  // duckdb returns the timestamp as a Date interpreted as UTC, so the UTC
+  // accessors give us the wall-clock CDT face value silver actually stored.
+  const arrival = arrivalToDate(scheduledArrival)
+  if (!arrival) return '\u2014'
+  const h = String(arrival.getUTCHours()).padStart(2, '0')
+  const m = String(arrival.getUTCMinutes()).padStart(2, '0')
+  return `${h}:${m}`
+}
+
 function dayOffsetFrom(dateLike, today) {
   if (!dateLike) return null
   const d = new Date(dateLike)
@@ -168,42 +206,65 @@ function fmtDest(name, city, state) {
 async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount }) {
   const safeProjectName = project.datexName.replace(/'/g, "''")
 
-  // ── Query 1: order headers ──
+  // ── Query 1: order headers, joined to dock appointment ──
+  //
+  // The appts CTE selects one active appointment per order (earliest
+  // scheduled_arrival), filtered by warehouse and the date window. Cancelled
+  // and Completed statuses are excluded — those don't represent trucks
+  // actually scheduled to ship. INNER JOIN means orders without an active
+  // appt aren't returned, which matches the "what's shipping today" framing
+  // of this view.
   const orderSql = `
     WITH proj AS (
-      SELECT project_id FROM production_db.silver.datex_slv_projects WHERE project_name = '${safeProjectName}'
+      SELECT project_id FROM production_db.silver.datex_slv_projects
+      WHERE project_name = '${safeProjectName}'
     ),
-    window_orders AS (
-      SELECT
-        o.order_id, o.lookup_code AS order_lookup,
-        o.requested_delivery_date, o.modified_sys_user, o.modified_sys_date_time,
-        os.status_name
-      FROM production_db.silver.datex_slv_orders o
-      JOIN proj ON o.project_id = proj.project_id
-      JOIN production_db.silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
-      WHERE os.status_name = 'Processing'
-        AND DATE(o.requested_delivery_date) BETWEEN '${dateFrom}' AND '${dateTo}'
-    ),
-    orders_with_tasks_in_wh AS (
-      SELECT DISTINCT wo.order_id
-      FROM window_orders wo
-      JOIN production_db.silver.datex_slv_tasks t ON t.order_id = wo.order_id
-      WHERE t.warehouse_id = ${warehouseId}
+    appts AS (
+      SELECT order_id, scheduled_arrival, appt_lookup, appt_status
+      FROM (
+        SELECT
+          dai.item_entity_id        AS order_id,
+          da.scheduled_arrival,
+          da.lookup_code            AS appt_lookup,
+          ds.dock_appointment_status_name AS appt_status,
+          ROW_NUMBER() OVER (
+            PARTITION BY dai.item_entity_id
+            ORDER BY da.scheduled_arrival ASC
+          ) AS rn
+        FROM production_db.silver.datex_slv_dockappointmentitems dai
+        JOIN production_db.silver.datex_slv_dockappointments da
+          ON da.dock_appointment_id = dai.dock_appointment_id
+        JOIN production_db.silver.datex_slv_dockappointmentstatuses ds
+          ON ds.dock_appointment_status_id = da.status_id
+        WHERE dai.item_entity_type = 'Order'
+          AND ds.dock_appointment_status_name NOT IN ('Cancelled', 'Completed')
+          AND da.warehouse_id = ${warehouseId}
+          AND DATE(da.scheduled_arrival) BETWEEN '${dateFrom}' AND '${dateTo}'
+      ) ranked
+      WHERE rn = 1
     )
     SELECT
-      wo.order_id, wo.order_lookup,
-      wo.requested_delivery_date,
-      wo.status_name,
-      wo.modified_sys_user,
+      o.order_id,
+      o.lookup_code AS order_lookup,
+      o.requested_delivery_date,
+      os.status_name,
+      o.modified_sys_user,
+      a.scheduled_arrival,
+      a.appt_lookup,
+      a.appt_status,
       MAX(CASE WHEN oa.type_id = 2 THEN oa.Name END)  AS dest_name,
       MAX(CASE WHEN oa.type_id = 2 THEN oa.City END)  AS dest_city,
       MAX(CASE WHEN oa.type_id = 2 THEN oa.State END) AS dest_state
-    FROM window_orders wo
-    JOIN orders_with_tasks_in_wh ot ON wo.order_id = ot.order_id
-    LEFT JOIN production_db.silver.datex_slv_orderaddresses oa ON oa.order_id = wo.order_id
-    GROUP BY wo.order_id, wo.order_lookup, wo.requested_delivery_date,
-             wo.status_name, wo.modified_sys_user
-    ORDER BY wo.requested_delivery_date ASC, wo.order_id ASC
+    FROM production_db.silver.datex_slv_orders o
+    JOIN proj                                                  ON o.project_id = proj.project_id
+    JOIN production_db.silver.datex_slv_orderstatuses os       ON o.order_status_id = os.order_status_id
+    JOIN appts a                                               ON a.order_id = o.order_id
+    LEFT JOIN production_db.silver.datex_slv_orderaddresses oa ON oa.order_id = o.order_id
+    WHERE os.status_name = 'Processing'
+    GROUP BY o.order_id, o.lookup_code, o.requested_delivery_date,
+             os.status_name, o.modified_sys_user,
+             a.scheduled_arrival, a.appt_lookup, a.appt_status
+    ORDER BY a.scheduled_arrival ASC, o.order_id ASC
   `
   const orderRows = await runQuery(orderSql)
 
@@ -334,15 +395,23 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     }
   }
 
+  // ── Order assembly with scheduled_arrival-based day + past ──
+  //
+  // `day` is the calendar day offset (0 = today, 1 = tomorrow, ...) clamped
+  // into the visible window. `past` flips true if the appointment is in the
+  // past at the moment of the request — time-of-day precision, so an order
+  // with a 10am appt becomes stale at 10:01am even though it's still today.
+  const nowMs = Date.now()
   const orders = []
   for (const oh of orderRows) {
     const orderId = Number(oh.order_id)
-    const reqDate = oh.requested_delivery_date
-    const dayOffset = dayOffsetFrom(reqDate, today)
+    const arrival = arrivalToDate(oh.scheduled_arrival)
+    const dayOffset = dayOffsetFrom(arrival, today)
     const day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
-    const past = dayOffset != null && dayOffset < 0
+    const past = arrival ? arrival.getTime() < nowMs : false
+
     const orderLines = []
-    for (const [key, line] of linesByOrderMaterial.entries()) {
+    for (const [, line] of linesByOrderMaterial.entries()) {
       if (line.orderId !== orderId) continue
       line.ship.sort((a, b) => a.k - b.k)
       orderLines.push({
@@ -356,9 +425,10 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       day,
       proj:     projectId,
       dest:     fmtDest(oh.dest_name, oh.dest_city, oh.dest_state),
-      appt:     '\u2014',
+      appt:     fmtApptTime(oh.scheduled_arrival),
       past,
       status:   oh.status_name,
+      apptStatus: oh.appt_status || null,
       allocBy:  shortUser(oh.modified_sys_user),
       lines:    orderLines,
     })
@@ -442,9 +512,6 @@ exports.handler = async (event) => {
     await exec("SET home_directory='/tmp'")
     await exec('INSTALL motherduck')
     await exec('LOAD motherduck')
-    // No alias — keep the catalog name as production_db so 3-part references
-    // (production_db.silver.<table>) resolve correctly. Aliasing as 'prod'
-    // breaks MotherDuck's internal catalog routing.
     await exec(`ATTACH 'md:production_db'`)
 
     // Sequential loop on the shared connection.
