@@ -1,38 +1,11 @@
 'use strict'
 
-// Netlify function — live FEFO orders from Datex via MotherDuck.
-//
-// POST input: { facility, projectIds, dayCount = 5 }
-//   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
-//   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
-//                 'riche5', 'golst5'). Single `projectId` is accepted for
-//                 backward compat and wrapped in an array.
-//   - dayCount:   optional, 1..7 (default 5)
-//
-// Response: {
-//   ordersByProject: { [projectId]: Order[] },  // empty array on per-project error
-//   errorsByProject: { [projectId]: string },   // only present if any failed
-//   fetchedAt: ISO,
-//   elapsedMs,
-//   source: 'motherduck',
-//   rowCounts: { [projectId]: { orders, allocations, onhand } },
-// }
-//
-// Why one call instead of fan-out: 4 parallel Lambda invocations were each
-// trying to open their own duckdb connection. The duckdb client failed to
-// initialize with "Connection Error: Connection was never established" and
-// elapsedMs: 6 — appears to be a concurrency bug in either duckdb-node or
-// Netlify's warm-Lambda pooling. One call, one duckdb connection, looped
-// over projects → 1 round trip vs 4, zero concurrency issues.
-//
-// Architecture (per Phase 7a recon):
-//   - hardallocations.shipment_line_id is always null in this Datex instance.
-//     Allocations link to orders via TASKS, not the shipment_line_id field.
-//   - Pre-pick orders only have lot-level allocation; specific LP assignment
-//     happens at pick time. We return lot-level data with LP counts where
-//     available.
-//   - Lot lookup_codes carry the date per-project (YDDDHHMMSS / MMDDYYYY /
-//     PPW+MMDDYYYY). Server-side parsers compute the sortable k integer.
+// DIAGNOSTIC version of fefo-orders. Reports per-step status of the duckdb
+// initialization chain so we can pinpoint exactly which step is failing.
+// Returns rich error info: step name, error message, error stack, error code,
+// and environment details. NOT a normal-flow function — just answers the
+// question "where exactly is duckdb breaking?" Reverts to normal flow once
+// the bug is identified.
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -40,437 +13,175 @@ const NO_CACHE_HEADERS = {
   'Pragma': 'no-cache',
 }
 
-// Mirrors src/lib/fefo.js FEFO_PROJECTS (only the live-data fields needed here).
-const PROJECTS = {
-  faioa5: { datexName: 'FAIR OAKS FARMS',      dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
-  fofwe5: { datexName: 'FAIR OAKS FARMS WEST', dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
-  riche5: { datexName: 'RICHELIEU KENOSHA',    dateFormat: 'MMDDYYYY',     dateSemantic: 'expiration' },
-  golst5: { datexName: 'CROWN BAKERIES',       dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack' },
-}
-
-const FACILITY_WAREHOUSE_ID = {
-  cal: 1, ec: 3, mad: 4, ken: 5, wr: 6,
-}
-
-// Mirrors HOLD_STATUS_NAMES in src/lib/fefo.js.
-const HOLD_STATUS_NAMES = new Set([
-  'HOLD', 'Pending Hold', 'QA Hold', 'Food Safety',
-  'NOT RELEASED', 'Damaged / Hold', 'Administrative',
-])
-function isHoldStatus(s) {
-  if (!s) return false
-  if (HOLD_STATUS_NAMES.has(s)) return true
-  return /hold|not released/i.test(s)
-}
-
-// ─── Date parsers (server copy — mirrors src/lib/fefo.js) ───────────────────
-
-function parseFairOaksDate(lookupCode) {
-  if (!lookupCode || typeof lookupCode !== 'string') return null
-  const m = lookupCode.match(/^(\d)(\d{3})(\d{2})(\d{2})(\d{2})$/)
-  if (!m) return null
-  const yDigit = Number(m[1])
-  const doy    = Number(m[2])
-  const hh     = Number(m[3])
-  const mm     = Number(m[4])
-  const ss     = Number(m[5])
-  if (doy < 1 || doy > 366 || hh > 23 || mm > 59 || ss > 59) return null
-  const currentYear = new Date().getUTCFullYear()
-  const currentDecade = Math.floor(currentYear / 10) * 10
-  let year = currentDecade + yDigit
-  if (year > currentYear + 1) year -= 10
-  const d = new Date(Date.UTC(year, 0, 1))
-  d.setUTCDate(doy)
-  const month = d.getUTCMonth() + 1
-  const day   = d.getUTCDate()
-  const k = year * 1e9 + doy * 1e6 + hh * 1e4 + mm * 1e2 + ss
-  return { k, display: `${month}/${day}/${String(year).slice(-2)}` }
-}
-
-function parseRichelieuDate(lookupCode) {
-  if (!lookupCode || typeof lookupCode !== 'string') return null
-  const m = lookupCode.match(/^(\d{2})(\d{2})(\d{4})$/)
-  if (!m) return null
-  const month = Number(m[1])
-  const day   = Number(m[2])
-  const year  = Number(m[3])
-  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900) return null
-  const k = year * 10000 + month * 100 + day
-  return { k, display: `${month}/${day}/${String(year).slice(-2)}` }
-}
-
-function parseCrownDate(lookupCode) {
-  if (!lookupCode || typeof lookupCode !== 'string') return null
-  return parseRichelieuDate(lookupCode.replace(/^PPW/i, ''))
-}
-
-function parseLotDateKey(lookupCode, dateFormat) {
-  let parsed
-  if (dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
-  else if (dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
-  else if (dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
-  else parsed = null
-  if (!parsed) return { k: 0, display: lookupCode || '?', error: `unparseable ${dateFormat}` }
-  return parsed
-}
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-function dayOffsetFrom(dateLike, today) {
-  if (!dateLike) return null
-  const d = new Date(dateLike)
-  if (Number.isNaN(d.getTime())) return null
-  const dDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
-  const diffMs = dDay.getTime() - today.getTime()
-  return Math.round(diffMs / 86400000)
-}
-
-function todayUtcMidnight() {
-  const n = new Date()
-  return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()))
-}
-
-function fmtDateISO(d) {
-  return d.toISOString().slice(0, 10)
-}
-
-function shortUser(u) {
-  if (!u) return ''
-  return String(u).replace(/^FOOTPRINT\\(csw-)?/i, '')
-}
-
-function fmtDest(name, city, state) {
-  const n = (name || '').trim()
-  const c = (city || '').trim()
-  const s = (state || '').trim()
-  if (!n && !c) return ''
-  const loc = c && s ? `${c}, ${s}` : c || s
-  return loc ? `${n} \u2014 ${loc}` : n
-}
-
-// ─── Per-project query block (runs on shared duckdb connection) ─────────────
-
-async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount }) {
-  const safeProjectName = project.datexName.replace(/'/g, "''")
-
-  // ── Query 1: order headers ──
-  const orderSql = `
-    WITH proj AS (
-      SELECT project_id FROM silver.datex_slv_projects WHERE project_name = '${safeProjectName}'
-    ),
-    window_orders AS (
-      SELECT
-        o.order_id, o.lookup_code AS order_lookup,
-        o.requested_delivery_date, o.modified_sys_user, o.modified_sys_date_time,
-        os.status_name
-      FROM silver.datex_slv_orders o
-      JOIN proj ON o.project_id = proj.project_id
-      JOIN silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
-      WHERE os.status_name = 'Processing'
-        AND DATE(o.requested_delivery_date) BETWEEN '${dateFrom}' AND '${dateTo}'
-    ),
-    orders_with_tasks_in_wh AS (
-      SELECT DISTINCT wo.order_id
-      FROM window_orders wo
-      JOIN silver.datex_slv_tasks t ON t.order_id = wo.order_id
-      WHERE t.warehouse_id = ${warehouseId}
-    )
-    SELECT
-      wo.order_id, wo.order_lookup,
-      wo.requested_delivery_date,
-      wo.status_name,
-      wo.modified_sys_user,
-      MAX(CASE WHEN oa.type_id = 2 THEN oa.Name END)  AS dest_name,
-      MAX(CASE WHEN oa.type_id = 2 THEN oa.City END)  AS dest_city,
-      MAX(CASE WHEN oa.type_id = 2 THEN oa.State END) AS dest_state
-    FROM window_orders wo
-    JOIN orders_with_tasks_in_wh ot ON wo.order_id = ot.order_id
-    LEFT JOIN silver.datex_slv_orderaddresses oa ON oa.order_id = wo.order_id
-    GROUP BY wo.order_id, wo.order_lookup, wo.requested_delivery_date,
-             wo.status_name, wo.modified_sys_user
-    ORDER BY wo.requested_delivery_date ASC, wo.order_id ASC
-  `
-  const orderRows = await runQuery(orderSql)
-
-  if (orderRows.length === 0) {
-    return { orders: [], rowCounts: { orders: 0, allocations: 0, onhand: 0 } }
-  }
-
-  const orderIds = orderRows.map(r => Number(r.order_id))
-  const orderIdList = orderIds.join(',')
-
-  // ── Query 2: allocations per (order, material, lot) ──
-  const allocSql = `
-    SELECT
-      t.order_id, t.order_line_number, t.material_id,
-      m.lookup_code AS material_code, m.Description AS material_desc,
-      t.lot_id, l.lookup_code AS lot_code, l.status_name AS lot_status,
-      COUNT(DISTINCT t.task_id) AS lp_count_planned,
-      COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
-      SUM(t.expected_packaged_amount) AS expected_cases,
-      SUM(t.actual_packaged_amount)   AS actual_cases
-    FROM silver.datex_slv_tasks t
-    JOIN silver.datex_slv_lots l ON t.lot_id = l.lot_id
-    JOIN silver.datex_slv_materials m ON t.material_id = m.material_id
-    WHERE t.order_id IN (${orderIdList})
-      AND t.lot_id IS NOT NULL
-      AND t.warehouse_id = ${warehouseId}
-    GROUP BY t.order_id, t.order_line_number, t.material_id,
-             m.lookup_code, m.Description,
-             t.lot_id, l.lookup_code, l.status_name
-  `
-  const allocRows = await runQuery(allocSql)
-
-  const materialIds = [...new Set(allocRows.map(r => Number(r.material_id)))]
-
-  // ── Query 3: on-hand by lot ──
-  let onhandRows = []
-  if (materialIds.length > 0) {
-    const matIdList = materialIds.join(',')
-    const onhandSql = `
-      SELECT
-        l.material_id, l.lot_id,
-        l.lookup_code AS lot_code, l.status_name AS lot_status,
-        COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
-        SUM(lpc.packaged_amount) AS cases_onhand
-      FROM silver.datex_slv_licenseplatecontents lpc
-      JOIN silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
-      JOIN silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
-      WHERE l.material_id IN (${matIdList})
-        AND lp.warehouse_id = ${warehouseId}
-        AND lp.Archived = false
-        AND lpc.packaged_amount > 0
-      GROUP BY l.material_id, l.lot_id, l.lookup_code, l.status_name
-    `
-    onhandRows = await runQuery(onhandSql)
-  }
-
-  // ── Assemble Order objects ──
-
-  const linesByOrderMaterial = new Map()
-  const allocLotsByLine = new Map()
-
-  for (const r of allocRows) {
-    const key = `${r.order_id}|${r.material_id}`
-    if (!linesByOrderMaterial.has(key)) {
-      linesByOrderMaterial.set(key, {
-        orderId: Number(r.order_id),
-        materialId: Number(r.material_id),
-        code: r.material_code || `MAT-${r.material_id}`,
-        desc: (r.material_desc || '').trim(),
-        pack: '',
-        ship: [],
-      })
-      allocLotsByLine.set(key, new Set())
-    }
-    const line = linesByOrderMaterial.get(key)
-    const allocLots = allocLotsByLine.get(key)
-    allocLots.add(Number(r.lot_id))
-
-    const parsed = parseLotDateKey(r.lot_code, project.dateFormat)
-    const cases = Number(r.actual_cases) > 0 ? Number(r.actual_cases) : Number(r.expected_cases) || 0
-    const lps = Number(r.lp_count_actual) > 0
-      ? Number(r.lp_count_actual)
-      : Number(r.lp_count_planned) || 0
-    line.ship.push({
-      lot: r.lot_code,
-      date: parsed.display,
-      k: parsed.k,
-      lps, cases,
-    })
-  }
-
-  const onhandByMaterial = new Map()
-  for (const r of onhandRows) {
-    const mid = Number(r.material_id)
-    if (!onhandByMaterial.has(mid)) onhandByMaterial.set(mid, [])
-    onhandByMaterial.get(mid).push({
-      lotId:    Number(r.lot_id),
-      lotCode:  r.lot_code,
-      status:   r.lot_status,
-      cases:    Number(r.cases_onhand) || 0,
-      lps:      Number(r.lp_count) || 0,
-    })
-  }
-
-  for (const [key, line] of linesByOrderMaterial.entries()) {
-    const allocLots = allocLotsByLine.get(key)
-    const candidates = (onhandByMaterial.get(line.materialId) || [])
-      .filter(c => !allocLots.has(c.lotId))
-      .map(c => {
-        const parsed = parseLotDateKey(c.lotCode, project.dateFormat)
-        return { ...c, k: parsed.k, display: parsed.display }
-      })
-      .filter(c => c.cases > 0)
-    if (candidates.length > 0) {
-      const oldest = candidates.reduce((a, b) => a.k < b.k ? a : b)
-      const held = isHoldStatus(oldest.status)
-      line.rem = {
-        lot:      oldest.lotCode,
-        date:     oldest.display,
-        k:        oldest.k,
-        lps:      oldest.lps,
-        cases:    oldest.cases,
-        hold:     held,
-        holdType: held ? oldest.status : undefined,
-      }
-    } else {
-      line.rem = { lot: '', date: '', k: 0, lps: 0, cases: 0, hold: false }
-    }
-  }
-
-  const orders = []
-  for (const oh of orderRows) {
-    const orderId = Number(oh.order_id)
-    const reqDate = oh.requested_delivery_date
-    const dayOffset = dayOffsetFrom(reqDate, today)
-    const day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
-    const past = dayOffset != null && dayOffset < 0
-    const orderLines = []
-    for (const [key, line] of linesByOrderMaterial.entries()) {
-      if (line.orderId !== orderId) continue
-      line.ship.sort((a, b) => a.k - b.k)
-      orderLines.push({
-        code: line.code, desc: line.desc, pack: line.pack,
-        ship: line.ship, rem: line.rem,
-      })
-    }
-    if (orderLines.length === 0) continue
-    orders.push({
-      id:       `SO-${oh.order_lookup || orderId}`,
-      day,
-      proj:     projectId,
-      dest:     fmtDest(oh.dest_name, oh.dest_city, oh.dest_state),
-      appt:     '\u2014',  // Phase 7c will join dockappointments for real time
-      past,
-      status:   oh.status_name,
-      allocBy:  shortUser(oh.modified_sys_user),
-      lines:    orderLines,
-    })
-  }
-
-  return {
-    orders,
-    rowCounts: { orders: orderRows.length, allocations: allocRows.length, onhand: onhandRows.length },
-  }
-}
-
-// ─── Handler ───────────────────────────────────────────────────────────────
-
 exports.handler = async (event) => {
   const t0 = Date.now()
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers: NO_CACHE_HEADERS, body: 'Method Not Allowed' }
-  }
-  const TOKEN = process.env.MOTHERDUCK_TOKEN
-  if (!TOKEN) {
-    return {
-      statusCode: 500, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: 'MOTHERDUCK_TOKEN not configured' }),
-    }
-  }
-
-  let facility, projectIds, projectId, dayCount
-  try {
-    ;({ facility, projectIds, projectId, dayCount } = JSON.parse(event.body || '{}'))
-  } catch {
-    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Invalid JSON body' }) }
-  }
-  dayCount = Number(dayCount) || 5
-  if (dayCount < 1 || dayCount > 7) dayCount = 5
-
-  // Backward compat: single projectId becomes a one-element list.
-  if (!projectIds && projectId) projectIds = [projectId]
-  if (!Array.isArray(projectIds) || projectIds.length === 0) {
-    return {
-      statusCode: 400, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: 'projectIds (array) or projectId (string) required' }),
-    }
-  }
-  // Validate every project upfront.
-  const unknown = projectIds.filter(pid => !PROJECTS[pid])
-  if (unknown.length > 0) {
-    return {
-      statusCode: 400, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: `Unknown projectId(s): ${unknown.join(', ')}` }),
-    }
-  }
-  const warehouseId = FACILITY_WAREHOUSE_ID[facility]
-  if (!warehouseId) {
-    return {
-      statusCode: 400, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: `Unknown facility: ${facility}` }),
-    }
+  const steps = []
+  const env = {
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    cwd: process.cwd(),
+    hasToken: !!process.env.MOTHERDUCK_TOKEN,
+    tokenLen: process.env.MOTHERDUCK_TOKEN?.length || 0,
   }
 
-  const today = todayUtcMidnight()
-  const dateFrom = fmtDateISO(new Date(today.getTime() - 86400000))
-  const dateTo   = fmtDateISO(new Date(today.getTime() + (dayCount - 1) * 86400000))
-
-  let conn, db
-  const ordersByProject = {}
-  const errorsByProject = {}
-  const rowCountsByProject = {}
-  try {
-    process.env.motherduck_token = TOKEN
-    const duckdb = require('duckdb')
-    db = new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
-    conn = db.connect()
-    await new Promise((resolve, reject) => conn.run('LOAD motherduck', e => e ? reject(e) : resolve()))
-    const runQuery = (sql) => new Promise((resolve, reject) => {
-      conn.all(sql, (e, r) => e ? reject(e) : resolve(r))
-    })
-
-    // Sequential loop on the shared connection — duckdb's nodejs client
-    // is single-threaded per connection, so parallel queries on one conn
-    // would serialize anyway. Sequential is clean and predictable.
-    for (const pid of projectIds) {
+  function step(name, fn) {
+    return new Promise(async (resolve) => {
+      const stepStart = Date.now()
       try {
-        const result = await loadOrdersForProject(runQuery, {
-          projectId: pid,
-          project: PROJECTS[pid],
-          warehouseId, today, dateFrom, dateTo, dayCount,
+        const result = await fn()
+        steps.push({ name, ok: true, ms: Date.now() - stepStart, result: typeof result === 'string' ? result : 'ok' })
+        resolve({ ok: true, result })
+      } catch (e) {
+        steps.push({
+          name,
+          ok: false,
+          ms: Date.now() - stepStart,
+          error: e?.message || String(e),
+          errorCode: e?.code,
+          errorName: e?.name,
+          stack: e?.stack?.split('\n').slice(0, 10).join('\n'),
         })
-        ordersByProject[pid] = result.orders
-        rowCountsByProject[pid] = result.rowCounts
-      } catch (perProjectErr) {
-        // Per-project failure: surface but keep going for the rest.
-        ordersByProject[pid] = []
-        errorsByProject[pid] = perProjectErr.message || 'unknown error'
-        rowCountsByProject[pid] = { orders: 0, allocations: 0, onhand: 0 }
+        resolve({ ok: false, error: e })
       }
-    }
-  } catch (e) {
-    // Connection-level failure: every project gets the same error.
-    for (const pid of projectIds) {
-      ordersByProject[pid] = ordersByProject[pid] || []
-      errorsByProject[pid] = e.message || 'connection failed'
-      rowCountsByProject[pid] = rowCountsByProject[pid] || { orders: 0, allocations: 0, onhand: 0 }
-    }
-    try { conn?.close(); db?.close() } catch (_) {}
-    return {
-      statusCode: 502, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({
-        ordersByProject,
-        errorsByProject,
-        rowCountsByProject,
-        error: e.message,
-        stack: e.stack?.slice(0, 500),
-        elapsedMs: Date.now() - t0,
-      }),
-    }
+    })
   }
+
+  // STEP 1: Check if duckdb directory exists in the function bundle.
+  const fs = require('fs')
+  const path = require('path')
+  await step('check-duckdb-dir', () => {
+    const candidates = [
+      '/var/task/node_modules/duckdb',
+      path.join(process.cwd(), 'node_modules/duckdb'),
+      './node_modules/duckdb',
+    ]
+    for (const p of candidates) {
+      try {
+        const stats = fs.statSync(p)
+        if (stats.isDirectory()) {
+          const contents = fs.readdirSync(p).slice(0, 20)
+          return `found at ${p}: ${contents.join(', ')}`
+        }
+      } catch (_) {}
+    }
+    throw new Error(`duckdb dir not found in any of: ${candidates.join(', ')}`)
+  })
+
+  // STEP 2: Check for the native binary (.node file)
+  await step('check-native-binary', () => {
+    const candidates = [
+      '/var/task/node_modules/duckdb/lib/binding/duckdb.node',
+      '/var/task/node_modules/duckdb/build/Release/duckdb.node',
+      path.join(process.cwd(), 'node_modules/duckdb/lib/binding/duckdb.node'),
+      path.join(process.cwd(), 'node_modules/duckdb/build/Release/duckdb.node'),
+    ]
+    for (const p of candidates) {
+      try {
+        const stats = fs.statSync(p)
+        return `found at ${p} (${stats.size} bytes)`
+      } catch (_) {}
+    }
+    // Try to find it by walking the duckdb dir
+    const roots = ['/var/task/node_modules/duckdb', path.join(process.cwd(), 'node_modules/duckdb')]
+    for (const root of roots) {
+      try {
+        const walk = (dir, depth = 0) => {
+          if (depth > 4) return null
+          for (const name of fs.readdirSync(dir)) {
+            const full = path.join(dir, name)
+            try {
+              const s = fs.statSync(full)
+              if (s.isDirectory()) {
+                const found = walk(full, depth + 1)
+                if (found) return found
+              } else if (name.endsWith('.node')) {
+                return full
+              }
+            } catch (_) {}
+          }
+          return null
+        }
+        const found = walk(root)
+        if (found) return `found by walk at ${found}`
+      } catch (_) {}
+    }
+    throw new Error(`no .node binary found in any duckdb dir`)
+  })
+
+  // STEP 3: require('duckdb')
+  let duckdb
+  const requireResult = await step('require-duckdb', () => {
+    duckdb = require('duckdb')
+    return `keys: ${Object.keys(duckdb).slice(0, 5).join(',')}`
+  })
+  if (!requireResult.ok) {
+    return diag(t0, env, steps, 'require failed')
+  }
+
+  // STEP 4: new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
+  let db
+  const dbResult = await step('new-database-md', () => {
+    process.env.motherduck_token = process.env.MOTHERDUCK_TOKEN
+    db = new duckdb.Database('md:production_db', { motherduck_token: process.env.MOTHERDUCK_TOKEN })
+    return 'database object created'
+  })
+  if (!dbResult.ok) {
+    return diag(t0, env, steps, 'new Database failed')
+  }
+
+  // STEP 5: db.connect()
+  let conn
+  const connResult = await step('db-connect', () => {
+    conn = db.connect()
+    return 'connection object created'
+  })
+  if (!connResult.ok) {
+    return diag(t0, env, steps, 'connect failed')
+  }
+
+  // STEP 6: conn.run('LOAD motherduck')
+  await step('load-motherduck', () => {
+    return new Promise((resolve, reject) => {
+      conn.run('LOAD motherduck', err => err ? reject(err) : resolve('loaded'))
+    })
+  })
+
+  // STEP 7: trivial query to confirm round-trip works
+  await step('trivial-query', () => {
+    return new Promise((resolve, reject) => {
+      conn.all('SELECT 1 AS test', (err, rows) => {
+        if (err) reject(err)
+        else resolve(`got ${rows?.length || 0} rows`)
+      })
+    })
+  })
+
+  // STEP 8: real test query against silver schema
+  await step('silver-projects-count', () => {
+    return new Promise((resolve, reject) => {
+      conn.all('SELECT COUNT(*) AS c FROM silver.datex_slv_projects', (err, rows) => {
+        if (err) reject(err)
+        else resolve(`projects=${rows?.[0]?.c}`)
+      })
+    })
+  })
+
   try { conn?.close(); db?.close() } catch (_) {}
 
+  return diag(t0, env, steps, 'all-steps-complete')
+}
+
+function diag(t0, env, steps, summary) {
   return {
-    statusCode: 200, headers: NO_CACHE_HEADERS,
+    statusCode: 200,
+    headers: NO_CACHE_HEADERS,
     body: JSON.stringify({
-      ordersByProject,
-      ...(Object.keys(errorsByProject).length > 0 ? { errorsByProject } : {}),
-      fetchedAt: new Date().toISOString(),
-      elapsedMs: Date.now() - t0,
-      source: 'motherduck',
-      rowCounts: rowCountsByProject,
-    }),
+      diagnostic: true,
+      summary,
+      env,
+      steps,
+      totalMs: Date.now() - t0,
+    }, null, 2),
   }
 }
