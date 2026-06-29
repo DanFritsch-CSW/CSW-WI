@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js'
+import { fetchActiveInventory } from './omni.js'
 
 // Space Planning module — shared constants + pure helpers + fetch functions.
 // Lives separately from supabase.js so the data layer stays low-level and
@@ -62,31 +63,53 @@ export function facilityCapacity(rooms, facility) {
     .reduce((sum, r) => sum + capacity(r), 0)
 }
 
-export function facilityActual(positions, facility) {
+// Sum of seeded actuals from Supabase. Phase 2.5 overrides this per-facility
+// when a live Datex LP count is available; this is the fallback when Omni
+// is down or the facility's live query failed.
+export function facilityActualSeeded(positions, facility) {
   return positions
     .filter(c => c.facility === facility)
     .reduce((sum, c) => sum + (c.actual_positions || 0), 0)
 }
 
-export function facilityUtil(rooms, positions, facility) {
-  const cap = facilityCapacity(rooms, facility)
-  if (cap <= 0) return null
-  return (facilityActual(positions, facility) / cap) * 100
+// Phase 2.5 resolver: prefer live Datex LP count when present, else seeded.
+// `liveTotals` shape: { [facility]: number } — what fetchLiveActualsPerFacility
+// returns in its `.totals` field. Missing key = no live data for that facility.
+export function facilityActual(positions, facility, liveTotals = null) {
+  if (liveTotals && Number.isFinite(liveTotals[facility])) {
+    return liveTotals[facility]
+  }
+  return facilityActualSeeded(positions, facility)
 }
 
-// Network = rollup across all 5 facilities.
+export function facilityUtil(rooms, positions, facility, liveTotals = null) {
+  const cap = facilityCapacity(rooms, facility)
+  if (cap <= 0) return null
+  return (facilityActual(positions, facility, liveTotals) / cap) * 100
+}
+
+// Network rollups respect the same live-over-seeded preference.
 export function networkCapacity(rooms) {
   return rooms.reduce((sum, r) => sum + capacity(r), 0)
 }
 
-export function networkActual(positions) {
-  return positions.reduce((sum, c) => sum + (c.actual_positions || 0), 0)
+export function networkActual(positions, liveTotals = null) {
+  return FACILITIES.reduce(
+    (sum, fac) => sum + facilityActual(positions, fac, liveTotals),
+    0
+  )
 }
 
-export function networkUtil(rooms, positions) {
+export function networkUtil(rooms, positions, liveTotals = null) {
   const cap = networkCapacity(rooms)
   if (cap <= 0) return null
-  return (networkActual(positions) / cap) * 100
+  return (networkActual(positions, liveTotals) / cap) * 100
+}
+
+// Whether a given facility's actuals came from live Datex vs. seeded fixtures.
+// Used by the UI to flag scorecards as "live" or "seeded".
+export function isFacilityLive(facility, liveTotals) {
+  return !!(liveTotals && Number.isFinite(liveTotals[facility]))
 }
 
 // ─── Formatters ──────────────────────────────────────────────────────
@@ -99,6 +122,18 @@ export function fmtInt(n) {
 export function fmtPct(n) {
   if (n == null || Number.isNaN(n)) return '—'
   return Math.round(n) + '%'
+}
+
+// Format an ISO timestamp as "11:42am" (12h local time).
+export function fmtTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  let h = d.getHours()
+  const m = String(d.getMinutes()).padStart(2, '0')
+  const ap = h >= 12 ? 'pm' : 'am'
+  h = h % 12 || 12
+  return `${h}:${m}${ap}`
 }
 
 // ─── Supabase fetch helpers ─────────────────────────────────────────────
@@ -121,4 +156,55 @@ export async function fetchSpaceCustomerPositions(facility = null) {
   const { data, error } = await q
   if (error) { console.error('fetchSpaceCustomerPositions:', error); return [] }
   return data ?? []
+}
+
+// ─── Live Datex actuals (Phase 2.5) ─────────────────────────────────────────────
+//
+// Fetches the count of active license plates per facility from Datex via Omni,
+// using the same `fetchActiveInventory` path that drives the MAD inventory
+// panel. That path joins LPs to `silver__datex_slv_projects` (INNER JOIN via
+// Omni's project_name field), which filters out internal/unassigned LPs —
+// matching the customer-owned-inventory semantic the handoff's LIVE_ACTUAL
+// numbers use (e.g. MAD 5,521 vs the raw 19,432 non-archived LPs).
+//
+// Fires 5 facility queries in parallel via Promise.allSettled, so a single
+// facility's Omni hiccup doesn't blank the whole Network view. Facilities
+// that fail are omitted from `.totals`; the UI falls back to seeded numbers
+// for those facilities (via the `facilityActual` resolver above) and surfaces
+// a warning naming which facilities went stale.
+//
+// Per-facility latency: ~1–3s depending on project count. Wall-clock total
+// is max-of-5 since they run concurrently. Pagination (5 pages × 500) is
+// handled inside fetchActiveInventory.
+//
+// Returns:
+//   {
+//     totals:    { [facility]: number },   // facilities that succeeded
+//     errors:    [{ facility, message }],  // facilities that failed
+//     fetchedAt: ISO timestamp string,
+//     ok:        boolean (true iff at least one facility returned data)
+//   }
+export async function fetchLiveActualsPerFacility() {
+  const results = await Promise.allSettled(
+    FACILITIES.map(facId => fetchActiveInventory(facId))
+  )
+  const totals = {}
+  const errors = []
+  results.forEach((r, i) => {
+    const facId = FACILITIES[i]
+    if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+      const total = r.value.reduce((s, p) => s + (Number(p.lps) || 0), 0)
+      totals[facId] = total
+    } else {
+      const msg = r.reason?.message || r.reason?.toString?.() || 'unknown error'
+      errors.push({ facility: facId, message: msg })
+      console.warn(`fetchLiveActualsPerFacility ${facId}:`, msg)
+    }
+  })
+  return {
+    totals,
+    errors,
+    fetchedAt: new Date().toISOString(),
+    ok: Object.keys(totals).length > 0,
+  }
 }

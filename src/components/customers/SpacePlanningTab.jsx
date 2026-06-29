@@ -2,20 +2,30 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   FACILITY_DOTS, FACILITY_NAMES, FACILITIES,
   utilBand, facilityCapacity, facilityActual, facilityUtil,
-  networkCapacity, networkActual, networkUtil,
-  fmtInt, fmtPct,
-  fetchSpaceRooms, fetchSpaceCustomerPositions,
+  networkCapacity, networkActual, networkUtil, isFacilityLive,
+  fmtInt, fmtPct, fmtTime,
+  fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
 } from '../../lib/spacePlanning.js'
 
-// Phase 2 — Network/ALL view is read-only and live. Single-facility view
-// (Phase 3) needs per-room occupancy from Datex location → room mapping,
-// which is deferred for now.
+// Phase 2 — Network/ALL view is read-only.
+// Phase 2.5 — Network/ALL view actuals come from live Datex LP counts when
+//   available, falling back to seeded Supabase fixtures per-facility on Omni
+//   failure. The seeded path was the entire data source in Phase 2; it now
+//   serves as graceful degradation.
+// Phase 3 (single-facility view) still needs the Datex location → room
+// mapping, which is deferred.
 export default function SpacePlanningTab() {
   const [facility, setFacility] = useState('all')
   const [rooms, setRooms] = useState([])
   const [positions, setPositions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+
+  // Phase 2.5 — live Datex actuals. Independent fetch lifecycle from Supabase
+  // (Supabase is fast + stable; Omni is slow + occasionally times out) so a
+  // slow Omni doesn't block the screen render.
+  const [live, setLive] = useState(null)         // { totals, errors, fetchedAt, ok } | null
+  const [liveLoading, setLiveLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
@@ -29,12 +39,30 @@ export default function SpacePlanningTab() {
       })
       .catch(err => {
         if (cancelled) return
-        console.error('SpacePlanningTab load:', err)
+        console.error('SpacePlanningTab Supabase load:', err)
         setError(err?.message || 'Failed to load space data')
       })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    setLiveLoading(true)
+    fetchLiveActualsPerFacility()
+      .then(result => { if (!cancelled) setLive(result) })
+      .catch(err => {
+        if (cancelled) return
+        // Total failure (shouldn't happen — Promise.allSettled inside the
+        // helper absorbs per-facility errors). Treat as no-live-data.
+        console.warn('fetchLiveActualsPerFacility unexpected error:', err)
+        setLive({ totals: {}, errors: [{ facility: 'all', message: err?.message || 'unknown' }], fetchedAt: new Date().toISOString(), ok: false })
+      })
+      .finally(() => { if (!cancelled) setLiveLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const liveTotals = live?.totals || null
 
   return (
     <div>
@@ -43,7 +71,14 @@ export default function SpacePlanningTab() {
         {loading && <LoadingState />}
         {error && !loading && <ErrorState error={error} />}
         {!loading && !error && facility === 'all' && (
-          <NetworkView rooms={rooms} positions={positions} onFacilityClick={setFacility} />
+          <NetworkView
+            rooms={rooms}
+            positions={positions}
+            liveTotals={liveTotals}
+            live={live}
+            liveLoading={liveLoading}
+            onFacilityClick={setFacility}
+          />
         )}
         {!loading && !error && facility !== 'all' && (
           <FacilityPlaceholder facility={facility} />
@@ -92,16 +127,30 @@ function FacilityTabStrip({ active, onChange }) {
   )
 }
 
-function NetworkView({ rooms, positions, onFacilityClick }) {
-  const cap  = useMemo(() => networkCapacity(rooms),        [rooms])
-  const act  = useMemo(() => networkActual(positions),      [positions])
-  const util = useMemo(() => networkUtil(rooms, positions), [rooms, positions])
+function NetworkView({ rooms, positions, liveTotals, live, liveLoading, onFacilityClick }) {
+  const cap  = useMemo(() => networkCapacity(rooms),                    [rooms])
+  const act  = useMemo(() => networkActual(positions, liveTotals),      [positions, liveTotals])
+  const util = useMemo(() => networkUtil(rooms, positions, liveTotals), [rooms, positions, liveTotals])
   const band = utilBand(util)
   const facilityCount = new Set(rooms.map(r => r.facility)).size
 
+  // Live-data state for the badge: counts of facilities reading live vs seeded.
+  const liveCount = liveTotals ? Object.keys(liveTotals).length : 0
+  const seededCount = FACILITIES.length - liveCount
+  const hasErrors = live?.errors?.length > 0
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      {/* Network summary 3 cells (no forecast — see Phase 2 decision) */}
+      {/* Data freshness banner */}
+      <DataFreshnessBanner
+        live={live}
+        liveLoading={liveLoading}
+        liveCount={liveCount}
+        seededCount={seededCount}
+        hasErrors={hasErrors}
+      />
+
+      {/* Network summary 3 cells (no forecast — Phase 2 decision) */}
       <SummaryRow>
         <SummaryCell label="NETWORK CAPACITY"    value={fmtInt(cap)}  sub="pallet positions" />
         <SummaryCell label="ACTUAL POSITIONS"    value={fmtInt(act)}  sub={`across ${facilityCount} facilities`} />
@@ -123,6 +172,7 @@ function NetworkView({ rooms, positions, onFacilityClick }) {
               facility={facId}
               rooms={rooms}
               positions={positions}
+              liveTotals={liveTotals}
               onClick={() => onFacilityClick(facId)}
             />
           ))}
@@ -132,14 +182,79 @@ function NetworkView({ rooms, positions, onFacilityClick }) {
   )
 }
 
-function FacilityScorecard({ facility, rooms, positions, onClick }) {
+function DataFreshnessBanner({ live, liveLoading, liveCount, seededCount, hasErrors }) {
+  // 4 states: loading, all-live, partial, all-seeded.
+  if (liveLoading) {
+    return (
+      <FreshnessRow
+        dotColor="var(--text-dim, #9aaabb)"
+        primary="Loading live Datex data…"
+        secondary={null}
+      />
+    )
+  }
+  if (liveCount === FACILITIES.length) {
+    return (
+      <FreshnessRow
+        dotColor="var(--green, #1a8a52)"
+        primary="Live from Datex"
+        secondary={`Updated ${fmtTime(live?.fetchedAt)} · all ${FACILITIES.length} facilities`}
+      />
+    )
+  }
+  if (liveCount > 0) {
+    const failed = (live?.errors || []).map(e => e.facility.toUpperCase()).join(', ')
+    return (
+      <FreshnessRow
+        dotColor="var(--orange, #d4824a)"
+        primary={`Partial live data · ${liveCount}/${FACILITIES.length} facilities`}
+        secondary={`Updated ${fmtTime(live?.fetchedAt)} · seeded fallback for ${failed}`}
+      />
+    )
+  }
+  // No live data at all.
+  return (
+    <FreshnessRow
+      dotColor="var(--amber, #a07818)"
+      primary="Showing seeded fixtures"
+      secondary={hasErrors ? 'Datex unavailable — displaying last known sample data' : 'No live data available'}
+    />
+  )
+}
+
+function FreshnessRow({ dotColor, primary, secondary }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '8px 14px',
+      background: 'var(--bg2, #f8f9fb)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md, 8px)',
+      fontSize: 12,
+    }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%',
+        background: dotColor, display: 'inline-block', flexShrink: 0,
+      }} />
+      <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{primary}</span>
+      {secondary && (
+        <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+          · {secondary}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function FacilityScorecard({ facility, rooms, positions, liveTotals, onClick }) {
   const cap  = facilityCapacity(rooms, facility)
-  const act  = facilityActual(positions, facility)
-  const util = facilityUtil(rooms, positions, facility)
+  const act  = facilityActual(positions, facility, liveTotals)
+  const util = facilityUtil(rooms, positions, facility, liveTotals)
   const band = utilBand(util)
   const dot  = FACILITY_DOTS[facility]
   const name = FACILITY_NAMES[facility]
   const roomCount = rooms.filter(r => r.facility === facility).length
+  const isLive = isFacilityLive(facility, liveTotals)
   return (
     <button
       type="button"
@@ -180,7 +295,10 @@ function FacilityScorecard({ facility, rooms, positions, onClick }) {
             {name}
           </div>
         </div>
-        <span style={{ width: 10, height: 10, borderRadius: '50%', background: dot }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <LiveBadge isLive={isLive} />
+          <span style={{ width: 10, height: 10, borderRadius: '50%', background: dot }} />
+        </div>
       </div>
 
       <ScorecardRow label="ACTUAL"      value={fmtInt(act)} />
@@ -197,6 +315,27 @@ function FacilityScorecard({ facility, rooms, positions, onClick }) {
         {roomCount} {roomCount === 1 ? 'room' : 'rooms'} · click for detail
       </div>
     </button>
+  )
+}
+
+function LiveBadge({ isLive }) {
+  return (
+    <span
+      title={isLive ? 'Live from Datex' : 'Showing seeded fallback data'}
+      style={{
+        fontSize: 9,
+        padding: '2px 5px',
+        borderRadius: 'var(--r-sm, 3px)',
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        letterSpacing: '0.06em',
+        fontWeight: 600,
+        background: isLive ? 'rgba(26, 138, 82, 0.12)' : 'rgba(160, 120, 24, 0.12)',
+        color: isLive ? 'var(--green, #1a8a52)' : 'var(--amber, #a07818)',
+        border: `1px solid ${isLive ? 'rgba(26, 138, 82, 0.3)' : 'rgba(160, 120, 24, 0.3)'}`,
+      }}
+    >
+      {isLive ? 'LIVE' : 'SEED'}
+    </span>
   )
 }
 
