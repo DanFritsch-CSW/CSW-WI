@@ -8,84 +8,105 @@ import {
   fefoOrderList, fetchLiveFefoOrders,
 } from '../../lib/fefo.js'
 
-// Phase 6 — mock UI for FEFO Rotation against fixtures.
-// Phase 7 — live data wiring. When VITE_USE_LIVE_FEFO === 'true' AND the user
-//   filters to a specific project (not "All Projects"), fetches real orders
-//   from Datex via /.netlify/functions/fefo-orders. Falls back to mock on
-//   error or when flag is off.
-// "All Projects" view stays mock for now (Phase 7c will fan-out across all 4
-// projects in parallel).
+// FEFO Rotation tab — always live from Datex.
 //
-// Verdict engine + UI rendering is shape-stable across both sources — only
-// the data origin differs.
-
-const USE_LIVE_FEFO = (import.meta?.env?.VITE_USE_LIVE_FEFO === 'true')
+// On mount, fans out to fetch all 4 projects in parallel via the
+// /.netlify/functions/fefo-orders backend. Each project caches into
+// liveByProject and renders as soon as it returns. Picking a specific project
+// just filters the already-loaded pool — no extra fetch. "All Projects"
+// shows the merged set across all 4.
+//
+// Mock fixtures (fefoOrderList) are kept as a true last-resort fallback only:
+// they render when every live fetch failed for the visible projects, so the
+// screen never goes blank during a MotherDuck outage.
 
 export default function FefoRotationTab() {
   const [day, setDay] = useState(0)
   const [proj, setProj] = useState('all')
   const [openOrders, setOpenOrders] = useState(() => new Set())
 
-  // Mock orders are always available — they back the "All" view and serve as
-  // fallback when a live fetch fails or the flag is off.
-  const mockOrders = useMemo(() => fefoOrderList(), [])
-
-  // Live orders per project (when flag is on + project filter is single).
-  // Shape: { [projectId]: { orders, loading, error, fetchedAt, source } }
+  // Live orders per project. Shape:
+  //   { [projectId]: { orders, loading, error, fetchedAt, source, elapsedMs } }
   const [liveByProject, setLiveByProject] = useState({})
 
-  // Re-fetch when the user picks a specific project AND the live flag is on.
-  // De-dupes by `proj` so we don't re-hit Datex on day-stepper changes.
+  // Fan out: on mount (and whenever proj changes), kick off any missing
+  // project fetches. "all" requests every project; a specific selection
+  // requests just that one. De-duped by inFlightRef so day-stepper changes
+  // don't re-fetch.
   const inFlightRef = useRef(new Set())
   useEffect(() => {
-    if (!USE_LIVE_FEFO || proj === 'all') return
-    if (liveByProject[proj] && !liveByProject[proj].error) return
-    if (inFlightRef.current.has(proj)) return
-    inFlightRef.current.add(proj)
-    setLiveByProject(prev => ({
-      ...prev,
-      [proj]: { ...(prev[proj] || {}), loading: true },
-    }))
-    fetchLiveFefoOrders(proj)
-      .then(result => {
-        setLiveByProject(prev => ({
-          ...prev,
-          [proj]: {
-            orders:    result.orders,
-            loading:   false,
-            error:     result.error || null,
-            fetchedAt: result.fetchedAt,
-            source:    result.source,
-            elapsedMs: result.elapsedMs,
-          },
-        }))
-      })
-      .catch(err => {
-        setLiveByProject(prev => ({
-          ...prev,
-          [proj]: { orders: [], loading: false, error: err.message || 'unknown', source: 'mock' },
-        }))
-      })
-      .finally(() => {
-        inFlightRef.current.delete(proj)
-      })
+    const wanted = proj === 'all' ? FEFO_PROJECTS.map(p => p.id) : [proj]
+    const toFetch = wanted.filter(pid =>
+      !liveByProject[pid] && !inFlightRef.current.has(pid)
+    )
+    if (toFetch.length === 0) return
+
+    // Mark loading for the projects we're about to fetch.
+    setLiveByProject(prev => {
+      const next = { ...prev }
+      for (const pid of toFetch) next[pid] = { ...(next[pid] || {}), loading: true }
+      return next
+    })
+
+    for (const pid of toFetch) {
+      inFlightRef.current.add(pid)
+      fetchLiveFefoOrders(pid)
+        .then(result => {
+          setLiveByProject(prev => ({
+            ...prev,
+            [pid]: {
+              orders:    result.orders,
+              loading:   false,
+              error:     result.error || null,
+              fetchedAt: result.fetchedAt,
+              source:    result.source,
+              elapsedMs: result.elapsedMs,
+            },
+          }))
+        })
+        .catch(err => {
+          setLiveByProject(prev => ({
+            ...prev,
+            [pid]: { orders: [], loading: false, error: err.message || 'unknown', source: 'mock' },
+          }))
+        })
+        .finally(() => {
+          inFlightRef.current.delete(pid)
+        })
+    }
   }, [proj, liveByProject])
 
-  const liveForCurrent = USE_LIVE_FEFO && proj !== 'all' ? liveByProject[proj] : null
-  const isLive = !!(liveForCurrent && liveForCurrent.source === 'live')
+  // What projects are in scope for the current view.
+  const scopedProjectIds = proj === 'all' ? FEFO_PROJECTS.map(p => p.id) : [proj]
 
-  // Visible = filtered by day + project, sorted by severity.
-  // Source-of-truth: live data when we have it for this project, else mock.
+  // Loading = any in-scope project still in flight.
+  const anyLoading = scopedProjectIds.some(pid => liveByProject[pid]?.loading)
+  // Every in-scope project has settled and ALL failed → fall back to mock.
+  const allFailed = scopedProjectIds.length > 0
+    && scopedProjectIds.every(pid => {
+      const s = liveByProject[pid]
+      return s && !s.loading && (s.source !== 'live' || s.error)
+    })
+
+  // Mock pool — only used when allFailed is true.
+  const mockOrders = useMemo(() => fefoOrderList(), [])
+
+  // Visible pool = merged live orders from all in-scope projects,
+  // filtered by day, sorted by severity. Mock fallback if everything failed.
   const visible = useMemo(() => {
     let pool
-    if (USE_LIVE_FEFO && proj !== 'all' && liveForCurrent?.source === 'live' && liveForCurrent.orders) {
-      pool = liveForCurrent.orders
-    } else {
+    if (allFailed) {
       pool = mockOrders.filter(o => proj === 'all' ? true : o.proj === proj)
+    } else {
+      pool = []
+      for (const pid of scopedProjectIds) {
+        const s = liveByProject[pid]
+        if (s?.orders?.length) pool.push(...s.orders)
+      }
     }
     const filtered = pool.filter(o => o.day === day)
     return [...filtered].sort(compareByVerdict)
-  }, [mockOrders, liveForCurrent, day, proj])
+  }, [allFailed, mockOrders, liveByProject, scopedProjectIds, day, proj])
 
   // Auto-expand violations + stale on view change (handoff §3.5).
   useEffect(() => {
@@ -115,8 +136,10 @@ export default function FefoRotationTab() {
         day={day}        onDayChange={setDay}
         proj={proj}      onProjChange={setProj}
         orderCount={visible.length}
-        liveState={liveForCurrent}
-        isLive={isLive}
+        anyLoading={anyLoading}
+        allFailed={allFailed}
+        scopedProjectIds={scopedProjectIds}
+        liveByProject={liveByProject}
       />
       <Banners banners={banners} />
       <KpiRow kpis={kpis} />
@@ -128,7 +151,7 @@ export default function FefoRotationTab() {
         openOrders={openOrders}
         onToggle={toggleOrder}
         showProjectChip={proj === 'all'}
-        loading={liveForCurrent?.loading}
+        loading={anyLoading && visible.length === 0}
       />
     </div>
   )
@@ -136,7 +159,7 @@ export default function FefoRotationTab() {
 
 // ─── Controls row: day stepper + project select + data source badge ─────────
 
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, liveState, isLive }) {
+function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, anyLoading, allFailed, scopedProjectIds, liveByProject }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -144,7 +167,12 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, liveSta
     }}>
       <DayStepper day={day} onChange={onDayChange} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <DataSourceBadge liveState={liveState} isLive={isLive} proj={proj} />
+        <DataSourceBadge
+          anyLoading={anyLoading}
+          allFailed={allFailed}
+          scopedProjectIds={scopedProjectIds}
+          liveByProject={liveByProject}
+        />
         <span style={{
           fontSize: 11, color: 'var(--text-dim)',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
@@ -158,20 +186,30 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, liveSta
   )
 }
 
-function DataSourceBadge({ liveState, isLive, proj }) {
-  // Only render when the flag is on (otherwise it'd just say MOCK forever)
-  // OR when there's a live attempt in flight / errored.
-  if (!USE_LIVE_FEFO) return null
-  if (proj === 'all') return (
-    <BadgeChip color="var(--text-dim, #9aaabb)" label="MOCK" title="All Projects view uses mock fixtures. Pick a specific project for live data." />
-  )
-  if (liveState?.loading) return <BadgeChip color="var(--text-dim, #9aaabb)" label="LOADING…" />
-  if (isLive) {
-    const ms = liveState.elapsedMs
-    return <BadgeChip color="var(--green, #1a8a52)" label="LIVE" title={`From Datex via MotherDuck${ms ? ` · ${ms}ms` : ''}`} />
+function DataSourceBadge({ anyLoading, allFailed, scopedProjectIds, liveByProject }) {
+  if (anyLoading) return <BadgeChip color="var(--text-dim, #9aaabb)" label="LOADING…" />
+  if (allFailed) {
+    // Compile error messages from the failed projects for the tooltip.
+    const errs = scopedProjectIds
+      .map(pid => liveByProject[pid]?.error)
+      .filter(Boolean)
+      .slice(0, 2)
+      .join(' · ')
+    return <BadgeChip color="var(--red, #c0392b)" label="OFFLINE" title={errs ? `Live fetch failed: ${errs}. Showing mock fixtures.` : 'Live fetch failed. Showing mock fixtures.'} />
   }
-  // Error or no-result fallback to mock
-  return <BadgeChip color="var(--amber, #a07818)" label="MOCK" title={liveState?.error ? `Live fetch failed: ${liveState.error}` : 'Mock fixture data'} />
+  // Partial failure check: some in-scope projects succeeded, others failed.
+  // Surface a yellow warning rather than going silent.
+  const failed = scopedProjectIds.filter(pid => {
+    const s = liveByProject[pid]
+    return s && !s.loading && (s.source !== 'live' || s.error)
+  })
+  if (failed.length > 0) {
+    const names = failed.map(pid => getProject(pid)?.code).filter(Boolean).join(', ')
+    return <BadgeChip color="var(--amber, #a07818)" label="PARTIAL" title={`Live but missing: ${names}. The rest are real Datex data.`} />
+  }
+  // Find max elapsedMs across in-scope projects for tooltip.
+  const ms = Math.max(...scopedProjectIds.map(pid => liveByProject[pid]?.elapsedMs || 0))
+  return <BadgeChip color="var(--green, #1a8a52)" label="LIVE" title={`From Datex via MotherDuck${ms ? ` · ${ms}ms` : ''}`} />
 }
 
 function BadgeChip({ color, label, title }) {
