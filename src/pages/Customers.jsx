@@ -1,5 +1,6 @@
 import { useSearchParams } from 'react-router-dom'
 import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
+import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 
 // Customers module — three sub-tabs sharing a common header + tab row.
 // Sub-tab state lives in URL (?tab=space|onboarding|fefo) so links are
@@ -90,7 +91,7 @@ export default function Customers() {
       <div style={{ padding: '24px' }}>
         {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingPlaceholder />}
-        {subTab === 'fefo'       && <FefoPlaceholder />}
+        {subTab === 'fefo'       && <FefoRotationTab />}
       </div>
     </div>
   )
@@ -102,19 +103,7 @@ function OnboardingPlaceholder() {
       <h2>Customer Onboarding</h2>
       <p>Single source of truth for onboarding new customers — master checklist + per-customer status tracking.</p>
       <p style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 8 }}>
-        Phase 4 — schema + template + checklist UI
-      </p>
-    </div>
-  )
-}
-
-function FefoPlaceholder() {
-  return (
-    <div className="stub-page">
-      <h2>FEFO Rotation</h2>
-      <p>Pre-ship FEFO (First-Expired-First-Out) rotation verification — catches violations before trucks leave.</p>
-      <p style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 8 }}>
-        Phase 5 — verdict engine + mock data UI · Phase 6 — Datex wiring
+        Phase 5 — schema + template + checklist UI (deferred per Dan; FEFO took priority)
       </p>
     </div>
   )
