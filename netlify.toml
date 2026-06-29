@@ -5,17 +5,23 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
-  # duckdb is a native module (compiled C++ bindings) and cannot be bundled
-  # by esbuild — it must be left as a runtime require() and shipped from
-  # node_modules in the function's deploy artifact. Without this, any
-  # `require('duckdb')` at runtime fails with "Connection Error: Connection
-  # was never established" within ~6ms (the constructor throws before the
-  # connection is ever attempted). Both motherduck-l4w.cjs and fefo-orders.cjs
-  # depend on this. L4W has been latently broken until now because it sits
-  # behind VITE_USE_MD_L4W which is not enabled in Netlify env; FEFO is the
-  # first function in production to actually exercise duckdb, which is why
-  # the issue only surfaced when always-live FEFO shipped.
+  # duckdb is a native module (compiled C++ bindings). Two pieces are required
+  # for it to actually work in a Netlify Lambda:
+  #   1. external_node_modules: tells esbuild to leave `require('duckdb')`
+  #      alone instead of trying to bundle the source into the JS artifact.
+  #   2. included_files: forces Netlify's zip-it-and-ship-it bundler to
+  #      actually copy the node_modules/duckdb directory (including the
+  #      .node native binary at node_modules/duckdb/lib/binding/duckdb.node)
+  #      into the function deploy artifact. Without (2), the require()
+  #      finds nothing at runtime and throws "Connection Error: Connection
+  #      was never established" within a few ms — misleading error coming
+  #      from duckdb's constructor when the native binding fails to load.
   external_node_modules = ["duckdb"]
+  included_files = [
+    "node_modules/duckdb/**",
+    "node_modules/@mapbox/node-pre-gyp/**",
+    "node_modules/node-addon-api/**",
+  ]
 
 # Bump omni-query timeout from default 10s to 26s (Netlify max for synchronous functions).
 # KEN's facility load fires the heaviest Omni query batch and during periods of Omni
