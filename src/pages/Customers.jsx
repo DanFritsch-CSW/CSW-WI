@@ -1,4 +1,5 @@
 import { useSearchParams } from 'react-router-dom'
+import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 
 // Customers module — three sub-tabs sharing a common header + tab row.
 // Sub-tab state lives in URL (?tab=space|onboarding|fefo) so links are
@@ -87,22 +88,10 @@ export default function Customers() {
 
       {/* Sub-tab content */}
       <div style={{ padding: '24px' }}>
-        {subTab === 'space'      && <SpacePlanningPlaceholder />}
+        {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingPlaceholder />}
         {subTab === 'fefo'       && <FefoPlaceholder />}
       </div>
-    </div>
-  )
-}
-
-function SpacePlanningPlaceholder() {
-  return (
-    <div className="stub-page">
-      <h2>Space Planning</h2>
-      <p>Capacity & utilization planning across the 5-facility network with a 12-month seasonal forecast.</p>
-      <p style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 8 }}>
-        Phase 2 — schema + read-only Network view
-      </p>
     </div>
   )
 }
