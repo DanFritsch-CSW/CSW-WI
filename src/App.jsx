@@ -7,6 +7,7 @@ import TopNav from './components/TopNav.jsx'
 // visits fetch their chunk once and cache it for the session.
 const LaborPlanning   = lazy(() => import('./pages/LaborPlanning.jsx'))
 const InventoryReport = lazy(() => import('./pages/InventoryReport.jsx'))
+const Customers       = lazy(() => import('./pages/Customers.jsx'))
 const OrderCreator    = lazy(() => import('./pages/OrderCreator.jsx'))
 const Analytics       = lazy(() => import('./pages/Analytics.jsx'))
 const Settings        = lazy(() => import('./pages/Settings.jsx'))
@@ -75,6 +76,7 @@ export default function App() {
             <Routes>
               <Route path="/"          element={<LaborPlanning />}    />
               <Route path="/inventory" element={<InventoryReport />}  />
+              <Route path="/customers" element={<Customers />}        />
               <Route path="/orders"    element={<OrderCreator />}     />
               <Route path="/analytics" element={<Analytics />}        />
               <Route path="/settings"  element={<Settings />}         />
