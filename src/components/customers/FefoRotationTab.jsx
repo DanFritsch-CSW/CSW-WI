@@ -5,94 +5,53 @@ import {
   bannerCounts, kpiRow, rollupByProject,
   dayLabel, daySubLabel,
   VERDICT_TOKENS,
-  fefoOrderList, fetchLiveFefoOrders,
+  fefoOrderList, fetchLiveFefoOrdersBatch,
 } from '../../lib/fefo.js'
 
-// FEFO Rotation tab — always live from Datex.
+// FEFO Rotation tab — always live from Datex, batched.
 //
-// On mount, fans out to fetch all 4 projects in parallel via the
-// /.netlify/functions/fefo-orders backend. Each project caches into
-// liveByProject and renders as soon as it returns. Picking a specific project
-// just filters the already-loaded pool — no extra fetch. "All Projects"
-// shows the merged set across all 4.
+// One Netlify function call on mount fetches all 4 KEN projects on a single
+// duckdb connection. Replaces the previous per-project fan-out which triggered
+// a duckdb connection-init bug under parallel Lambda invocations.
 //
-// Mock fixtures (fefoOrderList) are kept as a true last-resort fallback only:
-// they render when every live fetch failed for the visible projects, so the
-// screen never goes blank during a MotherDuck outage.
+// Mock fixtures render only when the batch call fails entirely — last-resort
+// fallback so the screen never blanks during a MotherDuck outage.
+
+const ALL_PROJECT_IDS = FEFO_PROJECTS.map(p => p.id)
 
 export default function FefoRotationTab() {
   const [day, setDay] = useState(0)
   const [proj, setProj] = useState('all')
   const [openOrders, setOpenOrders] = useState(() => new Set())
 
-  // Live orders per project. Shape:
-  //   { [projectId]: { orders, loading, error, fetchedAt, source, elapsedMs } }
-  const [liveByProject, setLiveByProject] = useState({})
+  const [liveResult, setLiveResult] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const fetchedRef = useRef(false)
 
-  // Fan out: on mount (and whenever proj changes), kick off any missing
-  // project fetches. "all" requests every project; a specific selection
-  // requests just that one. De-duped by inFlightRef so day-stepper changes
-  // don't re-fetch.
-  const inFlightRef = useRef(new Set())
   useEffect(() => {
-    const wanted = proj === 'all' ? FEFO_PROJECTS.map(p => p.id) : [proj]
-    const toFetch = wanted.filter(pid =>
-      !liveByProject[pid] && !inFlightRef.current.has(pid)
-    )
-    if (toFetch.length === 0) return
-
-    // Mark loading for the projects we're about to fetch.
-    setLiveByProject(prev => {
-      const next = { ...prev }
-      for (const pid of toFetch) next[pid] = { ...(next[pid] || {}), loading: true }
-      return next
-    })
-
-    for (const pid of toFetch) {
-      inFlightRef.current.add(pid)
-      fetchLiveFefoOrders(pid)
-        .then(result => {
-          setLiveByProject(prev => ({
-            ...prev,
-            [pid]: {
-              orders:    result.orders,
-              loading:   false,
-              error:     result.error || null,
-              fetchedAt: result.fetchedAt,
-              source:    result.source,
-              elapsedMs: result.elapsedMs,
-            },
-          }))
+    if (fetchedRef.current) return
+    fetchedRef.current = true
+    setLoading(true)
+    fetchLiveFefoOrdersBatch(ALL_PROJECT_IDS)
+      .then(result => { setLiveResult(result); setLoading(false) })
+      .catch(err => {
+        setLiveResult({
+          ordersByProject: {}, errorsByProject: {},
+          source: 'mock', error: err.message || 'unknown',
         })
-        .catch(err => {
-          setLiveByProject(prev => ({
-            ...prev,
-            [pid]: { orders: [], loading: false, error: err.message || 'unknown', source: 'mock' },
-          }))
-        })
-        .finally(() => {
-          inFlightRef.current.delete(pid)
-        })
-    }
-  }, [proj, liveByProject])
+        setLoading(false)
+      })
+  }, [])
 
-  // What projects are in scope for the current view.
-  const scopedProjectIds = proj === 'all' ? FEFO_PROJECTS.map(p => p.id) : [proj]
+  const scopedProjectIds = proj === 'all' ? ALL_PROJECT_IDS : [proj]
+  const errorsByProject = liveResult?.errorsByProject || {}
+  const ordersByProject = liveResult?.ordersByProject || {}
+  const failedScoped = scopedProjectIds.filter(pid => errorsByProject[pid])
+  const succeededScoped = scopedProjectIds.filter(pid => !errorsByProject[pid])
+  const allFailed = !loading && succeededScoped.length === 0
 
-  // Loading = any in-scope project still in flight.
-  const anyLoading = scopedProjectIds.some(pid => liveByProject[pid]?.loading)
-  // Every in-scope project has settled and ALL failed → fall back to mock.
-  const allFailed = scopedProjectIds.length > 0
-    && scopedProjectIds.every(pid => {
-      const s = liveByProject[pid]
-      return s && !s.loading && (s.source !== 'live' || s.error)
-    })
-
-  // Mock pool — only used when allFailed is true.
   const mockOrders = useMemo(() => fefoOrderList(), [])
 
-  // Visible pool = merged live orders from all in-scope projects,
-  // filtered by day, sorted by severity. Mock fallback if everything failed.
   const visible = useMemo(() => {
     let pool
     if (allFailed) {
@@ -100,15 +59,14 @@ export default function FefoRotationTab() {
     } else {
       pool = []
       for (const pid of scopedProjectIds) {
-        const s = liveByProject[pid]
-        if (s?.orders?.length) pool.push(...s.orders)
+        const arr = ordersByProject[pid]
+        if (Array.isArray(arr) && arr.length) pool.push(...arr)
       }
     }
     const filtered = pool.filter(o => o.day === day)
     return [...filtered].sort(compareByVerdict)
-  }, [allFailed, mockOrders, liveByProject, scopedProjectIds, day, proj])
+  }, [allFailed, mockOrders, ordersByProject, scopedProjectIds, day, proj])
 
-  // Auto-expand violations + stale on view change (handoff §3.5).
   useEffect(() => {
     const auto = new Set()
     for (const o of visible) {
@@ -136,10 +94,10 @@ export default function FefoRotationTab() {
         day={day}        onDayChange={setDay}
         proj={proj}      onProjChange={setProj}
         orderCount={visible.length}
-        anyLoading={anyLoading}
+        loading={loading}
         allFailed={allFailed}
-        scopedProjectIds={scopedProjectIds}
-        liveByProject={liveByProject}
+        failedScoped={failedScoped}
+        liveResult={liveResult}
       />
       <Banners banners={banners} />
       <KpiRow kpis={kpis} />
@@ -151,15 +109,13 @@ export default function FefoRotationTab() {
         openOrders={openOrders}
         onToggle={toggleOrder}
         showProjectChip={proj === 'all'}
-        loading={anyLoading && visible.length === 0}
+        loading={loading && visible.length === 0}
       />
     </div>
   )
 }
 
-// ─── Controls row: day stepper + project select + data source badge ─────────
-
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, anyLoading, allFailed, scopedProjectIds, liveByProject }) {
+function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -168,10 +124,10 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, anyLoad
       <DayStepper day={day} onChange={onDayChange} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <DataSourceBadge
-          anyLoading={anyLoading}
+          loading={loading}
           allFailed={allFailed}
-          scopedProjectIds={scopedProjectIds}
-          liveByProject={liveByProject}
+          failedScoped={failedScoped}
+          liveResult={liveResult}
         />
         <span style={{
           fontSize: 11, color: 'var(--text-dim)',
@@ -186,29 +142,21 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, anyLoad
   )
 }
 
-function DataSourceBadge({ anyLoading, allFailed, scopedProjectIds, liveByProject }) {
-  if (anyLoading) return <BadgeChip color="var(--text-dim, #9aaabb)" label="LOADING…" />
+function DataSourceBadge({ loading, allFailed, failedScoped, liveResult }) {
+  if (loading) return <BadgeChip color="var(--text-dim, #9aaabb)" label="LOADING…" />
   if (allFailed) {
-    // Compile error messages from the failed projects for the tooltip.
-    const errs = scopedProjectIds
-      .map(pid => liveByProject[pid]?.error)
-      .filter(Boolean)
-      .slice(0, 2)
-      .join(' · ')
-    return <BadgeChip color="var(--red, #c0392b)" label="OFFLINE" title={errs ? `Live fetch failed: ${errs}. Showing mock fixtures.` : 'Live fetch failed. Showing mock fixtures.'} />
+    const topErr = liveResult?.error
+    const firstErrors = liveResult?.errorsByProject
+      ? Object.values(liveResult.errorsByProject).filter(Boolean).slice(0, 2).join(' · ')
+      : ''
+    const tip = topErr || firstErrors || 'Live fetch failed'
+    return <BadgeChip color="var(--red, #c0392b)" label="OFFLINE" title={`${tip}. Showing mock fixtures.`} />
   }
-  // Partial failure check: some in-scope projects succeeded, others failed.
-  // Surface a yellow warning rather than going silent.
-  const failed = scopedProjectIds.filter(pid => {
-    const s = liveByProject[pid]
-    return s && !s.loading && (s.source !== 'live' || s.error)
-  })
-  if (failed.length > 0) {
-    const names = failed.map(pid => getProject(pid)?.code).filter(Boolean).join(', ')
+  if (failedScoped.length > 0) {
+    const names = failedScoped.map(pid => getProject(pid)?.code).filter(Boolean).join(', ')
     return <BadgeChip color="var(--amber, #a07818)" label="PARTIAL" title={`Live but missing: ${names}. The rest are real Datex data.`} />
   }
-  // Find max elapsedMs across in-scope projects for tooltip.
-  const ms = Math.max(...scopedProjectIds.map(pid => liveByProject[pid]?.elapsedMs || 0))
+  const ms = liveResult?.elapsedMs
   return <BadgeChip color="var(--green, #1a8a52)" label="LIVE" title={`From Datex via MotherDuck${ms ? ` · ${ms}ms` : ''}`} />
 }
 
@@ -241,11 +189,7 @@ function DayStepper({ day, onChange }) {
       border: '1px solid var(--border)',
       borderRadius: 'var(--r-md, 8px)',
     }}>
-      <StepBtn
-        disabled={day <= 0}
-        onClick={() => onChange(Math.max(0, day - 1))}
-        ariaLabel="Previous day"
-      >‹</StepBtn>
+      <StepBtn disabled={day <= 0} onClick={() => onChange(Math.max(0, day - 1))} ariaLabel="Previous day">‹</StepBtn>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 130, lineHeight: 1.2 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
           {dayLabel(day)}
@@ -258,11 +202,7 @@ function DayStepper({ day, onChange }) {
           {daySubLabel(day)}
         </span>
       </div>
-      <StepBtn
-        disabled={day >= 4}
-        onClick={() => onChange(Math.min(4, day + 1))}
-        ariaLabel="Next day"
-      >›</StepBtn>
+      <StepBtn disabled={day >= 4} onClick={() => onChange(Math.min(4, day + 1))} ariaLabel="Next day">›</StepBtn>
     </div>
   )
 }
@@ -314,8 +254,6 @@ function ProjectSelect({ proj, onChange }) {
   )
 }
 
-// ─── Banners ────────────────────────────────────────────────────────────────
-
 function Banners({ banners }) {
   const items = []
   if (banners.violations.length > 0) {
@@ -340,11 +278,7 @@ function Banners({ banners }) {
     })
   }
   if (banners.allClean) {
-    items.push({
-      key: 'c', kind: 'clean',
-      title: 'All clear',
-      body: 'Every order is pulling the oldest available lot.',
-    })
+    items.push({ key: 'c', kind: 'clean', title: 'All clear', body: 'Every order is pulling the oldest available lot.' })
   }
   if (!items.length) return null
   return (
@@ -360,12 +294,8 @@ function Banners({ banners }) {
             borderRadius: 'var(--r-md, 8px)',
           }}>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: t.color, marginBottom: 2 }}>
-                {b.title}
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.4 }}>
-                {b.body}
-              </div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: t.color, marginBottom: 2 }}>{b.title}</div>
+              <div style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.4 }}>{b.body}</div>
             </div>
           </div>
         )
@@ -373,8 +303,6 @@ function Banners({ banners }) {
     </div>
   )
 }
-
-// ─── KPI row (6 cells) ──────────────────────────────────────────────────────
 
 function KpiRow({ kpis }) {
   const cells = [
@@ -386,11 +314,7 @@ function KpiRow({ kpis }) {
     { label: 'LOTS ON HOLD',     value: kpis.holds,      color: kpis.holds > 0 ? VERDICT_TOKENS.hold.color : 'var(--text-dim)' },
   ]
   return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-      gap: 10,
-    }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
       {cells.map(c => (
         <div key={c.label} style={{
           background: 'var(--bg2, #f8f9fb)',
@@ -398,24 +322,13 @@ function KpiRow({ kpis }) {
           borderRadius: 'var(--r-md, 8px)',
           padding: '10px 14px',
         }}>
-          <div style={{
-            fontSize: 9, color: 'var(--text-dim)',
-            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-            letterSpacing: '0.08em',
-          }}>{c.label}</div>
-          <div style={{
-            fontSize: 22, fontWeight: 600,
-            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-            marginTop: 4,
-            color: c.color || 'var(--text-primary)',
-          }}>{c.value}</div>
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.08em' }}>{c.label}</div>
+          <div style={{ fontSize: 22, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginTop: 4, color: c.color || 'var(--text-primary)' }}>{c.value}</div>
         </div>
       ))}
     </div>
   )
 }
-
-// ─── Project rollup (only when "All Projects") ──────────────────────────────
 
 function ProjectRollup({ rollup, onProjClick }) {
   const visible = rollup.filter(r => r.orders > 0)
@@ -423,20 +336,13 @@ function ProjectRollup({ rollup, onProjClick }) {
   return (
     <div>
       <SectionLabel>BY PROJECT</SectionLabel>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
-        gap: 10,
-        marginTop: 8,
-      }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 10, marginTop: 8 }}>
         {visible.map(r => {
           const hasIssue = r.violations > 0 || r.stale > 0
           const flagToken = hasIssue ? VERDICT_TOKENS.violation : VERDICT_TOKENS.clean
           const flagText = r.violations > 0
             ? `${r.violations} violation${r.violations === 1 ? '' : 's'}`
-            : r.stale > 0
-              ? `${r.stale} stale`
-              : 'in rotation'
+            : r.stale > 0 ? `${r.stale} stale` : 'in rotation'
           return (
             <button
               key={r.proj.id}
@@ -455,12 +361,7 @@ function ProjectRollup({ rollup, onProjClick }) {
             >
               <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
                 <div>
-                  <div style={{
-                    fontSize: 11, fontWeight: 600,
-                    fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-                    letterSpacing: '0.06em',
-                    color: r.proj.color,
-                  }}>{r.proj.code}</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', color: r.proj.color }}>{r.proj.code}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-primary)', marginTop: 2 }}>
                     {r.orders} order{r.orders === 1 ? '' : 's'} · {r.lps} LP
                   </div>
@@ -474,9 +375,7 @@ function ProjectRollup({ rollup, onProjClick }) {
                   borderRadius: 'var(--r-sm, 4px)',
                   fontFamily: 'var(--font-mono, ui-monospace, monospace)',
                   whiteSpace: 'nowrap',
-                }}>
-                  {flagText}
-                </span>
+                }}>{flagText}</span>
               </div>
             </button>
           )
@@ -486,41 +385,19 @@ function ProjectRollup({ rollup, onProjClick }) {
   )
 }
 
-// ─── Orders list ────────────────────────────────────────────────────────────
-
 function OrdersList({ orders, openOrders, onToggle, showProjectChip, loading }) {
   if (loading) {
-    return (
-      <div style={{
-        padding: '40px 0', textAlign: 'center',
-        color: 'var(--text-secondary)', fontSize: 13,
-      }}>
-        Loading live FEFO data…
-      </div>
-    )
+    return <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>Loading live FEFO data…</div>
   }
   if (!orders.length) {
-    return (
-      <div style={{
-        padding: '40px 0', textAlign: 'center',
-        color: 'var(--text-secondary)', fontSize: 13,
-      }}>
-        No orders scheduled for this day.
-      </div>
-    )
+    return <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>No orders scheduled for this day.</div>
   }
   return (
     <div>
       <SectionLabel>ORDERS · sorted by severity</SectionLabel>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
         {orders.map(o => (
-          <OrderCard
-            key={o.id}
-            order={o}
-            open={openOrders.has(o.id)}
-            onToggle={() => onToggle(o.id)}
-            showProjectChip={showProjectChip}
-          />
+          <OrderCard key={o.id} order={o} open={openOrders.has(o.id)} onToggle={() => onToggle(o.id)} showProjectChip={showProjectChip} />
         ))}
       </div>
     </div>
@@ -542,7 +419,6 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
       borderRadius: 'var(--r-md, 8px)',
       overflow: 'hidden',
     }}>
-      {/* Header (clickable to toggle) */}
       <button
         type="button"
         onClick={onToggle}
@@ -561,10 +437,7 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
           transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
           transition: 'transform 0.15s ease',
         }}>›</span>
-        <span style={{
-          fontSize: 13, fontWeight: 600,
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        }}>{order.id}</span>
+        <span style={{ fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{order.id}</span>
         {showProjectChip && project && (
           <span style={{
             fontSize: 10, fontWeight: 600,
@@ -577,9 +450,7 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
             letterSpacing: '0.04em',
           }}>{project.code}</span>
         )}
-        <span style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {order.dest}
-        </span>
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{order.dest}</span>
         <span style={{
           fontSize: 11, color: order.past ? VERDICT_TOKENS.stale.color : 'var(--text-secondary)',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
@@ -591,7 +462,6 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
         <VerdictPill verdict={verdict} />
       </button>
 
-      {/* Body (when open) */}
       {open && (
         <div style={{
           padding: '12px 14px 14px',
@@ -640,33 +510,19 @@ function SkuLineRow({ line, projId }) {
       borderRadius: 'var(--r-md, 8px)',
       padding: 12,
     }}>
-      {/* Head */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 }}>
-        <span style={{
-          fontSize: 12, fontWeight: 600,
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        }}>{line.code}</span>
+        <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{line.code}</span>
         <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>{line.desc}</span>
         {line.pack && (
-          <span style={{
-            fontSize: 10, color: 'var(--text-dim)',
-            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-            marginLeft: 'auto',
-          }}>{line.pack}</span>
+          <span style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginLeft: 'auto' }}>{line.pack}</span>
         )}
       </div>
 
-      {/* Two columns: shipping (left) + oldest remaining (right) */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap: 10,
-      }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         <ShippingColumn ship={sortedShip} verb={verb} />
         <OldestRemainingColumn rem={line.rem} verb={verb} verdict={v} />
       </div>
 
-      {/* Verdict line */}
       <div style={{
         marginTop: 10,
         padding: '8px 10px',
@@ -685,24 +541,10 @@ function SkuLineRow({ line, projId }) {
 function ShippingColumn({ ship, verb }) {
   return (
     <div>
-      <div style={{
-        fontSize: 9, color: 'var(--text-dim)',
-        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        letterSpacing: '0.08em', marginBottom: 6,
-      }}>SHIPPING ON THIS ORDER · OLDEST FIRST</div>
+      <div style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.08em', marginBottom: 6 }}>SHIPPING ON THIS ORDER · OLDEST FIRST</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {ship.map((s, idx) => (
-          <DateChip
-            key={`${s.k}-${idx}`}
-            seq={idx + 1}
-            date={s.date}
-            lps={s.lps}
-            cases={s.cases}
-            codes={s.codes}
-            lot={s.lot}
-            verb={verb}
-            isOldest={idx === 0}
-          />
+          <DateChip key={`${s.k}-${idx}`} seq={idx + 1} date={s.date} lps={s.lps} cases={s.cases} codes={s.codes} lot={s.lot} verb={verb} isOldest={idx === 0} />
         ))}
       </div>
     </div>
@@ -720,14 +562,8 @@ function DateChip({ seq, date, lps, cases, codes, lot, verb, isOldest }) {
       background: 'var(--bg2, #f8f9fb)',
     }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-        <span style={{
-          fontSize: 9, color: 'var(--text-dim)',
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        }}>#{seq}</span>
-        <span style={{
-          fontSize: 12, fontWeight: 600,
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        }}>{verb} {date}</span>
+        <span style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>#{seq}</span>
+        <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{verb} {date}</span>
         {isOldest && (
           <span style={{
             fontSize: 9, fontWeight: 600,
@@ -738,11 +574,7 @@ function DateChip({ seq, date, lps, cases, codes, lot, verb, isOldest }) {
             fontFamily: 'var(--font-mono, ui-monospace, monospace)',
           }}>oldest</span>
         )}
-        <span style={{
-          fontSize: 11, color: 'var(--text-secondary)',
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-          marginLeft: 'auto',
-        }}>{lps} LP · {cases} cs</span>
+        <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginLeft: 'auto' }}>{lps} LP · {cases} cs</span>
       </div>
       {(visibleCodes.length > 0 || lot) && (
         <div style={{
@@ -768,11 +600,7 @@ function OldestRemainingColumn({ rem, verb, verdict }) {
   const t = VERDICT_TOKENS[verdict]
   return (
     <div>
-      <div style={{
-        fontSize: 9, color: 'var(--text-dim)',
-        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        letterSpacing: '0.08em', marginBottom: 6,
-      }}>OLDEST REMAINING · NOT ON ANY ORDER</div>
+      <div style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.08em', marginBottom: 6 }}>OLDEST REMAINING · NOT ON ANY ORDER</div>
       <div style={{
         padding: 8,
         border: `1px solid ${t.color}`,
@@ -781,16 +609,11 @@ function OldestRemainingColumn({ rem, verb, verdict }) {
         minHeight: 56,
       }}>
         {!rem || rem.lps === 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontStyle: 'italic' }}>
-            None — fully cleared
-          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontStyle: 'italic' }}>None — fully cleared</div>
         ) : (
           <>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-              <span style={{
-                fontSize: 12, fontWeight: 600,
-                fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-              }}>{verb} {rem.date}</span>
+              <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{verb} {rem.date}</span>
               {rem.hold && (
                 <span style={{
                   fontSize: 9, fontWeight: 600,
@@ -802,11 +625,7 @@ function OldestRemainingColumn({ rem, verb, verdict }) {
                 }}>⏸ {rem.holdType || 'HOLD'}</span>
               )}
             </div>
-            <div style={{
-              fontSize: 11, color: 'var(--text-secondary)',
-              fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-              marginTop: 2,
-            }}>{rem.lps} LP · {rem.cases} cs available{rem.lot ? ` · lot ${rem.lot}` : ''}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginTop: 2 }}>{rem.lps} LP · {rem.cases} cs available{rem.lot ? ` · lot ${rem.lot}` : ''}</div>
           </>
         )}
       </div>
@@ -828,9 +647,7 @@ function OrderFooter({ order }) {
       fontSize: 10, color: 'var(--text-dim)',
       fontFamily: 'var(--font-mono, ui-monospace, monospace)',
       letterSpacing: '0.04em',
-    }}>
-      {parts.join('  ·  ')}
-    </div>
+    }}>{parts.join('  ·  ')}</div>
   )
 }
 
