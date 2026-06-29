@@ -13,6 +13,26 @@
 // Output (JSON):       { result: { [projectName]: { [hour]: est_drops_int } } }
 //
 // Token is set via env var MOTHERDUCK_TOKEN (Netlify dashboard).
+//
+// ── duckdb / MotherDuck init pattern ────────────────────────────────────────
+// Same hard-won pattern as fefo-orders.cjs (see commit 217dda1b for full
+// rationale). Five rounds of production debugging revealed:
+//   1. HOME must be set to /tmp BEFORE require('duckdb'). Lambda's HOME is
+//      empty; duckdb needs a writable directory to cache the motherduck
+//      extension. Without this, every operation fails with the misleading
+//      "Connection was never established" error.
+//   2. Token via env var, NEVER as a Database constructor option (that
+//      silently produces a broken db handle).
+//   3. Open :memory: instead of 'md:production_db' URI. The URI form
+//      triggers eager async init that swallows errors.
+//   4. SET home_directory='/tmp', INSTALL motherduck, LOAD motherduck.
+//   5. ATTACH 'md:production_db' WITHOUT an alias. Aliasing breaks
+//      MotherDuck's internal catalog routing — queries that go through
+//      its schema graph need the real catalog name.
+//   6. All SQL uses 3-part names: production_db.gold.<table>.
+
+// Set HOME before requiring duckdb — duckdb reads it at load time.
+process.env.HOME = process.env.HOME || '/tmp'
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -230,21 +250,29 @@ exports.handler = async (event) => {
     ORDER BY hf.display_name, hf.h
   `
 
+  let db, conn
   try {
+    // See top-of-file comment block for why this exact sequence.
+    process.env.HOME = '/tmp'
     process.env.motherduck_token = TOKEN
     const duckdb = require('duckdb')
-    const db = new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
-    const conn = db.connect()
+    db = new duckdb.Database(':memory:')
+    conn = db.connect()
 
-    await new Promise((resolve, reject) => {
-      conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
+    const exec = (s) => new Promise((resolve, reject) => {
+      conn.run(s, err => err ? reject(err) : resolve())
+    })
+    const runQuery = (s) => new Promise((resolve, reject) => {
+      conn.all(s, (err, result) => err ? reject(err) : resolve(result))
     })
 
-    const rows = await new Promise((resolve, reject) => {
-      conn.all(sql, (err, result) => err ? reject(err) : resolve(result))
-    })
-    conn.close()
-    db.close()
+    await exec("SET home_directory='/tmp'")
+    await exec('INSTALL motherduck')
+    await exec('LOAD motherduck')
+    await exec(`ATTACH 'md:production_db'`)
+
+    const rows = await runQuery(sql)
+    try { conn?.close(); db?.close() } catch (_) {}
 
     // Build decimalMap per project, then redistribute to integers.
     // Matches the largest-remainder logic in omni.js fetchHistoricalProjectHourlyDrops.
@@ -289,6 +317,7 @@ exports.handler = async (event) => {
       }),
     }
   } catch (e) {
+    try { conn?.close(); db?.close() } catch (_) {}
     return {
       statusCode: 502,
       headers: NO_CACHE_HEADERS,
