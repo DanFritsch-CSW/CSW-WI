@@ -25,28 +25,20 @@
 //      time to know where to cache extensions. Lambda's HOME is empty by
 //      default. /tmp is the only writable directory on Lambda.
 //   2. process.env.motherduck_token = TOKEN. The token MUST come via env
-//      var. Passing it as the Database constructor's second arg silently
-//      produces a broken db handle that fails at first use with the
-//      misleading "Connection was never established" error.
-//   3. Open an in-memory database. DO NOT use `md:production_db` as the
-//      URI — that triggers eager MotherDuck connection inside the constructor,
-//      which fails for the same home-directory reason but swallows the
-//      error in async init. The Connection wrapper then throws the
-//      "Connection was never established" message on every operation.
-//   4. SET home_directory='/tmp' explicitly on the connection. Belt and
-//      suspenders alongside the HOME env var.
+//      var, NOT as a Database constructor option.
+//   3. Open an in-memory database. Don't use `md:production_db` as the
+//      URI — eager MotherDuck init in the constructor swallows errors and
+//      surfaces them as the misleading "Connection was never established".
+//   4. SET home_directory='/tmp' explicitly on the connection.
 //   5. INSTALL motherduck + LOAD motherduck. Cold start fetches the
-//      extension (~10-20 MB) from extensions.duckdb.org into /tmp;
-//      warm starts reuse the cache.
-//   6. ATTACH 'md:production_db' AS prod (TYPE motherduck), then USE prod.
-//      All subsequent queries can reference silver.<table> directly.
-//
-// Diagnostic v2 captured the actual error from Pattern C:
-//   "IO Error: Can't find the home directory at ''
-//    Specify a home directory using the SET home_directory='/path/to/dir' option."
-// Patterns A/B/D/E hit the same error but reported it as "Connection was
-// never established" because the failure happens inside the async Database
-// init queue and the Connection wrapper just sees a dead handle.
+//      extension (~10-20 MB) from extensions.duckdb.org into /tmp.
+//   6. ATTACH 'md:production_db' WITHOUT an alias, then USE production_db.
+//      Attaching with AS prod broke schema resolution — queries that
+//      reference `silver.<table>` produced "Catalog 'production_db' does
+//      not exist" because MotherDuck internally addresses the catalog by
+//      its real name and the alias 'prod' broke that resolution path.
+//      Attaching without an alias keeps the catalog name = production_db
+//      so 2-part names resolve correctly.
 //
 // ── Schema / data architecture (per Phase 7a recon) ─────────────────────────
 //   - hardallocations.shipment_line_id is always null in this Datex instance.
@@ -179,23 +171,23 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   // ── Query 1: order headers ──
   const orderSql = `
     WITH proj AS (
-      SELECT project_id FROM silver.datex_slv_projects WHERE project_name = '${safeProjectName}'
+      SELECT project_id FROM production_db.silver.datex_slv_projects WHERE project_name = '${safeProjectName}'
     ),
     window_orders AS (
       SELECT
         o.order_id, o.lookup_code AS order_lookup,
         o.requested_delivery_date, o.modified_sys_user, o.modified_sys_date_time,
         os.status_name
-      FROM silver.datex_slv_orders o
+      FROM production_db.silver.datex_slv_orders o
       JOIN proj ON o.project_id = proj.project_id
-      JOIN silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
+      JOIN production_db.silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
       WHERE os.status_name = 'Processing'
         AND DATE(o.requested_delivery_date) BETWEEN '${dateFrom}' AND '${dateTo}'
     ),
     orders_with_tasks_in_wh AS (
       SELECT DISTINCT wo.order_id
       FROM window_orders wo
-      JOIN silver.datex_slv_tasks t ON t.order_id = wo.order_id
+      JOIN production_db.silver.datex_slv_tasks t ON t.order_id = wo.order_id
       WHERE t.warehouse_id = ${warehouseId}
     )
     SELECT
@@ -208,7 +200,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       MAX(CASE WHEN oa.type_id = 2 THEN oa.State END) AS dest_state
     FROM window_orders wo
     JOIN orders_with_tasks_in_wh ot ON wo.order_id = ot.order_id
-    LEFT JOIN silver.datex_slv_orderaddresses oa ON oa.order_id = wo.order_id
+    LEFT JOIN production_db.silver.datex_slv_orderaddresses oa ON oa.order_id = wo.order_id
     GROUP BY wo.order_id, wo.order_lookup, wo.requested_delivery_date,
              wo.status_name, wo.modified_sys_user
     ORDER BY wo.requested_delivery_date ASC, wo.order_id ASC
@@ -232,9 +224,9 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
       SUM(t.expected_packaged_amount) AS expected_cases,
       SUM(t.actual_packaged_amount)   AS actual_cases
-    FROM silver.datex_slv_tasks t
-    JOIN silver.datex_slv_lots l ON t.lot_id = l.lot_id
-    JOIN silver.datex_slv_materials m ON t.material_id = m.material_id
+    FROM production_db.silver.datex_slv_tasks t
+    JOIN production_db.silver.datex_slv_lots l ON t.lot_id = l.lot_id
+    JOIN production_db.silver.datex_slv_materials m ON t.material_id = m.material_id
     WHERE t.order_id IN (${orderIdList})
       AND t.lot_id IS NOT NULL
       AND t.warehouse_id = ${warehouseId}
@@ -256,9 +248,9 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         l.lookup_code AS lot_code, l.status_name AS lot_status,
         COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
         SUM(lpc.packaged_amount) AS cases_onhand
-      FROM silver.datex_slv_licenseplatecontents lpc
-      JOIN silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
-      JOIN silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
+      FROM production_db.silver.datex_slv_licenseplatecontents lpc
+      JOIN production_db.silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
+      JOIN production_db.silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
       WHERE l.material_id IN (${matIdList})
         AND lp.warehouse_id = ${warehouseId}
         AND lp.Archived = false
@@ -450,8 +442,10 @@ exports.handler = async (event) => {
     await exec("SET home_directory='/tmp'")
     await exec('INSTALL motherduck')
     await exec('LOAD motherduck')
-    await exec(`ATTACH 'md:production_db' AS prod (TYPE motherduck)`)
-    await exec('USE prod')
+    // No alias — keep the catalog name as production_db so 3-part references
+    // (production_db.silver.<table>) resolve correctly. Aliasing as 'prod'
+    // breaks MotherDuck's internal catalog routing.
+    await exec(`ATTACH 'md:production_db'`)
 
     // Sequential loop on the shared connection.
     for (const pid of projectIds) {
