@@ -2,19 +2,28 @@
 
 // Netlify function — live FEFO orders from Datex via MotherDuck.
 //
-// POST input: { facility, projectId, dayCount = 5 }
-//   - facility:  'cal' | 'mad' | 'ken' | 'wr' | 'ec'
-//   - projectId: one of 'faioa5' | 'fofwe5' | 'riche5' | 'golst5'
-//   - dayCount:  optional, 1..7 (default 5)
+// POST input: { facility, projectIds, dayCount = 5 }
+//   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
+//   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
+//                 'riche5', 'golst5'). Single `projectId` is accepted for
+//                 backward compat and wrapped in an array.
+//   - dayCount:   optional, 1..7 (default 5)
 //
-// Response: { orders: Order[], fetchedAt: ISO, elapsedMs, source: 'motherduck',
-//             rowCounts: { orders, allocations, onhand } }
+// Response: {
+//   ordersByProject: { [projectId]: Order[] },  // empty array on per-project error
+//   errorsByProject: { [projectId]: string },   // only present if any failed
+//   fetchedAt: ISO,
+//   elapsedMs,
+//   source: 'motherduck',
+//   rowCounts: { [projectId]: { orders, allocations, onhand } },
+// }
 //
-// The Order objects match the shape the FEFO verdict engine expects (same
-// shape as fefoOrderList() mock fixtures in src/lib/fefo.js): id, day,
-// proj, dest, appt, past, status, allocBy, lines[{ code, desc, pack,
-// ship[{lot, date, k, lps, cases, codes?}], rem{lot, date, k, lps, cases,
-// hold, holdType} }].
+// Why one call instead of fan-out: 4 parallel Lambda invocations were each
+// trying to open their own duckdb connection. The duckdb client failed to
+// initialize with "Connection Error: Connection was never established" and
+// elapsedMs: 6 — appears to be a concurrency bug in either duckdb-node or
+// Netlify's warm-Lambda pooling. One call, one duckdb connection, looped
+// over projects → 1 round trip vs 4, zero concurrency issues.
 //
 // Architecture (per Phase 7a recon):
 //   - hardallocations.shipment_line_id is always null in this Datex instance.
@@ -54,7 +63,7 @@ function isHoldStatus(s) {
   return /hold|not released/i.test(s)
 }
 
-// ─── Date parsers (server copy — mirrors src/lib/fefo.js exactly) ─────────────
+// ─── Date parsers (server copy — mirrors src/lib/fefo.js) ───────────────────
 
 function parseFairOaksDate(lookupCode) {
   if (!lookupCode || typeof lookupCode !== 'string') return null
@@ -139,6 +148,213 @@ function fmtDest(name, city, state) {
   return loc ? `${n} \u2014 ${loc}` : n
 }
 
+// ─── Per-project query block (runs on shared duckdb connection) ─────────────
+
+async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount }) {
+  const safeProjectName = project.datexName.replace(/'/g, "''")
+
+  // ── Query 1: order headers ──
+  const orderSql = `
+    WITH proj AS (
+      SELECT project_id FROM silver.datex_slv_projects WHERE project_name = '${safeProjectName}'
+    ),
+    window_orders AS (
+      SELECT
+        o.order_id, o.lookup_code AS order_lookup,
+        o.requested_delivery_date, o.modified_sys_user, o.modified_sys_date_time,
+        os.status_name
+      FROM silver.datex_slv_orders o
+      JOIN proj ON o.project_id = proj.project_id
+      JOIN silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
+      WHERE os.status_name = 'Processing'
+        AND DATE(o.requested_delivery_date) BETWEEN '${dateFrom}' AND '${dateTo}'
+    ),
+    orders_with_tasks_in_wh AS (
+      SELECT DISTINCT wo.order_id
+      FROM window_orders wo
+      JOIN silver.datex_slv_tasks t ON t.order_id = wo.order_id
+      WHERE t.warehouse_id = ${warehouseId}
+    )
+    SELECT
+      wo.order_id, wo.order_lookup,
+      wo.requested_delivery_date,
+      wo.status_name,
+      wo.modified_sys_user,
+      MAX(CASE WHEN oa.type_id = 2 THEN oa.Name END)  AS dest_name,
+      MAX(CASE WHEN oa.type_id = 2 THEN oa.City END)  AS dest_city,
+      MAX(CASE WHEN oa.type_id = 2 THEN oa.State END) AS dest_state
+    FROM window_orders wo
+    JOIN orders_with_tasks_in_wh ot ON wo.order_id = ot.order_id
+    LEFT JOIN silver.datex_slv_orderaddresses oa ON oa.order_id = wo.order_id
+    GROUP BY wo.order_id, wo.order_lookup, wo.requested_delivery_date,
+             wo.status_name, wo.modified_sys_user
+    ORDER BY wo.requested_delivery_date ASC, wo.order_id ASC
+  `
+  const orderRows = await runQuery(orderSql)
+
+  if (orderRows.length === 0) {
+    return { orders: [], rowCounts: { orders: 0, allocations: 0, onhand: 0 } }
+  }
+
+  const orderIds = orderRows.map(r => Number(r.order_id))
+  const orderIdList = orderIds.join(',')
+
+  // ── Query 2: allocations per (order, material, lot) ──
+  const allocSql = `
+    SELECT
+      t.order_id, t.order_line_number, t.material_id,
+      m.lookup_code AS material_code, m.Description AS material_desc,
+      t.lot_id, l.lookup_code AS lot_code, l.status_name AS lot_status,
+      COUNT(DISTINCT t.task_id) AS lp_count_planned,
+      COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
+      SUM(t.expected_packaged_amount) AS expected_cases,
+      SUM(t.actual_packaged_amount)   AS actual_cases
+    FROM silver.datex_slv_tasks t
+    JOIN silver.datex_slv_lots l ON t.lot_id = l.lot_id
+    JOIN silver.datex_slv_materials m ON t.material_id = m.material_id
+    WHERE t.order_id IN (${orderIdList})
+      AND t.lot_id IS NOT NULL
+      AND t.warehouse_id = ${warehouseId}
+    GROUP BY t.order_id, t.order_line_number, t.material_id,
+             m.lookup_code, m.Description,
+             t.lot_id, l.lookup_code, l.status_name
+  `
+  const allocRows = await runQuery(allocSql)
+
+  const materialIds = [...new Set(allocRows.map(r => Number(r.material_id)))]
+
+  // ── Query 3: on-hand by lot ──
+  let onhandRows = []
+  if (materialIds.length > 0) {
+    const matIdList = materialIds.join(',')
+    const onhandSql = `
+      SELECT
+        l.material_id, l.lot_id,
+        l.lookup_code AS lot_code, l.status_name AS lot_status,
+        COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
+        SUM(lpc.packaged_amount) AS cases_onhand
+      FROM silver.datex_slv_licenseplatecontents lpc
+      JOIN silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
+      JOIN silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
+      WHERE l.material_id IN (${matIdList})
+        AND lp.warehouse_id = ${warehouseId}
+        AND lp.Archived = false
+        AND lpc.packaged_amount > 0
+      GROUP BY l.material_id, l.lot_id, l.lookup_code, l.status_name
+    `
+    onhandRows = await runQuery(onhandSql)
+  }
+
+  // ── Assemble Order objects ──
+
+  const linesByOrderMaterial = new Map()
+  const allocLotsByLine = new Map()
+
+  for (const r of allocRows) {
+    const key = `${r.order_id}|${r.material_id}`
+    if (!linesByOrderMaterial.has(key)) {
+      linesByOrderMaterial.set(key, {
+        orderId: Number(r.order_id),
+        materialId: Number(r.material_id),
+        code: r.material_code || `MAT-${r.material_id}`,
+        desc: (r.material_desc || '').trim(),
+        pack: '',
+        ship: [],
+      })
+      allocLotsByLine.set(key, new Set())
+    }
+    const line = linesByOrderMaterial.get(key)
+    const allocLots = allocLotsByLine.get(key)
+    allocLots.add(Number(r.lot_id))
+
+    const parsed = parseLotDateKey(r.lot_code, project.dateFormat)
+    const cases = Number(r.actual_cases) > 0 ? Number(r.actual_cases) : Number(r.expected_cases) || 0
+    const lps = Number(r.lp_count_actual) > 0
+      ? Number(r.lp_count_actual)
+      : Number(r.lp_count_planned) || 0
+    line.ship.push({
+      lot: r.lot_code,
+      date: parsed.display,
+      k: parsed.k,
+      lps, cases,
+    })
+  }
+
+  const onhandByMaterial = new Map()
+  for (const r of onhandRows) {
+    const mid = Number(r.material_id)
+    if (!onhandByMaterial.has(mid)) onhandByMaterial.set(mid, [])
+    onhandByMaterial.get(mid).push({
+      lotId:    Number(r.lot_id),
+      lotCode:  r.lot_code,
+      status:   r.lot_status,
+      cases:    Number(r.cases_onhand) || 0,
+      lps:      Number(r.lp_count) || 0,
+    })
+  }
+
+  for (const [key, line] of linesByOrderMaterial.entries()) {
+    const allocLots = allocLotsByLine.get(key)
+    const candidates = (onhandByMaterial.get(line.materialId) || [])
+      .filter(c => !allocLots.has(c.lotId))
+      .map(c => {
+        const parsed = parseLotDateKey(c.lotCode, project.dateFormat)
+        return { ...c, k: parsed.k, display: parsed.display }
+      })
+      .filter(c => c.cases > 0)
+    if (candidates.length > 0) {
+      const oldest = candidates.reduce((a, b) => a.k < b.k ? a : b)
+      const held = isHoldStatus(oldest.status)
+      line.rem = {
+        lot:      oldest.lotCode,
+        date:     oldest.display,
+        k:        oldest.k,
+        lps:      oldest.lps,
+        cases:    oldest.cases,
+        hold:     held,
+        holdType: held ? oldest.status : undefined,
+      }
+    } else {
+      line.rem = { lot: '', date: '', k: 0, lps: 0, cases: 0, hold: false }
+    }
+  }
+
+  const orders = []
+  for (const oh of orderRows) {
+    const orderId = Number(oh.order_id)
+    const reqDate = oh.requested_delivery_date
+    const dayOffset = dayOffsetFrom(reqDate, today)
+    const day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
+    const past = dayOffset != null && dayOffset < 0
+    const orderLines = []
+    for (const [key, line] of linesByOrderMaterial.entries()) {
+      if (line.orderId !== orderId) continue
+      line.ship.sort((a, b) => a.k - b.k)
+      orderLines.push({
+        code: line.code, desc: line.desc, pack: line.pack,
+        ship: line.ship, rem: line.rem,
+      })
+    }
+    if (orderLines.length === 0) continue
+    orders.push({
+      id:       `SO-${oh.order_lookup || orderId}`,
+      day,
+      proj:     projectId,
+      dest:     fmtDest(oh.dest_name, oh.dest_city, oh.dest_state),
+      appt:     '\u2014',  // Phase 7c will join dockappointments for real time
+      past,
+      status:   oh.status_name,
+      allocBy:  shortUser(oh.modified_sys_user),
+      lines:    orderLines,
+    })
+  }
+
+  return {
+    orders,
+    rowCounts: { orders: orderRows.length, allocations: allocRows.length, onhand: onhandRows.length },
+  }
+}
+
 // ─── Handler ───────────────────────────────────────────────────────────────
 
 exports.handler = async (event) => {
@@ -154,20 +370,29 @@ exports.handler = async (event) => {
     }
   }
 
-  let facility, projectId, dayCount
+  let facility, projectIds, projectId, dayCount
   try {
-    ;({ facility, projectId, dayCount } = JSON.parse(event.body || '{}'))
+    ;({ facility, projectIds, projectId, dayCount } = JSON.parse(event.body || '{}'))
   } catch {
     return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Invalid JSON body' }) }
   }
   dayCount = Number(dayCount) || 5
   if (dayCount < 1 || dayCount > 7) dayCount = 5
 
-  const project = PROJECTS[projectId]
-  if (!project) {
+  // Backward compat: single projectId becomes a one-element list.
+  if (!projectIds && projectId) projectIds = [projectId]
+  if (!Array.isArray(projectIds) || projectIds.length === 0) {
     return {
       statusCode: 400, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ error: `Unknown projectId: ${projectId}` }),
+      body: JSON.stringify({ error: 'projectIds (array) or projectId (string) required' }),
+    }
+  }
+  // Validate every project upfront.
+  const unknown = projectIds.filter(pid => !PROJECTS[pid])
+  if (unknown.length > 0) {
+    return {
+      statusCode: 400, headers: NO_CACHE_HEADERS,
+      body: JSON.stringify({ error: `Unknown projectId(s): ${unknown.join(', ')}` }),
     }
   }
   const warehouseId = FACILITY_WAREHOUSE_ID[facility]
@@ -181,248 +406,71 @@ exports.handler = async (event) => {
   const today = todayUtcMidnight()
   const dateFrom = fmtDateISO(new Date(today.getTime() - 86400000))
   const dateTo   = fmtDateISO(new Date(today.getTime() + (dayCount - 1) * 86400000))
-  const safeProjectName = project.datexName.replace(/'/g, "''")
 
+  let conn, db
+  const ordersByProject = {}
+  const errorsByProject = {}
+  const rowCountsByProject = {}
   try {
     process.env.motherduck_token = TOKEN
     const duckdb = require('duckdb')
-    const db = new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
-    const conn = db.connect()
+    db = new duckdb.Database('md:production_db', { motherduck_token: TOKEN })
+    conn = db.connect()
     await new Promise((resolve, reject) => conn.run('LOAD motherduck', e => e ? reject(e) : resolve()))
     const runQuery = (sql) => new Promise((resolve, reject) => {
       conn.all(sql, (e, r) => e ? reject(e) : resolve(r))
     })
 
-    // ── Query 1: order headers ──
-    const orderSql = `
-      WITH proj AS (
-        SELECT project_id FROM silver.datex_slv_projects WHERE project_name = '${safeProjectName}'
-      ),
-      window_orders AS (
-        SELECT
-          o.order_id, o.lookup_code AS order_lookup,
-          o.requested_delivery_date, o.modified_sys_user, o.modified_sys_date_time,
-          os.status_name
-        FROM silver.datex_slv_orders o
-        JOIN proj ON o.project_id = proj.project_id
-        JOIN silver.datex_slv_orderstatuses os ON o.order_status_id = os.order_status_id
-        WHERE os.status_name = 'Processing'
-          AND DATE(o.requested_delivery_date) BETWEEN '${dateFrom}' AND '${dateTo}'
-      ),
-      orders_with_tasks_in_wh AS (
-        SELECT DISTINCT wo.order_id
-        FROM window_orders wo
-        JOIN silver.datex_slv_tasks t ON t.order_id = wo.order_id
-        WHERE t.warehouse_id = ${warehouseId}
-      )
-      SELECT
-        wo.order_id, wo.order_lookup,
-        wo.requested_delivery_date,
-        wo.status_name,
-        wo.modified_sys_user,
-        MAX(CASE WHEN oa.type_id = 2 THEN oa.Name END)  AS dest_name,
-        MAX(CASE WHEN oa.type_id = 2 THEN oa.City END)  AS dest_city,
-        MAX(CASE WHEN oa.type_id = 2 THEN oa.State END) AS dest_state
-      FROM window_orders wo
-      JOIN orders_with_tasks_in_wh ot ON wo.order_id = ot.order_id
-      LEFT JOIN silver.datex_slv_orderaddresses oa ON oa.order_id = wo.order_id
-      GROUP BY wo.order_id, wo.order_lookup, wo.requested_delivery_date,
-               wo.status_name, wo.modified_sys_user
-      ORDER BY wo.requested_delivery_date ASC, wo.order_id ASC
-    `
-    const orderRows = await runQuery(orderSql)
-
-    if (orderRows.length === 0) {
-      conn.close(); db.close()
-      return {
-        statusCode: 200, headers: NO_CACHE_HEADERS,
-        body: JSON.stringify({
-          orders: [], fetchedAt: new Date().toISOString(),
-          elapsedMs: Date.now() - t0,
-          source: 'motherduck',
-          rowCounts: { orders: 0, allocations: 0, onhand: 0 },
-        }),
-      }
-    }
-
-    const orderIds = orderRows.map(r => Number(r.order_id))
-    const orderIdList = orderIds.join(',')
-
-    // ── Query 2: allocations per (order, material, lot) ──
-    const allocSql = `
-      SELECT
-        t.order_id, t.order_line_number, t.material_id,
-        m.lookup_code AS material_code, m.Description AS material_desc,
-        t.lot_id, l.lookup_code AS lot_code, l.status_name AS lot_status,
-        COUNT(DISTINCT t.task_id) AS lp_count_planned,
-        COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
-        SUM(t.expected_packaged_amount) AS expected_cases,
-        SUM(t.actual_packaged_amount)   AS actual_cases
-      FROM silver.datex_slv_tasks t
-      JOIN silver.datex_slv_lots l ON t.lot_id = l.lot_id
-      JOIN silver.datex_slv_materials m ON t.material_id = m.material_id
-      WHERE t.order_id IN (${orderIdList})
-        AND t.lot_id IS NOT NULL
-        AND t.warehouse_id = ${warehouseId}
-      GROUP BY t.order_id, t.order_line_number, t.material_id,
-               m.lookup_code, m.Description,
-               t.lot_id, l.lookup_code, l.status_name
-    `
-    const allocRows = await runQuery(allocSql)
-
-    const materialIds = [...new Set(allocRows.map(r => Number(r.material_id)))]
-
-    // ── Query 3: on-hand by lot ──
-    let onhandRows = []
-    if (materialIds.length > 0) {
-      const matIdList = materialIds.join(',')
-      const onhandSql = `
-        SELECT
-          l.material_id, l.lot_id,
-          l.lookup_code AS lot_code, l.status_name AS lot_status,
-          COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
-          SUM(lpc.packaged_amount) AS cases_onhand
-        FROM silver.datex_slv_licenseplatecontents lpc
-        JOIN silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
-        JOIN silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
-        WHERE l.material_id IN (${matIdList})
-          AND lp.warehouse_id = ${warehouseId}
-          AND lp.Archived = false
-          AND lpc.packaged_amount > 0
-        GROUP BY l.material_id, l.lot_id, l.lookup_code, l.status_name
-      `
-      onhandRows = await runQuery(onhandSql)
-    }
-
-    conn.close()
-    db.close()
-
-    // ── Assemble Order objects ────────────────────────────────────────────
-
-    const linesByOrderMaterial = new Map()
-    const allocLotsByLine = new Map()
-
-    for (const r of allocRows) {
-      const key = `${r.order_id}|${r.material_id}`
-      if (!linesByOrderMaterial.has(key)) {
-        linesByOrderMaterial.set(key, {
-          orderId: Number(r.order_id),
-          materialId: Number(r.material_id),
-          code: r.material_code || `MAT-${r.material_id}`,
-          desc: (r.material_desc || '').trim(),
-          pack: '',  // packaging info not available at material level in this Datex; Phase 7c can join materialspackagingslookup if needed
-          ship: [],
+    // Sequential loop on the shared connection — duckdb's nodejs client
+    // is single-threaded per connection, so parallel queries on one conn
+    // would serialize anyway. Sequential is clean and predictable.
+    for (const pid of projectIds) {
+      try {
+        const result = await loadOrdersForProject(runQuery, {
+          projectId: pid,
+          project: PROJECTS[pid],
+          warehouseId, today, dateFrom, dateTo, dayCount,
         })
-        allocLotsByLine.set(key, new Set())
+        ordersByProject[pid] = result.orders
+        rowCountsByProject[pid] = result.rowCounts
+      } catch (perProjectErr) {
+        // Per-project failure: surface but keep going for the rest.
+        ordersByProject[pid] = []
+        errorsByProject[pid] = perProjectErr.message || 'unknown error'
+        rowCountsByProject[pid] = { orders: 0, allocations: 0, onhand: 0 }
       }
-      const line = linesByOrderMaterial.get(key)
-      const allocLots = allocLotsByLine.get(key)
-      allocLots.add(Number(r.lot_id))
-
-      const parsed = parseLotDateKey(r.lot_code, project.dateFormat)
-      const cases = Number(r.actual_cases) > 0 ? Number(r.actual_cases) : Number(r.expected_cases) || 0
-      const lps = Number(r.lp_count_actual) > 0
-        ? Number(r.lp_count_actual)
-        : Number(r.lp_count_planned) || 0
-      line.ship.push({
-        lot: r.lot_code,
-        date: parsed.display,
-        k: parsed.k,
-        lps, cases,
-      })
-    }
-
-    const onhandByMaterial = new Map()
-    for (const r of onhandRows) {
-      const mid = Number(r.material_id)
-      if (!onhandByMaterial.has(mid)) onhandByMaterial.set(mid, [])
-      onhandByMaterial.get(mid).push({
-        lotId:    Number(r.lot_id),
-        lotCode:  r.lot_code,
-        status:   r.lot_status,
-        cases:    Number(r.cases_onhand) || 0,
-        lps:      Number(r.lp_count) || 0,
-      })
-    }
-
-    for (const [key, line] of linesByOrderMaterial.entries()) {
-      const allocLots = allocLotsByLine.get(key)
-      const candidates = (onhandByMaterial.get(line.materialId) || [])
-        .filter(c => !allocLots.has(c.lotId))
-        .map(c => {
-          const parsed = parseLotDateKey(c.lotCode, project.dateFormat)
-          return { ...c, k: parsed.k, display: parsed.display }
-        })
-        .filter(c => c.cases > 0)
-      if (candidates.length > 0) {
-        const oldest = candidates.reduce((a, b) => a.k < b.k ? a : b)
-        const held = isHoldStatus(oldest.status)
-        line.rem = {
-          lot:      oldest.lotCode,
-          date:     oldest.display,
-          k:        oldest.k,
-          lps:      oldest.lps,
-          cases:    oldest.cases,
-          hold:     held,
-          holdType: held ? oldest.status : undefined,
-        }
-      } else {
-        line.rem = { lot: '', date: '', k: 0, lps: 0, cases: 0, hold: false }
-      }
-    }
-
-    const orders = []
-    for (const oh of orderRows) {
-      const orderId = Number(oh.order_id)
-      const reqDate = oh.requested_delivery_date
-      const dayOffset = dayOffsetFrom(reqDate, today)
-      const day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
-      const past = dayOffset != null && dayOffset < 0
-      const orderLines = []
-      for (const [key, line] of linesByOrderMaterial.entries()) {
-        if (line.orderId !== orderId) continue
-        line.ship.sort((a, b) => a.k - b.k)
-        orderLines.push({
-          code: line.code, desc: line.desc, pack: line.pack,
-          ship: line.ship, rem: line.rem,
-        })
-      }
-      if (orderLines.length === 0) continue
-      orders.push({
-        id:       `SO-${oh.order_lookup || orderId}`,
-        day,
-        proj:     projectId,
-        dest:     fmtDest(oh.dest_name, oh.dest_city, oh.dest_state),
-        appt:     '\u2014',  // Phase 7c will join dockappointments for real time
-        past,
-        status:   oh.status_name,
-        allocBy:  shortUser(oh.modified_sys_user),
-        lines:    orderLines,
-      })
-    }
-
-    return {
-      statusCode: 200, headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({
-        orders,
-        fetchedAt: new Date().toISOString(),
-        elapsedMs: Date.now() - t0,
-        source:    'motherduck',
-        rowCounts: {
-          orders:      orderRows.length,
-          allocations: allocRows.length,
-          onhand:      onhandRows.length,
-        },
-      }),
     }
   } catch (e) {
+    // Connection-level failure: every project gets the same error.
+    for (const pid of projectIds) {
+      ordersByProject[pid] = ordersByProject[pid] || []
+      errorsByProject[pid] = e.message || 'connection failed'
+      rowCountsByProject[pid] = rowCountsByProject[pid] || { orders: 0, allocations: 0, onhand: 0 }
+    }
+    try { conn?.close(); db?.close() } catch (_) {}
     return {
       statusCode: 502, headers: NO_CACHE_HEADERS,
       body: JSON.stringify({
+        ordersByProject,
+        errorsByProject,
+        rowCountsByProject,
         error: e.message,
         stack: e.stack?.slice(0, 500),
         elapsedMs: Date.now() - t0,
       }),
     }
+  }
+  try { conn?.close(); db?.close() } catch (_) {}
+
+  return {
+    statusCode: 200, headers: NO_CACHE_HEADERS,
+    body: JSON.stringify({
+      ordersByProject,
+      ...(Object.keys(errorsByProject).length > 0 ? { errorsByProject } : {}),
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      source: 'motherduck',
+      rowCounts: rowCountsByProject,
+    }),
   }
 }
