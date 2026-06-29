@@ -1,34 +1,93 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FEFO_PROJECTS, getProject, dateVerb,
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
   bannerCounts, kpiRow, rollupByProject,
   dayLabel, daySubLabel,
   VERDICT_TOKENS,
-  fefoOrderList,
+  fefoOrderList, fetchLiveFefoOrders,
 } from '../../lib/fefo.js'
 
-// Phase 6 — mock UI for FEFO Rotation against fixtures. Verdict engine is
-// production-shaped (pure functions over Order objects); Phase 7 swaps the
-// fefoOrderList() fixture for a Datex FootPrint fetch and adds remediation
-// deep-links. Per handoff §3.7: violation > stale > hold > clean is the
-// precedence everywhere.
+// Phase 6 — mock UI for FEFO Rotation against fixtures.
+// Phase 7 — live data wiring. When VITE_USE_LIVE_FEFO === 'true' AND the user
+//   filters to a specific project (not "All Projects"), fetches real orders
+//   from Datex via /.netlify/functions/fefo-orders. Falls back to mock on
+//   error or when flag is off.
+// "All Projects" view stays mock for now (Phase 7c will fan-out across all 4
+// projects in parallel).
+//
+// Verdict engine + UI rendering is shape-stable across both sources — only
+// the data origin differs.
+
+const USE_LIVE_FEFO = (import.meta?.env?.VITE_USE_LIVE_FEFO === 'true')
+
 export default function FefoRotationTab() {
   const [day, setDay] = useState(0)
   const [proj, setProj] = useState('all')
   const [openOrders, setOpenOrders] = useState(() => new Set())
 
-  const allOrders = useMemo(() => fefoOrderList(), [])
+  // Mock orders are always available — they back the "All" view and serve as
+  // fallback when a live fetch fails or the flag is off.
+  const mockOrders = useMemo(() => fefoOrderList(), [])
+
+  // Live orders per project (when flag is on + project filter is single).
+  // Shape: { [projectId]: { orders, loading, error, fetchedAt, source } }
+  const [liveByProject, setLiveByProject] = useState({})
+
+  // Re-fetch when the user picks a specific project AND the live flag is on.
+  // De-dupes by `proj` so we don't re-hit Datex on day-stepper changes.
+  const inFlightRef = useRef(new Set())
+  useEffect(() => {
+    if (!USE_LIVE_FEFO || proj === 'all') return
+    if (liveByProject[proj] && !liveByProject[proj].error) return
+    if (inFlightRef.current.has(proj)) return
+    inFlightRef.current.add(proj)
+    setLiveByProject(prev => ({
+      ...prev,
+      [proj]: { ...(prev[proj] || {}), loading: true },
+    }))
+    fetchLiveFefoOrders(proj)
+      .then(result => {
+        setLiveByProject(prev => ({
+          ...prev,
+          [proj]: {
+            orders:    result.orders,
+            loading:   false,
+            error:     result.error || null,
+            fetchedAt: result.fetchedAt,
+            source:    result.source,
+            elapsedMs: result.elapsedMs,
+          },
+        }))
+      })
+      .catch(err => {
+        setLiveByProject(prev => ({
+          ...prev,
+          [proj]: { orders: [], loading: false, error: err.message || 'unknown', source: 'mock' },
+        }))
+      })
+      .finally(() => {
+        inFlightRef.current.delete(proj)
+      })
+  }, [proj, liveByProject])
+
+  const liveForCurrent = USE_LIVE_FEFO && proj !== 'all' ? liveByProject[proj] : null
+  const isLive = !!(liveForCurrent && liveForCurrent.source === 'live')
 
   // Visible = filtered by day + project, sorted by severity.
+  // Source-of-truth: live data when we have it for this project, else mock.
   const visible = useMemo(() => {
-    let o = allOrders.filter(o => o.day === day)
-    if (proj !== 'all') o = o.filter(o => o.proj === proj)
-    return [...o].sort(compareByVerdict)
-  }, [allOrders, day, proj])
+    let pool
+    if (USE_LIVE_FEFO && proj !== 'all' && liveForCurrent?.source === 'live' && liveForCurrent.orders) {
+      pool = liveForCurrent.orders
+    } else {
+      pool = mockOrders.filter(o => proj === 'all' ? true : o.proj === proj)
+    }
+    const filtered = pool.filter(o => o.day === day)
+    return [...filtered].sort(compareByVerdict)
+  }, [mockOrders, liveForCurrent, day, proj])
 
   // Auto-expand violations + stale on view change (handoff §3.5).
-  // Manual toggles via the chevron stick after the initial auto-expand pass.
   useEffect(() => {
     const auto = new Set()
     for (const o of visible) {
@@ -56,6 +115,8 @@ export default function FefoRotationTab() {
         day={day}        onDayChange={setDay}
         proj={proj}      onProjChange={setProj}
         orderCount={visible.length}
+        liveState={liveForCurrent}
+        isLive={isLive}
       />
       <Banners banners={banners} />
       <KpiRow kpis={kpis} />
@@ -67,14 +128,15 @@ export default function FefoRotationTab() {
         openOrders={openOrders}
         onToggle={toggleOrder}
         showProjectChip={proj === 'all'}
+        loading={liveForCurrent?.loading}
       />
     </div>
   )
 }
 
-// ─── Controls row: day stepper + project select ──────────────────────────
+// ─── Controls row: day stepper + project select + data source badge ─────────
 
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount }) {
+function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, liveState, isLive }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -82,6 +144,7 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount }) {
     }}>
       <DayStepper day={day} onChange={onDayChange} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <DataSourceBadge liveState={liveState} isLive={isLive} proj={proj} />
         <span style={{
           fontSize: 11, color: 'var(--text-dim)',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
@@ -92,6 +155,42 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount }) {
         <ProjectSelect proj={proj} onChange={onProjChange} />
       </div>
     </div>
+  )
+}
+
+function DataSourceBadge({ liveState, isLive, proj }) {
+  // Only render when the flag is on (otherwise it'd just say MOCK forever)
+  // OR when there's a live attempt in flight / errored.
+  if (!USE_LIVE_FEFO) return null
+  if (proj === 'all') return (
+    <BadgeChip color="var(--text-dim, #9aaabb)" label="MOCK" title="All Projects view uses mock fixtures. Pick a specific project for live data." />
+  )
+  if (liveState?.loading) return <BadgeChip color="var(--text-dim, #9aaabb)" label="LOADING…" />
+  if (isLive) {
+    const ms = liveState.elapsedMs
+    return <BadgeChip color="var(--green, #1a8a52)" label="LIVE" title={`From Datex via MotherDuck${ms ? ` · ${ms}ms` : ''}`} />
+  }
+  // Error or no-result fallback to mock
+  return <BadgeChip color="var(--amber, #a07818)" label="MOCK" title={liveState?.error ? `Live fetch failed: ${liveState.error}` : 'Mock fixture data'} />
+}
+
+function BadgeChip({ color, label, title }) {
+  return (
+    <span
+      title={title || ''}
+      style={{
+        fontSize: 9, fontWeight: 600,
+        padding: '2px 6px',
+        borderRadius: 'var(--r-sm, 4px)',
+        background: 'rgba(0,0,0,0.04)',
+        color,
+        border: `1px solid ${color}`,
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        letterSpacing: '0.08em',
+      }}
+    >
+      {label}
+    </span>
   )
 }
 
@@ -177,7 +276,7 @@ function ProjectSelect({ proj, onChange }) {
   )
 }
 
-// ─── Banners ─────────────────────────────────────────────────────────
+// ─── Banners ────────────────────────────────────────────────────────────────
 
 function Banners({ banners }) {
   const items = []
@@ -237,7 +336,7 @@ function Banners({ banners }) {
   )
 }
 
-// ─── KPI row (6 cells) ─────────────────────────────────────────────────────
+// ─── KPI row (6 cells) ──────────────────────────────────────────────────────
 
 function KpiRow({ kpis }) {
   const cells = [
@@ -278,7 +377,7 @@ function KpiRow({ kpis }) {
   )
 }
 
-// ─── Project rollup (only when "All Projects") ───────────────────────────
+// ─── Project rollup (only when "All Projects") ──────────────────────────────
 
 function ProjectRollup({ rollup, onProjClick }) {
   const visible = rollup.filter(r => r.orders > 0)
@@ -349,9 +448,19 @@ function ProjectRollup({ rollup, onProjClick }) {
   )
 }
 
-// ─── Orders list ─────────────────────────────────────────────────────
+// ─── Orders list ────────────────────────────────────────────────────────────
 
-function OrdersList({ orders, openOrders, onToggle, showProjectChip }) {
+function OrdersList({ orders, openOrders, onToggle, showProjectChip, loading }) {
+  if (loading) {
+    return (
+      <div style={{
+        padding: '40px 0', textAlign: 'center',
+        color: 'var(--text-secondary)', fontSize: 13,
+      }}>
+        Loading live FEFO data…
+      </div>
+    )
+  }
   if (!orders.length) {
     return (
       <div style={{
@@ -500,11 +609,13 @@ function SkuLineRow({ line, projId }) {
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
         }}>{line.code}</span>
         <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>{line.desc}</span>
-        <span style={{
-          fontSize: 10, color: 'var(--text-dim)',
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-          marginLeft: 'auto',
-        }}>{line.pack}</span>
+        {line.pack && (
+          <span style={{
+            fontSize: 10, color: 'var(--text-dim)',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            marginLeft: 'auto',
+          }}>{line.pack}</span>
+        )}
       </div>
 
       {/* Two columns: shipping (left) + oldest remaining (right) */}
@@ -669,7 +780,7 @@ function OrderFooter({ order }) {
   const project = getProject(order.proj)
   const parts = []
   if (project) parts.push(`format: ${project.dateFormat}`)
-  parts.push(`allocated by ${order.allocBy}`)
+  if (order.allocBy) parts.push(`allocated by ${order.allocBy}`)
   parts.push(`status: ${order.status}`)
   return (
     <div style={{
