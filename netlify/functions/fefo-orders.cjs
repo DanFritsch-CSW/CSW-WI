@@ -55,6 +55,20 @@
 // has multiple active appointments, takes the earliest scheduled_arrival
 // (ROW_NUMBER OVER PARTITION).
 //
+// ── Pack string: tie × high (Phase 7c follow-up) ────────────────────────────
+//
+// Allocations query LEFT JOINs materialspackagingslookup + inventorymeasurementunits
+// to surface the pallet structure per material. Filter is_reporting_default=true
+// AND deprecated_packaging=false to pick the canonical packaging row (usually
+// the Case unit — Each/Pallet variants exist on some materials but the
+// "reporting default" is the one ops thinks about for forecasting).
+//
+// packaging_id in materialspackagingslookup references inventory_measurement_unit_id.
+// pallet_tie × pallet_high = cases per pallet. e.g. 8×7 = 56 cs/pallet.
+// fmtPack formats as "8×7" (visualizes pallet stacking) when both values are
+// present; falls back to the unit's short_name (e.g. "CS") when not. Empty
+// string if neither source has data — UI can choose whether to render.
+//
 // ── Schema / data architecture (per Phase 7a recon) ─────────────────────────
 //   - hardallocations.shipment_line_id is always null in this Datex instance.
 //     Allocations link to orders via TASKS, not shipment_line_id.
@@ -169,6 +183,18 @@ function fmtApptTime(scheduledArrival) {
   return `${h}:${m}`
 }
 
+function fmtPack(palletTie, palletHigh, shortName) {
+  // Prefer "8×7" notation (tie × high) when both are present — ops staff
+  // recognize this as the pallet stacking pattern. Falls back to the unit
+  // short_name (e.g. "CS") when tie/high aren't populated. Empty string
+  // if no useful packaging info exists.
+  const t = Number(palletTie) || 0
+  const h = Number(palletHigh) || 0
+  if (t > 0 && h > 0) return `${t}\u00d7${h}`
+  const s = String(shortName || '').trim()
+  return s
+}
+
 function dayOffsetFrom(dateLike, today) {
   if (!dateLike) return null
   const d = new Date(dateLike)
@@ -276,10 +302,18 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   const orderIdList = orderIds.join(',')
 
   // ── Query 2: allocations per (order, material, lot) ──
+  //
+  // LEFT JOINs to materialspackagingslookup + inventorymeasurementunits add
+  // pallet_tie / pallet_high / pack_unit_short so we can surface a pack
+  // string ("8×7" = 56 cs/pallet) per material line. Filter
+  // is_reporting_default=true + deprecated_packaging=false picks the
+  // canonical packaging row per material (usually the Case unit).
   const allocSql = `
     SELECT
       t.order_id, t.order_line_number, t.material_id,
       m.lookup_code AS material_code, m.Description AS material_desc,
+      mp.pallet_tie, mp.pallet_high,
+      iu.short_name AS pack_unit_short,
       t.lot_id, l.lookup_code AS lot_code, l.status_name AS lot_status,
       COUNT(DISTINCT t.task_id) AS lp_count_planned,
       COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
@@ -288,11 +322,18 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     FROM production_db.silver.datex_slv_tasks t
     JOIN production_db.silver.datex_slv_lots l ON t.lot_id = l.lot_id
     JOIN production_db.silver.datex_slv_materials m ON t.material_id = m.material_id
+    LEFT JOIN production_db.silver.datex_slv_materialspackagingslookup mp
+      ON mp.material_id = t.material_id
+      AND mp.is_reporting_default = true
+      AND mp.deprecated_packaging = false
+    LEFT JOIN production_db.silver.datex_slv_inventorymeasurementunits iu
+      ON iu.inventory_measurement_unit_id = mp.packaging_id
     WHERE t.order_id IN (${orderIdList})
       AND t.lot_id IS NOT NULL
       AND t.warehouse_id = ${warehouseId}
     GROUP BY t.order_id, t.order_line_number, t.material_id,
              m.lookup_code, m.Description,
+             mp.pallet_tie, mp.pallet_high, iu.short_name,
              t.lot_id, l.lookup_code, l.status_name
   `
   const allocRows = await runQuery(allocSql)
@@ -334,7 +375,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         materialId: Number(r.material_id),
         code: r.material_code || `MAT-${r.material_id}`,
         desc: (r.material_desc || '').trim(),
-        pack: '',
+        pack: fmtPack(r.pallet_tie, r.pallet_high, r.pack_unit_short),
         ship: [],
       })
       allocLotsByLine.set(key, new Set())
