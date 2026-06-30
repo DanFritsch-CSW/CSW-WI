@@ -6,9 +6,9 @@ import { useState, useEffect, useMemo } from 'react'
 // with external customers.
 //
 // Data approach: 56 PER-DAY Omni queries (8 weeks × 7 days), batched 12 at a
-// time. Each query returns (project_name, type, lookup_code) for one specific
-// date. The date is known from the query parameter so we tag each returned
-// row with its (weekIdx, weekdayIdx) before flattening.
+// time. Each query returns (appointment_id, project_name, type, lookup_code)
+// for one specific date. The date is known from the query parameter so we tag
+// each returned row with its (weekIdx, weekdayIdx) before flattening.
 //
 // Why per-day instead of per-week or 56-day windows:
 //   When `scheduled_arrival` appears in the SELECT list of an Omni query with
@@ -23,6 +23,20 @@ import { useState, useEffect, useMemo } from 'react'
 // We don't need `scheduled_arrival` in the response anyway — the query date IS
 // the appointment date, so we attach (weekIdx, weekdayIdx) at query time.
 //
+// Why appointment_id is in the SELECT:
+//   Omni implicitly GROUP BYs the dimensions in the SELECT list. Without a
+//   unique-per-row dimension, two appointments that share the same
+//   (project_name, type, lookup_code) tuple collapse to a single row in the
+//   response — and we under-count the day. Real example caught 2026-06-30
+//   at KEN/Pretzilla 7/2: two separate appointments at 8am and 9am both
+//   carried the lookup_code "(PZ) - SO618308, SO618242, SO618446" (one
+//   appointment per stop on a multi-stop route). Omni collapsed them to 1,
+//   so Scheduled showed 11 instead of 12. Adding appointment_id (unique per
+//   appointment in gold.truck_appointments) forces Omni to keep each row
+//   distinct without breaking the single-day TIME_FOR_UNIT_DURATION pattern.
+//   We never read appointment_id client-side — it exists purely as a
+//   dedup-breaker.
+//
 // Type taxonomy:
 //   - Outbound:  dock_appointment_type_name starts with "Outbound"
 //   - Drops:     inbound rows where lookup_code matches the per-customer drop rule
@@ -32,6 +46,13 @@ import { useState, useEffect, useMemo } from 'react'
 // Baseline (Normal) = median of the OTHER 7 weeks for the same weekday/type.
 // "% of Normal" = scheduled / normal × 100, color-coded:
 //   ≥100% green   |   70-99% default   |   <70% amber
+//
+// Known limitation — Datex→silver sync lag:
+//   Appointments created in Datex within roughly the last hour may not yet
+//   have propagated to the silver/gold layer Omni reads from. The card's
+//   counts reflect what was visible at snapshot generation time; the
+//   footnote on the card surfaces this so consumers aren't confused when
+//   a freshly-scheduled appointment doesn't appear.
 
 const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_APPT = 'gold__truck_appointments'
@@ -186,6 +207,11 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
               modelId: GOLD_MODEL_ID,
               table: VIEW_APPT,
               fields: [
+                // appointment_id is unique per row — without it, Omni dedupes
+                // rows sharing the same (project, type, lookup_code) tuple.
+                // We never read this value client-side; it exists purely as
+                // a dimension that forces per-appointment rows.
+                `${VIEW_APPT}.appointment_id`,
                 `${VIEW_APPT}.project_name`,
                 `${VIEW_APPT}.dock_appointment_type_name`,
                 `${VIEW_APPT}.lookup_code`,
@@ -369,7 +395,7 @@ export default function CustomerSnapshot({ facilityId, planDate, color }) {
               </tbody>
             </table>
             <div className="snap-note">
-              Normal = median of the other 7 weeks (same weekday). HOLD appointments included; Cancelled excluded.
+              Normal = median of the other 7 weeks (same weekday). HOLD appointments included; Cancelled excluded. Counts reflect Datex at snapshot time; appointments created within the last hour may not yet appear.
             </div>
             <div className="snap-foot">
               <span>CSW · {facilityId.toUpperCase()}</span>
