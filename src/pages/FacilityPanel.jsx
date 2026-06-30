@@ -250,6 +250,29 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [refreshAppointments])
 
+  // ── View-change refresh ────────────────────────────────────────────────
+  // Keep daily and weekly views consistent. Without this, the daily view's
+  // data is loaded once at FacilityPanel mount and never refreshes; meanwhile
+  // the weekly view's Customer Snapshot fetches fresh on each mount. Kay
+  // flagged Pretzilla Thursday showing 12 outbound on daily vs 17 on weekly
+  // (2026-06-30) — the daily had loaded hours before the snapshot, and ~5
+  // new appointments arrived in between. Each view's queries were correct;
+  // they just ran at different times against a moving target.
+  //
+  // We fire refreshAppointments (Phase 1+2 only — hourly, projects,
+  // appointment list) rather than full loadData (which would re-run the
+  // heavier Phase 3 EST drops seeding too). Tab switching stays cheap.
+  //
+  // First mount no-ops because prevViewRef starts equal to view — the
+  // initial loadData useEffect already handles the first fetch.
+  const prevViewRef = useRef(view)
+  useEffect(() => {
+    if (prevViewRef.current !== view) {
+      prevViewRef.current = view
+      refreshAppointments()
+    }
+  }, [view, refreshAppointments])
+
   // ── Appointment list fetch (independent of main loadData flow) ──────────
   // A failure here does not block KPIs or the roster board.
   useEffect(() => {
