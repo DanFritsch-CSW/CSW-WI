@@ -74,11 +74,69 @@ function mondayOfWeek(iso) {
   return d.toISOString().slice(0, 10)
 }
 
+// ── Omni reliability tracking ──────────────────────────────────────────
+// Module-level so it survives facility/date switches within a session.
+// Inspect in browser console via `window.__omniStats` for ad-hoc diagnosis
+// when someone asks "is Omni getting worse?".
+const omniSessionStats = {
+  attempts: 0,
+  failures: 0,
+  recoveries: 0,
+  giveUps: 0,
+  sessionStart: Date.now(),
+}
+if (typeof window !== 'undefined') window.__omniStats = omniSessionStats
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+// Persistent silent retry — no user-facing banner.
+//
+// The original failure mode: users rapidly click between dates (Mon → Tue
+// → Wed), kicking off concurrent Omni fetches faster than they complete.
+// Under that load some fetches fail; the old code surfaced this as a loud
+// amber "Live Omni data unavailable" banner. Punishing a normal usage
+// pattern as an error.
+//
+// New behavior: retry quietly with backoff until either (a) the fetch
+// succeeds, or (b) the parent useEffect is cancelled (user moved to a
+// different date/facility, which triggers cleanup → cancelled flag flips
+// true → next sleep wake-up notices it and bails out of the loop).
+//
+// Backoff schedule: 0s, 2s, 4s, 8s, 15s, then 30s for remaining attempts.
+// Capped at 10 total attempts (~3 min total). After exhaustion we log and
+// let the page show whatever data already arrived from other fetches.
+const RETRY_DELAYS = [0, 2000, 4000, 8000, 15000, 30000, 30000, 30000, 30000, 30000]
+
+async function fetchWithPersistentRetry(fetchFn, label, isCancelled) {
+  for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
+    if (isCancelled()) throw new Error('cancelled')
+    if (RETRY_DELAYS[attempt] > 0) await sleep(RETRY_DELAYS[attempt])
+    if (isCancelled()) throw new Error('cancelled')
+
+    omniSessionStats.attempts++
+    try {
+      const result = await fetchFn()
+      if (attempt > 0) {
+        omniSessionStats.recoveries++
+        console.log(`[Omni] ${label} recovered after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`)
+      }
+      return result
+    } catch (err) {
+      omniSessionStats.failures++
+      if (attempt === 0) {
+        console.log(`[Omni] ${label} failed (${err?.message ?? 'unknown'}) — retrying silently`)
+      }
+    }
+  }
+  omniSessionStats.giveUps++
+  console.warn(`[Omni] ${label} gave up after ${RETRY_DELAYS.length} attempts`)
+  throw new Error(`${label} exhausted retries`)
+}
+
 export default function FacilityPanel({ facility, planDate, view, networkKpi, onDeltaComputed, onKpiComputed }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
   const [hourlyErr, setHourlyErr]           = useState(null)
-  const [omniWarning, setOmniWarning]       = useState(null)
   const [projects, setProjects]             = useState([])
   const [laborCount, setLaborCount]         = useState(0)
   const [rosterState, setRosterState]       = useState({ employees: [], laneMap: {}, assignmentMap: {}, breaksMap: new Map() })
@@ -95,7 +153,6 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   const [copying, setCopying]           = useState(false)
   const [copyMsg, setCopyMsg]           = useState(null)
   const [fetchedAt, setFetchedAt]             = useState(null)
-  const [retryNonce, setRetryNonce]           = useState(0)
   const [appointmentList, setAppointmentList]           = useState([])
   const [appointmentListLoading, setAppointmentListLoading] = useState(false)
   const [perProjectHourly, setPerProjectHourly] = useState(null)
@@ -159,7 +216,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
     }
     loadWeekly()
     return () => { cancelled = true }
-  }, [facility.id, weekStart, weekEnd, retryNonce])
+  }, [facility.id, weekStart, weekEnd])
 
   const refreshAppointments = useCallback(async () => {
     try {
@@ -204,67 +261,66 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
       .catch(() => { if (!cancelled) setAppointmentList([]) })
       .finally(() => { if (!cancelled) setAppointmentListLoading(false) })
     return () => { cancelled = true }
-  }, [facility.id, planDate, retryNonce])
+  }, [facility.id, planDate])
 
   useEffect(() => {
     let cancelled = false
-    setRawHourly([]); setHourlyAppts({}); setHourlyErr(null); setOmniWarning(null); setProjects([])
+    setRawHourly([]); setHourlyAppts({}); setHourlyErr(null); setProjects([])
     setProjectHourlyDrops({}); setHourlyAdjustments({}); setSideHourlyAppts({})
     setFetchedAt(null)
 
     async function loadData() {
-      let omniFailures = []
-
       // Clear manually edited rows from before the current week (fire-and-forget)
       const { from: weekStartISO } = weekOf(new Date().toISOString().slice(0, 10))
       clearExpiredManualEdits(facility.id, weekStartISO)
 
       const customRows = await loadCustomDropRules(facility.id).catch(() => [])
-      if (!cancelled) setCustomDropProjects(customRows)
-
-      // ── Phase 1: critical core data (hourly + appointments) ──
-      const [hourlyResult, apptsResult] = await Promise.allSettled([
-        fetchHourlyData(facility.id, planDate),
-        fetchHourlyAppointments(facility.id, planDate),
-      ])
       if (cancelled) return
+      setCustomDropProjects(customRows)
 
-      if (hourlyResult.status === 'fulfilled') {
-        setRawHourly(hourlyResult.value)
-      } else {
-        omniFailures.push('hourly labor data')
-        console.warn('fetchHourlyData failed:', hourlyResult.reason?.message)
-      }
-      if (apptsResult.status === 'fulfilled') {
-        setHourlyAppts(apptsResult.value)
-      } else {
-        omniFailures.push('appointment counts')
-        console.warn('fetchHourlyAppointments failed:', apptsResult.reason?.message)
-      }
-      setFetchedAt(new Date())
-      lastRefreshRef.current = Date.now()
+      // ── Phase 1a: hourly labor — fire independently, render as it arrives ──
+      // No more Promise.allSettled blocking both fetches. If one succeeds in
+      // 500ms and the other retries for 5s, the user sees the first one
+      // immediately instead of waiting on the slower fetch.
+      fetchWithPersistentRetry(
+        () => fetchHourlyData(facility.id, planDate),
+        'hourly labor',
+        () => cancelled
+      ).then(value => { if (!cancelled) setRawHourly(value) })
+       .catch(() => { /* cancelled or exhausted — already logged */ })
 
-      // ── Phase 2: project list ──
+      // ── Phase 1b: appointments — fires independently in parallel ──
+      fetchWithPersistentRetry(
+        () => fetchHourlyAppointments(facility.id, planDate),
+        'appointments',
+        () => cancelled
+      ).then(value => {
+        if (cancelled) return
+        setHourlyAppts(value)
+        setFetchedAt(new Date())
+        lastRefreshRef.current = Date.now()
+      }).catch(() => { /* cancelled or exhausted */ })
+
+      // Hourly adjustments (Supabase, no retry layer needed)
+      fetchHourlyAdjustments(facility.id, planDate)
+        .then(d => { if (!cancelled) setHourlyAdjustments(d) })
+        .catch(() => {})
+
+      // ── Phase 2: project list (drives Phase 3 EST drops seeding) ──
+      // Awaited because Phase 3 needs the project list. If this exhausts
+      // retries, Phase 3 falls back to existing Supabase data.
       let fetchedProjects = []
       try {
-        fetchedProjects = await fetchProjectData(facility.id, planDate)
+        fetchedProjects = await fetchWithPersistentRetry(
+          () => fetchProjectData(facility.id, planDate),
+          'project list',
+          () => cancelled
+        )
         if (!cancelled) setProjects(fetchedProjects)
-      } catch (e) {
-        omniFailures.push('project list')
-        console.warn('fetchProjectData failed:', e.message)
+      } catch {
+        /* cancelled or exhausted — Phase 3 handles fallback */
       }
       if (cancelled) return
-
-      fetchHourlyAdjustments(facility.id, planDate).then(d => { if (!cancelled) setHourlyAdjustments(d) }).catch(() => {})
-
-      if (!cancelled && omniFailures.length > 0) {
-        const hasHourly  = hourlyResult.status === 'fulfilled' && hourlyResult.value.length > 0
-        const hasAppts   = apptsResult.status === 'fulfilled' && Object.keys(apptsResult.value || {}).length > 0
-        const hasProjects = fetchedProjects.length > 0
-        if (!hasHourly && !hasAppts && !hasProjects) {
-          setOmniWarning(`Live Omni data unavailable (${omniFailures.join(', ')}). Showing cached values where available.`)
-        }
-      }
 
       // ── Phase 3: EST drops seeding + sync (DB-is-truth model) ──
       const hasCustom = customRows.length > 0
@@ -339,7 +395,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
 
     loadData()
     return () => { cancelled = true }
-  }, [facility.id, planDate, isMad, isKen, retryNonce])
+  }, [facility.id, planDate, isMad, isKen])
 
   async function handleRefreshProject(projectName) {
     setRefreshingProject(projectName)
@@ -455,7 +511,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         if (!cancelled) setPerProjectHourly(null)
       })
     return () => { cancelled = true }
-  }, [facility.id, planDate, projects, projectHpa, retryNonce])
+  }, [facility.id, planDate, projects, projectHpa])
 
   const handleLaborCount   = useCallback((count) => setLaborCount(count), [])
   const handleRosterChange = useCallback(state => setRosterState(state), [])
@@ -679,14 +735,6 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
               className={`cal2-tab${sideTab === t.id ? ' active' : ''}`}
               onClick={() => setSideTab(t.id)}>{t.label}</button>
           ))}
-        </div>
-      )}
-
-      {omniWarning && (
-        <div className="omni-warning-banner">
-          <span className="omni-warning-icon">⚠</span>
-          <span className="omni-warning-text">{omniWarning}</span>
-          <button className="omni-warning-retry" onClick={() => { setOmniWarning(null); setRetryNonce(n => n + 1) }}>Retry</button>
         </div>
       )}
 

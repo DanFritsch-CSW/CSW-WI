@@ -18,8 +18,21 @@ function arrowToRows(table) {
   return rows
 }
 
-const RETRY_ATTEMPTS = 2
-const RETRY_DELAY_MS = 500
+// Server-side retry policy. Catches sub-second Omni hiccups before they
+// bubble to the client (which has its own persistent retry layered on top
+// — see fetchWithPersistentRetry in FacilityPanel.jsx).
+const RETRY_ATTEMPTS = 3
+const RETRY_BASE_DELAY_MS = 500
+const RETRY_JITTER_MS     = 500
+
+// Jittered delay between server retries. Without jitter the ALL tab's
+// ~15-query fan-out has every concurrent query retry at the exact same
+// instant — they then pile onto Omni simultaneously on retry too, which
+// just reproduces the original failure. Jittering by 0-500ms spreads the
+// retry burst across a 500ms window so each retry hits Omni separately.
+function jitteredRetryDelay() {
+  return RETRY_BASE_DELAY_MS + Math.floor(Math.random() * RETRY_JITTER_MS)
+}
 
 // Tell Omni: "work on this query for up to 20 seconds before giving up."
 // Omni's API default is shorter — explicitly setting this means many queries
@@ -50,7 +63,7 @@ async function runOmniQuery(query, apiKey, startTime) {
   const queryWithTimeout = { ...query, timeout: OMNI_QUERY_TIMEOUT_SEC }
 
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
-    if (attempt > 0) await sleep(RETRY_DELAY_MS)
+    if (attempt > 0) await sleep(jitteredRetryDelay())
 
     // Bail out if we're about to hit the Netlify function timeout. Better to
     // return a structured 502 than to let the process get killed mid-stream.
