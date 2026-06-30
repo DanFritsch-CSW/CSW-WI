@@ -97,13 +97,30 @@ export async function upsertEmployees(employees) {
 }
 
 // seedRosterAssignments — writes B2E roster data to Supabase as the baseline.
-// CRITICAL: rows already marked manually_edited=true are NEVER touched. This
-// protects user-made lane moves / PTO / call-in assignments / shift edits
-// from being overwritten when a B2E sync (manual or auto-resync) runs.
+//
+// Splits employees into two cohorts based on manually_edited flag of any
+// existing row on this date:
+//   1. Non-manual: full upsert. B2E owns the entire row.
+//   2. Manual:     PARTIAL update of shift_start, shift_hours, employee_name,
+//                  last_b2e_sync_at. lane, role, manually_edited, and
+//                  manually_edited_at are preserved.
+//
+// The partial path fixes the "wrong shift on manually-moved employee" bug
+// where a row marked manually_edited=true (e.g. dragged to specialProject or
+// a different CAL side) kept stale shift_start/shift_hours forever, even
+// after B2E published a new schedule for that employee on that date.
+//
+// What the new policy enforces:
+//   - B2E always owns shift_start, shift_hours, employee_name.
+//   - Managers always own lane and role.
+// Trade-off: per-tile shift edits (handleShiftChange in RosterBoard) DO get
+// overwritten by B2E on next sync. If a manager intentionally adjusts a
+// specific day's hours, they should use the Adj column on HourlyTable for
+// labor adjustments instead, or edit B2E directly.
 export async function seedRosterAssignments(employees, planDate) {
   if (!supabase || !employees.length) return null
   const facility = employees[0]?.facility
-  // Fetch existing manual rows so we can exclude them from the seed write.
+  // Fetch existing manual rows so we can route them through the partial-update path.
   let manualIds = new Set()
   if (facility) {
     const { data: manualRows, error: mErr } = await supabase
@@ -115,29 +132,55 @@ export async function seedRosterAssignments(employees, planDate) {
     if (mErr) { console.error('seedRosterAssignments fetch manual:', mErr); return mErr.message }
     manualIds = new Set((manualRows ?? []).map(r => String(r.employee_id)))
   }
-  const filtered = employees.filter(e => !manualIds.has(String(e.id)))
-  if (!filtered.length) return null
   const nowIso = new Date().toISOString()
-  const rows = filtered.map(e => ({
-    facility:          e.facility,
-    employee_id:       e.id,
-    employee_name:     e.name,
-    role:              e.role ?? null,
-    lane:              e.default_lane || 'shift1',
-    plan_date:         planDate,
-    shift_start:       e.shift_start ?? null,
-    shift_hours:       e.shift_hours ?? null,
-    is_temp:           false,
-    from_facility:     null,
-    on_loan_to:        null,
-    last_b2e_sync_at:  nowIso,
-    manually_edited:   false,
-    manually_edited_at: null,
-  }))
-  const { error } = await supabase
-    .from('roster_assignments')
-    .upsert(rows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: false })
-  if (error) { console.error('seedRosterAssignments:', error); return error.message }
+
+  // Path 1 — non-manual employees: full upsert (existing behavior).
+  const fullRows = employees
+    .filter(e => !manualIds.has(String(e.id)))
+    .map(e => ({
+      facility:          e.facility,
+      employee_id:       e.id,
+      employee_name:     e.name,
+      role:              e.role ?? null,
+      lane:              e.default_lane || 'shift1',
+      plan_date:         planDate,
+      shift_start:       e.shift_start ?? null,
+      shift_hours:       e.shift_hours ?? null,
+      is_temp:           false,
+      from_facility:     null,
+      on_loan_to:        null,
+      last_b2e_sync_at:  nowIso,
+      manually_edited:   false,
+      manually_edited_at: null,
+    }))
+
+  if (fullRows.length) {
+    const { error } = await supabase
+      .from('roster_assignments')
+      .upsert(fullRows, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: false })
+    if (error) { console.error('seedRosterAssignments full upsert:', error); return error.message }
+  }
+
+  // Path 2 — manually-edited employees: partial update so B2E owns shift
+  // times and name, but lane/role/manually_edited stay protected.
+  const partialEmployees = employees.filter(e => manualIds.has(String(e.id)))
+  if (partialEmployees.length) {
+    await Promise.all(partialEmployees.map(e =>
+      supabase
+        .from('roster_assignments')
+        .update({
+          shift_start:      e.shift_start ?? null,
+          shift_hours:      e.shift_hours ?? null,
+          employee_name:    e.name,
+          last_b2e_sync_at: nowIso,
+        })
+        .eq('facility', e.facility)
+        .eq('employee_id', e.id)
+        .eq('plan_date', planDate)
+        .then(({ error }) => { if (error) console.error('seedRosterAssignments partial update:', error) })
+    ))
+  }
+
   return null
 }
 
@@ -269,20 +312,25 @@ export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, from
 // scheduled for each forward date. Built by fetchB2eRosterForRange in omni.js.
 // One Omni roundtrip covers the whole window so this is cheap.
 //
-// Three things happen, all in parallel:
-//   1. INSERT: any (employee, date) pair in B2E but missing from Supabase
+// Four things happen, all in parallel:
+//   1. INSERT: (employee, date) pair in B2E but missing from Supabase
 //      → new row written. Closes the new-hire gap that this function was
 //      originally built for.
-//   2. DELETE: any non-manual, non-temp, non-loan Supabase row whose
-//      (employee, date) is NOT in B2E for that date → deleted. Closes the
-//      "false rows" bug introduced earlier today by the prior cartesian-
-//      projection implementation, which wrote rows for employees on every
-//      future date regardless of whether B2E actually had them scheduled
-//      (broke 4/10, part-time, Mon-Wed-only employees).
-//   3. PROTECT: rows with manually_edited=true, is_temp=true, on_loan_to set,
-//      or from_facility set are NEVER touched — neither overwritten by an
-//      insert (existing rows skipped via existing-keys check) nor deleted
-//      (filter excludes them).
+//   2. DELETE: any Supabase row whose (employee, date) is NOT in B2E for
+//      that date → deleted. Off-day rows are deleted REGARDLESS of
+//      manually_edited — a manual lane assignment cannot meaningfully exist
+//      on a day the employee isn't there. is_temp/loan rows still preserved.
+//   3. REFRESH: existing rows that ARE in B2E but whose shift_start or
+//      shift_hours differ from B2E truth → partial update of shift fields
+//      and last_b2e_sync_at. Lane/role/manually_edited preserved. Fixes the
+//      "stale shift on manually-moved employee" bug.
+//   4. PROTECT: is_temp=true, on_loan_to set, from_facility set rows are
+//      NEVER touched.
+//
+// Policy: B2E always owns shift times and existence-on-date. Managers always
+// own lane and role labels. This separates the two concerns cleanly so a
+// manager moving an employee to specialProject doesn't freeze their shift
+// times forever, and a stale row from a removed off-day can be cleaned up.
 //
 // Safety: if b2eRosterByDate is empty (Omni outage), the function NO-OPS.
 // We never delete on a no-data signal — same defensive posture as
@@ -322,28 +370,53 @@ export async function seedForwardHorizon(facility, b2eRosterByDate, fromDate, da
     }
   }
 
-  // Fetch existing rows in window — includes the protection flags so we can
-  // make per-row keep/delete decisions client-side.
+  // Fetch existing rows in window — shift_start/shift_hours included so we
+  // can diff against B2E truth in the refresh path; protection flags included
+  // so we can make per-row keep/delete decisions client-side.
   const { data: existing, error: fErr } = await supabase
     .from('roster_assignments')
-    .select('employee_id, plan_date, manually_edited, is_temp, from_facility, on_loan_to')
+    .select('employee_id, plan_date, manually_edited, is_temp, from_facility, on_loan_to, shift_start, shift_hours')
     .eq('facility', facility)
     .in('plan_date', dates)
   if (fErr) { console.error('seedForwardHorizon fetch:', fErr); return fErr.message }
 
-  // Walk existing rows: build the existing-keys set (for insert dedup) AND
-  // identify deletion candidates (rows in DB that B2E doesn't have, and that
-  // aren't protected).
+  // Walk existing rows: build existingKeys (for insert dedup), refreshRows
+  // (matched rows whose shifts diverge from B2E), and deletion candidates.
   const existingKeys = new Set()
   const deleteByDate = {} // plan_date -> [employee_id, ...]
+  const refreshRows  = [] // existing-row updates to apply (shift fields only)
   for (const r of (existing ?? [])) {
     const key = `${r.employee_id}|${r.plan_date}`
     existingKeys.add(key)
-    if (validKeys.has(key)) continue
-    if (r.manually_edited) continue
+    if (validKeys.has(key)) {
+      // Row exists AND B2E says employee is working this date.
+      // Refresh shift_start/shift_hours if they don't match B2E. lane and
+      // role are NOT touched — manual lane moves stay sticky.
+      const e = employeeByKey.get(key)
+      if (e) {
+        const dbStart  = r.shift_start == null ? null : Number(r.shift_start)
+        const dbHours  = r.shift_hours == null ? null : Number(r.shift_hours)
+        const b2eStart = e.shift_start == null ? null : Number(e.shift_start)
+        const b2eHours = e.shift_hours == null ? null : Number(e.shift_hours)
+        if (dbStart !== b2eStart || dbHours !== b2eHours) {
+          refreshRows.push({
+            employee_id:   r.employee_id,
+            plan_date:     r.plan_date,
+            shift_start:   b2eStart,
+            shift_hours:   b2eHours,
+            employee_name: e.name,
+          })
+        }
+      }
+      continue
+    }
+    // B2E does NOT have this employee scheduled on this date. Off-day row.
+    // Delete regardless of manually_edited — a manual lane assignment on a
+    // day the employee isn't there has no meaning. is_temp and loan rows
+    // are still preserved (independent of B2E).
     if (r.is_temp) continue
-    if (r.from_facility !== null) continue  // incoming loan — owned by source facility
-    if (r.on_loan_to) continue              // outgoing loan — destination row preserved
+    if (r.from_facility !== null) continue
+    if (r.on_loan_to) continue
     if (!deleteByDate[r.plan_date]) deleteByDate[r.plan_date] = []
     deleteByDate[r.plan_date].push(r.employee_id)
   }
@@ -373,7 +446,7 @@ export async function seedForwardHorizon(facility, b2eRosterByDate, fromDate, da
     })
   }
 
-  // Run delete (batched per plan_date) + insert in parallel.
+  // Run delete (batched per plan_date) + insert + refresh updates in parallel.
   const tasks = []
   for (const [planDate, empIds] of Object.entries(deleteByDate)) {
     if (!empIds.length) continue
@@ -384,10 +457,10 @@ export async function seedForwardHorizon(facility, b2eRosterByDate, fromDate, da
         .eq('facility', facility)
         .eq('plan_date', planDate)
         .in('employee_id', empIds)
-        .eq('manually_edited', false)
         .eq('is_temp', false)
         .is('from_facility', null)
         .is('on_loan_to', null)
+        // NOTE: no manually_edited filter — off-day rows delete regardless
         .then(({ error }) => { if (error) console.error('seedForwardHorizon delete:', error) })
     )
   }
@@ -397,6 +470,22 @@ export async function seedForwardHorizon(facility, b2eRosterByDate, fromDate, da
         .from('roster_assignments')
         .upsert(rowsToInsert, { onConflict: 'facility,employee_id,plan_date', ignoreDuplicates: true })
         .then(({ error }) => { if (error) console.error('seedForwardHorizon insert:', error) })
+    )
+  }
+  for (const u of refreshRows) {
+    tasks.push(
+      supabase
+        .from('roster_assignments')
+        .update({
+          shift_start:      u.shift_start,
+          shift_hours:      u.shift_hours,
+          employee_name:    u.employee_name,
+          last_b2e_sync_at: nowIso,
+        })
+        .eq('facility', facility)
+        .eq('employee_id', u.employee_id)
+        .eq('plan_date', u.plan_date)
+        .then(({ error }) => { if (error) console.error('seedForwardHorizon refresh:', error) })
     )
   }
   await Promise.all(tasks)
