@@ -8,6 +8,7 @@ import {
   upsertProjectLaborAssumption, deleteProjectLaborAssumption,
 } from '../lib/supabase.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
+import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
 
 // ── Tab nav ────────────────────────────────────────────────
 
@@ -16,6 +17,7 @@ const TABS = [
   { id: 'breaks',   label: 'Break Assumptions' },
   { id: 'dock',     label: 'CAL Dock Assignment' },
   { id: 'estdrops', label: 'EST Drop Projects' },
+  { id: 'pvi',      label: 'PVI Accounts' },
 ]
 
 // Hardcoded EST drop projects per facility (mirrors PROJECT_DROP_RULES in omni.js).
@@ -520,7 +522,7 @@ function EstDropProjectsEditor() {
         <strong>System projects</strong> are hardcoded and cannot be removed here — contact your developer to modify them.
         <br />
         <strong>Custom projects</strong> count all inbound appointments for the given Omni project name.
-        The Omni name must match exactly (case-sensitive, including spaces). After adding, use ↺ Reset EST Drops on the facility tab to pull the 4-week historical average immediately.
+        The Omni name must match exactly (case-sensitive, including spaces). After adding, use ↺ Reset EST Drops on the facility tab to pull the 4-week historical average immediately.
       </p>
     </div>
   )
@@ -603,6 +605,16 @@ export default function Settings() {
             <p className="settings-page-sub">All customers tracked in the hourly EST drops table, by facility. System projects are managed in code. Custom projects can be added or removed here.</p>
           </div>
           <EstDropProjectsEditor />
+        </>
+      )}
+
+      {activeTab === 'pvi' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">PVI Accounts (Palermo's Shelf Life)</h2>
+            <p className="settings-page-sub">Canonical customer accounts + raw Datex ship-to name mappings + shelf-life days per customer. Drives the PVI Shelf Life dashboard on the Customers tab.</p>
+          </div>
+          <PviAccountsTab />
         </>
       )}
     </div>
