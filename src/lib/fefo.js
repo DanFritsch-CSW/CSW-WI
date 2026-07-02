@@ -4,7 +4,7 @@
 //   - Project config with date semantic + facility mapping
 //   - Pure verdict engine (line + order + severity ordering)
 //   - Plain-language verdict copy generator (pack vs expiration aware)
-//   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY → { k, display }
+//   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY → { k, kDay, display }
 //   - Hold status detector — multiple Datex statuses count as "on hold"
 //   - Aggregations: banner counts, KPI row, by-project rollup
 //   - Day stepper helpers (5 ship days)
@@ -13,6 +13,16 @@
 //
 // The verdict engine + copy logic is shape-stable across mock and live —
 // only the Order source changes.
+//
+// ── Two-key sorting model (2026-07-01) ─────────────────────────────────────
+// Parsers return both `k` and `kDay`:
+//   - k    — full-precision sort key (Fair Oaks: includes HH:MM:SS; Richelieu /
+//            Crown: identical to kDay since those formats are day-level only).
+//            Used to pick the truly-oldest lot as REM within a day.
+//   - kDay — day-level integer. Used for violation comparisons. Two Fair Oaks
+//            lots produced at 10:00 and 14:00 on the same day should NOT flag
+//            as a rotation violation — same-day pack date is same-age
+//            inventory operationally. See Hill's Slack feedback 2026-07-01.
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
@@ -82,8 +92,12 @@ export function parseFairOaksDate(lookupCode) {
   const d = dateFromYearAndDoy(year, doy)
   const month = d.getUTCMonth() + 1
   const day   = d.getUTCDate()
-  const k = year * 1e9 + doy * 1e6 + hh * 1e4 + mm * 1e2 + ss
-  return { k, display: fmtMDY(year, month, day) }
+  // kDay drops HH:MM:SS so same-day lots compare equal in the verdict
+  // engine (see lineVerdict). k retains full precision for sorting the
+  // truly-oldest lot when we pick a REM candidate within a day.
+  const kDay = year * 1000 + doy
+  const k    = kDay * 1e6 + hh * 1e4 + mm * 1e2 + ss
+  return { k, kDay, display: fmtMDY(year, month, day) }
 }
 
 export function parseRichelieuDate(lookupCode) {
@@ -94,8 +108,9 @@ export function parseRichelieuDate(lookupCode) {
   const day   = Number(m[2])
   const year  = Number(m[3])
   if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900) return null
-  const k = year * 10000 + month * 100 + day
-  return { k, display: fmtMDY(year, month, day) }
+  // MMDDYYYY is inherently day-level — k and kDay are identical here.
+  const kDay = year * 10000 + month * 100 + day
+  return { k: kDay, kDay, display: fmtMDY(year, month, day) }
 }
 
 export function parseCrownDate(lookupCode) {
@@ -107,7 +122,7 @@ export function parseCrownDate(lookupCode) {
 export function parseLotDateKey(lookupCode, projId) {
   const project = getProject(projId)
   if (!project) {
-    return { k: 0, display: lookupCode || '?', error: `unknown project ${projId}` }
+    return { k: 0, kDay: 0, display: lookupCode || '?', error: `unknown project ${projId}` }
   }
   let parsed
   if (project.dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
@@ -115,7 +130,7 @@ export function parseLotDateKey(lookupCode, projId) {
   else if (project.dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
   else parsed = null
   if (!parsed) {
-    return { k: 0, display: lookupCode || '?', error: `unparseable ${project.dateFormat}` }
+    return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${project.dateFormat}` }
   }
   return parsed
 }
@@ -137,11 +152,21 @@ export function isHoldStatus(statusName) {
 
 export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, clean: 3 }
 
+// lineVerdict — flag a rotation violation only when REM is strictly older
+// than the oldest ship lot BY DAY. Historically compared full k which,
+// for Fair Oaks (YDDDHHMMSS), included HH:MM:SS — meaning two lots on the
+// same day at 10:00 vs 14:00 would flag as a violation despite being
+// operationally same-age inventory. Hill's 2026-07-01 feedback: only flag
+// stuff that's OLDER, not stuff with a different date code.
+//
+// Falls back to `k` when kDay is absent to stay compatible with any older
+// cached response payloads or mock fixtures that predate the two-key model.
 export function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
-  const oldK = Math.min(...line.ship.map(s => s.k))
+  const oldKDay = Math.min(...line.ship.map(s => s.kDay ?? s.k))
   const rem = line.rem
-  if (rem && rem.lps > 0 && rem.k < oldK) {
+  const remKDay = rem?.kDay ?? rem?.k
+  if (rem && rem.lps > 0 && remKDay != null && remKDay < oldKDay) {
     return rem.hold ? 'hold' : 'violation'
   }
   return 'clean'
