@@ -35,6 +35,13 @@
 [functions."fefo-orders"]
   timeout = 26
 
+# pvi-derive-accounts scans 90d of PVI orderlines + orderaddresses with a
+# large aggregation. Runs on-demand from the Settings "Suggest from history"
+# button so latency isn't critical, but the query touches ~700k rows so give
+# it room.
+[functions."pvi-derive-accounts"]
+  timeout = 26
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
