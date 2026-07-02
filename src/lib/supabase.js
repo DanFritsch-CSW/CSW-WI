@@ -1247,3 +1247,186 @@ export async function deleteEmployeeBreak(employeeId) {
     throw error
   }
 }
+
+// ─── PVI Shelf Life ─────────────────────────────────────────────────────────
+//
+// Three tables back the PVI Shelf Life feature (Palermo's expiration
+// predictor):
+//   pvi_canonical_accounts    — Costco/Walmart/Target/etc + shelf-life days.
+//                               account_type = 'end_customer' | 'internal_transfer'.
+//                               override_days is nullable; when null, the UI
+//                               shows derived_days from shipment history.
+//   pvi_account_name_map      — raw Datex ship-to names → canonical_id.
+//                               Multiple raw names (e.g. "COSTCO Atlanta",
+//                               "COSTCO Mira Loma") fold into one canonical.
+//   pvi_shelf_notes           — free-text notes + status tag per lot. Shared
+//                               across users. No auth — author is free-text.
+//
+// The Settings tab uses these five helpers plus applyPviAccountSeed to bulk-
+// insert reviewed suggestions from the derive Netlify function.
+
+export async function fetchPviCanonicalAccounts() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('pvi_canonical_accounts')
+    .select('*')
+    .order('canonical_name')
+  if (error) { console.error('fetchPviCanonicalAccounts:', error); return [] }
+  return data ?? []
+}
+
+export async function upsertPviCanonicalAccount({ id, canonical_name, account_type, override_days }) {
+  if (!supabase) return null
+  const payload = {
+    canonical_name: (canonical_name || '').trim(),
+    account_type:   account_type === 'internal_transfer' ? 'internal_transfer' : 'end_customer',
+    override_days:  override_days == null || override_days === '' ? null : Number(override_days),
+  }
+  if (!payload.canonical_name) throw new Error('canonical_name required')
+  let q
+  if (id) {
+    q = supabase.from('pvi_canonical_accounts').update(payload).eq('id', id).select().single()
+  } else {
+    q = supabase.from('pvi_canonical_accounts').insert(payload).select().single()
+  }
+  const { data, error } = await q
+  if (error) { console.error('upsertPviCanonicalAccount:', error); throw error }
+  return data
+}
+
+export async function deletePviCanonicalAccount(id) {
+  if (!supabase) return
+  // CASCADE on pvi_account_name_map handles the raw-name rows.
+  const { error } = await supabase.from('pvi_canonical_accounts').delete().eq('id', id)
+  if (error) { console.error('deletePviCanonicalAccount:', error); throw error }
+}
+
+export async function fetchPviAccountNameMap() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('pvi_account_name_map')
+    .select('id, raw_account_name, canonical_id')
+    .order('raw_account_name')
+  if (error) { console.error('fetchPviAccountNameMap:', error); return [] }
+  return data ?? []
+}
+
+export async function upsertPviAccountNameMap({ id, raw_account_name, canonical_id }) {
+  if (!supabase) return null
+  const payload = {
+    raw_account_name: (raw_account_name || '').trim(),
+    canonical_id:     Number(canonical_id),
+  }
+  if (!payload.raw_account_name) throw new Error('raw_account_name required')
+  if (!payload.canonical_id) throw new Error('canonical_id required')
+  let q
+  if (id) {
+    q = supabase.from('pvi_account_name_map').update(payload).eq('id', id).select().single()
+  } else {
+    // ON CONFLICT (raw_account_name) — user re-mapping an existing raw name
+    // updates the existing row instead of erroring on the UNIQUE constraint.
+    q = supabase.from('pvi_account_name_map')
+      .upsert(payload, { onConflict: 'raw_account_name', ignoreDuplicates: false })
+      .select().single()
+  }
+  const { data, error } = await q
+  if (error) { console.error('upsertPviAccountNameMap:', error); throw error }
+  return data
+}
+
+export async function deletePviAccountNameMap(id) {
+  if (!supabase) return
+  const { error } = await supabase.from('pvi_account_name_map').delete().eq('id', id)
+  if (error) { console.error('deletePviAccountNameMap:', error); throw error }
+}
+
+// applyPviAccountSeed — bulk-insert the reviewed suggestion set from the
+// pvi-derive-accounts Netlify function. Each suggestion is a canonical +
+// its raw-name mappings. Uses upsert on canonical_name so re-running the
+// seed after adjustments doesn't duplicate rows; existing canonicals get
+// their account_type/override_days updated, and new raw-names get added
+// without touching existing mappings.
+export async function applyPviAccountSeed(suggestions) {
+  if (!supabase) return { canonicals: 0, mappings: 0 }
+  let canonicalCount = 0
+  let mappingCount = 0
+  for (const s of (suggestions ?? [])) {
+    if (!s?.canonical_name) continue
+    const canonPayload = {
+      canonical_name: s.canonical_name.trim(),
+      account_type:   s.account_type === 'internal_transfer' ? 'internal_transfer' : 'end_customer',
+      override_days:  s.override_days == null || s.override_days === '' ? null : Number(s.override_days),
+    }
+    const { data: canonRow, error: canonErr } = await supabase
+      .from('pvi_canonical_accounts')
+      .upsert(canonPayload, { onConflict: 'canonical_name', ignoreDuplicates: false })
+      .select()
+      .single()
+    if (canonErr) { console.error('applyPviAccountSeed canonical:', canonErr); continue }
+    canonicalCount += 1
+    const rawNames = (s.raw_names ?? [])
+      .map(n => (n || '').trim())
+      .filter(Boolean)
+    if (!rawNames.length) continue
+    const mapPayload = rawNames.map(n => ({
+      raw_account_name: n,
+      canonical_id:     canonRow.id,
+    }))
+    const { error: mapErr } = await supabase
+      .from('pvi_account_name_map')
+      .upsert(mapPayload, { onConflict: 'raw_account_name', ignoreDuplicates: false })
+    if (mapErr) { console.error('applyPviAccountSeed mappings:', mapErr); continue }
+    mappingCount += rawNames.length
+  }
+  return { canonicals: canonicalCount, mappings: mappingCount }
+}
+
+export async function fetchPviShelfNotes(itemLotPairs) {
+  // itemLotPairs: [{ item, lot_code }, ...]  — pull notes for the specific
+  // lots visible in the dashboard rather than the whole table.
+  if (!supabase || !itemLotPairs?.length) return []
+  const items = [...new Set(itemLotPairs.map(p => p.item))]
+  const lots  = [...new Set(itemLotPairs.map(p => p.lot_code))]
+  const { data, error } = await supabase
+    .from('pvi_shelf_notes')
+    .select('*')
+    .in('item', items)
+    .in('lot_code', lots)
+    .order('created_at', { ascending: false })
+  if (error) { console.error('fetchPviShelfNotes:', error); return [] }
+  return data ?? []
+}
+
+export async function insertPviShelfNote({ item, lot_code, note, status, author }) {
+  if (!supabase) return null
+  const payload = {
+    item:     (item || '').trim(),
+    lot_code: (lot_code || '').trim(),
+    note:     (note || '').trim(),
+    status:   status || 'open',
+    author:   (author || '').trim() || null,
+  }
+  if (!payload.item || !payload.lot_code || !payload.note) throw new Error('item, lot_code, note required')
+  const { data, error } = await supabase
+    .from('pvi_shelf_notes')
+    .insert(payload)
+    .select()
+    .single()
+  if (error) { console.error('insertPviShelfNote:', error); throw error }
+  return data
+}
+
+export async function updatePviShelfNoteStatus(id, status) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('pvi_shelf_notes')
+    .update({ status })
+    .eq('id', id)
+  if (error) { console.error('updatePviShelfNoteStatus:', error); throw error }
+}
+
+export async function deletePviShelfNote(id) {
+  if (!supabase) return
+  const { error } = await supabase.from('pvi_shelf_notes').delete().eq('id', id)
+  if (error) { console.error('deletePviShelfNote:', error); throw error }
+}
