@@ -36,12 +36,12 @@
 // See netlify/functions/fefo-orders.cjs top-of-file for the full rationale.
 // Short version: HOME=/tmp before require, in-memory db, ATTACH without alias.
 //
-// ── Schema assumptions (verify against silver.datex_slv_* if queries fail) ─
-//   - datex_slv_lots.expiration_date  (nullable timestamp; primary code-date source)
-//   - datex_slv_lots.parquet_record_sys_date_time  (received-at fallback)
-//   - datex_slv_orderlines.packaged_amount        (cases per line)
-// If any of these column names differ in this Datex instance, the query will
-// throw a helpful "column X does not exist" error and we'll adjust.
+// ── Schema anchors (verified 2026-07-02) ───────────────────────────────────
+//   - datex_slv_lots does NOT have expiration_date. Expiration lives on
+//     datex_slv_vendorlots, joined via lot.vendor_lot_id = vendorlot.vendor_lot_id.
+//     Coverage: 100% of PVI lots have a vendorlots row with expiration_date populated.
+//   - datex_slv_orderlines.packaged_amount = cases per line.
+//   - datex_slv_lots.parquet_record_sys_date_time = received-at fallback.
 
 process.env.HOME = process.env.HOME || '/tmp'
 
@@ -113,6 +113,10 @@ exports.handler = async (event) => {
     // 180 days. Broader than pvi-derive-accounts' 90-day window because a
     // seasonal SKU might have inventory today but no shipments in 90d.
     //
+    // Expiration_date lives on datex_slv_vendorlots (not datex_slv_lots) —
+    // joined via lot.vendor_lot_id = vendorlot.vendor_lot_id. See schema
+    // anchor comment at top of file.
+    //
     // `project_lookup` per material picked as MIN over active projects — a
     // few materials appear under both PALVI9 and PALDSD9; MIN is stable and
     // arbitrary but deterministic. Client can look up velocity per
@@ -150,7 +154,7 @@ exports.handler = async (event) => {
         l.lot_id,
         l.lookup_code                       AS lot_code,
         l.status_name                       AS lot_status,
-        l.expiration_date                   AS expiration_date,
+        vl.expiration_date                  AS expiration_date,
         l.parquet_record_sys_date_time      AS received_at,
         pm.project_lookup,
         COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
@@ -169,6 +173,8 @@ exports.handler = async (event) => {
         ON l.material_id = m.material_id
       JOIN pvi_materials pm
         ON pm.material_id = l.material_id
+      LEFT JOIN production_db.silver.datex_slv_vendorlots vl
+        ON vl.vendor_lot_id = l.vendor_lot_id
       LEFT JOIN committed c
         ON c.lot_id = l.lot_id
       WHERE lp.warehouse_id = ${CAL_WAREHOUSE_ID}
@@ -177,7 +183,7 @@ exports.handler = async (event) => {
       GROUP BY
         l.material_id, m.lookup_code, m.Description,
         l.lot_id, l.lookup_code, l.status_name,
-        l.expiration_date, l.parquet_record_sys_date_time,
+        vl.expiration_date, l.parquet_record_sys_date_time,
         pm.project_lookup
       HAVING SUM(lpc.packaged_amount) > 0
     `
