@@ -1,9 +1,10 @@
 import { useSearchParams } from 'react-router-dom'
 import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
+import PviShelfLife from './PviShelfLife.jsx'
 
-// Customers module — three sub-tabs sharing a common header + tab row.
-// Sub-tab state lives in URL (?tab=space|onboarding|fefo) so links are
+// Customers module — four sub-tabs sharing a common header + tab row.
+// Sub-tab state lives in URL (?tab=space|onboarding|fefo|pvi) so links are
 // shareable and refresh-safe, matching the rest of the app's URL-as-state
 // pattern (LaborPlanning uses ?fac=&date=).
 const SUB_TABS = [
@@ -21,6 +22,11 @@ const SUB_TABS = [
     id: 'fefo',
     label: 'FEFO Rotation',
     subtitle: 'Pre-ship FEFO rotation verification · live from Datex / Omni',
+  },
+  {
+    id: 'pvi',
+    label: 'PVI Shelf Life',
+    subtitle: "Palermo's shelf-life risk snapshot · CAL lots × canonical account cutoffs",
   },
 ]
 
@@ -92,6 +98,7 @@ export default function Customers() {
         {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingPlaceholder />}
         {subTab === 'fefo'       && <FefoRotationTab />}
+        {subTab === 'pvi'        && <PviShelfLife />}
       </div>
     </div>
   )
