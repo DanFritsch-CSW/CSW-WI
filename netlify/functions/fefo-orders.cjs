@@ -69,6 +69,45 @@
 // present; falls back to the unit's short_name (e.g. "CS") when not. Empty
 // string if neither source has data — UI can choose whether to render.
 //
+// ── Committed-cases subtraction (2026-07-01, Hill's FEFO false-positive fix) ─
+//
+// The onhand SQL now LEFT JOINs a `committed` CTE that sums
+// expected_packaged_amount per lot for tasks in ('Planned', 'Released')
+// status at the warehouse. Those cases are soft-allocated: the pick task
+// has been created (Planned) or released to a picker (Released) but not
+// yet executed, and Datex binds the allocation to the LOCATION not the LP.
+// So the underlying license_plate_contents row still shows the LP as full
+// even though the cases are effectively spoken for.
+//
+// Without this subtraction, we were flagging false FEFO violations for
+// lots whose cases were already committed to other orders' released picks.
+// Verified against KEN 2026-07-01: 12 of 12 sampled lots with active tasks
+// had 0 tasks with source_license_plate_id populated — 100% of them bind
+// by location + lot only. Example: lot 26162 material 109282 (Crown), 2454
+// onhand, 2454 committed, 0 truly available — but the app was surfacing
+// those 2454 as available REM inventory.
+//
+// The subtraction is warehouse-wide (not filtered to our in-window orders)
+// so that lots committed to any released pick — including out-of-window
+// orders — are correctly excluded from REM candidates.
+//
+// ── Day-level violation compare (2026-07-01, kDay field) ────────────────────
+//
+// Fair Oaks lot codes encode YDDDHHMMSS — down-to-the-second precision.
+// Two lots produced on the same day at 10:00 vs 14:00 have different k
+// values, so a REM lot 4 hours "older" was flagging as a violation. Hill's
+// operational view: same-day pack = same-age inventory; only flag if
+// strictly older by a full day.
+//
+// Parsers now return { k, kDay, display }:
+//   - k: full-precision sort key (preserves HH:MM:SS ordering for
+//     picking the truly-oldest REM within a day)
+//   - kDay: day-level integer for violation comparison
+// Client-side lineVerdict compares kDay < oldKDay rather than k < oldK.
+//
+// Richelieu (MMDDYYYY) and Crown (PPW+MMDDYYYY) are already day-level so
+// their k == kDay. Only Fair Oaks had the sub-day precision issue.
+//
 // ── Schema / data architecture (per Phase 7a recon) ─────────────────────────
 //   - hardallocations.shipment_line_id is always null in this Datex instance.
 //     Allocations link to orders via TASKS, not shipment_line_id.
@@ -113,6 +152,11 @@ function isHoldStatus(s) {
 }
 
 // ─── Date parsers (server copy — mirrors src/lib/fefo.js) ───────────────────
+//
+// Each parser returns { k, kDay, display }:
+//   - k    — full-precision sort key (used to pick truly-oldest REM lot)
+//   - kDay — day-level integer (used for violation comparisons; see notes above)
+//   - display — human MM/DD/YY
 
 function parseFairOaksDate(lookupCode) {
   if (!lookupCode || typeof lookupCode !== 'string') return null
@@ -132,8 +176,9 @@ function parseFairOaksDate(lookupCode) {
   d.setUTCDate(doy)
   const month = d.getUTCMonth() + 1
   const day   = d.getUTCDate()
-  const k = year * 1e9 + doy * 1e6 + hh * 1e4 + mm * 1e2 + ss
-  return { k, display: `${month}/${day}/${String(year).slice(-2)}` }
+  const kDay = year * 1000 + doy
+  const k    = kDay * 1e6 + hh * 1e4 + mm * 1e2 + ss
+  return { k, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
 }
 
 function parseRichelieuDate(lookupCode) {
@@ -144,8 +189,9 @@ function parseRichelieuDate(lookupCode) {
   const day   = Number(m[2])
   const year  = Number(m[3])
   if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900) return null
-  const k = year * 10000 + month * 100 + day
-  return { k, display: `${month}/${day}/${String(year).slice(-2)}` }
+  // MMDDYYYY is inherently day-level — k and kDay are identical here.
+  const kDay = year * 10000 + month * 100 + day
+  return { k: kDay, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
 }
 
 function parseCrownDate(lookupCode) {
@@ -159,7 +205,7 @@ function parseLotDateKey(lookupCode, dateFormat) {
   else if (dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
   else if (dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
   else parsed = null
-  if (!parsed) return { k: 0, display: lookupCode || '?', error: `unparseable ${dateFormat}` }
+  if (!parsed) return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${dateFormat}` }
   return parsed
 }
 
@@ -340,19 +386,51 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
 
   const materialIds = [...new Set(allocRows.map(r => Number(r.material_id)))]
 
-  // ── Query 3: on-hand by lot ──
+  // ── Query 3: on-hand by lot (with committed-cases subtraction) ──
+  //
+  // The `committed` CTE sums expected_packaged_amount per lot for tasks in
+  // Planned/Released status across the whole warehouse. Those cases are
+  // soft-allocated: a pick task exists but hasn't executed, and Datex binds
+  // the allocation to the LOCATION not the LP — so the LP screen still
+  // shows the cases as physically present. We subtract to get true
+  // availability.
+  //
+  // cases_available = GREATEST(onhand - committed, 0). Uses GREATEST to
+  // guard against edge cases where committed > onhand (data drift between
+  // license_plate_contents and tasks). Downstream candidate filter drops
+  // any lot where cases_available == 0.
+  //
+  // Warehouse-wide (not filtered to our in-window orders) is intentional:
+  // a lot committed to a released pick for an OUT-of-window order still
+  // shouldn't be considered available for REM.
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
     const onhandSql = `
+      WITH committed AS (
+        SELECT t.lot_id, SUM(t.expected_packaged_amount) AS cases_committed
+        FROM production_db.silver.datex_slv_tasks t
+        JOIN production_db.silver.datex_slv_taskstatuses ts
+          ON ts.task_status_id = t.status_id
+        WHERE t.warehouse_id = ${warehouseId}
+          AND t.lot_id IS NOT NULL
+          AND ts.status_name IN ('Planned', 'Released')
+        GROUP BY t.lot_id
+      )
       SELECT
         l.material_id, l.lot_id,
         l.lookup_code AS lot_code, l.status_name AS lot_status,
         COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
-        SUM(lpc.packaged_amount) AS cases_onhand
+        SUM(lpc.packaged_amount) AS cases_onhand,
+        COALESCE(MAX(c.cases_committed), 0) AS cases_committed,
+        GREATEST(
+          SUM(lpc.packaged_amount) - COALESCE(MAX(c.cases_committed), 0),
+          0
+        ) AS cases_available
       FROM production_db.silver.datex_slv_licenseplatecontents lpc
       JOIN production_db.silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
       JOIN production_db.silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
+      LEFT JOIN committed c ON c.lot_id = l.lot_id
       WHERE l.material_id IN (${matIdList})
         AND lp.warehouse_id = ${warehouseId}
         AND lp.Archived = false
@@ -393,6 +471,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       lot: r.lot_code,
       date: parsed.display,
       k: parsed.k,
+      kDay: parsed.kDay,
       lps, cases,
     })
   }
@@ -405,8 +484,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       lotId:    Number(r.lot_id),
       lotCode:  r.lot_code,
       status:   r.lot_status,
-      cases:    Number(r.cases_onhand) || 0,
-      lps:      Number(r.lp_count) || 0,
+      // `cases` is the truly-available count (onhand minus committed). This
+      // is what the REM logic evaluates. Gross + committed retained on the
+      // candidate for potential UI surfacing / debugging later.
+      cases:          Number(r.cases_available) || 0,
+      casesGross:     Number(r.cases_onhand) || 0,
+      casesCommitted: Number(r.cases_committed) || 0,
+      lps:            Number(r.lp_count) || 0,
     })
   }
 
@@ -416,9 +500,9 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       .filter(c => !allocLots.has(c.lotId))
       .map(c => {
         const parsed = parseLotDateKey(c.lotCode, project.dateFormat)
-        return { ...c, k: parsed.k, display: parsed.display }
+        return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display }
       })
-      .filter(c => c.cases > 0)
+      .filter(c => c.cases > 0)   // cases_available > 0 (post-committed subtraction)
     if (candidates.length > 0) {
       const oldest = candidates.reduce((a, b) => a.k < b.k ? a : b)
       const held = isHoldStatus(oldest.status)
@@ -426,13 +510,14 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         lot:      oldest.lotCode,
         date:     oldest.display,
         k:        oldest.k,
+        kDay:     oldest.kDay,
         lps:      oldest.lps,
         cases:    oldest.cases,
         hold:     held,
         holdType: held ? oldest.status : undefined,
       }
     } else {
-      line.rem = { lot: '', date: '', k: 0, lps: 0, cases: 0, hold: false }
+      line.rem = { lot: '', date: '', k: 0, kDay: 0, lps: 0, cases: 0, hold: false }
     }
   }
 
