@@ -1248,6 +1248,83 @@ export async function deleteEmployeeBreak(employeeId) {
   }
 }
 
+
+// ─── WR Pickline Snapshot (persisted across refreshes/devices) ────────────
+//
+// Before this section existed, PicklinePanel's snapshot + hour overrides lived
+// only in FacilityPanel React state — refresh wiped them, and opening the app
+// on another computer showed the upload screen and required a fresh Pull from
+// Omni (which returned different data than the original pull if orders had
+// changed in Datex since). Now the initial Pull-from-Omni or Excel-upload is
+// written to Supabase, all subsequent loads read the persisted snapshot, and
+// only an explicit re-pull or "Load new file" click replaces it.
+//
+// Table: pickline_snapshots(facility, plan_date, snapshot jsonb, hour_overrides
+// jsonb, source, pulled_at, updated_at). One row per WR day.
+
+export async function fetchPicklineSnapshot(facility, planDate) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('pickline_snapshots')
+    .select('snapshot, hour_overrides, source, pulled_at, updated_at')
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+    .maybeSingle()
+  if (error) { console.error('fetchPicklineSnapshot:', error); return null }
+  if (!data) return null
+  return {
+    snapshot:      data.snapshot ?? null,
+    hourOverrides: data.hour_overrides ?? {},
+    source:        data.source ?? null,
+    pulledAt:      data.pulled_at ?? null,
+    updatedAt:     data.updated_at ?? null,
+  }
+}
+
+// upsertPicklineSnapshot — full replace. Called when Pull from Omni or Excel
+// upload produces a new brief. hour_overrides is reset to {} because the new
+// snapshot invalidates any prior manual per-hour tweaks (they were tied to
+// specific route case counts that just changed).
+export async function upsertPicklineSnapshot(facility, planDate, snapshot, source) {
+  if (!supabase) return
+  const nowIso = new Date().toISOString()
+  const { error } = await supabase
+    .from('pickline_snapshots')
+    .upsert({
+      facility,
+      plan_date:      planDate,
+      snapshot,
+      hour_overrides: {},
+      source:         source ?? (snapshot?.source ?? null),
+      pulled_at:      nowIso,
+      updated_at:     nowIso,
+    }, { onConflict: 'facility,plan_date' })
+  if (error) console.error('upsertPicklineSnapshot:', error)
+}
+
+// updatePicklineOverrides — hour_overrides only. Fires on every +/- click in
+// the PickTable, so it's cheap: single-row update, no snapshot rewrite. If
+// no snapshot exists (e.g. race with clear), the update no-ops silently since
+// there's nothing to attach overrides to.
+export async function updatePicklineOverrides(facility, planDate, hourOverrides) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('pickline_snapshots')
+    .update({ hour_overrides: hourOverrides ?? {}, updated_at: new Date().toISOString() })
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+  if (error) console.error('updatePicklineOverrides:', error)
+}
+
+export async function deletePicklineSnapshot(facility, planDate) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('pickline_snapshots')
+    .delete()
+    .eq('facility', facility)
+    .eq('plan_date', planDate)
+  if (error) console.error('deletePicklineSnapshot:', error)
+}
 // ─── PVI Shelf Life ─────────────────────────────────────────────────────────
 //
 // Three tables back the PVI Shelf Life feature (Palermo's expiration
