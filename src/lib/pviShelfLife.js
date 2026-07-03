@@ -9,7 +9,7 @@
 //   resolveCanonical(rawName, index)
 //   getShelfLifeDays(canonical)
 //   velocityConfidence(shipments30d)
-//   projectFefo({ lots, pendingOrders, velocity, canonicalIndex })
+//   projectFefo({ lots, pendingOrders, velocity, materialShipHistory, canonicalIndex })
 //   verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays })
 //   formatLotForEmail(row)
 //   bulkCopyForEmail(rows)
@@ -19,8 +19,7 @@
 // The customer's shelf-life-days requirement is a MINIMUM at receipt — i.e.
 // "Costco needs 156 days remaining when the load lands." A lot arriving with
 // less than that is below spec and subject to rejection or discount. The
-// verdict engine now compares days-to-code-at-ship against that minimum, not
-// against the total lifetime of the product:
+// verdict engine now compares days-to-code-at-ship against that minimum:
 //
 //   ratio = daysToCodeAtShip / shelfLifeDays
 //
@@ -30,9 +29,26 @@
 //   Unshippable  daysToCodeAtShip ≤ 0 but not yet expired today
 //   Expired      Past code date TODAY
 //
-// Previous thresholds (0.6/0.3) were framed as "how much of the shelf life is
-// left" which understated risk — a lot at 60% of Costco's spec looked "fine"
-// when Costco would actually reject it.
+// ── Spec source: allocation vs. material history baseline ────────────────
+//
+// A lot's shelf-life comparison needs a customer spec, which comes from one
+// of two places:
+//
+//   'allocation'       — the lot is bound to a specific order (Phase A) or
+//                        velocity-projected to a specific customer (Phase B).
+//                        Use that customer's spec.
+//   'material_history' — no allocation. Fall back to a material-level
+//                        baseline derived from 90-day pick history: dominant
+//                        customer for DISPLAY ("if this ships, it'll probably
+//                        go to X"), STRICTEST spec across all end-customer
+//                        recipients for the math (operational conservatism —
+//                        don't hide risk against a possible recipient).
+//   null               — material has no shipping history or all recipients
+//                        are internal transfers. Vs. Spec column renders "—".
+//
+// The two-signal design (dominant for display, strictest for math) is
+// intentional. Every row's math should protect against the worst plausible
+// spec violation while the label reflects the most likely destination.
 
 export const STAGE_ORDER = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 
@@ -96,31 +112,88 @@ export function dailyCaseRate(vel) {
   return Math.min(...rates)
 }
 
+// ── Material-level baselines from 90-day pick history ────────────────────
+//
+// Returns two maps keyed by material_id:
+//   dominantByMaterial: canonical → whoever received the most cases in 90d
+//                       (end-customers only; internal transfers skipped)
+//   strictestByMaterial: { canonical, spec_days } → recipient whose shelf-
+//                       life-days spec was tightest across the 90-day roster
+//
+// Internal transfers are excluded from both — they have no shelf-life spec
+// and don't drive customer-facing risk.
+
+function buildMaterialBaselines(materialShipHistory, canonicalIndex) {
+  const casesByMaterialCanonical = new Map() // material_id → Map(canonical_id → cases)
+  for (const h of materialShipHistory || []) {
+    const canon = resolveCanonical(h.ship_to_raw_name, canonicalIndex)
+    if (!canon || canon.account_type === 'internal_transfer') continue
+    if (!casesByMaterialCanonical.has(h.material_id)) {
+      casesByMaterialCanonical.set(h.material_id, new Map())
+    }
+    const inner = casesByMaterialCanonical.get(h.material_id)
+    inner.set(canon.id, (inner.get(canon.id) || 0) + (Number(h.cases_90d) || 0))
+  }
+
+  const dominantByMaterial = new Map()
+  const strictestByMaterial = new Map()
+  for (const [materialId, inner] of casesByMaterialCanonical) {
+    let bestCanon = null, bestCases = -1
+    let strictestCanon = null, strictestDays = -1
+    for (const [canonId, cases] of inner) {
+      const canon = canonicalIndex.byCanonId.get(canonId)
+      if (!canon) continue
+      if (cases > bestCases) { bestCases = cases; bestCanon = canon }
+      const spec = getShelfLifeDays(canon)
+      if (spec != null && spec > strictestDays) {
+        strictestDays = spec
+        strictestCanon = canon
+      }
+    }
+    if (bestCanon)     dominantByMaterial.set(materialId,  bestCanon)
+    if (strictestCanon) strictestByMaterial.set(materialId, { canonical: strictestCanon, spec_days: strictestDays })
+  }
+
+  return { dominantByMaterial, strictestByMaterial }
+}
+
 // ── FEFO projection ───────────────────────────────────────────────────────
 //
 // Input:
-//   lots               — from pvi-shelf-life.cjs
-//   pendingOrders      — from pvi-shelf-life.cjs (scheduled next 21 days)
-//   velocity           — from pvi-shelf-life.cjs
-//   canonicalIndex     — from buildRawNameToCanonical
+//   lots                — from pvi-shelf-life.cjs
+//   pendingOrders       — from pvi-shelf-life.cjs (scheduled next 21 days)
+//   velocity            — from pvi-shelf-life.cjs
+//   materialShipHistory — from pvi-shelf-life.cjs (90-day per-material recipients)
+//   canonicalIndex      — from buildRawNameToCanonical
 //
-// Output: one row per lot with a projected recipient and days_to_code_at_ship.
+// Output: one row per lot with a projected recipient, days_to_code_at_ship,
+// shelf_life_days (from allocation OR material history baseline), and a
+// spec_source flag so the UI can distinguish real allocations from baselines.
 //
 // Algorithm:
-//   1. Sort lots per material by expiration_date ASC (FEFO). Nulls last.
-//   2. Sort pending orders by scheduled_arrival ASC.
-//   3. For each pending order line, consume cases from the material's lot
-//      queue, marking each depleted chunk with (order, ship_to canonical,
-//      ship_date). Track sub-lot allocations so partials are handled.
-//   4. Any lot cases NOT consumed by pending orders get projected forward
-//      using the material's daily case rate. Project which canonical account
-//      is likely to receive them by weighting recent order history.
-//   5. Compute days_to_code_at_ship = expiration_date - projected_ship_date.
-//   6. Attach verdict via verdictForLot.
+//   1. Build per-material dominant+strictest maps from 90-day history.
+//   2. Sort lots per material by expiration_date ASC (FEFO). Nulls last.
+//   3. Sort pending orders by scheduled_arrival ASC.
+//   4. Phase A: consume against scheduled demand. Each allocation slice
+//      carries the destination canonical + real ship date.
+//   5. Phase B: remaining lot balance projected forward via velocity to the
+//      material's dominant end-customer (from history). Ship date estimated
+//      at the midpoint of each lot's burn.
+//   6. Roll up per lot: pick earliest allocation as PRIMARY. If primary has
+//      a canonical with a spec, use that spec (source='allocation'). Else
+//      fall back to strictest-baseline (source='material_history'). If
+//      neither exists, spec is null.
+//   7. Compute days_to_code_today, days_to_code_at_ship, shortfall_days,
+//      verdict via verdictForLot.
 
-export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, today }) {
+export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory, canonicalIndex, today }) {
   const now = today ? new Date(today) : new Date()
   const todayMid = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+
+  const { dominantByMaterial, strictestByMaterial } = buildMaterialBaselines(
+    materialShipHistory || [],
+    canonicalIndex,
+  )
 
   // Group lots by material, sort by expiration_date ASC (nulls last).
   const lotsByMaterial = new Map()
@@ -148,31 +221,6 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
     return velByKey.get(`${materialId}|${projectLookup}`)
         || velByMaterial.get(materialId)
         || null
-  }
-
-  // Build a per-material recent-account histogram from pending orders, used
-  // to project "who's most likely to receive leftover cases" for lots not
-  // consumed by scheduled demand.
-  const acctHistByMaterial = new Map() // material_id → Map(canonical_id → cases)
-  for (const ord of pendingOrders) {
-    const canon = resolveCanonical(ord.ship_to_raw_name, canonicalIndex)
-    if (!canon || canon.account_type === 'internal_transfer') continue
-    for (const line of ord.lines || []) {
-      if (!acctHistByMaterial.has(line.material_id)) {
-        acctHistByMaterial.set(line.material_id, new Map())
-      }
-      const h = acctHistByMaterial.get(line.material_id)
-      h.set(canon.id, (h.get(canon.id) || 0) + line.cases)
-    }
-  }
-  const dominantEndCustomerForMaterial = (materialId) => {
-    const h = acctHistByMaterial.get(materialId)
-    if (!h || h.size === 0) return null
-    let bestId = null, bestCases = 0
-    for (const [id, cases] of h) {
-      if (cases > bestCases) { bestCases = cases; bestId = id }
-    }
-    return bestId ? canonicalIndex.byCanonId.get(bestId) : null
   }
 
   // Allocation records: one per (lot, recipient) sub-slice.
@@ -213,17 +261,15 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
     }
   }
 
-  // Phase B: project remaining lot balance forward using velocity.
+  // Phase B: project remaining lot balance forward using velocity + the
+  // material's dominant historical recipient.
   for (const [materialId, queue] of lotsByMaterial) {
     const remaining = queue.reduce((s, l) => s + l._remaining, 0)
     if (remaining <= 0) continue
-    // Pick the dominant PVI project for velocity — first non-null project on
-    // any lot in the queue. Client is CAL-scoped so project distinction is
-    // mostly about which velocity window to use.
     const projectLookup = queue.find(l => l.project_lookup)?.project_lookup || null
     const vel = getVelocity(materialId, projectLookup)
     const perDay = dailyCaseRate(vel)
-    const projectedAccount = dominantEndCustomerForMaterial(materialId)
+    const projectedAccount = dominantByMaterial.get(materialId) || null
     // Cumulative days-to-consume as we walk the queue.
     let cumCases = 0
     for (const lot of queue) {
@@ -265,7 +311,38 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
     const vel = velByKey.get(`${lot.material_id}|${lot.project_lookup}`)
               || velByMaterial.get(lot.material_id)
               || null
-    const shelfLifeDays = getShelfLifeDays(primary?.canonical)
+
+    // Resolve spec + display recipient with the allocation → history fallback.
+    //
+    // 'allocation' spec source: primary allocation has a mapped end-customer
+    // with a configured shelf-life-days. Use that spec, that customer.
+    //
+    // 'material_history' spec source: primary allocation is missing, or its
+    // canonical is an internal_transfer, or has no override_days. Fall back
+    // to the material's 90-day baseline:
+    //   - strictest customer's spec_days for the verdict math
+    //   - dominant customer for the "Projected ship" display
+    // The primary allocation stays as-is (so we can still show a raw ship-to
+    // name if we have one) but shelf_life_days + display canonical get
+    // sourced from baseline.
+    let shelfLifeDays = getShelfLifeDays(primary?.canonical)
+    let specSource   = shelfLifeDays != null ? 'allocation' : null
+    let displayCanonical = primary?.canonical || null
+
+    if (shelfLifeDays == null) {
+      const strictest = strictestByMaterial.get(lot.material_id)
+      if (strictest) {
+        shelfLifeDays = strictest.spec_days
+        specSource   = 'material_history'
+      }
+      // Prefer the dominant recipient for display when no allocation canonical
+      // is present. Keep any raw ship-to name from the primary as-is if it
+      // exists (helps operators see the actual scheduled address).
+      if (!displayCanonical) {
+        displayCanonical = dominantByMaterial.get(lot.material_id) || null
+      }
+    }
+
     const expIso = lot.expiration_date_iso
     const expMs = expIso ? Date.parse(expIso) : null
     const daysToCodeToday = expMs != null
@@ -293,10 +370,21 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
       daysToCodeAtShip,
       shelfLifeDays,
     })
+
+    // Compose a primary suitable for display. If the raw primary is missing
+    // (no allocation at all), synthesize one from baseline so the UI has
+    // something to render.
+    const displayPrimary = primary
+      ? { ...primary, canonical: displayCanonical || primary.canonical }
+      : (displayCanonical
+          ? { cases: lot.cases_available, canonical: displayCanonical, projected_ship_iso: null, source: 'baseline' }
+          : null)
+
     rows.push({
       ...lot,
       allocations:         allocs,
-      primary,
+      primary:             displayPrimary,
+      spec_source:         specSource,
       shelf_life_days:     shelfLifeDays,
       days_to_code_today:  daysToCodeToday,
       days_to_code_at_ship: daysToCodeAtShip,
@@ -362,7 +450,8 @@ export function formatLotForEmail(row) {
     parts.push(`Days to code (at projected ship): ${row.days_to_code_at_ship}`)
   }
   if (row.shelf_life_days) {
-    parts.push(`Customer minimum-at-receipt: ${row.shelf_life_days} days`)
+    const srcLabel = row.spec_source === 'material_history' ? ' (from 90-day history)' : ''
+    parts.push(`Customer minimum-at-receipt: ${row.shelf_life_days} days${srcLabel}`)
     if (row.shortfall_days != null) {
       const s = row.shortfall_days
       parts.push(`Vs. spec: ${s > 0 ? `${s} days SHORT` : s < 0 ? `${-s} days of buffer` : 'exactly at spec'}`)
@@ -376,7 +465,9 @@ export function formatLotForEmail(row) {
       ? `scheduled — ${prim.order_lookup}`
       : prim.source === 'projected'
         ? `projected @ ${(prim.velocity_per_day || 0).toFixed(1)} cs/day`
-        : 'no velocity — unassigned'
+        : prim.source === 'baseline'
+          ? 'material history baseline'
+          : 'no velocity — unassigned'
     parts.push(`Projected ship: ${acct} on ${shipIso} (${src})`)
   } else {
     parts.push(`Projected ship: (unallocated)`)
