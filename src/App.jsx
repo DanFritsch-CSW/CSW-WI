@@ -2,15 +2,23 @@ import { Component, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import TopNav from './components/TopNav.jsx'
 
+// Build-time mode flag. Set via Netlify env var VITE_APP_MODE.
+//   undefined / 'csw' → full CSW internal app (default)
+//   'palermos'        → standalone Palermo's-only view (cswpvi.netlify.app)
+// Read once at module load — Vite inlines this at build so switching modes
+// requires a rebuild (which is exactly what Netlify triggers on push).
+const APP_MODE = import.meta.env.VITE_APP_MODE || 'csw'
+
 // Route-level code splitting — each page ships as its own chunk so the
 // initial JS payload only contains the active route. Subsequent route
 // visits fetch their chunk once and cache it for the session.
-const LaborPlanning   = lazy(() => import('./pages/LaborPlanning.jsx'))
-const InventoryReport = lazy(() => import('./pages/InventoryReport.jsx'))
-const Customers       = lazy(() => import('./pages/Customers.jsx'))
-const OrderCreator    = lazy(() => import('./pages/OrderCreator.jsx'))
-const Analytics       = lazy(() => import('./pages/Analytics.jsx'))
-const Settings        = lazy(() => import('./pages/Settings.jsx'))
+const LaborPlanning      = lazy(() => import('./pages/LaborPlanning.jsx'))
+const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
+const Customers          = lazy(() => import('./pages/Customers.jsx'))
+const OrderCreator       = lazy(() => import('./pages/OrderCreator.jsx'))
+const Analytics          = lazy(() => import('./pages/Analytics.jsx'))
+const Settings           = lazy(() => import('./pages/Settings.jsx'))
+const PalermosStandalone = lazy(() => import('./pages/PalermosStandalone.jsx'))
 
 function PageLoading() {
   return (
@@ -67,6 +75,29 @@ class PageErrorBoundary extends Component {
 }
 
 export default function App() {
+  // Palermo's build: one route, catches everything (so any URL, including
+  // random guesses like /labor-planning, lands on the standalone view — the
+  // other page components aren't even imported in this build, so no code
+  // leaks and there's nowhere for Palermo's users to escape to). No TopNav,
+  // no app-shell wrapper — PalermosStandalone renders its own header.
+  if (APP_MODE === 'palermos') {
+    return (
+      <BrowserRouter>
+        <PageErrorBoundary>
+          <Suspense fallback={<PageLoading />}>
+            <Routes>
+              <Route path="*" element={<PalermosStandalone />} />
+            </Routes>
+          </Suspense>
+        </PageErrorBoundary>
+      </BrowserRouter>
+    )
+  }
+
+  // Default CSW build: full app with all routes. Unchanged from before the
+  // palermos-mode flag was introduced. PVI Shelf Life still lives inside
+  // Customers > ?tab=pvi as it did — same component the palermos build
+  // renders standalone.
   return (
     <BrowserRouter>
       <div className="app-shell">
