@@ -10,18 +10,29 @@
 //   getShelfLifeDays(canonical)
 //   velocityConfidence(shipments30d)
 //   projectFefo({ lots, pendingOrders, velocity, canonicalIndex })
-//   verdictForLot({ daysToCode, shelfLifeDays })
+//   verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays })
 //   formatLotForEmail(row)
 //   bulkCopyForEmail(rows)
 //
-// Verdict engine — day-count math anchors to `expiration_date`:
-//   Watch        ≥ 60% of shelf-life remaining at projected ship
-//   At Risk      30–60% remaining
-//   Critical      0–30% remaining
-//   Unshippable  Past code date at projected ship, but not yet expired today
-//   Expired      Past code date TODAY (regardless of ship projection)
+// ── Verdict semantics (revised 2026-07-02 per Hill feedback) ──────────────
 //
-// These are conventional ratios; Hill/Dean can tune once they see the UI live.
+// The customer's shelf-life-days requirement is a MINIMUM at receipt — i.e.
+// "Costco needs 156 days remaining when the load lands." A lot arriving with
+// less than that is below spec and subject to rejection or discount. The
+// verdict engine now compares days-to-code-at-ship against that minimum, not
+// against the total lifetime of the product:
+//
+//   ratio = daysToCodeAtShip / shelfLifeDays
+//
+//   Watch        ratio ≥ 1.0    (meets or exceeds customer minimum)
+//   At Risk      0.5 ≤ ratio < 1.0    (below customer spec, likely negotiable)
+//   Critical     ratio < 0.5    (well below spec, needs escalation)
+//   Unshippable  daysToCodeAtShip ≤ 0 but not yet expired today
+//   Expired      Past code date TODAY
+//
+// Previous thresholds (0.6/0.3) were framed as "how much of the shelf life is
+// left" which understated risk — a lot at 60% of Costco's spec looked "fine"
+// when Costco would actually reject it.
 
 export const STAGE_ORDER = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 
@@ -271,6 +282,12 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
       )
       daysToCodeAtShip = Math.round((expMs - shipDay) / 86400000)
     }
+    // Shortfall = how many days below the customer's minimum-at-receipt spec.
+    // Positive = below spec by that many days. Negative = compliant with N
+    // days of buffer above spec. Null = no spec configured.
+    const shortfallDays = (shelfLifeDays && daysToCodeAtShip != null)
+      ? shelfLifeDays - daysToCodeAtShip
+      : null
     const verdict = verdictForLot({
       daysToCodeToday,
       daysToCodeAtShip,
@@ -283,6 +300,7 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
       shelf_life_days:     shelfLifeDays,
       days_to_code_today:  daysToCodeToday,
       days_to_code_at_ship: daysToCodeAtShip,
+      shortfall_days:      shortfallDays,
       velocity:            vel,
       velocity_confidence: vel ? velocityConfidence(vel.shipments_30d) : { tier: 'low', label: 'None', color: '#999' },
       verdict,
@@ -293,6 +311,14 @@ export function projectFefo({ lots, pendingOrders, velocity, canonicalIndex, tod
 }
 
 // ── Verdict engine ────────────────────────────────────────────────────────
+//
+// Ratio semantics: days-to-code-at-ship / customer's minimum-at-receipt spec.
+//   ≥ 1.0  → meets spec (Watch)
+//   0.5–1.0 → below spec, negotiable (At Risk)
+//   < 0.5  → deep below spec, needs escalation (Critical)
+// Absolute-date fallbacks (Expired, Unshippable) override the ratio math.
+// No-spec fallback (unmapped account or internal transfer) uses days-to-code-
+// today with a 30-day soft-critical trigger.
 
 export function verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays }) {
   // Expired trumps everything — past code today = write-off candidate.
@@ -304,12 +330,11 @@ export function verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays
     return { stage: 'watch', ...STAGE_META.watch, missingData: true }
   }
   // Unshippable = code date passes before we can ship it out.
-  if (daysToCodeAtShip < 0) {
+  if (daysToCodeAtShip <= 0) {
     return { stage: 'unshippable', ...STAGE_META.unshippable }
   }
   // No shelf-life days configured — projected recipient is internal transfer
-  // or unmapped account. Skip ratio math; fall back to a soft-watch bucket
-  // gated purely on days-to-code-today.
+  // or unmapped account. Skip ratio math; fall back to a soft rule.
   if (!shelfLifeDays || shelfLifeDays <= 0) {
     if (daysToCodeToday != null && daysToCodeToday < 30) {
       return { stage: 'critical', ...STAGE_META.critical, noShelfLifeCfg: true }
@@ -317,8 +342,8 @@ export function verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays
     return { stage: 'watch', ...STAGE_META.watch, noShelfLifeCfg: true }
   }
   const ratio = daysToCodeAtShip / shelfLifeDays
-  if (ratio < 0.3) return { stage: 'critical', ...STAGE_META.critical, ratio }
-  if (ratio < 0.6) return { stage: 'at_risk',  ...STAGE_META.at_risk,  ratio }
+  if (ratio < 0.5) return { stage: 'critical', ...STAGE_META.critical, ratio }
+  if (ratio < 1.0) return { stage: 'at_risk',  ...STAGE_META.at_risk,  ratio }
   return { stage: 'watch', ...STAGE_META.watch, ratio }
 }
 
@@ -335,6 +360,13 @@ export function formatLotForEmail(row) {
   parts.push(`Days to code (today): ${row.days_to_code_today ?? '?'}`)
   if (row.days_to_code_at_ship != null && row.days_to_code_at_ship !== row.days_to_code_today) {
     parts.push(`Days to code (at projected ship): ${row.days_to_code_at_ship}`)
+  }
+  if (row.shelf_life_days) {
+    parts.push(`Customer minimum-at-receipt: ${row.shelf_life_days} days`)
+    if (row.shortfall_days != null) {
+      const s = row.shortfall_days
+      parts.push(`Vs. spec: ${s > 0 ? `${s} days SHORT` : s < 0 ? `${-s} days of buffer` : 'exactly at spec'}`)
+    }
   }
   const prim = row.primary
   if (prim) {
