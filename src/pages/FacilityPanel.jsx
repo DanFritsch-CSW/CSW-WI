@@ -22,6 +22,10 @@ import {
   fetchHourlyAdjustments,
   upsertHourlyAdjustment,
   fetchWeeklyProjectDrops,
+  fetchPicklineSnapshot,
+  upsertPicklineSnapshot,
+  updatePicklineOverrides,
+  deletePicklineSnapshot,
 } from '../lib/supabase.js'
 import { useSettings } from '../hooks/useSettings.js'
 import { applySettings, computeDailyKpis, buildRosterAvailability, buildRosterStaffedHeadcount } from '../lib/laborCalc.js'
@@ -175,6 +179,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
 
   const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
   const [picklineOverrides, setPicklineOverrides] = useState({})
+  const [picklineLoading,   setPicklineLoading]   = useState(false)
 
   const { settings, loading: settingsLoading, projectHpa } = useSettings(facility.id)
 
@@ -217,6 +222,37 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
     loadWeekly()
     return () => { cancelled = true }
   }, [facility.id, weekStart, weekEnd])
+
+  // ── Persisted Pickline snapshot (WR only) ───────────────────────────────
+  // The Pull-from-Omni / Excel-upload output is persisted to Supabase, keyed
+  // by (facility, plan_date), so refreshing the page or opening on another
+  // computer shows the SAME brief instead of prompting a fresh pull. A fresh
+  // pull only happens when the user explicitly clicks Pull-from-Omni or
+  // uploads a new Excel file — which then becomes the new shared snapshot
+  // for everyone. Fixes the bug where refresh wiped the brief and cross-
+  // device access returned different data pulled at a different moment.
+  //
+  // Reset state on every facility/date change so we don't briefly show
+  // yesterday's brief while today's row is being fetched. picklineLoading
+  // gates PicklinePanel's upload screen so it doesn't flash on load.
+  useEffect(() => {
+    if (!isWr) return
+    let cancelled = false
+    setPicklineSnapshot(null)
+    setPicklineOverrides({})
+    setPicklineLoading(true)
+    fetchPicklineSnapshot(facility.id, planDate)
+      .then(row => {
+        if (cancelled) return
+        if (row?.snapshot) {
+          setPicklineSnapshot(row.snapshot)
+          setPicklineOverrides(row.hourOverrides ?? {})
+        }
+      })
+      .catch(e => console.warn('fetchPicklineSnapshot failed (non-fatal):', e?.message))
+      .finally(() => { if (!cancelled) setPicklineLoading(false) })
+    return () => { cancelled = true }
+  }, [isWr, facility.id, planDate])
 
   const refreshAppointments = useCallback(async () => {
     try {
@@ -945,9 +981,31 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
               <PicklinePanel
                 snapshot={picklineSnapshot}
                 hourOverrides={picklineOverrides}
-                onSnapshot={snap => { setPicklineSnapshot(snap); setPicklineOverrides({}) }}
-                onOverridesChange={setPicklineOverrides}
-                onClear={() => { setPicklineSnapshot(null); setPicklineOverrides({}) }}
+                loading={picklineLoading}
+                onSnapshot={snap => {
+                  // A new snapshot (Pull-from-Omni or Excel upload) becomes
+                  // the shared brief for everyone until someone explicitly
+                  // re-pulls or loads a new file. hour_overrides get reset
+                  // by upsertPicklineSnapshot because the new snapshot's
+                  // route counts invalidate any prior per-hour tweaks.
+                  setPicklineSnapshot(snap)
+                  setPicklineOverrides({})
+                  upsertPicklineSnapshot(facility.id, planDate, snap, snap?.source)
+                }}
+                onOverridesChange={next => {
+                  // Support both direct-object and updater-function styles;
+                  // PicklinePanel's setHourOverride uses the updater form.
+                  setPicklineOverrides(prev => {
+                    const resolved = typeof next === 'function' ? next(prev) : next
+                    updatePicklineOverrides(facility.id, planDate, resolved)
+                    return resolved
+                  })
+                }}
+                onClear={() => {
+                  setPicklineSnapshot(null)
+                  setPicklineOverrides({})
+                  deletePicklineSnapshot(facility.id, planDate)
+                }}
                 planDate={planDate}
               />
             </Suspense>
