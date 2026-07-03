@@ -825,7 +825,7 @@ export default function PicklinePanel({ snapshot, hourOverrides, loading, onSnap
                 <div style={{fontSize:12,color:'#444',lineHeight:2.0}}>
                   <div>Shift capacity: <strong>{target.toLocaleString()} cs</strong></div>
                   <div>Primary complete est: <strong>~{netDoneTime}</strong></div>
-                  <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>{totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}` : `${(netCs-totalCap).toLocaleString()}cs SHORT`}</strong></div>
+                  <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>{totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:''}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}</strong></div>
                 </div>
               </div>
               <PickTable
