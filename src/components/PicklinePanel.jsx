@@ -674,7 +674,7 @@ function PickTable({ pickers, cpmh, tl, netCs, hourOverrides, setHourOverride, r
 }
 
 // ─── PicklinePanel ────────────────────────────────────────────────────────────
-export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onOverridesChange, onClear, planDate }) {
+export default function PicklinePanel({ snapshot, hourOverrides, loading, onSnapshot, onOverridesChange, onClear, planDate }) {
   const [pickers,       setPickers]      = useState(9)
   const [cpmh,          setCpmh]         = useState(150)
   const [crewMode,      setCrewMode]     = useState('spread')
@@ -797,7 +797,9 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
 
       {wrTab === 'brief' && (
         <div>
-          {!snapshot ? (
+          {loading ? (
+            <div style={{textAlign:'center',color:'#888',padding:60,fontSize:12}}>Loading pick brief…</div>
+          ) : !snapshot ? (
             <UploadArea onSnapshot={onSnapshot} scheduleRows={scheduleRows} planDate={planDate} />
           ) : (
             <div>
@@ -823,7 +825,7 @@ export default function PicklinePanel({ snapshot, hourOverrides, onSnapshot, onO
                 <div style={{fontSize:12,color:'#444',lineHeight:2.0}}>
                   <div>Shift capacity: <strong>{target.toLocaleString()} cs</strong></div>
                   <div>Primary complete est: <strong>~{netDoneTime}</strong></div>
-                  <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>{totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:''}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}</strong></div>
+                  <div>Pre-pick: <strong style={{color:totalCap>=netCs?'#6A1B9A':'#C62828'}}>{totalCap>=netCs?`~${monPickable.toLocaleString()}cs available${nextDates[0]?` → ${fmtDate(nextDates[0].date)}`:`${(netCs-totalCap).toLocaleString()}cs SHORT`}` : `${(netCs-totalCap).toLocaleString()}cs SHORT`}</strong></div>
                 </div>
               </div>
               <PickTable
