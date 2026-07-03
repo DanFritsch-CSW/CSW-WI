@@ -29,6 +29,12 @@ import {
 // per-lot and bulk. Stage filter defaults to "At Risk and worse".
 
 const STAGES_FOR_TABS = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
+const PROJECT_OPTIONS = [
+  { value: '',         label: 'All PVI projects' },
+  { value: 'PALVI9',   label: 'PALVI9' },
+  { value: 'PALMA9',   label: 'PALMA9' },
+  { value: 'PALDSD9',  label: 'PALDSD9' },
+]
 
 export default function PviShelfLife() {
   const [snapshot, setSnapshot]         = useState(null)   // response from function
@@ -42,6 +48,7 @@ export default function PviShelfLife() {
   // Filters
   const [enabledStages, setEnabledStages] = useState(new Set(DEFAULT_STAGES))
   const [accountFilter, setAccountFilter] = useState('')  // canonical_id string or ''
+  const [projectFilter, setProjectFilter] = useState('')  // PALVI9 | PALMA9 | PALDSD9 | ''
   const [textFilter, setTextFilter]       = useState('')
 
   // Selection
@@ -93,17 +100,22 @@ export default function PviShelfLife() {
     })
   }, [snapshot, canonicalIndex])
 
-  // Stage counts for the tab row (ignoring account/text filter — always
-  // reflect the raw universe so the operator sees the full workload).
+  // Stage counts for the tab row — respect project filter but ignore stage/
+  // account/text filters, so the operator sees the full workload for whatever
+  // project scope they've chosen.
   const stageCounts = useMemo(() => {
     const c = { expired: 0, unshippable: 0, critical: 0, at_risk: 0, watch: 0 }
-    for (const r of rows) c[r.verdict.stage] = (c[r.verdict.stage] || 0) + 1
+    for (const r of rows) {
+      if (projectFilter && r.project_lookup !== projectFilter) continue
+      c[r.verdict.stage] = (c[r.verdict.stage] || 0) + 1
+    }
     return c
-  }, [rows])
+  }, [rows, projectFilter])
 
   // Filtered rows for the table.
   const filteredRows = useMemo(() => {
     return rows.filter(r => {
+      if (projectFilter && r.project_lookup !== projectFilter) return false
       if (!enabledStages.has(r.verdict.stage)) return false
       if (accountFilter) {
         const canonId = r.primary?.canonical?.id ?? null
@@ -116,15 +128,19 @@ export default function PviShelfLife() {
       }
       return true
     }).sort((a, b) => {
-      // Sort by stage severity DESC, then by days-to-code ASC (worst first).
+      // Sort by stage severity DESC, then by shortfall DESC (worst first),
+      // then by days-to-code ASC.
       const sa = STAGE_ORDER.indexOf(a.verdict.stage)
       const sb = STAGE_ORDER.indexOf(b.verdict.stage)
       if (sa !== sb) return sa - sb
+      const shA = a.shortfall_days ?? -9999
+      const shB = b.shortfall_days ?? -9999
+      if (shA !== shB) return shB - shA
       const da = a.days_to_code_today ?? 9999
       const db = b.days_to_code_today ?? 9999
       return da - db
     })
-  }, [rows, enabledStages, accountFilter, textFilter])
+  }, [rows, projectFilter, enabledStages, accountFilter, textFilter])
 
   const selectedRow = useMemo(
     () => filteredRows.find(r => r.lot_id === selectedLotId) || rows.find(r => r.lot_id === selectedLotId) || null,
@@ -228,6 +244,15 @@ export default function PviShelfLife() {
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <select
             className="est-drops-select"
+            value={projectFilter}
+            onChange={e => setProjectFilter(e.target.value)}
+            style={{ fontSize: 11 }}
+            title="Filter to a specific Palermo's project"
+          >
+            {PROJECT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <select
+            className="est-drops-select"
             value={accountFilter}
             onChange={e => setAccountFilter(e.target.value)}
             style={{ fontSize: 11 }}
@@ -275,7 +300,8 @@ export default function PviShelfLife() {
                 <th style={{ textAlign: 'left' }}>Item</th>
                 <th style={{ textAlign: 'left' }}>Lot</th>
                 <th style={{ textAlign: 'left' }}>Code date</th>
-                <th style={{ textAlign: 'right' }}>Days to code</th>
+                <th style={{ textAlign: 'right' }} title="Days remaining until code date (today)">Days to code</th>
+                <th style={{ textAlign: 'right' }} title="Customer's minimum-days-at-receipt spec; red delta = days short of spec at projected ship">Vs. spec</th>
                 <th style={{ textAlign: 'right' }}>Available</th>
                 <th style={{ textAlign: 'left' }}>Projected ship</th>
                 <th style={{ textAlign: 'left' }}>Velocity</th>
@@ -331,6 +357,17 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
   const daysToCode = row.days_to_code_today
   const daysAtShip = row.days_to_code_at_ship
   const vc = row.velocity_confidence
+  const req = row.shelf_life_days
+  const shortfall = row.shortfall_days
+  // Shortfall coloring:
+  //   > 0  = SHORT of spec (bad)   → red
+  //   = 0  = exactly at spec       → amber
+  //   < 0  = buffer above spec     → green
+  const shortColor = shortfall == null
+    ? 'var(--text-dim)'
+    : shortfall > 0 ? '#d1583a'
+    : shortfall < 0 ? '#3a7a3a'
+    : '#c88a2a'
 
   return (
     <tr
@@ -357,6 +394,9 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
         <div>{row.material_code}</div>
         <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{row.material_desc}</div>
+        {row.project_lookup && (
+          <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>{row.project_lookup}</div>
+        )}
       </td>
       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
         {row.lot_code}
@@ -378,6 +418,20 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
         )}
       </td>
       <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        {req == null ? (
+          <span style={{ color: 'var(--text-dim)' }} title={prim?.canonical?.account_type === 'internal_transfer' ? 'Internal transfer — no shelf-life spec' : 'No shelf-life spec configured for this account'}>
+            —
+          </span>
+        ) : (
+          <>
+            <div style={{ color: 'var(--text-dim)', fontSize: 10 }}>req {req}d</div>
+            <div style={{ color: shortColor, fontWeight: 600 }}>
+              {shortfall > 0 ? `▼ ${shortfall}d short` : shortfall < 0 ? `▲ ${-shortfall}d buffer` : 'at spec'}
+            </div>
+          </>
+        )}
+      </td>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
         <div>{row.cases_available}</div>
         {row.cases_committed > 0 && (
           <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>
@@ -395,7 +449,7 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
         <span style={{ color: vc.color, fontWeight: 600 }}>{vc.label}</span>
         {row.velocity && (
           <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>
-            {row.velocity.shipments_30d} ship/30d
+            {row.velocity.shipments_30d} orders / 30d
           </div>
         )}
       </td>
@@ -503,6 +557,17 @@ function NotesDrawer({ row, notes, allNotesForItem, onClose, onNotesChanged }) {
           <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: 4 }}>
             Lot {row.lot_code} · {row.cases_available} cs available
           </div>
+          {row.shelf_life_days != null && row.shortfall_days != null && (
+            <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+              {row.days_to_code_at_ship}d to code @ ship · req {row.shelf_life_days}d ·{' '}
+              <span style={{
+                color: row.shortfall_days > 0 ? '#d1583a' : row.shortfall_days < 0 ? '#3a7a3a' : '#c88a2a',
+                fontWeight: 600,
+              }}>
+                {row.shortfall_days > 0 ? `${row.shortfall_days}d short` : row.shortfall_days < 0 ? `${-row.shortfall_days}d buffer` : 'at spec'}
+              </span>
+            </div>
+          )}
         </div>
         <button className="settings-save-btn" onClick={onClose} style={{ fontSize: 10 }}>Close</button>
       </div>
