@@ -23,8 +23,11 @@
 //       cases_30d, cases_60d, cases_90d,
 //       shipments_30d }
 //   ],
+//   materialShipHistory: [
+//     { material_id, ship_to_raw_name, cases_90d, shipments_90d }
+//   ],
 //   fetchedAt, elapsedMs, source: 'motherduck',
-//   rowCounts: { lots, pendingOrders, velocity }
+//   rowCounts: { lots, pendingOrders, velocity, materialShipHistory }
 // }
 //
 // The function is intentionally thin — it returns raw facts. All business
@@ -281,6 +284,47 @@ exports.handler = async (event) => {
     `
     const velRows = await runQuery(velSql)
 
+    // ── Query 4: Material × ship-to 90-day pick history ──────────────────
+    //
+    // For each PVI material, list every ship-to that received cases in the
+    // last 90 days along with total cases + shipment count. The client uses
+    // this to compute:
+    //   (a) Dominant recipient per material (whoever got the most cases) —
+    //       used to fill in "Projected ship" for lots with no scheduled
+    //       demand and no velocity-based allocation.
+    //   (b) Strictest spec per material (MAX of shelf-life-days across all
+    //       resolved-canonical recipients) — used as the fallback baseline
+    //       for the Vs. Spec column when no primary allocation exists.
+    //
+    // Verified query size: ~5k rows across ~740 materials × ~160 ship-tos
+    // for the current PVI corpus. Small enough to ship over the wire.
+    const histSql = `
+      WITH pvi_projects AS (
+        SELECT project_id, lookup_code
+        FROM production_db.silver.datex_slv_projects
+        WHERE lookup_code IN (${projList})
+      )
+      SELECT
+        t.material_id,
+        oa."Name"                                    AS ship_to_raw_name,
+        SUM(t.actual_packaged_amount)                AS cases_90d,
+        COUNT(DISTINCT t.order_id)                   AS shipments_90d
+      FROM production_db.silver.datex_slv_tasks t
+      JOIN production_db.silver.datex_slv_taskstatuses ts ON ts.task_status_id = t.status_id
+      JOIN production_db.silver.datex_slv_orders o        ON o.order_id = t.order_id
+      JOIN pvi_projects p                                 ON p.project_id = o.project_id
+      LEFT JOIN production_db.silver.datex_slv_orderaddresses oa
+        ON oa.order_id = t.order_id AND oa.type_id = 2
+      WHERE t.warehouse_id = ${CAL_WAREHOUSE_ID}
+        AND ts.status_name = 'Completed'
+        AND t.actual_packaged_amount > 0
+        AND t.parquet_record_sys_date_time >= CURRENT_DATE - INTERVAL 90 DAY
+        AND oa."Name" IS NOT NULL
+        AND oa."Name" != ''
+      GROUP BY t.material_id, oa."Name"
+    `
+    const histRows = await runQuery(histSql)
+
     // ── Shape response ───────────────────────────────────────────────────
 
     const lots = lotRows.map(r => ({
@@ -329,6 +373,13 @@ exports.handler = async (event) => {
       shipments_30d:  Number(r.shipments_30d) || 0,
     }))
 
+    const materialShipHistory = histRows.map(r => ({
+      material_id:      Number(r.material_id),
+      ship_to_raw_name: r.ship_to_raw_name || '',
+      cases_90d:        Number(r.cases_90d) || 0,
+      shipments_90d:    Number(r.shipments_90d) || 0,
+    }))
+
     try { conn?.close(); db?.close() } catch (_) {}
 
     return {
@@ -337,13 +388,15 @@ exports.handler = async (event) => {
         lots,
         pendingOrders,
         velocity,
+        materialShipHistory,
         fetchedAt: new Date().toISOString(),
         elapsedMs: Date.now() - t0,
         source: 'motherduck',
         rowCounts: {
-          lots:          lotRows.length,
-          pendingOrders: orderRows.length,
-          velocity:      velRows.length,
+          lots:                lotRows.length,
+          pendingOrders:       orderRows.length,
+          velocity:            velRows.length,
+          materialShipHistory: histRows.length,
         },
       }),
     }
