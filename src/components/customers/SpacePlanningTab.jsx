@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FACILITY_DOTS, FACILITY_NAMES, FACILITIES, PHASE3_FACILITIES,
   ZONES, utilBand, facilityCapacity, facilityActual, facilityUtil,
   networkCapacity, networkActual, networkUtil, isFacilityLive,
   fmtInt, fmtPct, fmtTime,
   fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
-  fetchLivePerRoomActuals,
+  fetchLivePerRoomActuals, updateRoomCapacity,
 } from '../../lib/spacePlanning.js'
 
 // Phase 2 — Network/ALL view is read-only.
@@ -17,7 +17,9 @@ import {
 //   come from netlify/functions/space-per-room via fetchLivePerRoomActuals.
 //   Rooms are joined by space_rooms.datex_top_location_id → the top-level
 //   Datex location container. Other facilities still show the deferred
-//   placeholder until their room lists get seeded.
+//   placeholder until their room lists get seeded. Capacity (slots × stack)
+//   is editable inline in this tab — no separate Settings page — via
+//   CapacityCell + updateRoomCapacity.
 export default function SpacePlanningTab() {
   const [facility, setFacility] = useState('all')
   const [rooms, setRooms] = useState([])
@@ -85,7 +87,13 @@ export default function SpacePlanningTab() {
           />
         )}
         {!loading && !error && facility !== 'all' && PHASE3_FACILITIES.has(facility) && (
-          <FacilityRoomView facility={facility} rooms={rooms} />
+          <FacilityRoomView
+            facility={facility}
+            rooms={rooms}
+            onRoomUpdated={(roomId, patch) => {
+              setRooms(prev => prev.map(r => r.id === roomId ? { ...r, ...patch } : r))
+            }}
+          />
         )}
         {!loading && !error && facility !== 'all' && !PHASE3_FACILITIES.has(facility) && (
           <FacilityPlaceholder facility={facility} />
@@ -457,7 +465,7 @@ function FacilityPlaceholder({ facility }) {
 
 // ─── Phase 3: single-facility per-room view (MAD only for now) ─────────────
 
-function FacilityRoomView({ facility, rooms }) {
+function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
   const facilityRooms = useMemo(
     () => rooms.filter(r => r.facility === facility),
     [rooms, facility]
@@ -548,7 +556,7 @@ function FacilityRoomView({ facility, rooms }) {
       {/* Per-room table */}
       <div>
         <SectionLabel>ROOMS</SectionLabel>
-        <RoomTable rows={rows} liveLoading={liveLoading} isLive={isLive} />
+        <RoomTable rows={rows} liveLoading={liveLoading} isLive={isLive} onRoomUpdated={onRoomUpdated} />
       </div>
 
       {/* Footnote about counting semantics */}
@@ -564,7 +572,8 @@ function FacilityRoomView({ facility, rooms }) {
         Per-room count is the physical active LP total (all non-archived license plates
         in each room, warehouse-scoped). The Network scorecard uses a project-joined
         count that filters out internal/unassigned LPs, so the two totals will differ.
-        Slots × Stack columns will populate once you set them in Settings.
+        Click any Slots × Stack cell to set capacity — it saves immediately, no separate
+        Settings page needed. Utilization uses the physical LP count against that capacity.
       </div>
     </div>
   )
@@ -598,7 +607,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive }) {
+function RoomTable({ rows, liveLoading, isLive, onRoomUpdated }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -614,6 +623,7 @@ function RoomTable({ rows, liveLoading, isLive }) {
     )
   }
   const total = rows.reduce((s, r) => s + (r.live_lps ?? 0), 0)
+  const GRID = '1.1fr 0.9fr 0.9fr 1.3fr 0.9fr 0.8fr'
   return (
     <div style={{
       marginTop: 10,
@@ -624,7 +634,7 @@ function RoomTable({ rows, liveLoading, isLive }) {
     }}>
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr',
+        gridTemplateColumns: GRID,
         padding: '10px 14px',
         background: 'var(--bg2, #f8f9fb)',
         borderBottom: '1px solid var(--border)',
@@ -638,15 +648,23 @@ function RoomTable({ rows, liveLoading, isLive }) {
         <div>Zone</div>
         <div style={{ textAlign: 'right' }}>Live LPs</div>
         <div style={{ textAlign: 'right' }}>Slots × Stack</div>
+        <div style={{ textAlign: 'right' }}>Util</div>
         <div style={{ textAlign: 'right' }}>Datex ID</div>
       </div>
       {rows.map(row => (
-        <RoomRow key={row.id} row={row} liveLoading={liveLoading} isLive={isLive} />
+        <RoomRow
+          key={row.id}
+          row={row}
+          liveLoading={liveLoading}
+          isLive={isLive}
+          gridTemplate={GRID}
+          onRoomUpdated={onRoomUpdated}
+        />
       ))}
       {/* Total row */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr',
+        gridTemplateColumns: GRID,
         padding: '10px 14px',
         background: 'var(--bg2, #f8f9fb)',
         borderTop: '2px solid var(--border)',
@@ -661,18 +679,21 @@ function RoomTable({ rows, liveLoading, isLive }) {
         </div>
         <div />
         <div />
+        <div />
       </div>
     </div>
   )
 }
 
-function RoomRow({ row, liveLoading, isLive }) {
+function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const cap = (row.slots || 0) * (row.stack || 0)
+  const util = cap > 0 && row.live_lps != null ? (row.live_lps / cap) * 100 : null
+  const band = utilBand(util)
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr',
+      gridTemplateColumns: gridTemplate,
       padding: '10px 14px',
       borderBottom: '1px solid var(--border-subtle, #eceff5)',
       fontSize: 13,
@@ -698,13 +719,15 @@ function RoomRow({ row, liveLoading, isLive }) {
       }}>
         {liveLoading ? '…' : (row.live_lps != null ? fmtInt(row.live_lps) : '—')}
       </div>
+      <CapacityCell room={row} onRoomUpdated={onRoomUpdated} />
       <div style={{
         textAlign: 'right',
         fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        color: cap > 0 ? 'var(--text-primary)' : 'var(--text-dim)',
         fontSize: 12,
+        fontWeight: util != null ? 600 : 400,
+        color: util != null ? band.color : 'var(--text-dim)',
       }}>
-        {cap > 0 ? `${row.slots} × ${row.stack} = ${fmtInt(cap)}` : '—'}
+        {util != null ? fmtPct(util) : '—'}
       </div>
       <div style={{
         textAlign: 'right',
@@ -714,6 +737,149 @@ function RoomRow({ row, liveLoading, isLive }) {
       }}>
         {row.datex_top_location_id ?? '—'}
       </div>
+    </div>
+  )
+}
+
+// Click-to-edit Slots × Stack cell. Follows the same pattern as PickScheduleEditor's
+// inline-editable cells: click to enter edit mode, two small number inputs, save on
+// blur (when both inputs have lost focus) or Enter key. Escape cancels and reverts.
+// Writes directly to Supabase via updateRoomCapacity — no separate Settings page.
+function CapacityCell({ room, onRoomUpdated }) {
+  const [editing, setEditing] = useState(false)
+  const [slots, setSlots] = useState(room.slots || 0)
+  const [stack, setStack] = useState(room.stack || 0)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+  const blurTimerRef = useRef(null)
+
+  // Keep local input state in sync if the room prop changes externally
+  // (e.g. another tab/session updated it and a refetch happened).
+  useEffect(() => {
+    if (!editing) {
+      setSlots(room.slots || 0)
+      setStack(room.stack || 0)
+    }
+  }, [room.slots, room.stack, editing])
+
+  const cap = (room.slots || 0) * (room.stack || 0)
+
+  async function commit() {
+    const nextSlots = Math.max(0, Math.round(Number(slots) || 0))
+    const nextStack = Math.max(0, Math.round(Number(stack) || 0))
+    if (nextSlots === (room.slots || 0) && nextStack === (room.stack || 0)) {
+      setEditing(false)
+      setErr(null)
+      return
+    }
+    setSaving(true)
+    setErr(null)
+    const result = await updateRoomCapacity(room.id, { slots: nextSlots, stack: nextStack })
+    setSaving(false)
+    if (result.success) {
+      onRoomUpdated?.(room.id, { slots: nextSlots, stack: nextStack })
+      setEditing(false)
+    } else {
+      setErr(result.error || 'Save failed')
+      // Stay in edit mode so the user doesn't lose their input.
+    }
+  }
+
+  function cancel() {
+    setSlots(room.slots || 0)
+    setStack(room.stack || 0)
+    setEditing(false)
+    setErr(null)
+  }
+
+  // Debounced blur: only commit if focus has left BOTH inputs (moving from
+  // the slots input to the stack input shouldn't trigger a save mid-edit).
+  function handleBlur() {
+    if (blurTimerRef.current) clearTimeout(blurTimerRef.current)
+    blurTimerRef.current = setTimeout(() => {
+      if (editing) commit()
+    }, 120)
+  }
+  function handleFocus() {
+    if (blurTimerRef.current) clearTimeout(blurTimerRef.current)
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        title="Click to edit capacity"
+        style={{
+          textAlign: 'right',
+          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          fontSize: 12,
+          color: cap > 0 ? 'var(--text-primary)' : 'var(--text-dim)',
+          background: 'none',
+          border: '1px dashed transparent',
+          borderRadius: 4,
+          padding: '2px 4px',
+          cursor: 'pointer',
+          font: 'inherit',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border)' }}
+        onMouseLeave={e => { e.currentTarget.style.borderColor = 'transparent' }}
+      >
+        {cap > 0 ? `${room.slots} × ${room.stack} = ${fmtInt(cap)}` : 'Set capacity'}
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
+        <input
+          type="number"
+          min="0"
+          autoFocus
+          value={slots}
+          onChange={e => setSlots(e.target.value)}
+          onBlur={handleBlur}
+          onFocus={handleFocus}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); commit() }
+            if (e.key === 'Escape') { e.preventDefault(); cancel() }
+          }}
+          disabled={saving}
+          style={{
+            width: 48, fontSize: 12, padding: '2px 4px',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            border: '1px solid var(--border)', borderRadius: 4,
+            textAlign: 'right',
+          }}
+        />
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>×</span>
+        <input
+          type="number"
+          min="0"
+          value={stack}
+          onChange={e => setStack(e.target.value)}
+          onBlur={handleBlur}
+          onFocus={handleFocus}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); commit() }
+            if (e.key === 'Escape') { e.preventDefault(); cancel() }
+          }}
+          disabled={saving}
+          style={{
+            width: 48, fontSize: 12, padding: '2px 4px',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            border: '1px solid var(--border)', borderRadius: 4,
+            textAlign: 'right',
+          }}
+        />
+      </div>
+      {saving && (
+        <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>Saving…</span>
+      )}
+      {err && (
+        <span style={{ fontSize: 9, color: 'var(--red, #c0392b)' }}>{err}</span>
+      )}
     </div>
   )
 }
