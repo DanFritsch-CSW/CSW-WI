@@ -213,6 +213,32 @@ export async function fetchLiveActualsPerFacility() {
   }
 }
 
+// ─── Phase 3 — Room capacity edits (in-tab, MAD only) ─────────────────────────────
+//
+// Inline capacity editor lives inside SpacePlanningTab's FacilityRoomView —
+// there is no separate Settings page for this. Updates slots + stack on a
+// single room row. Called on blur/save from the CapacityCell component.
+//
+// Returns { success: true, room } on success, { success: false, error } on
+// failure. Caller (CapacityCell) shows an inline error and keeps the edit
+// open so the user doesn't lose their input.
+export async function updateRoomCapacity(roomId, { slots, stack }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const cleanSlots = Math.max(0, Math.round(Number(slots) || 0))
+  const cleanStack  = Math.max(0, Math.round(Number(stack) || 0))
+  const { data, error } = await supabase
+    .from('space_rooms')
+    .update({ slots: cleanSlots, stack: cleanStack, updated_at: new Date().toISOString() })
+    .eq('id', roomId)
+    .select()
+    .single()
+  if (error) {
+    console.error('updateRoomCapacity:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true, room: data }
+}
+
 // ─── Phase 3 — Live per-room actuals ─────────────────────────────────────────────
 //
 // Fetches physical LP counts per top-level Datex room for a single facility
