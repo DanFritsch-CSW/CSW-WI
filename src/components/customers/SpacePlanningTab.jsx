@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  FACILITY_DOTS, FACILITY_NAMES, FACILITIES,
-  utilBand, facilityCapacity, facilityActual, facilityUtil,
+  FACILITY_DOTS, FACILITY_NAMES, FACILITIES, PHASE3_FACILITIES,
+  ZONES, utilBand, facilityCapacity, facilityActual, facilityUtil,
   networkCapacity, networkActual, networkUtil, isFacilityLive,
   fmtInt, fmtPct, fmtTime,
   fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
+  fetchLivePerRoomActuals,
 } from '../../lib/spacePlanning.js'
 
 // Phase 2 — Network/ALL view is read-only.
@@ -12,8 +13,11 @@ import {
 //   available, falling back to seeded Supabase fixtures per-facility on Omni
 //   failure. The seeded path was the entire data source in Phase 2; it now
 //   serves as graceful degradation.
-// Phase 3 (single-facility view) still needs the Datex location → room
-// mapping, which is deferred.
+// Phase 3 (single-facility view) — currently MAD-only. Per-room LP counts
+//   come from netlify/functions/space-per-room via fetchLivePerRoomActuals.
+//   Rooms are joined by space_rooms.datex_top_location_id → the top-level
+//   Datex location container. Other facilities still show the deferred
+//   placeholder until their room lists get seeded.
 export default function SpacePlanningTab() {
   const [facility, setFacility] = useState('all')
   const [rooms, setRooms] = useState([])
@@ -80,7 +84,10 @@ export default function SpacePlanningTab() {
             onFacilityClick={setFacility}
           />
         )}
-        {!loading && !error && facility !== 'all' && (
+        {!loading && !error && facility !== 'all' && PHASE3_FACILITIES.has(facility) && (
+          <FacilityRoomView facility={facility} rooms={rooms} />
+        )}
+        {!loading && !error && facility !== 'all' && !PHASE3_FACILITIES.has(facility) && (
           <FacilityPlaceholder facility={facility} />
         )}
       </div>
@@ -444,6 +451,269 @@ function FacilityPlaceholder({ facility }) {
       <p style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 8 }}>
         Phase 3 — needs Datex location → room mapping (currently deferred)
       </p>
+    </div>
+  )
+}
+
+// ─── Phase 3: single-facility per-room view (MAD only for now) ─────────────
+
+function FacilityRoomView({ facility, rooms }) {
+  const facilityRooms = useMemo(
+    () => rooms.filter(r => r.facility === facility),
+    [rooms, facility]
+  )
+  const [liveResult, setLiveResult] = useState(null)   // { byRoomId, total, fetchedAt, elapsedMs, error, source } | null
+  const [liveLoading, setLiveLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLiveLoading(true)
+    fetchLivePerRoomActuals(facility)
+      .then(res => { if (!cancelled) setLiveResult(res) })
+      .catch(err => {
+        if (cancelled) return
+        console.warn('fetchLivePerRoomActuals unexpected error:', err)
+        setLiveResult({
+          byRoomId: new Map(), total: 0,
+          fetchedAt: new Date().toISOString(), elapsedMs: 0,
+          error: err?.message || 'unknown', source: 'error',
+        })
+      })
+      .finally(() => { if (!cancelled) setLiveLoading(false) })
+    return () => { cancelled = true }
+  }, [facility])
+
+  // Attach live LP count to each seeded room row. Rooms without a
+  // datex_top_location_id show '—' for live LPs.
+  const rows = useMemo(() => {
+    const byId = liveResult?.byRoomId || new Map()
+    return facilityRooms.map(r => ({
+      ...r,
+      live_lps: r.datex_top_location_id != null
+        ? (byId.get(Number(r.datex_top_location_id)) ?? null)
+        : null,
+    })).sort((a, b) => {
+      // Sort desc by live_lps, nulls last
+      const av = a.live_lps ?? -1
+      const bv = b.live_lps ?? -1
+      return bv - av
+    })
+  }, [facilityRooms, liveResult])
+
+  const total = liveResult?.total ?? 0
+  const isLive = liveResult?.source === 'live' && !liveResult?.error
+  const dot = FACILITY_DOTS[facility]
+  const name = FACILITY_NAMES[facility]
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ width: 12, height: 12, borderRadius: '50%', background: dot }} />
+          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
+            {name} ({facility.toUpperCase()})
+          </h2>
+        </div>
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+          Per-room live inventory
+        </span>
+      </div>
+
+      {/* Freshness banner */}
+      <PerRoomFreshnessBanner
+        liveLoading={liveLoading}
+        liveResult={liveResult}
+      />
+
+      {/* Summary cell */}
+      <SummaryRow>
+        <SummaryCell
+          label="TOTAL ACTIVE LPs"
+          value={liveLoading ? '…' : fmtInt(total)}
+          sub={`across ${facilityRooms.length} rooms`}
+        />
+        <SummaryCell
+          label="LIVE STATUS"
+          value={liveLoading ? 'LOADING' : (isLive ? 'LIVE' : 'OFFLINE')}
+          sub={liveResult ? `Updated ${fmtTime(liveResult.fetchedAt)}` : null}
+          valueColor={
+            liveLoading ? 'var(--text-dim)'
+              : isLive ? 'var(--green, #1a8a52)'
+              : 'var(--red, #c0392b)'
+          }
+        />
+      </SummaryRow>
+
+      {/* Per-room table */}
+      <div>
+        <SectionLabel>ROOMS</SectionLabel>
+        <RoomTable rows={rows} liveLoading={liveLoading} isLive={isLive} />
+      </div>
+
+      {/* Footnote about counting semantics */}
+      <div style={{
+        fontSize: 11, color: 'var(--text-dim)',
+        padding: '10px 12px',
+        background: 'var(--bg2, #f8f9fb)',
+        border: '1px solid var(--border-subtle, #eceff5)',
+        borderRadius: 'var(--r-md, 8px)',
+        lineHeight: 1.5,
+      }}>
+        <strong style={{ color: 'var(--text-secondary)' }}>Note on counts:</strong>{' '}
+        Per-room count is the physical active LP total (all non-archived license plates
+        in each room, warehouse-scoped). The Network scorecard uses a project-joined
+        count that filters out internal/unassigned LPs, so the two totals will differ.
+        Slots × Stack columns will populate once you set them in Settings.
+      </div>
+    </div>
+  )
+}
+
+function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
+  if (liveLoading) {
+    return (
+      <FreshnessRow
+        dotColor="var(--text-dim, #9aaabb)"
+        primary="Loading live Datex data…"
+        secondary={null}
+      />
+    )
+  }
+  if (liveResult?.source === 'live' && !liveResult.error) {
+    return (
+      <FreshnessRow
+        dotColor="var(--green, #1a8a52)"
+        primary="Live from Datex"
+        secondary={`Updated ${fmtTime(liveResult.fetchedAt)} · ${liveResult.elapsedMs}ms`}
+      />
+    )
+  }
+  return (
+    <FreshnessRow
+      dotColor="var(--red, #c0392b)"
+      primary="Live data unavailable"
+      secondary={liveResult?.error || 'Unknown error'}
+    />
+  )
+}
+
+function RoomTable({ rows, liveLoading, isLive }) {
+  if (!rows.length) {
+    return (
+      <div style={{
+        padding: 24, textAlign: 'center',
+        color: 'var(--text-secondary)', fontSize: 13,
+        background: 'var(--bg2, #f8f9fb)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--r-md, 8px)',
+        marginTop: 10,
+      }}>
+        No rooms configured for this facility.
+      </div>
+    )
+  }
+  const total = rows.reduce((s, r) => s + (r.live_lps ?? 0), 0)
+  return (
+    <div style={{
+      marginTop: 10,
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md, 8px)',
+      overflow: 'hidden',
+      background: 'var(--bg1, #fff)',
+    }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr',
+        padding: '10px 14px',
+        background: 'var(--bg2, #f8f9fb)',
+        borderBottom: '1px solid var(--border)',
+        fontSize: 10,
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        letterSpacing: '0.08em',
+        color: 'var(--text-dim)',
+        textTransform: 'uppercase',
+      }}>
+        <div>Room</div>
+        <div>Zone</div>
+        <div style={{ textAlign: 'right' }}>Live LPs</div>
+        <div style={{ textAlign: 'right' }}>Slots × Stack</div>
+        <div style={{ textAlign: 'right' }}>Datex ID</div>
+      </div>
+      {rows.map(row => (
+        <RoomRow key={row.id} row={row} liveLoading={liveLoading} isLive={isLive} />
+      ))}
+      {/* Total row */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr',
+        padding: '10px 14px',
+        background: 'var(--bg2, #f8f9fb)',
+        borderTop: '2px solid var(--border)',
+        fontSize: 13,
+        fontWeight: 600,
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+      }}>
+        <div>Total</div>
+        <div />
+        <div style={{ textAlign: 'right', color: 'var(--text-primary)' }}>
+          {liveLoading ? '…' : fmtInt(total)}
+        </div>
+        <div />
+        <div />
+      </div>
+    </div>
+  )
+}
+
+function RoomRow({ row, liveLoading, isLive }) {
+  const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
+  const cap = (row.slots || 0) * (row.stack || 0)
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: '1.2fr 1fr 1fr 1fr 1fr',
+      padding: '10px 14px',
+      borderBottom: '1px solid var(--border-subtle, #eceff5)',
+      fontSize: 13,
+      alignItems: 'center',
+    }}>
+      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{row.name}</div>
+      <div>
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5,
+          fontSize: 11, color: 'var(--text-secondary)',
+        }}>
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: zoneInfo.color, display: 'inline-block',
+          }} />
+          {zoneInfo.label}
+        </span>
+      </div>
+      <div style={{
+        textAlign: 'right',
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        color: isLive ? 'var(--text-primary)' : 'var(--text-dim)',
+      }}>
+        {liveLoading ? '…' : (row.live_lps != null ? fmtInt(row.live_lps) : '—')}
+      </div>
+      <div style={{
+        textAlign: 'right',
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        color: cap > 0 ? 'var(--text-primary)' : 'var(--text-dim)',
+        fontSize: 12,
+      }}>
+        {cap > 0 ? `${row.slots} × ${row.stack} = ${fmtInt(cap)}` : '—'}
+      </div>
+      <div style={{
+        textAlign: 'right',
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        fontSize: 11,
+        color: 'var(--text-dim)',
+      }}>
+        {row.datex_top_location_id ?? '—'}
+      </div>
     </div>
   )
 }

@@ -37,6 +37,10 @@ export const FACILITY_NAMES = {
 // Order for tab strip + scorecard grid.
 export const FACILITIES = ['cal', 'mad', 'ken', 'wr', 'ec']
 
+// Facilities that have per-room breakdown live (Phase 3). Others show the
+// generic placeholder. Extend as room lists get seeded for other sites.
+export const PHASE3_FACILITIES = new Set(['mad'])
+
 // ─── Utilization color bands ───────────────────────────────────────────
 // Per handoff §2: <70 green · 70–84 amber/gold · 85–94 orange · ≥95 red · null dim.
 export function utilBand(pct) {
@@ -206,5 +210,78 @@ export async function fetchLiveActualsPerFacility() {
     errors,
     fetchedAt: new Date().toISOString(),
     ok: Object.keys(totals).length > 0,
+  }
+}
+
+// ─── Phase 3 — Live per-room actuals ─────────────────────────────────────────────
+//
+// Fetches physical LP counts per top-level Datex room for a single facility
+// via the MotherDuck-backed Netlify function (netlify/functions/space-per-room).
+//
+// IMPORTANT — different measurement than fetchActiveInventory / Network scorecard.
+// The Network view uses fetchActiveInventory which is a project-joined
+// customer-owned-inventory count (MAD ~5,521). This function returns the
+// PHYSICAL LP count per room (archived=false, warehouse-scoped), which will
+// be higher (MAD ~20,342 total physical LPs including internal/system LPs
+// not tied to a customer project). Both are correct; they measure different
+// things. UI documents the discrepancy inline.
+//
+// Currently MAD-only per Phase 3 rollout. Extend server-side (FACILITY_TO_WAREHOUSE
+// + FACILITY_ROOT_LOCATION_ID) and add PHASE3_FACILITIES entries here when
+// other facilities' room lists get seeded.
+//
+// Returns:
+//   {
+//     byRoomId:  Map<datex_top_location_id: number, active_lps: number>,
+//     total:     number  (sum of active_lps across all rooms in response),
+//     fetchedAt: ISO timestamp string,
+//     elapsedMs: number,
+//     error:     string | null,
+//     source:    'live' | 'error',
+//   }
+export async function fetchLivePerRoomActuals(facility) {
+  const t0 = Date.now()
+  if (!PHASE3_FACILITIES.has(facility)) {
+    return {
+      byRoomId: new Map(), total: 0,
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      error: `Facility '${facility}' not yet scoped for per-room breakdown`,
+      source: 'error',
+    }
+  }
+  try {
+    const res = await fetch('/.netlify/functions/space-per-room', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ facility }),
+    })
+    if (!res.ok) {
+      let body = {}
+      try { body = await res.json() } catch { /* non-json */ }
+      throw new Error(body.error || `space-per-room ${res.status}`)
+    }
+    const { perRoom, totals, fetchedAt, elapsedMs } = await res.json()
+    const byRoomId = new Map()
+    for (const row of (perRoom || [])) {
+      byRoomId.set(Number(row.datex_top_location_id), Number(row.active_lps) || 0)
+    }
+    return {
+      byRoomId,
+      total: totals?.active_lps ?? 0,
+      fetchedAt: fetchedAt || new Date().toISOString(),
+      elapsedMs: elapsedMs ?? (Date.now() - t0),
+      error: null,
+      source: 'live',
+    }
+  } catch (e) {
+    console.warn('fetchLivePerRoomActuals failed:', e.message)
+    return {
+      byRoomId: new Map(), total: 0,
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      error: e.message,
+      source: 'error',
+    }
   }
 }
