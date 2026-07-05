@@ -6,6 +6,7 @@ import {
   fmtInt, fmtPct, fmtTime,
   fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
   fetchLivePerRoomActuals, updateRoomCapacity,
+  fetchCustomerStacking, addCustomerStacking, updateCustomerStacking, deleteCustomerStacking,
 } from '../../lib/spacePlanning.js'
 
 // Phase 2 — Network/ALL view is read-only.
@@ -17,9 +18,7 @@ import {
 //   come from netlify/functions/space-per-room via fetchLivePerRoomActuals.
 //   Rooms are joined by space_rooms.datex_top_location_id → the top-level
 //   Datex location container. Other facilities still show the deferred
-//   placeholder until their room lists get seeded. Capacity (slots × stack)
-//   is editable inline in this tab — no separate Settings page — via
-//   CapacityCell + updateRoomCapacity.
+//   placeholder until their room lists get seeded.
 export default function SpacePlanningTab() {
   const [facility, setFacility] = useState('all')
   const [rooms, setRooms] = useState([])
@@ -575,8 +574,291 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         Click any Slots × Stack cell to set capacity — it saves immediately, no separate
         Settings page needed. Utilization uses the physical LP count against that capacity.
       </div>
+
+      {/* Customer stacking reference — manual, not tied to a specific room */}
+      <CustomerStackingSection facility={facility} />
     </div>
   )
+}
+
+// Manual reference list: which customers double-stack vs single-stack.
+// Not tied to a room (general per-customer note). Datex has no data to derive
+// this automatically — see comment on fetchCustomerStacking in spacePlanning.js.
+function CustomerStackingSection({ facility }) {
+  const [rows, setRows] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  const load = () => {
+    setLoading(true)
+    fetchCustomerStacking(facility)
+      .then(data => { setRows(data); setError(null) })
+      .catch(err => setError(err?.message || 'Failed to load'))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { load() }, [facility])
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
+        <SectionLabel>CUSTOMER STACKING NOTES</SectionLabel>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Manual reference — not tied to a room</span>
+      </div>
+      <div style={{
+        marginTop: 6,
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--r-md, 8px)',
+        overflow: 'hidden',
+        background: 'var(--bg1, #fff)',
+      }}>
+        {loading && (
+          <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-secondary)' }}>
+            Loading…
+          </div>
+        )}
+        {error && !loading && (
+          <div style={{ padding: 16, fontSize: 12, color: 'var(--red, #c0392b)' }}>{error}</div>
+        )}
+        {!loading && !error && (
+          <>
+            {rows.length === 0 && (
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-dim)' }}>
+                No entries yet — add a customer below.
+              </div>
+            )}
+            {rows.map(row => (
+              <StackingRow
+                key={row.id}
+                row={row}
+                onUpdated={updated => setRows(prev => prev.map(r => r.id === updated.id ? updated : r))}
+                onDeleted={id => setRows(prev => prev.filter(r => r.id !== id))}
+              />
+            ))}
+            <StackingAddRow
+              facility={facility}
+              existingNames={rows.map(r => r.customer_name.toLowerCase())}
+              onAdded={row => setRows(prev => [...prev, row].sort((a, b) => a.customer_name.localeCompare(b.customer_name)))}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function StackModeBadge({ mode }) {
+  const isDouble = mode === 'double'
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 600, letterSpacing: '0.04em',
+      padding: '2px 7px', borderRadius: 'var(--r-sm, 3px)',
+      fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+      background: isDouble ? 'rgba(42, 114, 184, 0.12)' : 'rgba(160, 120, 24, 0.12)',
+      color: isDouble ? 'var(--blue, #2a72b8)' : 'var(--amber, #a07818)',
+      border: `1px solid ${isDouble ? 'rgba(42, 114, 184, 0.3)' : 'rgba(160, 120, 24, 0.3)'}`,
+    }}>
+      {isDouble ? 'DOUBLE' : 'SINGLE'}
+    </span>
+  )
+}
+
+function StackingRow({ row, onUpdated, onDeleted }) {
+  const [editing, setEditing] = useState(false)
+  const [customerName, setCustomerName] = useState(row.customer_name)
+  const [stackMode, setStackMode] = useState(row.stack_mode)
+  const [notes, setNotes] = useState(row.notes || '')
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [err, setErr] = useState(null)
+
+  async function save() {
+    setSaving(true)
+    setErr(null)
+    const result = await updateCustomerStacking(row.id, { customerName, stackMode, notes })
+    setSaving(false)
+    if (result.success) {
+      onUpdated(result.row)
+      setEditing(false)
+    } else {
+      setErr(result.error)
+    }
+  }
+
+  function cancel() {
+    setCustomerName(row.customer_name)
+    setStackMode(row.stack_mode)
+    setNotes(row.notes || '')
+    setEditing(false)
+    setErr(null)
+  }
+
+  async function handleDelete() {
+    if (!window.confirm(`Remove stacking note for "${row.customer_name}"?`)) return
+    setDeleting(true)
+    const result = await deleteCustomerStacking(row.id)
+    setDeleting(false)
+    if (result.success) {
+      onDeleted(row.id)
+    } else {
+      setErr(result.error)
+    }
+  }
+
+  if (editing) {
+    return (
+      <div style={{
+        display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8,
+        padding: '10px 14px',
+        borderBottom: '1px solid var(--border-subtle, #eceff5)',
+        background: 'var(--bg2, #f8f9fb)',
+      }}>
+        <input
+          value={customerName}
+          onChange={e => setCustomerName(e.target.value)}
+          disabled={saving}
+          style={{ flex: '1 1 180px', fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
+        />
+        <StackModeToggle value={stackMode} onChange={setStackMode} disabled={saving} />
+        <input
+          value={notes}
+          onChange={e => setNotes(e.target.value)}
+          placeholder="Notes (optional)"
+          disabled={saving}
+          style={{ flex: '1 1 200px', fontSize: 12, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
+        />
+        <button type="button" onClick={save} disabled={saving || !customerName.trim()} style={smallBtnStyle('var(--green, #1a8a52)')}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" onClick={cancel} disabled={saving} style={smallBtnStyle('var(--text-dim)')}>
+          Cancel
+        </button>
+        {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)', flexBasis: '100%' }}>{err}</span>}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '10px 14px',
+      borderBottom: '1px solid var(--border-subtle, #eceff5)',
+      fontSize: 13,
+    }}>
+      <div style={{ flex: '1 1 180px', fontWeight: 600, color: 'var(--text-primary)' }}>{row.customer_name}</div>
+      <StackModeBadge mode={row.stack_mode} />
+      <div style={{ flex: '1 1 200px', fontSize: 12, color: 'var(--text-secondary)' }}>{row.notes || '—'}</div>
+      <button type="button" onClick={() => setEditing(true)} style={smallBtnStyle('var(--text-secondary)')}>Edit</button>
+      <button type="button" onClick={handleDelete} disabled={deleting} style={smallBtnStyle('var(--red, #c0392b)')}>
+        {deleting ? '…' : 'Delete'}
+      </button>
+      {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</span>}
+    </div>
+  )
+}
+
+function StackingAddRow({ facility, existingNames, onAdded }) {
+  const [customerName, setCustomerName] = useState('')
+  const [stackMode, setStackMode] = useState('double')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+
+  async function handleAdd() {
+    const trimmed = customerName.trim()
+    if (!trimmed) return
+    if (existingNames.includes(trimmed.toLowerCase())) {
+      setErr('That customer already has an entry')
+      return
+    }
+    setSaving(true)
+    setErr(null)
+    const result = await addCustomerStacking(facility, { customerName: trimmed, stackMode, notes })
+    setSaving(false)
+    if (result.success) {
+      onAdded(result.row)
+      setCustomerName('')
+      setNotes('')
+      setStackMode('double')
+    } else {
+      setErr(result.error)
+    }
+  }
+
+  return (
+    <div style={{
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8,
+      padding: '10px 14px',
+      background: 'var(--bg2, #f8f9fb)',
+    }}>
+      <input
+        value={customerName}
+        onChange={e => setCustomerName(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+        placeholder="Customer name"
+        disabled={saving}
+        style={{ flex: '1 1 180px', fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
+      />
+      <StackModeToggle value={stackMode} onChange={setStackMode} disabled={saving} />
+      <input
+        value={notes}
+        onChange={e => setNotes(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+        placeholder="Notes (optional)"
+        disabled={saving}
+        style={{ flex: '1 1 200px', fontSize: 12, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
+      />
+      <button
+        type="button"
+        onClick={handleAdd}
+        disabled={saving || !customerName.trim()}
+        style={smallBtnStyle('var(--brand, #a07818)', true)}
+      >
+        {saving ? 'Adding…' : '+ Add'}
+      </button>
+      {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)', flexBasis: '100%' }}>{err}</span>}
+    </div>
+  )
+}
+
+function StackModeToggle({ value, onChange, disabled }) {
+  return (
+    <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+      {['single', 'double'].map(mode => {
+        const active = value === mode
+        return (
+          <button
+            key={mode}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange(mode)}
+            style={{
+              fontSize: 11, fontWeight: 600, letterSpacing: '0.03em',
+              padding: '4px 10px', border: 'none', cursor: 'pointer',
+              fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+              background: active ? 'var(--brand, #a07818)' : 'var(--bg1, #fff)',
+              color: active ? '#fff' : 'var(--text-secondary)',
+            }}
+          >
+            {mode.toUpperCase()}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function smallBtnStyle(color, filled) {
+  return {
+    fontSize: 11, fontWeight: 600,
+    padding: '4px 10px',
+    borderRadius: 4,
+    border: `1px solid ${color}`,
+    background: filled ? color : 'transparent',
+    color: filled ? '#fff' : color,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  }
 }
 
 function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
