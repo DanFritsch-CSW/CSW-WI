@@ -387,3 +387,23 @@ export async function deleteCustomerStacking(id) {
   }
   return { success: true }
 }
+
+// Real project/customer list for a facility, sourced from the same
+// fetchActiveInventory path the Network scorecard uses — guarantees the
+// stacking-notes dropdown links to actual Datex project names instead of
+// free-typed text that can drift (typos, casing, "Colony Brands" vs
+// "colony brands" becoming two different entries). Already sorted by LP
+// count descending (fetchActiveInventory's own sort), so the biggest
+// customers surface first.
+//
+// Returns array of { name, lps } on success, or null on failure — callers
+// should treat null as "fall back to manual text entry", not as "empty list".
+export async function fetchKnownCustomersForFacility(facility) {
+  try {
+    const rows = await fetchActiveInventory(facility)
+    return rows.filter(r => r.name && r.name.trim())
+  } catch (e) {
+    console.warn('fetchKnownCustomersForFacility failed:', e.message)
+    return null
+  }
+}
