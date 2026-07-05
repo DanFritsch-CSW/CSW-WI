@@ -311,3 +311,79 @@ export async function fetchLivePerRoomActuals(facility) {
     }
   }
 }
+
+// ─── Customer stacking reference (in-tab, MAD only for now) ─────────────────────
+//
+// Manual reference list: which customers' product double-stacks vs single-stacks
+// in a room. Not tied to a specific room — Dan's call (2026-07-04) is that this
+// is a general per-customer note, not per-room-per-customer. Datex has no data
+// to derive this automatically (checked: LP Height/Length/Width are null across
+// the board, parent_id/nesting unused, location-level LP counts reflect deep-lane
+// storage depth rather than physical stack count) — this is manual knowledge,
+// simply given a place to live instead of staying tribal.
+//
+// Lives in space_customer_stacking: facility, customer_name, stack_mode
+// ('single'|'double'), notes, timestamps. UNIQUE(facility, customer_name) —
+// one entry per customer per facility, editable/upsertable in place.
+
+export async function fetchCustomerStacking(facility) {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('space_customer_stacking')
+    .select('*')
+    .eq('facility', facility)
+    .order('customer_name')
+  if (error) { console.error('fetchCustomerStacking:', error); return [] }
+  return data ?? []
+}
+
+// Insert a new customer stacking entry. Returns { success, row } or
+// { success: false, error }. Fails on duplicate (facility, customer_name) —
+// caller should use updateCustomerStacking to edit an existing entry instead.
+export async function addCustomerStacking(facility, { customerName, stackMode, notes }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { data, error } = await supabase
+    .from('space_customer_stacking')
+    .insert({
+      facility,
+      customer_name: customerName.trim(),
+      stack_mode: stackMode,
+      notes: notes?.trim() || null,
+    })
+    .select()
+    .single()
+  if (error) {
+    console.error('addCustomerStacking:', error)
+    return { success: false, error: error.code === '23505' ? 'That customer already has an entry for this facility' : error.message }
+  }
+  return { success: true, row: data }
+}
+
+export async function updateCustomerStacking(id, { customerName, stackMode, notes }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const patch = { updated_at: new Date().toISOString() }
+  if (customerName != null) patch.customer_name = customerName.trim()
+  if (stackMode != null) patch.stack_mode = stackMode
+  if (notes !== undefined) patch.notes = notes?.trim() || null
+  const { data, error } = await supabase
+    .from('space_customer_stacking')
+    .update(patch)
+    .eq('id', id)
+    .select()
+    .single()
+  if (error) {
+    console.error('updateCustomerStacking:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true, row: data }
+}
+
+export async function deleteCustomerStacking(id) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { error } = await supabase.from('space_customer_stacking').delete().eq('id', id)
+  if (error) {
+    console.error('deleteCustomerStacking:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true }
+}
