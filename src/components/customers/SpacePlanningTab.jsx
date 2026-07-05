@@ -7,6 +7,7 @@ import {
   fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
   fetchLivePerRoomActuals, updateRoomCapacity,
   fetchCustomerStacking, addCustomerStacking, updateCustomerStacking, deleteCustomerStacking,
+  fetchKnownCustomersForFacility,
 } from '../../lib/spacePlanning.js'
 
 // Phase 2 — Network/ALL view is read-only.
@@ -589,6 +590,11 @@ function CustomerStackingSection({ facility }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // Live customer/project list for the dropdown — same source as the Network
+  // scorecard, so names always match real Datex projects. status: 'loading' |
+  // 'ready' | 'error'. 'error' triggers a manual-text fallback in the add row.
+  const [customerOptions, setCustomerOptions] = useState({ status: 'loading', options: [] })
+
   const load = () => {
     setLoading(true)
     fetchCustomerStacking(facility)
@@ -598,6 +604,16 @@ function CustomerStackingSection({ facility }) {
   }
 
   useEffect(() => { load() }, [facility])
+
+  useEffect(() => {
+    let cancelled = false
+    setCustomerOptions({ status: 'loading', options: [] })
+    fetchKnownCustomersForFacility(facility).then(list => {
+      if (cancelled) return
+      setCustomerOptions(list == null ? { status: 'error', options: [] } : { status: 'ready', options: list })
+    })
+    return () => { cancelled = true }
+  }, [facility])
 
   return (
     <div>
@@ -638,6 +654,7 @@ function CustomerStackingSection({ facility }) {
             <StackingAddRow
               facility={facility}
               existingNames={rows.map(r => r.customer_name.toLowerCase())}
+              customerOptions={customerOptions}
               onAdded={row => setRows(prev => [...prev, row].sort((a, b) => a.customer_name.localeCompare(b.customer_name)))}
             />
           </>
@@ -665,7 +682,6 @@ function StackModeBadge({ mode }) {
 
 function StackingRow({ row, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(false)
-  const [customerName, setCustomerName] = useState(row.customer_name)
   const [stackMode, setStackMode] = useState(row.stack_mode)
   const [notes, setNotes] = useState(row.notes || '')
   const [saving, setSaving] = useState(false)
@@ -675,7 +691,9 @@ function StackingRow({ row, onUpdated, onDeleted }) {
   async function save() {
     setSaving(true)
     setErr(null)
-    const result = await updateCustomerStacking(row.id, { customerName, stackMode, notes })
+    // Customer name is fixed once created — it's the link to the real Datex
+    // project, not something to retype. Only stack mode and notes are editable.
+    const result = await updateCustomerStacking(row.id, { stackMode, notes })
     setSaving(false)
     if (result.success) {
       onUpdated(result.row)
@@ -686,7 +704,6 @@ function StackingRow({ row, onUpdated, onDeleted }) {
   }
 
   function cancel() {
-    setCustomerName(row.customer_name)
     setStackMode(row.stack_mode)
     setNotes(row.notes || '')
     setEditing(false)
@@ -713,12 +730,7 @@ function StackingRow({ row, onUpdated, onDeleted }) {
         borderBottom: '1px solid var(--border-subtle, #eceff5)',
         background: 'var(--bg2, #f8f9fb)',
       }}>
-        <input
-          value={customerName}
-          onChange={e => setCustomerName(e.target.value)}
-          disabled={saving}
-          style={{ flex: '1 1 180px', fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
-        />
+        <div style={{ flex: '1 1 180px', fontWeight: 600, color: 'var(--text-primary)' }}>{row.customer_name}</div>
         <StackModeToggle value={stackMode} onChange={setStackMode} disabled={saving} />
         <input
           value={notes}
@@ -727,7 +739,7 @@ function StackingRow({ row, onUpdated, onDeleted }) {
           disabled={saving}
           style={{ flex: '1 1 200px', fontSize: 12, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
         />
-        <button type="button" onClick={save} disabled={saving || !customerName.trim()} style={smallBtnStyle('var(--green, #1a8a52)')}>
+        <button type="button" onClick={save} disabled={saving} style={smallBtnStyle('var(--green, #1a8a52)')}>
           {saving ? 'Saving…' : 'Save'}
         </button>
         <button type="button" onClick={cancel} disabled={saving} style={smallBtnStyle('var(--text-dim)')}>
@@ -757,27 +769,33 @@ function StackingRow({ row, onUpdated, onDeleted }) {
   )
 }
 
-function StackingAddRow({ facility, existingNames, onAdded }) {
-  const [customerName, setCustomerName] = useState('')
+const OTHER_OPTION = '__other__'
+
+function StackingAddRow({ facility, existingNames, customerOptions, onAdded }) {
+  const [selected, setSelected] = useState('')
+  const [manualName, setManualName] = useState('')
   const [stackMode, setStackMode] = useState('double')
   const [notes, setNotes] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
 
+  const useManual = customerOptions.status !== 'ready' || customerOptions.options.length === 0 || selected === OTHER_OPTION
+  const customerName = useManual ? manualName.trim() : selected
+
   async function handleAdd() {
-    const trimmed = customerName.trim()
-    if (!trimmed) return
-    if (existingNames.includes(trimmed.toLowerCase())) {
+    if (!customerName) return
+    if (existingNames.includes(customerName.toLowerCase())) {
       setErr('That customer already has an entry')
       return
     }
     setSaving(true)
     setErr(null)
-    const result = await addCustomerStacking(facility, { customerName: trimmed, stackMode, notes })
+    const result = await addCustomerStacking(facility, { customerName, stackMode, notes })
     setSaving(false)
     if (result.success) {
       onAdded(result.row)
-      setCustomerName('')
+      setSelected('')
+      setManualName('')
       setNotes('')
       setStackMode('double')
     } else {
@@ -791,14 +809,34 @@ function StackingAddRow({ facility, existingNames, onAdded }) {
       padding: '10px 14px',
       background: 'var(--bg2, #f8f9fb)',
     }}>
-      <input
-        value={customerName}
-        onChange={e => setCustomerName(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
-        placeholder="Customer name"
-        disabled={saving}
-        style={{ flex: '1 1 180px', fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
-      />
+      {customerOptions.status === 'ready' && customerOptions.options.length > 0 ? (
+        <select
+          value={selected}
+          onChange={e => setSelected(e.target.value)}
+          disabled={saving}
+          style={{ flex: '1 1 220px', fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, background: '#fff' }}
+        >
+          <option value="">Select customer…</option>
+          {customerOptions.options.map(o => (
+            <option key={o.name} value={o.name}>{o.name} ({fmtInt(o.lps)} LPs)</option>
+          ))}
+          <option value={OTHER_OPTION}>Other / not listed…</option>
+        </select>
+      ) : (
+        <span style={{ flex: '1 1 220px', fontSize: 11, color: 'var(--amber, #a07818)' }}>
+          {customerOptions.status === 'loading' ? 'Loading live customer list…' : "Couldn't load live customer list — enter manually"}
+        </span>
+      )}
+      {useManual && (
+        <input
+          value={manualName}
+          onChange={e => setManualName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+          placeholder="Customer name"
+          disabled={saving}
+          style={{ flex: '1 1 180px', fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
+        />
+      )}
       <StackModeToggle value={stackMode} onChange={setStackMode} disabled={saving} />
       <input
         value={notes}
@@ -811,7 +849,7 @@ function StackingAddRow({ facility, existingNames, onAdded }) {
       <button
         type="button"
         onClick={handleAdd}
-        disabled={saving || !customerName.trim()}
+        disabled={saving || !customerName}
         style={smallBtnStyle('var(--brand, #a07818)', true)}
       >
         {saving ? 'Adding…' : '+ Add'}
