@@ -25,6 +25,13 @@
 //   ],
 //   materialShipHistory: [
 //     { material_id, ship_to_raw_name, cases_90d, shipments_90d }
+//     // NOTE (2026-07-06): field names retained as *_90d for backward
+//     // compatibility, but the query window was widened to 365 DAY per
+//     // Dan's request to close the no-history coverage gap. Cases/shipments
+//     // in the response now reflect a full year, not 90 days. Downstream
+//     // uses (dominant + strictest baselines in pviShelfLife.js) only care
+//     // about relative magnitude, so widening the window is transparent to
+//     // the ranking logic.
 //   ],
 //   fetchedAt, elapsedMs, source: 'motherduck',
 //   rowCounts: { lots, pendingOrders, velocity, materialShipHistory }
@@ -60,6 +67,13 @@ const CAL_WAREHOUSE_ID = 1
 // Window for pending orders — 3 weeks forward covers the longest end-customer
 // scheduling horizon and gives us enough runway to project FEFO burn.
 const PENDING_DAYS_FORWARD = 21
+
+// Window for the material-history baseline (Query 4). Widened from 90 to
+// 365 days on 2026-07-06 to close the no-history coverage gap on materials
+// that ship intermittently — verified against MotherDuck to close all 22
+// previously-uncovered materials (658/658 vs 636/658 at 90d). No perf
+// concern: query returns ~15-20K rows at 365d, still small over the wire.
+const HISTORY_DAYS_BACK = 365
 
 function toISODate(v) {
   if (!v) return null
@@ -255,7 +269,9 @@ exports.handler = async (event) => {
     //
     // We look at ACTUAL picks (tasks in status 'Completed') rather than order
     // lines — closer to true throughput and matches what the FEFO engine
-    // actually consumed.
+    // actually consumed. This window stays at 90 days: velocity is meant to
+    // reflect the RECENT ship rate, not the annual average. Widening it
+    // would over-count seasonal lulls.
     const velSql = `
       WITH pvi_projects AS (
         SELECT project_id, lookup_code
@@ -284,10 +300,10 @@ exports.handler = async (event) => {
     `
     const velRows = await runQuery(velSql)
 
-    // ── Query 4: Material × ship-to 90-day pick history ──────────────────
+    // ── Query 4: Material × ship-to 365-day pick history ─────────────────
     //
     // For each PVI material, list every ship-to that received cases in the
-    // last 90 days along with total cases + shipment count. The client uses
+    // last 365 days along with total cases + shipment count. The client uses
     // this to compute:
     //   (a) Dominant recipient per material (whoever got the most cases) —
     //       used to fill in "Projected ship" for lots with no scheduled
@@ -296,8 +312,19 @@ exports.handler = async (event) => {
     //       resolved-canonical recipients) — used as the fallback baseline
     //       for the Vs. Spec column when no primary allocation exists.
     //
-    // Verified query size: ~5k rows across ~740 materials × ~160 ship-tos
-    // for the current PVI corpus. Small enough to ship over the wire.
+    // Window widened from 90 to 365 days on 2026-07-06 per Dan. Verified
+    // against MotherDuck: closes all 22 previously-uncovered materials
+    // (658/658 vs 636/658 at 90d). Response field names retained as
+    // `cases_90d` / `shipments_90d` for backward compatibility with the
+    // client — downstream uses only care about relative magnitude, so
+    // widening is transparent to the ranking logic in pviShelfLife.js.
+    //
+    // NOTE: this does NOT address the unmapped-ship-to-name issue. ~115 of
+    // the 164 distinct PVI ship-to names in the past year have no entry in
+    // Supabase pvi_account_name_map (mostly co-manufacturers/suppliers like
+    // Rustica, Agropur, Tyson, etc. that aren't spec'd end-customers).
+    // Materials whose entire history goes to those names still get no
+    // baseline. Fix for that is a separate mapping/UX push.
     const histSql = `
       WITH pvi_projects AS (
         SELECT project_id, lookup_code
@@ -318,7 +345,7 @@ exports.handler = async (event) => {
       WHERE t.warehouse_id = ${CAL_WAREHOUSE_ID}
         AND ts.status_name = 'Completed'
         AND t.actual_packaged_amount > 0
-        AND t.parquet_record_sys_date_time >= CURRENT_DATE - INTERVAL 90 DAY
+        AND t.parquet_record_sys_date_time >= CURRENT_DATE - INTERVAL ${HISTORY_DAYS_BACK} DAY
         AND oa."Name" IS NOT NULL
         AND oa."Name" != ''
       GROUP BY t.material_id, oa."Name"
