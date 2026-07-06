@@ -1507,3 +1507,62 @@ export async function deletePviShelfNote(id) {
   const { error } = await supabase.from('pvi_shelf_notes').delete().eq('id', id)
   if (error) { console.error('deletePviShelfNote:', error); throw error }
 }
+
+// ─── PVI Material Specs (per-material shelf-life ops overrides) ────────────
+//
+// pvi_material_specs — one row per PVI material. Ops-curated shelf-life-days
+// requirement. Wins over allocation and history in the engine's spec priority
+// (see src/lib/pviShelfLife.js). Seeded 2026-07-06 from 365-day history via
+// the strictest-mapped-customer across each material's recipients; per-row
+// edits from the Settings UI mark spec_source='ops_edited'.
+//
+// Schema: material_id (PK), material_code, material_desc,
+//         shelf_life_days_required INT > 0, spec_source, notes,
+//         updated_at, updated_by.
+
+export async function fetchPviMaterialSpecs() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('pvi_material_specs')
+    .select('*')
+    .order('material_code')
+  if (error) { console.error('fetchPviMaterialSpecs:', error); return [] }
+  return data ?? []
+}
+
+export async function upsertPviMaterialSpec({ material_id, material_code, material_desc, shelf_life_days_required, notes, updated_by }) {
+  if (!supabase) return null
+  const payload = {
+    material_id:              Number(material_id),
+    material_code:            String(material_code || '').trim(),
+    material_desc:            (material_desc || '').trim() || null,
+    shelf_life_days_required: Number(shelf_life_days_required),
+    spec_source:              'ops_edited',
+    notes:                    (notes || '').trim() || null,
+    updated_by:               (updated_by || '').trim() || null,
+    updated_at:               new Date().toISOString(),
+  }
+  if (!Number.isFinite(payload.material_id) || payload.material_id <= 0) {
+    throw new Error('material_id required')
+  }
+  if (!payload.material_code) throw new Error('material_code required')
+  if (!Number.isFinite(payload.shelf_life_days_required) || payload.shelf_life_days_required <= 0) {
+    throw new Error('shelf_life_days_required must be a positive number')
+  }
+  const { data, error } = await supabase
+    .from('pvi_material_specs')
+    .upsert(payload, { onConflict: 'material_id', ignoreDuplicates: false })
+    .select()
+    .single()
+  if (error) { console.error('upsertPviMaterialSpec:', error); throw error }
+  return data
+}
+
+export async function deletePviMaterialSpec(materialId) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('pvi_material_specs')
+    .delete()
+    .eq('material_id', Number(materialId))
+  if (error) { console.error('deletePviMaterialSpec:', error); throw error }
+}
