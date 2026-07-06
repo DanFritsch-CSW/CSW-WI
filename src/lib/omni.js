@@ -1288,6 +1288,23 @@ export async function fetchB2eTimeOff(facilityId, date) {
 }
 
 // Internal helper — fetches active schedule rows for a single B2E entry_date.
+//
+// B2E's futurescheduleentries is APPEND-ONLY: when an employee's schedule
+// changes, new rows are added for the new pattern but old rows from the prior
+// pattern are NOT removed. Result: a stale row from a superseded schedule
+// (e.g. Franco 6/16 "8am-4:30pm M-F") can remain in the table indefinitely
+// alongside newer rows from the current schedule (Franco 7/6 "6am-4:30pm
+// M,T,F,S"). A single-day fetch can't distinguish current vs. stale.
+//
+// Fix: fetch a STALE_WINDOW_DAYS-wide window around the target date so we can
+// compute the LATEST ingestion_ts PER EMPLOYEE. Only rows matching that per-
+// employee max survive the stale-snapshot filter. Rows from prior snapshots
+// (which have older ingestion_ts values shared across all their sibling rows
+// in that snapshot batch) are dropped.
+//
+// Then filter the survivors to just entryDate for the caller.
+const STALE_SCHEDULE_WINDOW_DAYS = 14
+
 async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssignments) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
@@ -1308,24 +1325,49 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
       `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
       `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
       `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
-      `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`,
+      `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`, `${SCHEDULE}.entry_date`,
     ],
     filters: {
       [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${SCHEDULE}.entry_date`]: {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: entryDate, is_negative: false, offset_interval_string: '0 days',
+        isFiscal: false, left_side: entryDate, is_negative: false,
+        offset_interval_string: `${STALE_SCHEDULE_WINDOW_DAYS} days`,
       },
     },
     sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-    limit: 500,
+    limit: 5000,
   })
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
+
+  // Establish per-employee max ingestion_ts across the entire window.
+  // Only rows matching this represent the current B2E schedule; older rows
+  // are leftovers from superseded snapshots (append-only table).
+  const maxIngestByEmp = new Map()
+  for (const r of scheduleRows) {
+    const id = String(r[`${SCHEDULE}.employee_id`])
+    if (!activeIds.has(id)) continue
+    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    if (!maxIngestByEmp.has(id) || ts > maxIngestByEmp.get(id)) {
+      maxIngestByEmp.set(id, ts)
+    }
+  }
+
   const schedMap  = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
+    if (!activeIds.has(id)) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    // Stale-snapshot filter: drop rows from prior B2E snapshots.
+    if (ts !== maxIngestByEmp.get(id)) continue
+    // Only keep rows matching the caller's target entry_date.
+    const rowDateRaw = r[`${SCHEDULE}.entry_date`]
+    if (!rowDateRaw) continue
+    const rowDate = typeof rowDateRaw === 'string'
+      ? rowDateRaw.slice(0, 10)
+      : new Date(rowDateRaw).toISOString().slice(0, 10)
+    if (rowDate !== entryDate) continue
     if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
@@ -1484,6 +1526,22 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
 
+  // Per-employee max ingestion_ts across all fetched rows. B2E's
+  // futurescheduleentries is append-only — old rows from superseded
+  // schedules stick around forever. Rows whose ingestion_ts is older than
+  // this per-employee max are leftovers from prior snapshot batches and
+  // must be dropped so seedForwardHorizon's delete branch will clean up
+  // Supabase rows for those (employee, date) pairs.
+  const maxIngestByEmp = new Map()
+  for (const r of scheduleRows) {
+    const id = String(r[`${SCHEDULE}.employee_id`])
+    if (!activeIds.has(id)) continue
+    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    if (!maxIngestByEmp.has(id) || ts > maxIngestByEmp.get(id)) {
+      maxIngestByEmp.set(id, ts)
+    }
+  }
+
   // Dedup by (employee_id, entry_date), most recent ingestion_ts wins.
   // Mirrors fetchB2eRosterForEntryDate's single-date dedup behavior.
   const byDateEmp = new Map() // dateIso -> Map<empId, {row, ts}>
@@ -1491,12 +1549,15 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
     const id = String(r[`${SCHEDULE}.employee_id`])
     if (!activeIds.has(id)) continue
     if (!ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
+    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    // Stale-snapshot filter: drop rows from B2E snapshots older than this
+    // employee's latest snapshot in the window.
+    if (ts !== maxIngestByEmp.get(id)) continue
     const dateRaw = r[`${SCHEDULE}.entry_date`]
     if (!dateRaw) continue
     const dateIso = typeof dateRaw === 'string'
       ? dateRaw.slice(0, 10)
       : new Date(dateRaw).toISOString().slice(0, 10)
-    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
     if (!byDateEmp.has(dateIso)) byDateEmp.set(dateIso, new Map())
     const empMap = byDateEmp.get(dateIso)
     if (!empMap.has(id) || ts > empMap.get(id).ts) empMap.set(id, { row: r, ts })
