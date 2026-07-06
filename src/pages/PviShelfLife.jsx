@@ -3,6 +3,7 @@ import {
   fetchPviCanonicalAccounts,
   fetchPviAccountNameMap,
   fetchPviShelfNotes,
+  fetchPviMaterialSpecs,
   insertPviShelfNote,
   updatePviShelfNoteStatus,
   deletePviShelfNote,
@@ -19,10 +20,13 @@ import {
 
 // PVI Shelf Life dashboard.
 //
-// Loads three things in parallel:
+// Loads four things in parallel:
 //   1. Live risk snapshot from /.netlify/functions/pvi-shelf-life
 //   2. Canonical accounts + raw-name map from Supabase
 //   3. Notes from Supabase
+//   4. Material specs (pvi_material_specs) from Supabase — ops-curated
+//      per-material shelf-life days. Wins over allocation/history in the
+//      engine's spec priority.
 //
 // Then runs FEFO projection client-side (src/lib/pviShelfLife.js) and renders
 // a filterable table. Side drawer for per-lot notes. Copy-for-email buttons
@@ -41,6 +45,7 @@ export default function PviShelfLife() {
   const [canonicals, setCanonicals]     = useState([])
   const [nameMap, setNameMap]           = useState([])
   const [notes, setNotes]               = useState([])
+  const [materialSpecs, setMaterialSpecs] = useState([])
   const [loading, setLoading]           = useState(true)
   const [error, setError]               = useState(null)
   const [reloadTick, setReloadTick]     = useState(0)
@@ -60,7 +65,7 @@ export default function PviShelfLife() {
     setError(null)
     ;(async () => {
       try {
-        const [snap, canon, map, noteRows] = await Promise.all([
+        const [snap, canon, map, noteRows, specs] = await Promise.all([
           fetch('/.netlify/functions/pvi-shelf-life', { method: 'POST' })
             .then(async r => {
               if (!r.ok) throw new Error(`Shelf-life fetch failed (${r.status}): ${(await r.text()).slice(0, 200)}`)
@@ -69,12 +74,14 @@ export default function PviShelfLife() {
           fetchPviCanonicalAccounts(),
           fetchPviAccountNameMap(),
           fetchPviShelfNotes(),
+          fetchPviMaterialSpecs(),
         ])
         if (cancelled) return
         setSnapshot(snap)
         setCanonicals(canon)
         setNameMap(map)
         setNotes(noteRows)
+        setMaterialSpecs(specs)
       } catch (e) {
         if (!cancelled) setError(e.message || String(e))
       } finally {
@@ -90,15 +97,23 @@ export default function PviShelfLife() {
   )
 
   // Run FEFO projection whenever the inputs change.
+  //
+  // NOTE: materialShipHistory is REQUIRED for the material-history baseline
+  // to activate. Without it, the engine has no way to compute strictest-
+  // customer-across-365d and every unallocated lot falls straight through
+  // to the 96d default (or null for internal transfers). The Netlify function
+  // returns it as `snapshot.materialShipHistory`.
   const rows = useMemo(() => {
     if (!snapshot) return []
     return projectFefo({
-      lots:           snapshot.lots || [],
-      pendingOrders:  snapshot.pendingOrders || [],
-      velocity:       snapshot.velocity || [],
+      lots:                snapshot.lots || [],
+      pendingOrders:       snapshot.pendingOrders || [],
+      velocity:            snapshot.velocity || [],
+      materialShipHistory: snapshot.materialShipHistory || [],
+      materialSpecs,
       canonicalIndex,
     })
-  }, [snapshot, canonicalIndex])
+  }, [snapshot, canonicalIndex, materialSpecs])
 
   // Stage counts for the tab row — respect project filter but ignore stage/
   // account/text filters, so the operator sees the full workload for whatever
@@ -347,6 +362,16 @@ export default function PviShelfLife() {
 
 // ── Row ───────────────────────────────────────────────────────────────────
 
+// Compact spec-source label for the "Vs. spec" cell. Distinguishes ops-
+// curated specs from inferred fallbacks so operators can spot rows that
+// need a real spec set in Settings.
+const SPEC_SOURCE_BADGE = {
+  material_spec:    { label: 'spec',    color: '#3a7a3a' },
+  allocation:       { label: 'alloc',   color: '#5b9bd5' },
+  material_history: { label: 'hist',    color: '#c88a2a' },
+  default_96:       { label: 'default', color: '#999' },
+}
+
 function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
   const meta = STAGE_META[row.verdict.stage]
   const prim = row.primary
@@ -359,6 +384,7 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
   const vc = row.velocity_confidence
   const req = row.shelf_life_days
   const shortfall = row.shortfall_days
+  const specBadge = SPEC_SOURCE_BADGE[row.spec_source] || null
   // Shortfall coloring:
   //   > 0  = SHORT of spec (bad)   → red
   //   = 0  = exactly at spec       → amber
@@ -424,7 +450,28 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
           </span>
         ) : (
           <>
-            <div style={{ color: 'var(--text-dim)', fontSize: 10 }}>req {req}d</div>
+            <div style={{ color: 'var(--text-dim)', fontSize: 10 }}>
+              req {req}d
+              {specBadge && (
+                <span style={{
+                  marginLeft: 4,
+                  padding: '0 3px',
+                  fontSize: 8,
+                  fontWeight: 600,
+                  color: specBadge.color,
+                  border: `1px solid ${specBadge.color}`,
+                  borderRadius: 2,
+                  letterSpacing: '0.03em',
+                }} title={
+                  row.spec_source === 'material_spec'   ? 'Ops-curated material spec' :
+                  row.spec_source === 'allocation'      ? 'From allocation customer spec' :
+                  row.spec_source === 'material_history' ? 'Strictest customer across 365-day history' :
+                  row.spec_source === 'default_96'      ? 'Default (no material spec, no history)' : ''
+                }>
+                  {specBadge.label}
+                </span>
+              )}
+            </div>
             <div style={{ color: shortColor, fontWeight: 600 }}>
               {shortfall > 0 ? `▼ ${shortfall}d short` : shortfall < 0 ? `▲ ${-shortfall}d buffer` : 'at spec'}
             </div>
