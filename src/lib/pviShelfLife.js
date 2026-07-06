@@ -9,7 +9,7 @@
 //   resolveCanonical(rawName, index)
 //   getShelfLifeDays(canonical)
 //   velocityConfidence(shipments30d)
-//   projectFefo({ lots, pendingOrders, velocity, materialShipHistory, canonicalIndex })
+//   projectFefo({ lots, pendingOrders, velocity, materialShipHistory, materialSpecs, canonicalIndex })
 //   verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays })
 //   formatLotForEmail(row)
 //   bulkCopyForEmail(rows)
@@ -29,26 +29,36 @@
 //   Unshippable  daysToCodeAtShip ≤ 0 but not yet expired today
 //   Expired      Past code date TODAY
 //
-// ── Spec source: allocation vs. material history baseline ────────────────
+// ── Spec source priority (revised 2026-07-06 per Hill feedback) ──────────
 //
-// A lot's shelf-life comparison needs a customer spec, which comes from one
-// of two places:
+// Hill's reframe: a material's shelf-life requirement is a fixed property
+// of the material, not something to infer per-load from allocation or
+// history. The `pvi_material_specs` table is the ops-curated source of
+// truth — one row per material, editable in Settings. History/allocation
+// remain as fallbacks for materials that haven't been curated yet.
 //
+// Priority (highest wins):
+//   'material_spec'    — pvi_material_specs row for this material.
+//                        Ops-curated. Overrides everything else.
 //   'allocation'       — the lot is bound to a specific order (Phase A) or
-//                        velocity-projected to a specific customer (Phase B).
-//                        Use that customer's spec.
-//   'material_history' — no allocation. Fall back to a material-level
-//                        baseline derived from 90-day pick history: dominant
-//                        customer for DISPLAY ("if this ships, it'll probably
-//                        go to X"), STRICTEST spec across all end-customer
-//                        recipients for the math (operational conservatism —
-//                        don't hide risk against a possible recipient).
-//   null               — material has no shipping history or all recipients
-//                        are internal transfers. Vs. Spec column renders "—".
+//                        velocity-projected to a specific customer (Phase B),
+//                        and that customer has a configured shelf-life spec.
+//   'material_history' — no allocation spec. Fall back to the strictest
+//                        customer spec across the last 365 days of this
+//                        material's shipments (mapped end-customers only).
+//   'default_96'       — final fallback for materials with no material_spec,
+//                        no allocation spec, AND no history — assume 96 days.
+//                        Matches Hill's "default to 96 days if the material
+//                        hasn't shipped yet." NOT applied when the primary
+//                        allocation is an internal_transfer (internal moves
+//                        between Palermo's facilities have no customer spec).
+//   null               — only possible for internal_transfer allocations
+//                        with no material_spec row. Vs. Spec column renders "—".
 //
-// The two-signal design (dominant for display, strictest for math) is
-// intentional. Every row's math should protect against the worst plausible
-// spec violation while the label reflects the most likely destination.
+// The dominant-recipient-for-display / strictest-recipient-for-math split
+// still applies to the material_history baseline. Every row's math should
+// protect against the worst plausible spec violation while the display
+// reflects the most likely destination.
 
 export const STAGE_ORDER = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 
@@ -62,6 +72,12 @@ export const STAGE_META = {
 
 // Stages that make up the default "At Risk and worse" filter.
 export const DEFAULT_STAGES = new Set(['at_risk', 'critical', 'unshippable', 'expired'])
+
+// Runtime fallback shelf-life spec when a material has no curated spec,
+// no allocation customer spec, and no shipment history. Per Hill: "default
+// to 96 days if the material hasn't shipped yet." Applied to end-customer
+// and unmapped allocations, NOT to internal_transfer.
+export const DEFAULT_UNSHIPPED_SHELF_LIFE_DAYS = 96
 
 // ── Canonical resolution ──────────────────────────────────────────────────
 
@@ -112,16 +128,21 @@ export function dailyCaseRate(vel) {
   return Math.min(...rates)
 }
 
-// ── Material-level baselines from 90-day pick history ────────────────────
+// ── Material-level baselines from shipment history ───────────────────────
 //
 // Returns two maps keyed by material_id:
-//   dominantByMaterial: canonical → whoever received the most cases in 90d
-//                       (end-customers only; internal transfers skipped)
+//   dominantByMaterial: canonical → whoever received the most cases in the
+//                       history window (end-customers only; internal
+//                       transfers skipped)
 //   strictestByMaterial: { canonical, spec_days } → recipient whose shelf-
-//                       life-days spec was tightest across the 90-day roster
+//                       life-days spec was tightest across the window's
+//                       roster
 //
 // Internal transfers are excluded from both — they have no shelf-life spec
 // and don't drive customer-facing risk.
+//
+// Note: field is named `cases_90d` for backward compat but the Netlify
+// function currently queries a 365-day window.
 
 function buildMaterialBaselines(materialShipHistory, canonicalIndex) {
   const casesByMaterialCanonical = new Map() // material_id → Map(canonical_id → cases)
@@ -163,30 +184,35 @@ function buildMaterialBaselines(materialShipHistory, canonicalIndex) {
 //   lots                — from pvi-shelf-life.cjs
 //   pendingOrders       — from pvi-shelf-life.cjs (scheduled next 21 days)
 //   velocity            — from pvi-shelf-life.cjs
-//   materialShipHistory — from pvi-shelf-life.cjs (90-day per-material recipients)
+//   materialShipHistory — from pvi-shelf-life.cjs (per-material recipients)
+//   materialSpecs       — from Supabase pvi_material_specs table
+//                         (ops-curated per-material shelf-life spec)
 //   canonicalIndex      — from buildRawNameToCanonical
 //
 // Output: one row per lot with a projected recipient, days_to_code_at_ship,
-// shelf_life_days (from allocation OR material history baseline), and a
-// spec_source flag so the UI can distinguish real allocations from baselines.
+// shelf_life_days (from material_specs / allocation / history baseline /
+// 96d default), and a spec_source flag so the UI can distinguish sources.
 //
 // Algorithm:
-//   1. Build per-material dominant+strictest maps from 90-day history.
-//   2. Sort lots per material by expiration_date ASC (FEFO). Nulls last.
-//   3. Sort pending orders by scheduled_arrival ASC.
-//   4. Phase A: consume against scheduled demand. Each allocation slice
+//   1. Build per-material dominant+strictest maps from history.
+//   2. Build materialSpecMap for O(1) lookup.
+//   3. Sort lots per material by expiration_date ASC (FEFO). Nulls last.
+//   4. Sort pending orders by scheduled_arrival ASC.
+//   5. Phase A: consume against scheduled demand. Each allocation slice
 //      carries the destination canonical + real ship date.
-//   5. Phase B: remaining lot balance projected forward via velocity to the
+//   6. Phase B: remaining lot balance projected forward via velocity to the
 //      material's dominant end-customer (from history). Ship date estimated
 //      at the midpoint of each lot's burn.
-//   6. Roll up per lot: pick earliest allocation as PRIMARY. If primary has
-//      a canonical with a spec, use that spec (source='allocation'). Else
-//      fall back to strictest-baseline (source='material_history'). If
-//      neither exists, spec is null.
-//   7. Compute days_to_code_today, days_to_code_at_ship, shortfall_days,
+//   7. Roll up per lot. Spec resolution priority:
+//      a. materialSpecMap → 'material_spec'
+//      b. Allocation canonical's override_days → 'allocation'
+//      c. Strictest-baseline spec_days → 'material_history'
+//      d. DEFAULT_UNSHIPPED_SHELF_LIFE_DAYS → 'default_96'
+//         (skipped when allocation is internal_transfer)
+//   8. Compute days_to_code_today, days_to_code_at_ship, shortfall_days,
 //      verdict via verdictForLot.
 
-export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory, canonicalIndex, today }) {
+export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory, materialSpecs, canonicalIndex, today }) {
   const now = today ? new Date(today) : new Date()
   const todayMid = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
 
@@ -194,6 +220,16 @@ export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory
     materialShipHistory || [],
     canonicalIndex,
   )
+
+  // Fast lookup for the ops-curated per-material spec. Positive-integer only —
+  // schema enforces > 0 but guard defensively in case of a bad row.
+  const materialSpecMap = new Map()
+  for (const s of (materialSpecs || [])) {
+    const days = Number(s?.shelf_life_days_required)
+    if (Number.isFinite(days) && days > 0 && s?.material_id != null) {
+      materialSpecMap.set(s.material_id, days)
+    }
+  }
 
   // Group lots by material, sort by expiration_date ASC (nulls last).
   const lotsByMaterial = new Map()
@@ -312,34 +348,40 @@ export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory
               || velByMaterial.get(lot.material_id)
               || null
 
-    // Resolve spec + display recipient with the allocation → history fallback.
-    //
-    // 'allocation' spec source: primary allocation has a mapped end-customer
-    // with a configured shelf-life-days. Use that spec, that customer.
-    //
-    // 'material_history' spec source: primary allocation is missing, or its
-    // canonical is an internal_transfer, or has no override_days. Fall back
-    // to the material's 90-day baseline:
-    //   - strictest customer's spec_days for the verdict math
-    //   - dominant customer for the "Projected ship" display
-    // The primary allocation stays as-is (so we can still show a raw ship-to
-    // name if we have one) but shelf_life_days + display canonical get
-    // sourced from baseline.
-    let shelfLifeDays = getShelfLifeDays(primary?.canonical)
-    let specSource   = shelfLifeDays != null ? 'allocation' : null
+    // ── Spec resolution (see priority order documented at top of file) ──
+    let shelfLifeDays = null
+    let specSource   = null
     let displayCanonical = primary?.canonical || null
 
-    if (shelfLifeDays == null) {
-      const strictest = strictestByMaterial.get(lot.material_id)
-      if (strictest) {
-        shelfLifeDays = strictest.spec_days
-        specSource   = 'material_history'
-      }
-      // Prefer the dominant recipient for display when no allocation canonical
-      // is present. Keep any raw ship-to name from the primary as-is if it
-      // exists (helps operators see the actual scheduled address).
-      if (!displayCanonical) {
-        displayCanonical = dominantByMaterial.get(lot.material_id) || null
+    // 1. Ops-curated material_specs row wins over everything.
+    const matSpec = materialSpecMap.get(lot.material_id)
+    if (matSpec != null) {
+      shelfLifeDays = matSpec
+      specSource   = 'material_spec'
+    } else {
+      // 2. Allocation canonical's shelf-life days.
+      const allocDays = getShelfLifeDays(primary?.canonical)
+      if (allocDays != null) {
+        shelfLifeDays = allocDays
+        specSource   = 'allocation'
+      } else {
+        // 3. Strictest-across-365d-history baseline.
+        const strictest = strictestByMaterial.get(lot.material_id)
+        if (strictest) {
+          shelfLifeDays = strictest.spec_days
+          specSource   = 'material_history'
+        }
+        // Prefer the dominant recipient for display when no allocation
+        // canonical is present.
+        if (!displayCanonical) {
+          displayCanonical = dominantByMaterial.get(lot.material_id) || null
+        }
+        // 4. Final fallback: 96d default. Skipped for internal_transfer
+        //    allocations (no shelf-life expectation for internal moves).
+        if (shelfLifeDays == null && primary?.canonical?.account_type !== 'internal_transfer') {
+          shelfLifeDays = DEFAULT_UNSHIPPED_SHELF_LIFE_DAYS
+          specSource   = 'default_96'
+        }
       }
     }
 
@@ -437,6 +479,16 @@ export function verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays
 
 // ── Copy-for-email formatter ──────────────────────────────────────────────
 
+// Human-readable label for each spec source. Used in the email format so
+// ops can see at a glance whether a spec came from a curated row, an
+// allocation, a history baseline, or the runtime default.
+const SPEC_SOURCE_LABEL = {
+  material_spec:    'from material spec',
+  allocation:       'from allocation',
+  material_history: 'from 365-day history',
+  default_96:       'default (no history)',
+}
+
 export function formatLotForEmail(row) {
   const parts = []
   parts.push(`Item: ${row.material_code} — ${row.material_desc}`)
@@ -450,7 +502,9 @@ export function formatLotForEmail(row) {
     parts.push(`Days to code (at projected ship): ${row.days_to_code_at_ship}`)
   }
   if (row.shelf_life_days) {
-    const srcLabel = row.spec_source === 'material_history' ? ' (from 90-day history)' : ''
+    const srcLabel = SPEC_SOURCE_LABEL[row.spec_source]
+      ? ` (${SPEC_SOURCE_LABEL[row.spec_source]})`
+      : ''
     parts.push(`Customer minimum-at-receipt: ${row.shelf_life_days} days${srcLabel}`)
     if (row.shortfall_days != null) {
       const s = row.shortfall_days
