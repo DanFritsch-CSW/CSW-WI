@@ -42,6 +42,15 @@
 [functions."pvi-derive-accounts"]
   timeout = 26
 
+# Scheduled nightly B2E sync — runs at 10:00 UTC daily = 5 AM CDT / 4 AM CST.
+# Fires AFTER B2E's midnight-CDT silver ingest so all overnight schedule
+# changes are in MotherDuck by the time this pulls them into Supabase.
+# Loops all 5 facilities sequentially; each does ~2 Omni queries + a handful
+# of Supabase writes. Typical runtime ~10-20s across all facilities.
+[functions."nightly-b2e-sync"]
+  schedule = "0 10 * * *"
+  timeout = 26
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
