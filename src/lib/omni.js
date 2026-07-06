@@ -49,6 +49,39 @@ const VIEW_LP       = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH    = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ  = 'silver__datex_slv_projects'
 
+// ── MotherDuck appointments cutover ─────────────────────────────────────
+// Feature flag: VITE_USE_MD_APPOINTMENTS=true routes the four appointment
+// fetchers (hourMap, projectData, appointmentList, projectHourly) through
+// /.netlify/functions/motherduck-appointments instead of Omni.
+//
+// Rationale: Omni's gold__truck_appointments view lags the underlying
+// Datex → MotherDuck gold layer, sometimes by several hours. MotherDuck
+// gold is refreshed on the source pipeline cadence and is the accurate
+// source of truth. Cutover eliminates the "created 6h ago but still not
+// showing in the app" class of complaint.
+//
+// Shapes are IDENTICAL to the previous Omni implementations — no callers
+// need to change. Flag defaults OFF (Omni path) so deploy is a no-op
+// until env var is flipped in Netlify.
+const USE_MD_APPOINTMENTS =
+  typeof import.meta !== 'undefined' &&
+  import.meta.env &&
+  import.meta.env.VITE_USE_MD_APPOINTMENTS === 'true'
+
+async function mdAppointmentsQuery(body) {
+  const res = await fetch('/.netlify/functions/motherduck-appointments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let err = {}
+    try { err = await res.json() } catch { /* non-json */ }
+    throw new Error(err.error || `motherduck-appointments ${res.status}`)
+  }
+  return res.json()
+}
+
 // Suffix appended to carryover employee IDs to distinguish them from the
 // same employee's normal entry when they work back-to-back overnight shifts.
 // Surface-checked by RosterBoard, EmployeeTile, and laborCalc via the
@@ -642,6 +675,10 @@ export async function fetchOmniLaborFullRow(facilityId, date) {
 }
 
 export async function fetchHourlyAppointments(facilityId, date) {
+  if (USE_MD_APPOINTMENTS) {
+    const { hourMap } = await mdAppointmentsQuery({ mode: 'hourMap', facilityId, date })
+    return hourMap ?? {}
+  }
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return {}
   return fetchApptHourMap(
@@ -651,24 +688,36 @@ export async function fetchHourlyAppointments(facilityId, date) {
 }
 
 export async function fetchProjectData(facilityId, date) {
-  const wh = CSW_WAREHOUSE[facilityId]
-  if (!wh) return []
-  const rows = await omniQuery({
-    modelId: GOLD_MODEL_ID,
-    table: VIEW_APPT,
-    fields: [
-      `${VIEW_APPT}.project_name`,
-      `${VIEW_APPT}.dock_appointment_type_name`,
-      `${VIEW_APPT}.count`,
-    ],
-    filters: {
-      [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
-      ...scheduledArrivalDateFilter(date),
-      ...apptStatusFilter(),
-    },
-    sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
-    limit: 500,
-  })
+  let rows
+  if (USE_MD_APPOINTMENTS) {
+    const resp = await mdAppointmentsQuery({ mode: 'projectData', facilityId, date })
+    // Adapt MD row shape → Omni-shaped rows so the aggregation loop below
+    // is unchanged. MD returns { project_name, dock_appointment_type_name, count }.
+    rows = (resp.projects ?? []).map(r => ({
+      [`${VIEW_APPT}.project_name`]:               r.project_name,
+      [`${VIEW_APPT}.dock_appointment_type_name`]: r.dock_appointment_type_name,
+      [`${VIEW_APPT}.count`]:                      r.count,
+    }))
+  } else {
+    const wh = CSW_WAREHOUSE[facilityId]
+    if (!wh) return []
+    rows = await omniQuery({
+      modelId: GOLD_MODEL_ID,
+      table: VIEW_APPT,
+      fields: [
+        `${VIEW_APPT}.project_name`,
+        `${VIEW_APPT}.dock_appointment_type_name`,
+        `${VIEW_APPT}.count`,
+      ],
+      filters: {
+        [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
+        ...scheduledArrivalDateFilter(date),
+        ...apptStatusFilter(),
+      },
+      sorts: [{ column_name: `${VIEW_APPT}.project_name`, sort_descending: false }],
+      limit: 500,
+    })
+  }
   const projectMap = new Map()
   for (const r of rows) {
     const rawName = r[`${VIEW_APPT}.project_name`] || ''
@@ -702,6 +751,18 @@ export async function fetchProjectData(facilityId, date) {
  *   carrier_name, notes }
  */
 export async function fetchAppointmentList(facilityId, date) {
+  if (USE_MD_APPOINTMENTS) {
+    const { rows } = await mdAppointmentsQuery({ mode: 'appointmentList', facilityId, date })
+    return (rows ?? []).map(r => ({
+      lookup_code:       r.lookup_code       || '',
+      type:              classifyApptType(r.dock_appointment_type_name),
+      scheduled_arrival: r.scheduled_arrival || null,
+      project_name:      r.project_name      || '',
+      carrier_name:      r.carrier_name      || '',
+      notes:             r.notes             || '',
+    }))
+  }
+
   const wh = CSW_WAREHOUSE[facilityId]
   if (!wh) return []
 
@@ -754,8 +815,15 @@ export async function fetchAppointmentList(facilityId, date) {
 }
 
 export async function fetchProjectHourlyAppointments(facilityId, date, projectNames) {
+  if (!projectNames?.length) return {}
+  if (USE_MD_APPOINTMENTS) {
+    const { hourMap } = await mdAppointmentsQuery({
+      mode: 'projectHourly', facilityId, date, projectNames,
+    })
+    return hourMap ?? {}
+  }
   const wh = CSW_WAREHOUSE[facilityId]
-  if (!wh || !projectNames?.length) return {}
+  if (!wh) return {}
   return fetchApptHourMap(
     {
       [`${VIEW_APPT}.warehouse_name`]: { kind: 'EQUALS', type: 'string', values: [wh] },
