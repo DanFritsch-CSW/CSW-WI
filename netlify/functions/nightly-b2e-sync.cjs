@@ -17,12 +17,16 @@
 //      against B2E truth. Manages new-hire adds, off-day deletes, and stale
 //      shift-time refreshes.
 //
-// Logic ported verbatim from src/lib/omni.js (fetchB2eRosterForRange,
-// fetchActiveB2eEmployees) and src/lib/supabase.js (purgeTerminatedAcrossFuture,
-// seedForwardHorizon). Keeping the port faithful preserves the same protection
-// semantics — is_temp/from_facility/on_loan_to rows are never touched, and
-// manually_edited=true rows keep their lane/role while shift times still refresh
-// from B2E truth.
+// Omni access path: proxies through the internal /.netlify/functions/omni-query
+// function rather than calling https://csw.omniapp.co/api/v1/query/run directly.
+// The first version of this function called Omni directly and consistently got
+// empty responses for the SCHEDULE range query (large multi-day
+// TIME_FOR_UNIT_DURATION filter + sort by ingestion_ts + 11 fields), even
+// though the identical query worked fine through the proxy in the client.
+// Root cause unclear — suspected some Omni-side rate limiting or auth-scope
+// behavior on direct API calls vs. proxied. Using the proxy eliminates the
+// divergence and inherits its retry logic, Arrow parsing, and timeout policy
+// for free.
 //
 // Schedule: 10:00 UTC = 5 AM CDT (4 AM CST in winter). Runs AFTER the reliable
 // midnight-CDT silver ingest of B2E's ~6pm-previous-day export, so all overnight
@@ -31,7 +35,7 @@
 // Configuration: schedule + timeout in netlify.toml under [functions."nightly-b2e-sync"].
 //
 // Env vars required (all already set for other functions):
-//   OMNI_API_KEY
+//   URL                    — Netlify sets automatically to the deploy URL
 //   VITE_SUPABASE_URL
 //   VITE_SUPABASE_ANON_KEY
 
@@ -119,75 +123,34 @@ function computeShiftHours(startTime, endTime) {
   return hours > 0 ? Math.round(hours * 2) / 2 : null
 }
 
-// ── Omni query (ported from omni-query.cjs, single-attempt) ────────────────
+// ── Omni query — proxies to internal omni-query.cjs ────────────────────────
+//
+// The proxy handles Arrow IPC parsing, Omni-side timeout injection, and its
+// own 3-attempt jittered retry. We just POST { query } and receive { rows }.
+// Errors from the proxy come back as HTTP 502 with { error, raw, timedOut }.
 
-function arrowToRows(table) {
-  const rows = []
-  for (let i = 0; i < table.numRows; i++) {
-    const row = {}
-    for (const field of table.schema.fields) {
-      const col = table.getChild(field.name)
-      let val = col.get(i)
-      if (typeof val === 'bigint') val = Number(val)
-      if (typeof val === 'string' && val.startsWith('"') && val.endsWith('"')) {
-        val = val.slice(1, -1)
-      }
-      row[field.name] = val
-    }
-    rows.push(row)
+async function omniQuery(query, baseUrl) {
+  const proxyUrl = `${baseUrl}/.netlify/functions/omni-query`
+  const res = await fetch(proxyUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: { version: 5, ...query } }),
+  })
+  if (!res.ok) {
+    let body = ''
+    try { body = await res.text() } catch { /* ignore */ }
+    throw new Error(`omni-query proxy HTTP ${res.status}: ${body.slice(0, 300)}`)
   }
-  return rows
-}
-
-// Retry policy — Omni occasionally hiccups. Do up to 3 attempts with jittered
-// backoff. This is a scheduled job with a 26s function budget; each Omni
-// query has a 20s server-side timeout, so realistically we get 1 retry.
-async function omniQuery(query, apiKey, attempt = 0) {
-  const queryWithTimeout = { version: 5, ...query, timeout: 20 }
-  let res
-  try {
-    res = await fetch('https://csw.omniapp.co/api/v1/query/run', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ query: queryWithTimeout }),
-    })
-  } catch (e) {
-    if (attempt < 2) {
-      await new Promise(r => setTimeout(r, 500 + Math.random() * 500))
-      return omniQuery(query, apiKey, attempt + 1)
-    }
-    throw new Error(`Omni network error: ${e.message}`)
+  const payload = await res.json()
+  if (!payload || !Array.isArray(payload.rows)) {
+    throw new Error(`omni-query proxy: missing rows field: ${JSON.stringify(payload).slice(0, 300)}`)
   }
-
-  const text = await res.text()
-  let completeJob = null
-  let timedOut = false
-  for (const line of text.trim().split('\n')) {
-    try {
-      const parsed = JSON.parse(line)
-      if (parsed.status === 'COMPLETE') { completeJob = parsed; break }
-      if (parsed.timed_out === true) timedOut = true
-    } catch { /* skip malformed lines */ }
-  }
-  if (!completeJob) {
-    if (timedOut && attempt < 2) {
-      await new Promise(r => setTimeout(r, 500 + Math.random() * 500))
-      return omniQuery(query, apiKey, attempt + 1)
-    }
-    throw new Error(`Omni query did not complete: ${text.slice(0, 200)}`)
-  }
-  const { tableFromIPC } = await import('apache-arrow')
-  const buf = Buffer.from(completeJob.result, 'base64')
-  const table = tableFromIPC(buf)
-  return arrowToRows(table)
+  return payload.rows
 }
 
 // ── B2E fetchers (ported from omni.js) ─────────────────────────────────────
 
-async function fetchB2eRosterForRange(apiKey, facilityId, fromDate, daysForward, cal2DockAssignments) {
+async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward, cal2DockAssignments) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return {}
   const isCal = facilityId === 'cal'
@@ -201,7 +164,7 @@ async function fetchB2eRosterForRange(apiKey, facilityId, fromDate, daysForward,
         [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
       },
       limit: 500,
-    }, apiKey),
+    }, baseUrl),
     omniQuery({
       modelId: B2E_MODEL_ID, table: SCHEDULE,
       fields: [
@@ -220,7 +183,7 @@ async function fetchB2eRosterForRange(apiKey, facilityId, fromDate, daysForward,
       },
       sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
       limit: 5000,
-    }, apiKey),
+    }, baseUrl),
   ])
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
@@ -296,7 +259,7 @@ async function fetchB2eRosterForRange(apiKey, facilityId, fromDate, daysForward,
   return result
 }
 
-async function fetchActiveB2eEmployees(apiKey, facilityId) {
+async function fetchActiveB2eEmployees(baseUrl, facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return new Set()
   const rows = await omniQuery({
@@ -309,7 +272,7 @@ async function fetchActiveB2eEmployees(apiKey, facilityId) {
     },
     sorts: [],
     limit: 500,
-  }, apiKey)
+  }, baseUrl)
   return new Set(rows.map(r => String(r[`${ROSTER}.employee_id`])))
 }
 
@@ -492,15 +455,15 @@ async function seedForwardHorizon(supabase, facility, b2eRosterByDate, fromDate,
 
 // ── Handler ────────────────────────────────────────────────────────────────
 
-async function syncFacility(supabase, apiKey, facility, today, cal2Docks) {
+async function syncFacility(supabase, baseUrl, facility, today, cal2Docks) {
   const facStart = Date.now()
   try {
     const [rosterByDate, activeEmps] = await Promise.all([
       fetchB2eRosterForRange(
-        apiKey, facility, today, FORWARD_DAYS + 1,
+        baseUrl, facility, today, FORWARD_DAYS + 1,
         facility === 'cal' ? cal2Docks : new Map()
       ),
-      fetchActiveB2eEmployees(apiKey, facility),
+      fetchActiveB2eEmployees(baseUrl, facility),
     ])
     // Purge first (removes terminated/transferred), then seed (adds new hires,
     // deletes off-day rows, refreshes shift times). Same order as client.
@@ -526,13 +489,16 @@ async function syncFacility(supabase, apiKey, facility, today, cal2Docks) {
 
 exports.handler = async (event) => {
   const startTime = Date.now()
-  const OMNI_KEY = process.env.OMNI_API_KEY
   const SUPA_URL = process.env.VITE_SUPABASE_URL
   const SUPA_KEY = process.env.VITE_SUPABASE_ANON_KEY
+  // Netlify sets process.env.URL to the deploy URL automatically. Fall back
+  // to DEPLOY_URL for deploy previews, then a hardcoded production URL as a
+  // final safety net. The proxy call needs an absolute URL — relative doesn't
+  // work from function-to-function.
+  const baseUrl = process.env.URL || process.env.DEPLOY_URL || 'https://csw-wi.netlify.app'
 
-  if (!OMNI_KEY || !SUPA_URL || !SUPA_KEY) {
+  if (!SUPA_URL || !SUPA_KEY) {
     const missing = {
-      OMNI_API_KEY:            !!OMNI_KEY,
       VITE_SUPABASE_URL:       !!SUPA_URL,
       VITE_SUPABASE_ANON_KEY:  !!SUPA_KEY,
     }
@@ -550,10 +516,10 @@ exports.handler = async (event) => {
 
   // Sequential per facility to keep Omni load bounded and stay under the
   // 26s function timeout. Each facility runs its 2 Omni queries in parallel
-  // internally so a single facility takes ~2-4s.
+  // internally so a single facility takes ~2-4s (proxy round-trip adds ~50ms).
   const results = {}
   for (const facility of FACILITIES) {
-    results[facility] = await syncFacility(supabase, OMNI_KEY, facility, today, cal2Docks)
+    results[facility] = await syncFacility(supabase, baseUrl, facility, today, cal2Docks)
     // Fail-forward: log each facility's outcome even if it errors, so a
     // partial success is visible in Netlify function logs.
     console.log(`[nightly-b2e-sync] ${facility}:`, JSON.stringify(results[facility]))
@@ -563,6 +529,7 @@ exports.handler = async (event) => {
     ok:      Object.values(results).every(r => r.ok),
     ranAt:   new Date().toISOString(),
     today,
+    baseUrl,
     totalMs: Date.now() - startTime,
     results,
   }
