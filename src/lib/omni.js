@@ -1370,18 +1370,6 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
 
 /**
  * Fetch the roster for a given operational date.
- *
- * Op day spans 5am→4:59am+1, so we do TWO B2E queries:
- * 1. entry_date = date — today's roster (1st/Mid/2nd + 3rd starting tonight)
- * 2. entry_date = date - 1 — prior-night carryover (3rd shifters whose shift
- *    started yesterday at 10pm and extends into today's post-5am window)
- *
- * Carryovers tagged is_carryover: true with a synthetic ID suffix so they
- * can coexist with the same employee's normal entry today (M-F 3rd shifters
- * commonly appear on both: yesterday's shift finishing this morning AND
- * tonight's shift starting at 10pm). NOT persisted to Supabase — recomputed
- * live each page load. Callers writing to employees or roster_assignments
- * tables must filter via e => !e.is_carryover.
  */
 export async function fetchB2eRoster(facilityId, date) {
   const location = B2E_LOCATION[facilityId]
@@ -1398,16 +1386,6 @@ export async function fetchB2eRoster(facilityId, date) {
     }),
   ])
 
-  // Carryover rule: linearEnd = shift_start + shift_hours
-  //   - linearEnd <= 24+5 (29) → tail entirely within yesterday's op day → skip
-  //   - linearEnd > 29 → tail reaches into today's post-5am window → carryover
-  // Example: 22:00 + 8.5h = 30.5 → 30.5 > 29 ✓ carryover (tail = 6:30am)
-  //
-  // NOTE: we deliberately do NOT dedup against today's roster. M-F 3rd shifters
-  // legitimately appear on BOTH (their prior-night shift finishing this morning,
-  // and tonight's shift starting at 10pm). Synthetic ID suffix prevents React
-  // key collisions; the carryover entry's `originalId` field lets downstream
-  // code reference the real employee when needed.
   const carryovers = priorNightRoster
     .filter(e => {
       if (e.shift_start == null || e.shift_hours == null) return false
@@ -1426,24 +1404,9 @@ export async function fetchB2eRoster(facilityId, date) {
 
 /**
  * Fetch B2E rosters for a forward window in a SINGLE Omni round trip.
- *
- * Returns { [iso_date]: Employee[] } — one entry per (employee, date) pair
- * that B2E actually has scheduled in [fromDate, fromDate + daysForward).
- *
- * Replaces the prior "project today's roster across N future days" cartesian
- * pattern in seedForwardHorizon, which created false rows for employees on
- * partial-week schedules (4/10, Mon-Wed only, etc). With per-date B2E truth,
- * employees off-schedule on a given day simply have no entry for that date —
- * no row gets seeded.
- *
- * Carryover logic is intentionally omitted: carryover is a DISPLAY concept
- * (faded prior-night tiles) recomputed live by fetchB2eRoster when the user
- * visits the date. Forward-window seeding writes one row per (employee, date);
- * the per-date view re-fetches carryovers fresh.
- *
- * Single Omni window query (TIME_FOR_UNIT_DURATION with daysForward offset)
- * keeps this at 2 round trips total (roster + schedule in parallel) vs 14+
- * for a per-date approach.
+ * Applies stale-snapshot filter: per-employee max ingestion_ts drops rows
+ * from prior B2E snapshot batches so seedForwardHorizon's delete branch
+ * removes stale (employee, date) pairs from Supabase.
  */
 export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) {
   const location = B2E_LOCATION[facilityId]
@@ -1484,12 +1447,6 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
 
-  // Per-employee max ingestion_ts across all fetched rows. B2E's
-  // futurescheduleentries is append-only — old rows from superseded
-  // schedules stick around forever. Rows whose ingestion_ts is older than
-  // this per-employee max are leftovers from prior snapshot batches and
-  // must be dropped so seedForwardHorizon's delete branch will clean up
-  // Supabase rows for those (employee, date) pairs.
   const maxIngestByEmp = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
@@ -1500,16 +1457,12 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
     }
   }
 
-  // Dedup by (employee_id, entry_date), most recent ingestion_ts wins.
-  // Mirrors fetchB2eRosterForEntryDate's single-date dedup behavior.
-  const byDateEmp = new Map() // dateIso -> Map<empId, {row, ts}>
+  const byDateEmp = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
     if (!activeIds.has(id)) continue
     if (!ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
-    // Stale-snapshot filter: drop rows from B2E snapshots older than this
-    // employee's latest snapshot in the window.
     if (ts !== maxIngestByEmp.get(id)) continue
     const dateRaw = r[`${SCHEDULE}.entry_date`]
     if (!dateRaw) continue
@@ -1562,25 +1515,6 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
   return result
 }
 
-/**
- * Fetch the set of currently-active employee IDs at a facility from B2E's
- * master roster (silver.b2e_slv_employeeroster). Independent of any specific
- * date's schedule — represents who is on the books right now.
- *
- * Used by purgeTerminatedAcrossFuture (in supabase.js) to identify which
- * roster_assignments rows belong to terminated employees or employees who've
- * transferred to a different facility. Distinct from fetchB2eRoster, which
- * joins the master roster against per-date schedule entries — we deliberately
- * skip that join here because someone can be Active but legitimately off-
- * schedule on any given day (weekend, PTO). Master roster status is the
- * ground truth for "are they an employee here at all?"
- *
- * Filters: location matches facility, employee_status = 'Active', job_code 205.
- *
- * Returns Set<string> of employee_ids. Returns empty Set on Omni failure —
- * callers MUST treat an empty set as "skip the purge" to avoid wiping rows
- * on a transient outage. purgeTerminatedAcrossFuture has this guard.
- */
 export async function fetchActiveB2eEmployees(facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return new Set()
@@ -1652,3 +1586,4 @@ export async function fetchWrPickers(date) {
       name: [r[`${SCHEDULE}.first_name`] || '', r[`${SCHEDULE}.last_name`] || ''].filter(Boolean).join(' '),
     }))
     .sort((a, b) => a.name.localeCompare(b.name))
+}
