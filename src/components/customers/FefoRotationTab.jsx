@@ -9,13 +9,6 @@ import {
 } from '../../lib/fefo.js'
 
 // FEFO Rotation tab — always live from Datex, batched.
-//
-// One Netlify function call on mount fetches all 4 KEN projects on a single
-// duckdb connection. Replaces the previous per-project fan-out which triggered
-// a duckdb connection-init bug under parallel Lambda invocations.
-//
-// Mock fixtures render only when the batch call fails entirely — last-resort
-// fallback so the screen never blanks during a MotherDuck outage.
 
 const ALL_PROJECT_IDS = FEFO_PROJECTS.map(p => p.id)
 
@@ -273,8 +266,8 @@ function Banners({ banners }) {
   if (banners.holds.length > 0) {
     items.push({
       key: 'h', kind: 'hold',
-      title: `${banners.holds.length} lot${banners.holds.length === 1 ? '' : 's'} on hold`,
-      body: `Older lots correctly skipped because on hold: ${banners.holds.join(', ')}. Release once cleared.`,
+      title: `${banners.holds.length} lot${banners.holds.length === 1 ? '' : 's'} on hold or in receiving`,
+      body: `Older lots correctly skipped — either on hold or dwelling in a non-allocatable location (receiving, staging, dock): ${banners.holds.join(', ')}. Clear the hold or move to a pickable bin.`,
     })
   }
   if (banners.allClean) {
@@ -436,8 +429,9 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
           color: 'var(--text-dim)', fontSize: 14,
           transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
           transition: 'transform 0.15s ease',
+          pointerEvents: 'none',
         }}>›</span>
-        <span style={{ fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{order.id}</span>
+        <span style={{ fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)', pointerEvents: 'none' }}>{order.id}</span>
         {showProjectChip && project && (
           <span style={{
             fontSize: 10, fontWeight: 600,
@@ -448,15 +442,17 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
             borderRadius: 'var(--r-sm, 4px)',
             fontFamily: 'var(--font-mono, ui-monospace, monospace)',
             letterSpacing: '0.04em',
+            pointerEvents: 'none',
           }}>{project.code}</span>
         )}
-        <span style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{order.dest}</span>
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', pointerEvents: 'none' }}>{order.dest}</span>
         <span style={{
           fontSize: 11, color: order.past ? VERDICT_TOKENS.stale.color : 'var(--text-secondary)',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
           fontWeight: order.past ? 600 : 400,
+          pointerEvents: 'none',
         }}>{order.appt}</span>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', pointerEvents: 'none' }}>
           {totalLps} LP · {skuCount} SKU{skuCount === 1 ? '' : 's'}
         </span>
         <VerdictPill verdict={verdict} />
@@ -492,6 +488,7 @@ function VerdictPill({ verdict }) {
       borderRadius: 'var(--r-sm, 4px)',
       fontFamily: 'var(--font-mono, ui-monospace, monospace)',
       whiteSpace: 'nowrap',
+      pointerEvents: 'none',
     }}>
       {t.label}
     </span>
@@ -539,29 +536,55 @@ function SkuLineRow({ line, projId }) {
 }
 
 function ShippingColumn({ ship, verb }) {
+  const anyHold = ship.some(s => s.hold)
   return (
     <div>
-      <div style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.08em', marginBottom: 6 }}>SHIPPING ON THIS ORDER · OLDEST FIRST</div>
+      <div style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.08em', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span>SHIPPING ON THIS ORDER · OLDEST FIRST</span>
+        {anyHold && (
+          <span style={{
+            padding: '1px 5px',
+            background: 'rgba(192, 57, 43, 0.12)',
+            color: 'var(--red, #c0392b)',
+            border: '1px solid var(--red, #c0392b)',
+            borderRadius: 2,
+            fontWeight: 600,
+            letterSpacing: '0.04em',
+          }}>⚠ HOLD ON ORDER</span>
+        )}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {ship.map((s, idx) => (
-          <DateChip key={`${s.k}-${idx}`} seq={idx + 1} date={s.date} lps={s.lps} cases={s.cases} codes={s.codes} lot={s.lot} verb={verb} isOldest={idx === 0} />
+          <DateChip
+            key={`${s.k}-${idx}`}
+            seq={idx + 1}
+            date={s.date}
+            lps={s.lps}
+            cases={s.cases}
+            codes={s.codes}
+            lot={s.lot}
+            verb={verb}
+            isOldest={idx === 0}
+            hold={s.hold}
+            holdType={s.holdType}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function DateChip({ seq, date, lps, cases, codes, lot, verb, isOldest }) {
+function DateChip({ seq, date, lps, cases, codes, lot, verb, isOldest, hold, holdType }) {
   const moreCount = (codes?.length || 0) > 6 ? codes.length - 6 : 0
   const visibleCodes = (codes || []).slice(0, 6)
   return (
     <div style={{
       padding: '6px 8px',
-      border: '1px solid var(--border)',
+      border: hold ? '1px solid var(--red, #c0392b)' : '1px solid var(--border)',
       borderRadius: 'var(--r-sm, 4px)',
-      background: 'var(--bg2, #f8f9fb)',
+      background: hold ? 'rgba(192, 57, 43, 0.04)' : 'var(--bg2, #f8f9fb)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>#{seq}</span>
         <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{verb} {date}</span>
         {isOldest && (
@@ -573,6 +596,17 @@ function DateChip({ seq, date, lps, cases, codes, lot, verb, isOldest }) {
             borderRadius: 2,
             fontFamily: 'var(--font-mono, ui-monospace, monospace)',
           }}>oldest</span>
+        )}
+        {hold && (
+          <span style={{
+            fontSize: 9, fontWeight: 600,
+            padding: '1px 5px',
+            background: 'rgba(192, 57, 43, 0.14)',
+            color: 'var(--red, #c0392b)',
+            border: '1px solid var(--red, #c0392b)',
+            borderRadius: 2,
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          }}>⏸ {holdType || 'HOLD'}</span>
         )}
         <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginLeft: 'auto' }}>{lps} LP · {cases} cs</span>
       </div>
@@ -598,6 +632,8 @@ function DateChip({ seq, date, lps, cases, codes, lot, verb, isOldest }) {
 
 function OldestRemainingColumn({ rem, verb, verdict }) {
   const t = VERDICT_TOKENS[verdict]
+  const showLocation = rem && rem.lps > 0 && (rem.location || (rem.locations && rem.locations.length))
+  const extraLocs = rem?.locations && rem.locations.length > 1 ? rem.locations.length - 1 : 0
   return (
     <div>
       <div style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.08em', marginBottom: 6 }}>OLDEST REMAINING · NOT ON ANY ORDER</div>
@@ -612,7 +648,7 @@ function OldestRemainingColumn({ rem, verb, verdict }) {
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontStyle: 'italic' }}>None — fully cleared</div>
         ) : (
           <>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{verb} {rem.date}</span>
               {rem.hold && (
                 <span style={{
@@ -624,8 +660,35 @@ function OldestRemainingColumn({ rem, verb, verdict }) {
                   fontFamily: 'var(--font-mono, ui-monospace, monospace)',
                 }}>⏸ {rem.holdType || 'HOLD'}</span>
               )}
+              {!rem.hold && rem.locationBlocked && (
+                <span
+                  title="Older lot is in a non-allocatable location (receiving, staging, dock, etc.). It won't be picked until moved to an allocatable bin."
+                  style={{
+                    fontSize: 9, fontWeight: 600,
+                    padding: '1px 5px',
+                    background: 'rgba(160, 120, 24, 0.12)',
+                    color: 'var(--amber, #a07818)',
+                    border: '1px solid var(--amber, #a07818)',
+                    borderRadius: 2,
+                    fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+                  }}
+                >⚑ NOT IN BIN</span>
+              )}
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginTop: 2 }}>{rem.lps} LP · {rem.cases} cs available{rem.lot ? ` · lot ${rem.lot}` : ''}</div>
+            {showLocation && (
+              <div style={{
+                fontSize: 11,
+                color: 'var(--text-secondary)',
+                fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+                marginTop: 3,
+              }}>
+                📍 {rem.location || rem.locations[0]}
+                {extraLocs > 0 && (
+                  <span style={{ color: 'var(--text-dim)' }} title={rem.locations.join(', ')}> · +{extraLocs} more</span>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>

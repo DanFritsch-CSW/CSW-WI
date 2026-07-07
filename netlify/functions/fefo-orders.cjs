@@ -44,82 +44,33 @@
 // Phase 7c switched the order date filter from requested_delivery_date to
 // scheduled_arrival on the dock appointment. Reason: orders in Datex often
 // carry a stale requested_delivery_date after rescheduling, while the dock
-// appointment is the actual "this truck is leaving today" signal. Example
-// caught in production: order 973305 (QT Midlothian) had req_date 6/26 but
-// appointment scheduled 6/29 18:00 — the old filter excluded it; the new
-// one catches it AND flags it stale because the appt time is in the past.
+// appointment is the actual "this truck is leaving today" signal.
 //
-// Join path: order → dockappointmentitems (item_entity_type='Order',
-// item_entity_id=order_id) → dockappointments → dockappointmentstatuses.
-// Filter excludes Cancelled/Completed appointment statuses. If an order
-// has multiple active appointments, takes the earliest scheduled_arrival
-// (ROW_NUMBER OVER PARTITION).
+// ── Committed-cases subtraction ─────────────────────────────────────────────
 //
-// ── Pack string: tie × high (Phase 7c follow-up) ────────────────────────────
+// The onhand SQL LEFT JOINs a `committed` CTE that sums
+// expected_packaged_amount per lot for tasks in Planned/Released/Started/
+// Suspended status at the warehouse. Those cases are soft-allocated: the
+// pick task has been created or released to a picker but not yet executed,
+// and Datex binds the allocation to the LOCATION not the LP.
 //
-// Allocations query LEFT JOINs materialspackagingslookup + inventorymeasurementunits
-// to surface the pallet structure per material. Filter is_reporting_default=true
-// AND deprecated_packaging=false to pick the canonical packaging row (usually
-// the Case unit — Each/Pallet variants exist on some materials but the
-// "reporting default" is the one ops thinks about for forecasting).
+// Statuses (2026-07-07 broadening — Bry's PSH0087544 false-negative):
+//   - Planned:   task created, not yet released
+//   - Released:  released to picker, not yet started
+//   - Started:   picker actively picking (in-progress)
+//   - Suspended: paused mid-pick (still committed)
 //
-// packaging_id in materialspackagingslookup references inventory_measurement_unit_id.
-// pallet_tie × pallet_high = cases per pallet. e.g. 8×7 = 56 cs/pallet.
-// fmtPack formats as "8×7" (visualizes pallet stacking) when both values are
-// present; falls back to the unit's short_name (e.g. "CS") when not. Empty
-// string if neither source has data — UI can choose whether to render.
+// LP-source fallback UNION: some pick tasks reference source_license_plate_id
+// but NOT lot_id (LP-bound rather than lot-bound picks). Resolve the lot via
+// license_plate_contents so those cases are still counted as committed.
 //
-// ── Committed-cases subtraction (2026-07-01, Hill's FEFO false-positive fix) ─
+// ── Location visibility (2026-07-07, Bry's team feedback) ───────────────────
 //
-// The onhand SQL now LEFT JOINs a `committed` CTE that sums
-// expected_packaged_amount per lot for tasks in ('Planned', 'Released')
-// status at the warehouse. Those cases are soft-allocated: the pick task
-// has been created (Planned) or released to a picker (Released) but not
-// yet executed, and Datex binds the allocation to the LOCATION not the LP.
-// So the underlying license_plate_contents row still shows the LP as full
-// even though the cases are effectively spoken for.
-//
-// Without this subtraction, we were flagging false FEFO violations for
-// lots whose cases were already committed to other orders' released picks.
-// Verified against KEN 2026-07-01: 12 of 12 sampled lots with active tasks
-// had 0 tasks with source_license_plate_id populated — 100% of them bind
-// by location + lot only. Example: lot 26162 material 109282 (Crown), 2454
-// onhand, 2454 committed, 0 truly available — but the app was surfacing
-// those 2454 as available REM inventory.
-//
-// The subtraction is warehouse-wide (not filtered to our in-window orders)
-// so that lots committed to any released pick — including out-of-window
-// orders — are correctly excluded from REM candidates.
-//
-// ── Day-level violation compare (2026-07-01, kDay field) ────────────────────
-//
-// Fair Oaks lot codes encode YDDDHHMMSS — down-to-the-second precision.
-// Two lots produced on the same day at 10:00 vs 14:00 have different k
-// values, so a REM lot 4 hours "older" was flagging as a violation. Hill's
-// operational view: same-day pack = same-age inventory; only flag if
-// strictly older by a full day.
-//
-// Parsers now return { k, kDay, display }:
-//   - k: full-precision sort key (preserves HH:MM:SS ordering for
-//     picking the truly-oldest REM within a day)
-//   - kDay: day-level integer for violation comparison
-// Client-side lineVerdict compares kDay < oldKDay rather than k < oldK.
-//
-// Richelieu (MMDDYYYY) and Crown (PPW+MMDDYYYY) are already day-level so
-// their k == kDay. Only Fair Oaks had the sub-day precision issue.
-//
-// ── Schema / data architecture (per Phase 7a recon) ─────────────────────────
-//   - hardallocations.shipment_line_id is always null in this Datex instance.
-//     Allocations link to orders via TASKS, not shipment_line_id.
-//   - Pre-pick orders only have lot-level allocation; LP-level assignment
-//     happens at pick time. We return lot-level data with LP counts.
-//   - Lot lookup_codes carry the date per-project (YDDDHHMMSS / MMDDYYYY /
-//     PPW+MMDDYYYY). Server-side parsers compute the sortable k integer.
-//   - Silver timestamps are CDT-naive. duckdb returns them as JS Date
-//     objects interpreted as UTC. For display we use the UTC accessors
-//     (getUTCHours etc) which return the wall-clock CDT face value. For
-//     past/now comparison both sides are offset by the same 5 hours so
-//     relative ordering is preserved.
+// REM candidates now include their storage location(s) so ops can see WHERE
+// the older unallocated stock is sitting. When the location matches a
+// non-allocatable pattern (receiving dock, staging, quarantine, equipment
+// scanner locations), the row is flagged locationBlocked=true so the UI
+// can show it as informational rather than a rotation violation.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -151,12 +102,38 @@ function isHoldStatus(s) {
   return /hold|not released/i.test(s)
 }
 
-// ─── Date parsers (server copy — mirrors src/lib/fefo.js) ───────────────────
+// Location-name patterns for "not yet in an allocatable bin". If the OLDEST
+// REM lot lives entirely in one of these location types, the app treats it
+// as informational, not a rotation violation.
 //
-// Each parser returns { k, kDay, display }:
-//   - k    — full-precision sort key (used to pick truly-oldest REM lot)
-//   - kDay — day-level integer (used for violation comparisons; see notes above)
-//   - display — human MM/DD/YY
+// Match is case-insensitive substring. Verified against KEN locations
+// 2026-07-07: BG### / BE### / equipment scanner names (Desktop / Scanner)
+// are the ones ops treats as non-allocatable dwell zones.
+const NON_ALLOCATABLE_LOCATION_PATTERNS = [
+  /receiving/i,       // C5 Receiving, Dock Receiving, etc.
+  /staging/i,         // Staging zones
+  /quarantine/i,      // Post-inspection holds
+  /\bdock\b/i,        // Loading docks
+  /\bdoor\b/i,        // Loading doors
+  /desktop/i,         // Equipment scanner locations (e.g. "C5 Desktop")
+  /\bscanner\b/i,     // Handheld scanner locations
+  /inspection/i,      // QA inspection zones
+]
+
+function classifyLocations(locationsString) {
+  if (!locationsString) return { locations: [], primary: '', locationBlocked: false }
+  const parts = String(locationsString).split(' | ').map(s => s.trim()).filter(Boolean)
+  if (parts.length === 0) return { locations: [], primary: '', locationBlocked: false }
+  const blocked = parts.map(p => NON_ALLOCATABLE_LOCATION_PATTERNS.some(rx => rx.test(p)))
+  const allBlocked = blocked.every(Boolean)
+  return {
+    locations: parts,
+    primary: parts[0],
+    locationBlocked: allBlocked,
+  }
+}
+
+// ─── Date parsers (server copy — mirrors src/lib/fefo.js) ───────────────────
 
 function parseFairOaksDate(lookupCode) {
   if (!lookupCode || typeof lookupCode !== 'string') return null
@@ -189,7 +166,6 @@ function parseRichelieuDate(lookupCode) {
   const day   = Number(m[2])
   const year  = Number(m[3])
   if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900) return null
-  // MMDDYYYY is inherently day-level — k and kDay are identical here.
   const kDay = year * 10000 + month * 100 + day
   return { k: kDay, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
 }
@@ -219,24 +195,17 @@ function arrivalToDate(scheduledArrival) {
 }
 
 function fmtApptTime(scheduledArrival) {
-  // Format silver-naive CDT timestamp as HH:MM (24-hour) for display.
-  // duckdb returns the timestamp as a Date interpreted as UTC, so the UTC
-  // accessors give us the wall-clock CDT face value silver actually stored.
   const arrival = arrivalToDate(scheduledArrival)
-  if (!arrival) return '\u2014'
+  if (!arrival) return '—'
   const h = String(arrival.getUTCHours()).padStart(2, '0')
   const m = String(arrival.getUTCMinutes()).padStart(2, '0')
   return `${h}:${m}`
 }
 
 function fmtPack(palletTie, palletHigh, shortName) {
-  // Prefer "8×7" notation (tie × high) when both are present — ops staff
-  // recognize this as the pallet stacking pattern. Falls back to the unit
-  // short_name (e.g. "CS") when tie/high aren't populated. Empty string
-  // if no useful packaging info exists.
   const t = Number(palletTie) || 0
   const h = Number(palletHigh) || 0
-  if (t > 0 && h > 0) return `${t}\u00d7${h}`
+  if (t > 0 && h > 0) return `${t}×${h}`
   const s = String(shortName || '').trim()
   return s
 }
@@ -270,22 +239,14 @@ function fmtDest(name, city, state) {
   const s = (state || '').trim()
   if (!n && !c) return ''
   const loc = c && s ? `${c}, ${s}` : c || s
-  return loc ? `${n} \u2014 ${loc}` : n
+  return loc ? `${n} — ${loc}` : n
 }
 
-// ─── Per-project query block (runs on shared duckdb connection) ─────────────
+// ─── Per-project query block ───────────────────────────────────────────────
 
 async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount }) {
   const safeProjectName = project.datexName.replace(/'/g, "''")
 
-  // ── Query 1: order headers, joined to dock appointment ──
-  //
-  // The appts CTE selects one active appointment per order (earliest
-  // scheduled_arrival), filtered by warehouse and the date window. Cancelled
-  // and Completed statuses are excluded — those don't represent trucks
-  // actually scheduled to ship. INNER JOIN means orders without an active
-  // appt aren't returned, which matches the "what's shipping today" framing
-  // of this view.
   const orderSql = `
     WITH proj AS (
       SELECT project_id FROM production_db.silver.datex_slv_projects
@@ -347,13 +308,8 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   const orderIds = orderRows.map(r => Number(r.order_id))
   const orderIdList = orderIds.join(',')
 
-  // ── Query 2: allocations per (order, material, lot) ──
-  //
-  // LEFT JOINs to materialspackagingslookup + inventorymeasurementunits add
-  // pallet_tie / pallet_high / pack_unit_short so we can surface a pack
-  // string ("8×7" = 56 cs/pallet) per material line. Filter
-  // is_reporting_default=true + deprecated_packaging=false picks the
-  // canonical packaging row per material (usually the Case unit).
+  // Allocations query — l.status_name surfaces hold info for SHIPPING lots
+  // so the UI can flag pallets on QA hold on the order itself, not just REM.
   const allocSql = `
     SELECT
       t.order_id, t.order_line_number, t.material_id,
@@ -386,36 +342,55 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
 
   const materialIds = [...new Set(allocRows.map(r => Number(r.material_id)))]
 
-  // ── Query 3: on-hand by lot (with committed-cases subtraction) ──
-  //
-  // The `committed` CTE sums expected_packaged_amount per lot for tasks in
-  // Planned/Released status across the whole warehouse. Those cases are
-  // soft-allocated: a pick task exists but hasn't executed, and Datex binds
-  // the allocation to the LOCATION not the LP — so the LP screen still
-  // shows the cases as physically present. We subtract to get true
-  // availability.
-  //
-  // cases_available = GREATEST(onhand - committed, 0). Uses GREATEST to
-  // guard against edge cases where committed > onhand (data drift between
-  // license_plate_contents and tasks). Downstream candidate filter drops
-  // any lot where cases_available == 0.
-  //
-  // Warehouse-wide (not filtered to our in-window orders) is intentional:
-  // a lot committed to a released pick for an OUT-of-window order still
-  // shouldn't be considered available for REM.
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
+    // Onhand query with:
+    //   - committed CTE (broader statuses + LP-source fallback)
+    //   - lot_locations CTE (STRING_AGG of distinct location names)
+    //   - cases_available = GREATEST(onhand - committed, 0)
     const onhandSql = `
-      WITH committed AS (
-        SELECT t.lot_id, SUM(t.expected_packaged_amount) AS cases_committed
+      WITH committed_raw AS (
+        SELECT t.lot_id, t.expected_packaged_amount AS cases_committed
         FROM production_db.silver.datex_slv_tasks t
         JOIN production_db.silver.datex_slv_taskstatuses ts
           ON ts.task_status_id = t.status_id
         WHERE t.warehouse_id = ${warehouseId}
           AND t.lot_id IS NOT NULL
-          AND ts.status_name IN ('Planned', 'Released')
-        GROUP BY t.lot_id
+          AND ts.status_name IN ('Planned', 'Released', 'Started', 'Suspended')
+
+        UNION ALL
+
+        SELECT lpc.lot_id, t.expected_packaged_amount AS cases_committed
+        FROM production_db.silver.datex_slv_tasks t
+        JOIN production_db.silver.datex_slv_taskstatuses ts
+          ON ts.task_status_id = t.status_id
+        JOIN production_db.silver.datex_slv_licenseplatecontents lpc
+          ON lpc.license_plate_id = t.actual_source_license_plate_id
+        WHERE t.warehouse_id = ${warehouseId}
+          AND t.lot_id IS NULL
+          AND t.actual_source_license_plate_id IS NOT NULL
+          AND lpc.lot_id IS NOT NULL
+          AND ts.status_name IN ('Planned', 'Released', 'Started', 'Suspended')
+      ),
+      committed AS (
+        SELECT lot_id, SUM(cases_committed) AS cases_committed
+        FROM committed_raw
+        GROUP BY lot_id
+      ),
+      lot_locations AS (
+        SELECT
+          lpc.lot_id,
+          STRING_AGG(DISTINCT loc.location_container_name, ' | ') AS locations
+        FROM production_db.silver.datex_slv_licenseplatecontents lpc
+        JOIN production_db.silver.datex_slv_licenseplates lp
+          ON lpc.license_plate_id = lp.license_plate_id
+        LEFT JOIN production_db.silver.datex_slv_locationcontainers loc
+          ON lp.location_id = loc.location_container_id
+        WHERE lp.warehouse_id = ${warehouseId}
+          AND lp.Archived = false
+          AND lpc.packaged_amount > 0
+        GROUP BY lpc.lot_id
       )
       SELECT
         l.material_id, l.lot_id,
@@ -426,11 +401,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         GREATEST(
           SUM(lpc.packaged_amount) - COALESCE(MAX(c.cases_committed), 0),
           0
-        ) AS cases_available
+        ) AS cases_available,
+        MAX(ll.locations) AS locations
       FROM production_db.silver.datex_slv_licenseplatecontents lpc
       JOIN production_db.silver.datex_slv_lots l  ON lpc.lot_id = l.lot_id
       JOIN production_db.silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
       LEFT JOIN committed c ON c.lot_id = l.lot_id
+      LEFT JOIN lot_locations ll ON ll.lot_id = l.lot_id
       WHERE l.material_id IN (${matIdList})
         AND lp.warehouse_id = ${warehouseId}
         AND lp.Archived = false
@@ -439,8 +416,6 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     `
     onhandRows = await runQuery(onhandSql)
   }
-
-  // ── Assemble Order objects ──
 
   const linesByOrderMaterial = new Map()
   const allocLotsByLine = new Map()
@@ -467,12 +442,15 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const lps = Number(r.lp_count_actual) > 0
       ? Number(r.lp_count_actual)
       : Number(r.lp_count_planned) || 0
+    const shipHeld = isHoldStatus(r.lot_status)
     line.ship.push({
       lot: r.lot_code,
       date: parsed.display,
       k: parsed.k,
       kDay: parsed.kDay,
       lps, cases,
+      hold:     shipHeld,
+      holdType: shipHeld ? r.lot_status : undefined,
     })
   }
 
@@ -480,17 +458,18 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   for (const r of onhandRows) {
     const mid = Number(r.material_id)
     if (!onhandByMaterial.has(mid)) onhandByMaterial.set(mid, [])
+    const locInfo = classifyLocations(r.locations)
     onhandByMaterial.get(mid).push({
       lotId:    Number(r.lot_id),
       lotCode:  r.lot_code,
       status:   r.lot_status,
-      // `cases` is the truly-available count (onhand minus committed). This
-      // is what the REM logic evaluates. Gross + committed retained on the
-      // candidate for potential UI surfacing / debugging later.
       cases:          Number(r.cases_available) || 0,
       casesGross:     Number(r.cases_onhand) || 0,
       casesCommitted: Number(r.cases_committed) || 0,
       lps:            Number(r.lp_count) || 0,
+      location:        locInfo.primary,
+      locations:       locInfo.locations,
+      locationBlocked: locInfo.locationBlocked,
     })
   }
 
@@ -502,7 +481,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         const parsed = parseLotDateKey(c.lotCode, project.dateFormat)
         return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display }
       })
-      .filter(c => c.cases > 0)   // cases_available > 0 (post-committed subtraction)
+      .filter(c => c.cases > 0)
     if (candidates.length > 0) {
       const oldest = candidates.reduce((a, b) => a.k < b.k ? a : b)
       const held = isHoldStatus(oldest.status)
@@ -515,18 +494,19 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         cases:    oldest.cases,
         hold:     held,
         holdType: held ? oldest.status : undefined,
+        location:        oldest.location || '',
+        locations:       oldest.locations || [],
+        locationBlocked: !!oldest.locationBlocked,
       }
     } else {
-      line.rem = { lot: '', date: '', k: 0, kDay: 0, lps: 0, cases: 0, hold: false }
+      line.rem = {
+        lot: '', date: '', k: 0, kDay: 0, lps: 0, cases: 0,
+        hold: false,
+        location: '', locations: [], locationBlocked: false,
+      }
     }
   }
 
-  // ── Order assembly with scheduled_arrival-based day + past ──
-  //
-  // `day` is the calendar day offset (0 = today, 1 = tomorrow, ...) clamped
-  // into the visible window. `past` flips true if the appointment is in the
-  // past at the moment of the request — time-of-day precision, so an order
-  // with a 10am appt becomes stale at 10:01am even though it's still today.
   const nowMs = Date.now()
   const orders = []
   for (const oh of orderRows) {
@@ -621,7 +601,6 @@ exports.handler = async (event) => {
   const errorsByProject = {}
   const rowCountsByProject = {}
   try {
-    // See top-of-file comment block for why this exact sequence.
     process.env.HOME = '/tmp'
     process.env.motherduck_token = TOKEN
     const duckdb = require('duckdb')
@@ -640,7 +619,6 @@ exports.handler = async (event) => {
     await exec('LOAD motherduck')
     await exec(`ATTACH 'md:production_db'`)
 
-    // Sequential loop on the shared connection.
     for (const pid of projectIds) {
       try {
         const result = await loadOrdersForProject(runQuery, {
