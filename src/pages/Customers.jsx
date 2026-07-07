@@ -14,6 +14,11 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // for a Palermo's-branded feature. Logo asset lives in
 // src/lib/palermos-logo.js as a base64 data URI (same source used by the
 // cswpvi.netlify.app standalone site — one source of truth for the mark).
+//
+// PVI tab rename (2026-07-07, Hill Slack 9:12 AM): "change the app title
+// to Palermo's At Risk Inventory Manager." Label + subtitle updated here;
+// the browser tab title is set by PviShelfLife.jsx via document.title
+// useEffect so it flips to the new name only while that tab is active.
 const SUB_TABS = [
   {
     id: 'space',
@@ -32,8 +37,8 @@ const SUB_TABS = [
   },
   {
     id: 'pvi',
-    label: 'PVI Shelf Life',
-    subtitle: "Palermo's shelf-life risk snapshot · CAL lots × canonical account cutoffs",
+    label: 'PVI At Risk Inventory',
+    subtitle: "Palermo's At Risk Inventory Manager · per-lot disposition & owner tracking",
   },
 ]
 
