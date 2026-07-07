@@ -1,4 +1,5 @@
 import PviShelfLife from './PviShelfLife.jsx'
+import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
 // Palermo's standalone entry point.
 //
@@ -12,10 +13,12 @@ import PviShelfLife from './PviShelfLife.jsx'
 // appears inside the CSW Customers tab — same component, same behavior,
 // same data. Fix a bug in one place, ships to both sites automatically.
 //
-// Brand palette: placeholder Palermo's red (#8b1a1a). Swap for their
-// official brand color once we have it. Keep the "powered by CSW" footer
-// small so it doesn't compete with the Palermo's identity but stays
-// discoverable if a user needs to know where the data lives.
+// Header layout: real Palermo's brand mark on the left (from
+// src/lib/palermos-logo.js — see that file for source + prep notes),
+// "Shelf Life" descriptor + subtitle stack on the right. The "powered by
+// CSW" footer stays small so it doesn't compete with the Palermo's
+// identity but stays discoverable if a user needs to know where the data
+// lives.
 
 export default function PalermosStandalone() {
   return (
@@ -25,34 +28,45 @@ export default function PalermosStandalone() {
         borderBottom: '1px solid var(--border, #e5e5e5)',
         background: 'white',
         padding: '20px 32px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 20,
+        flexWrap: 'wrap',
       }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-          <h1 style={{
-            fontSize: 26,
-            fontWeight: 700,
-            margin: 0,
-            letterSpacing: '0.01em',
-            color: '#8b1a1a',
-            textTransform: 'uppercase',
-          }}>
-            Palermo's Shelf Life
-          </h1>
-          <span style={{
-            fontSize: 11,
-            color: 'var(--text-dim, #888)',
+        <img
+          src={PALERMOS_LOGO}
+          alt="Palermo's"
+          style={{ height: 56, width: 'auto', display: 'block', flexShrink: 0 }}
+        />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+            <h1 style={{
+              fontSize: 22,
+              fontWeight: 700,
+              margin: 0,
+              letterSpacing: '0.02em',
+              color: '#8b1a1a',
+              textTransform: 'uppercase',
+            }}>
+              Shelf Life
+            </h1>
+            <span style={{
+              fontSize: 11,
+              color: 'var(--text-dim, #888)',
+              fontFamily: 'var(--font-mono, monospace)',
+            }}>
+              live inventory · risk snapshot
+            </span>
+          </div>
+          <p style={{
+            margin: '4px 0 0',
+            fontSize: 12,
+            color: 'var(--text-secondary, #666)',
             fontFamily: 'var(--font-mono, monospace)',
           }}>
-            live inventory · risk snapshot
-          </span>
+            CAL lots × canonical account cutoffs — refreshed on every load
+          </p>
         </div>
-        <p style={{
-          margin: '4px 0 0',
-          fontSize: 12,
-          color: 'var(--text-secondary, #666)',
-          fontFamily: 'var(--font-mono, monospace)',
-        }}>
-          CAL lots × canonical account cutoffs — refreshed on every load
-        </p>
       </div>
 
       {/* Content */}
