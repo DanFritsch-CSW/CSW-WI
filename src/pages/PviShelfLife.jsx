@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   fetchPviCanonicalAccounts,
   fetchPviAccountNameMap,
@@ -18,6 +18,8 @@ import {
   DEFAULT_STAGES,
   DISPOSITION_OPTIONS,
   DISPOSITION_META,
+  PROJECT_CODE_MAP,
+  formatProjectLabel,
   formatLotForEmail,
   bulkCopyForEmail,
 } from '../lib/pviShelfLife.js'
@@ -57,14 +59,32 @@ import {
 // FEFO-projected ship date lands relative to spec — not a foregone loss.
 // Renamed to "Xd projected ship" in both the row's Vs. spec column and the
 // drawer header so the language stays neutral/descriptive.
+//
+// Project code mapping + multi-select (2026-07-07, Hill): Palermo's
+// internal project numbers (PALVI9=247, PALDSD9=243, PALMA9=248) don't
+// exist in Datex/Omni — they're purely Palermo's own bookkeeping. Hill
+// asked that both codes show together everywhere a project appears, that
+// the project filter support picking more than one at once, and that the
+// dashboard default to 247 (PALVI9) only on load. See PROJECT_CODE_MAP /
+// formatProjectLabel in src/lib/pviShelfLife.js for the mapping itself.
+// The project filter changed from a single <select> to a checkbox
+// multi-select popover; the underlying state is a Set of raw project_lookup
+// codes. An empty Set means "no restriction" (all projects) — Hill can
+// clear the filter down to nothing if she wants to see everything.
 
 const STAGES_FOR_TABS = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
-const PROJECT_OPTIONS = [
-  { value: '',         label: 'All PVI projects' },
-  { value: 'PALVI9',   label: 'PALVI9' },
-  { value: 'PALMA9',   label: 'PALMA9' },
-  { value: 'PALDSD9',  label: 'PALDSD9' },
-]
+
+// Raw Omni project_lookup codes this dashboard knows about. Order here
+// drives both the multi-select popover and CSV/email — kept in the same
+// order as PROJECT_CODE_MAP was documented to Hill (247, 243, 248 order
+// would read oddly since PALVI9/247 is the default/primary project).
+const PROJECT_LOOKUPS = ['PALVI9', 'PALDSD9', 'PALMA9']
+
+// Default project selection on load. Hill: "default filters to 247 for
+// project... (don't select expired or unshippable as default)." Stage
+// defaults already live in DEFAULT_STAGES (pviShelfLife.js) — this is the
+// project-side counterpart.
+const DEFAULT_PROJECT_FILTERS = new Set(['PALVI9'])
 
 // Sort accessors for each sortable column. Return the value used for
 // comparison. Nulls sort last regardless of direction (see compareRows).
@@ -125,7 +145,8 @@ export default function PviShelfLife() {
   // Filters
   const [enabledStages, setEnabledStages] = useState(new Set(DEFAULT_STAGES))
   const [accountFilter, setAccountFilter] = useState('')
-  const [projectFilter, setProjectFilter] = useState('')
+  const [projectFilters, setProjectFilters] = useState(new Set(DEFAULT_PROJECT_FILTERS))
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [textFilter, setTextFilter]       = useState('')
 
   // Sort — { key: null, direction: 'asc' } means default severity-first sort.
@@ -206,6 +227,27 @@ export default function PviShelfLife() {
     return [...set].sort((a, b) => a.localeCompare(b))
   }, [dispositions])
 
+  // Group notes by (item, lot) so the drawer can look them up without a
+  // per-render filter scan. Notes ingested from the 7/6 workbook use item =
+  // material_code (text) and lot_code — same keys the FEFO rows use.
+  const notesByItemLot = useMemo(() => {
+    const m = new Map()
+    for (const n of notes) {
+      const key = `${n.item}|${n.lot_code}`
+      if (!m.has(key)) m.set(key, [])
+      m.get(key).push(n)
+    }
+    return m
+  }, [notes])
+  const notesByItem = useMemo(() => {
+    const m = new Map()
+    for (const n of notes) {
+      if (!m.has(n.item)) m.set(n.item, [])
+      m.get(n.item).push(n)
+    }
+    return m
+  }, [notes])
+
   // Run FEFO projection whenever the inputs change, then merge disposition
   // + owner from pvi_lot_dispositions onto each row. Merging AFTER
   // projectFefo (rather than inside the engine) keeps the engine pure and
@@ -236,20 +278,21 @@ export default function PviShelfLife() {
 
   // Stage counts for the tab row — respect project filter but ignore stage/
   // account/text filters, so the operator sees the full workload for
-  // whatever project scope they've chosen.
+  // whatever project scope they've chosen. Empty projectFilters = no
+  // restriction (matches filteredRows logic below).
   const stageCounts = useMemo(() => {
     const c = { expired: 0, unshippable: 0, critical: 0, at_risk: 0, watch: 0 }
     for (const r of rows) {
-      if (projectFilter && r.project_lookup !== projectFilter) continue
+      if (projectFilters.size > 0 && !projectFilters.has(r.project_lookup)) continue
       c[r.verdict.stage] = (c[r.verdict.stage] || 0) + 1
     }
     return c
-  }, [rows, projectFilter])
+  }, [rows, projectFilters])
 
   // Filtered + sorted rows for the table.
   const filteredRows = useMemo(() => {
     const filtered = rows.filter(r => {
-      if (projectFilter && r.project_lookup !== projectFilter) return false
+      if (projectFilters.size > 0 && !projectFilters.has(r.project_lookup)) return false
       if (!enabledStages.has(r.verdict.stage)) return false
       if (accountFilter) {
         const canonId = r.primary?.canonical?.id ?? null
@@ -282,7 +325,7 @@ export default function PviShelfLife() {
       const db = b.days_to_code_today ?? 9999
       return da - db
     })
-  }, [rows, projectFilter, enabledStages, accountFilter, textFilter, sortConfig])
+  }, [rows, projectFilters, enabledStages, accountFilter, textFilter, sortConfig])
 
   const selectedRow = useMemo(
     () => filteredRows.find(r => r.lot_id === selectedLotId) || rows.find(r => r.lot_id === selectedLotId) || null,
@@ -296,6 +339,14 @@ export default function PviShelfLife() {
       return next
     })
   }
+
+  const toggleProject = useCallback((lookup) => {
+    setProjectFilters(prev => {
+      const next = new Set(prev)
+      if (next.has(lookup)) next.delete(lookup); else next.add(lookup)
+      return next
+    })
+  }, [])
 
   const handleSort = useCallback((key) => {
     setSortConfig(prev => {
@@ -331,11 +382,14 @@ export default function PviShelfLife() {
   }, [])
 
   // CSV export — currently filtered + sorted rows, all detail columns
-  // including Disposition + Owner.
+  // including Disposition + Owner. Project split into two columns (Omni
+  // lookup + Palermo's number) rather than the combined "PALVI9 · 247"
+  // display string, since a spreadsheet column is more useful to filter/
+  // pivot on as two discrete values than as one formatted string.
   const handleExportCsv = useCallback(() => {
     if (filteredRows.length === 0) return
     const headers = [
-      'Stage', 'Item code', 'Item description', 'Project',
+      'Stage', 'Item code', 'Item description', 'Project Lookup', 'Project Number',
       'Lot code', 'Lot status',
       'Code date', 'Days to code (today)', 'Days to code (at ship)',
       'Spec days', 'Spec source', 'Vs spec (days short; negative = buffer)',
@@ -355,6 +409,7 @@ export default function PviShelfLife() {
         r.material_code ?? '',
         r.material_desc ?? '',
         r.project_lookup ?? '',
+        PROJECT_CODE_MAP[r.project_lookup] ?? '',
         r.lot_code ?? '',
         r.lot_status ?? '',
         r.expiration_date_iso ?? '',
@@ -382,14 +437,16 @@ export default function PviShelfLife() {
     const a = document.createElement('a')
     a.href = url
     const today = new Date().toISOString().slice(0, 10)
-    const scope = projectFilter ? `-${projectFilter.toLowerCase()}` : ''
+    const scope = projectFilters.size > 0
+      ? `-${[...projectFilters].map(p => p.toLowerCase()).join('-')}`
+      : ''
     a.download = `pvi-at-risk-inventory${scope}-${today}.csv`
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
     flash(`Exported ${filteredRows.length} lot(s) to CSV`)
-  }, [filteredRows, projectFilter])
+  }, [filteredRows, projectFilters])
 
   const reload = () => setReloadTick(t => t + 1)
 
@@ -459,15 +516,15 @@ export default function PviShelfLife() {
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          <select
-            className="est-drops-select"
-            value={projectFilter}
-            onChange={e => setProjectFilter(e.target.value)}
-            style={{ fontSize: 11 }}
-            title="Filter to a specific Palermo's project"
-          >
-            {PROJECT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
+          <ProjectMultiSelect
+            lookups={PROJECT_LOOKUPS}
+            selected={projectFilters}
+            onToggle={toggleProject}
+            onClear={() => setProjectFilters(new Set())}
+            onSelectOnly={(lookup) => setProjectFilters(new Set([lookup]))}
+            open={projectMenuOpen}
+            setOpen={setProjectMenuOpen}
+          />
           <select
             className="est-drops-select"
             value={accountFilter}
@@ -553,13 +610,8 @@ export default function PviShelfLife() {
       {selectedRow && (
         <NotesDrawer
           row={selectedRow}
-          notes={notes.filter(n =>
-            (n.item === selectedRow.material_code || n.item === selectedRow.material_desc) ||
-            n.lot_code === selectedRow.lot_code
-          )}
-          allNotesForItem={notes.filter(n =>
-            n.item === selectedRow.material_code
-          )}
+          notes={notesByItemLot.get(`${selectedRow.material_code}|${selectedRow.lot_code}`) || []}
+          allNotesForItem={notesByItem.get(selectedRow.material_code) || []}
           uniqueOwners={uniqueOwners}
           onClose={() => setSelectedLotId(null)}
           onNotesChanged={async () => {
@@ -568,6 +620,124 @@ export default function PviShelfLife() {
           }}
           onDispositionChanged={reloadDispositions}
         />
+      )}
+    </div>
+  )
+}
+
+// ── Project multi-select ────────────────────────────────────────────────
+//
+// Replaces the old single <select> now that Hill wants to be able to pick
+// PALVI9 + PALDSD9 together. A checkbox popover rather than a native
+// <select multiple> — multiple-select listboxes are notoriously unfriendly
+// (ctrl/cmd-click to multi-pick isn't discoverable, and the UI can't show
+// both codes plus a checked state cleanly). Click-outside-to-close via a
+// full-screen transparent overlay behind the panel.
+//
+// Empty `selected` Set = no restriction ("All projects"). Button label
+// reflects the current selection: the formatted label for exactly one,
+// a count for several, or "All PVI projects" for zero/all.
+function ProjectMultiSelect({ lookups, selected, onToggle, onClear, onSelectOnly, open, setOpen }) {
+  const wrapRef = useRef(null)
+
+  let buttonLabel
+  if (selected.size === 0) {
+    buttonLabel = 'All PVI projects'
+  } else if (selected.size === 1) {
+    buttonLabel = formatProjectLabel([...selected][0])
+  } else {
+    buttonLabel = `${selected.size} projects selected`
+  }
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        className="est-drops-select"
+        onClick={() => setOpen(o => !o)}
+        style={{ fontSize: 11, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+        title="Filter to one or more Palermo's projects"
+      >
+        {buttonLabel}
+        <span style={{ fontSize: 9, opacity: 0.6 }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <>
+          {/* Click-outside overlay */}
+          <div
+            onClick={() => setOpen(false)}
+            style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              marginTop: 4,
+              background: 'var(--bg0, white)',
+              border: '1px solid var(--border)',
+              borderRadius: 3,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+              zIndex: 50,
+              minWidth: 200,
+              padding: 8,
+            }}
+          >
+            {lookups.map(lookup => {
+              const checked = selected.has(lookup)
+              return (
+                <label
+                  key={lookup}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '4px 4px',
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => onToggle(lookup)}
+                  />
+                  <span style={{ flex: 1 }}>{formatProjectLabel(lookup)}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); onSelectOnly(lookup) }}
+                    style={{
+                      fontSize: 9, color: 'var(--text-dim)', background: 'none', border: 'none',
+                      cursor: 'pointer', textDecoration: 'underline', padding: 0,
+                    }}
+                    title={`Show only ${formatProjectLabel(lookup)}`}
+                  >
+                    only
+                  </button>
+                </label>
+              )
+            })}
+            <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between' }}>
+              <button
+                type="button"
+                onClick={onClear}
+                style={{ fontSize: 10, color: 'var(--text-dim)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}
+              >
+                Clear (show all)
+              </button>
+              <button
+                type="button"
+                className="settings-save-btn"
+                onClick={() => setOpen(false)}
+                style={{ fontSize: 10 }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   )
@@ -657,7 +827,7 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
         <div>{row.material_code}</div>
         <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{row.material_desc}</div>
         {row.project_lookup && (
-          <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>{row.project_lookup}</div>
+          <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>{formatProjectLabel(row.project_lookup)}</div>
         )}
       </td>
       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
@@ -912,6 +1082,11 @@ function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNot
           <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: 4 }}>
             Lot {row.lot_code} · {row.cases_available} cs available
           </div>
+          {row.project_lookup && (
+            <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+              Project: {formatProjectLabel(row.project_lookup)}
+            </div>
+          )}
           {row.shelf_life_days != null && row.shortfall_days != null && (
             <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
               {row.days_to_code_at_ship}d to code @ ship · req {row.shelf_life_days}d ·{' '}
