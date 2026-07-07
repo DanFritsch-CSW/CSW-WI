@@ -10,14 +10,14 @@ import { CSW_BEAR_LOGO } from '../lib/csw-logo.js'
 // exist in this build at all.
 //
 // Header layout (2026-07-07, Hill request): Palermo's brand mark on the
-// far left as the primary brand, "Shelf Life" title + tagline in the
-// middle, CSW polar bear brand mark on the far right so the co-branding
-// is visible up front (Hill: "want the Palermo's logo and CSW logo side
-// by side"). Both logos at 56px for equal visual weight. The
-// "CAL lots × canonical account cutoffs" descriptor was removed at the
-// same time — Hill considered it visual noise on the standalone site.
-// Content area renders PviShelfLife exactly as it appears inside the
-// CSW Customers tab — same component, same behavior, same data.
+// far left as the primary brand, "At Risk Inventory Manager" title +
+// tagline in the middle, CSW polar bear brand mark on the far right so
+// the co-branding is visible up front (Hill: "want the Palermo's logo
+// and CSW logo side by side"). Both logos at 56px for equal visual
+// weight. The "CAL lots × canonical account cutoffs" descriptor was
+// removed earlier — Hill considered it visual noise on the standalone
+// site. Content area renders PviShelfLife, which also owns the browser
+// document.title (set to "Palermo's At Risk Inventory Manager" on mount).
 
 export default function PalermosStandalone() {
   return (
@@ -47,7 +47,7 @@ export default function PalermosStandalone() {
               color: '#8b1a1a',
               textTransform: 'uppercase',
             }}>
-              Shelf Life
+              At Risk Inventory Manager
             </h1>
             <span style={{
               fontSize: 11,
