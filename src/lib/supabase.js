@@ -1566,3 +1566,66 @@ export async function deletePviMaterialSpec(materialId) {
     .eq('material_id', Number(materialId))
   if (error) { console.error('deletePviMaterialSpec:', error); throw error }
 }
+
+// ─── PVI Lot Dispositions (per-lot Tag + Owner) ─────────────────────────────
+//
+// pvi_lot_dispositions — one row per (material_code, lot_code) tracking
+// Hill's disposition Tag + Owner (Palermo's team member). Formalizes what
+// they currently track in a bi-weekly Excel workbook. Disposition sticks
+// with the lot until explicitly changed. RLS: all four CRUD policies open
+// to anon (learned the hard way that missing DELETE policy silently
+// turns delete queries into no-ops).
+//
+// Schema (see migration create_pvi_lot_dispositions):
+//   material_code TEXT NOT NULL
+//   lot_code      TEXT NOT NULL
+//   disposition   TEXT  (one of DISPOSITION_OPTIONS or NULL)
+//   owner         TEXT  (free text — no master list)
+//   updated_at    TIMESTAMPTZ
+//   updated_by    TEXT
+//   PRIMARY KEY (material_code, lot_code)
+
+export async function fetchPviLotDispositions() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('pvi_lot_dispositions')
+    .select('*')
+  if (error) { console.error('fetchPviLotDispositions:', error); return [] }
+  return data ?? []
+}
+
+// upsertPviLotDisposition — writes/updates the disposition + owner for a
+// specific lot. Pass empty string / null to clear individual fields; pass
+// nulls for both and the row still exists (use deletePviLotDisposition to
+// wipe entirely). updated_at is refreshed on every write; updated_by is
+// captured for audit.
+export async function upsertPviLotDisposition({ material_code, lot_code, disposition, owner, updated_by }) {
+  if (!supabase) return null
+  const payload = {
+    material_code: String(material_code || '').trim(),
+    lot_code:      String(lot_code || '').trim(),
+    disposition:   (disposition == null || disposition === '') ? null : String(disposition).trim(),
+    owner:         (owner == null || owner === '') ? null : String(owner).trim(),
+    updated_by:    (updated_by || '').trim() || null,
+    updated_at:    new Date().toISOString(),
+  }
+  if (!payload.material_code) throw new Error('material_code required')
+  if (!payload.lot_code) throw new Error('lot_code required')
+  const { data, error } = await supabase
+    .from('pvi_lot_dispositions')
+    .upsert(payload, { onConflict: 'material_code,lot_code', ignoreDuplicates: false })
+    .select()
+    .single()
+  if (error) { console.error('upsertPviLotDisposition:', error); throw error }
+  return data
+}
+
+export async function deletePviLotDisposition(material_code, lot_code) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('pvi_lot_dispositions')
+    .delete()
+    .eq('material_code', String(material_code))
+    .eq('lot_code', String(lot_code))
+  if (error) { console.error('deletePviLotDisposition:', error); throw error }
+}
