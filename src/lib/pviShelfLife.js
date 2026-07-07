@@ -13,6 +13,7 @@
 //   verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays })
 //   formatLotForEmail(row)
 //   bulkCopyForEmail(rows)
+//   DISPOSITION_OPTIONS, DISPOSITION_META  (per-lot Tag catalog, 2026-07-07)
 //
 // ── Verdict semantics (revised 2026-07-02 per Hill feedback) ──────────────
 //
@@ -78,6 +79,43 @@ export const DEFAULT_STAGES = new Set(['at_risk', 'critical', 'unshippable', 'ex
 // to 96 days if the material hasn't shipped yet." Applied to end-customer
 // and unmapped allocations, NOT to internal_transfer.
 export const DEFAULT_UNSHIPPED_SHELF_LIFE_DAYS = 96
+
+// ── PVI Lot Dispositions (2026-07-07, Hill request) ───────────────────────
+//
+// Nine allowed disposition values per Hill's Slack (2026-07-07 9:12 AM).
+// Order chosen so operators scan a natural workflow: pending approvals at
+// the top (need action), approved states next, then already-handled states,
+// then terminal states (Quarantine, Donation). Persisted per-lot in
+// pvi_lot_dispositions along with a free-text Owner field.
+
+export const DISPOSITION_OPTIONS = [
+  'Disposal - Pending Approval',
+  'Disposal - Approved',
+  'Customer Acceptance - Pending',
+  'Customer Acceptance - Approved',
+  'Sell-Through - DSD',
+  'Ship - Scheduled',
+  'Claim / Reimbursement',
+  'Quarantine / Loss',
+  'Donation',
+]
+
+// One badge style per disposition. `label` is the display string used in
+// the drawer dropdown; `short` is the compact tag used in the inline table
+// cell (limited horizontal space). Colors picked to differentiate at-a-
+// glance in the table without visually competing with STAGE_META badges —
+// stage wins on urgency, disposition is secondary status.
+export const DISPOSITION_META = {
+  'Disposal - Pending Approval':    { label: 'Disposal (Pending)',  short: 'Disp Pend',   color: '#c88a2a', bg: '#fbf1de' },
+  'Disposal - Approved':            { label: 'Disposal (Approved)', short: 'Disp OK',     color: '#8b1a1a', bg: '#f9e0e0' },
+  'Customer Acceptance - Pending':  { label: 'Cust Accept (Pend)',  short: 'Cust Pend',   color: '#5b9bd5', bg: '#eaf2fa' },
+  'Customer Acceptance - Approved': { label: 'Cust Accept (OK)',    short: 'Cust OK',     color: '#3a7a3a', bg: '#e4f0e4' },
+  'Sell-Through - DSD':             { label: 'Sell-Through DSD',    short: 'DSD',         color: '#2b8a91', bg: '#dff0f2' },
+  'Ship - Scheduled':               { label: 'Ship Scheduled',      short: 'Ship Sched',  color: '#3a7a3a', bg: '#e4f0e4' },
+  'Claim / Reimbursement':          { label: 'Claim/Reimburse',     short: 'Claim',       color: '#7d3aa1', bg: '#efe4f7' },
+  'Quarantine / Loss':              { label: 'Quarantine/Loss',     short: 'Quar/Loss',   color: '#5f2c2c', bg: '#e8d4d4' },
+  'Donation':                       { label: 'Donation',            short: 'Donate',      color: '#a86a2a', bg: '#f5e6d3' },
+}
 
 // ── Canonical resolution ──────────────────────────────────────────────────
 
@@ -511,6 +549,10 @@ export function formatLotForEmail(row) {
       parts.push(`Vs. spec: ${s > 0 ? `${s} days SHORT` : s < 0 ? `${-s} days of buffer` : 'exactly at spec'}`)
     }
   }
+  // Disposition + Owner tags (persisted separately in pvi_lot_dispositions;
+  // merged into the row by the UI before calling formatLotForEmail).
+  if (row.disposition) parts.push(`Disposition: ${row.disposition}`)
+  if (row.owner)       parts.push(`Owner: ${row.owner}`)
   const prim = row.primary
   if (prim) {
     const acct = prim.canonical?.canonical_name || prim.ship_to_raw_name || '(unmapped)'
