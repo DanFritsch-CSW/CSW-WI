@@ -1,6 +1,7 @@
 import { Component, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import TopNav from './components/TopNav.jsx'
+import PalermosPasswordGate from './components/PalermosPasswordGate.jsx'
 
 // Build-time mode flag. Set via Netlify env var VITE_APP_MODE.
 //   undefined / 'csw' → full CSW internal app (default)
@@ -80,17 +81,25 @@ export default function App() {
   // other page components aren't even imported in this build, so no code
   // leaks and there's nowhere for Palermo's users to escape to). No TopNav,
   // no app-shell wrapper — PalermosStandalone renders its own header.
+  //
+  // Password gate (2026-07-07, Hill): wraps the whole palermos-mode tree.
+  // Gate renders its own full-page prompt and blocks children until the
+  // correct password is entered; see PalermosPasswordGate.jsx for the
+  // implementation and its documented limitations (client-side only).
+  // Scoped to this branch only — the main CSW app below is untouched.
   if (APP_MODE === 'palermos') {
     return (
-      <BrowserRouter>
-        <PageErrorBoundary>
-          <Suspense fallback={<PageLoading />}>
-            <Routes>
-              <Route path="*" element={<PalermosStandalone />} />
-            </Routes>
-          </Suspense>
-        </PageErrorBoundary>
-      </BrowserRouter>
+      <PalermosPasswordGate>
+        <BrowserRouter>
+          <PageErrorBoundary>
+            <Suspense fallback={<PageLoading />}>
+              <Routes>
+                <Route path="*" element={<PalermosStandalone />} />
+              </Routes>
+            </Suspense>
+          </PageErrorBoundary>
+        </BrowserRouter>
+      </PalermosPasswordGate>
     )
   }
 
