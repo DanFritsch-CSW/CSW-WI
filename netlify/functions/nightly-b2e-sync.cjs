@@ -314,6 +314,7 @@ async function purgeTerminatedAcrossFuture(supabase, facility, activeEmpIdSet, f
     .gte('plan_date', fromDate)
     .eq('is_temp', false)
     .is('from_facility', null)
+    .eq('manually_edited', false)
     .in('employee_id', staleIds)
   if (delErr) return { error: `delete: ${delErr.message}` }
   return { purged: staleIds.length, staleIds }
@@ -383,9 +384,12 @@ async function seedForwardHorizon(supabase, facility, b2eRosterByDate, fromDate,
       continue
     }
     // Off-day row (in DB, not in B2E for this date). Preserved rows first.
+    // Manager overrides (manually_edited=true) are preserved — Dean-reported
+    // 2026-07-07 fix mirroring the same change in src/lib/supabase.js.
     if (r.is_temp) continue
     if (r.from_facility !== null) continue
     if (r.on_loan_to) continue
+    if (r.manually_edited) continue
     if (!deleteByDate[r.plan_date]) deleteByDate[r.plan_date] = []
     deleteByDate[r.plan_date].push(r.employee_id)
   }
@@ -424,6 +428,7 @@ async function seedForwardHorizon(supabase, facility, b2eRosterByDate, fromDate,
         .eq('facility', facility).eq('plan_date', planDate)
         .in('employee_id', empIds)
         .eq('is_temp', false).is('from_facility', null).is('on_loan_to', null)
+        .eq('manually_edited', false)
         .then(({ error }) => { if (error) stats.errors.push(`delete ${planDate}: ${error.message}`) })
     )
   }
