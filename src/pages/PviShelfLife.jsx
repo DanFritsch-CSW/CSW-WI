@@ -4,6 +4,8 @@ import {
   fetchPviAccountNameMap,
   fetchPviShelfNotes,
   fetchPviMaterialSpecs,
+  fetchPviLotDispositions,
+  upsertPviLotDisposition,
   insertPviShelfNote,
   updatePviShelfNoteStatus,
   deletePviShelfNote,
@@ -14,34 +16,41 @@ import {
   STAGE_META,
   STAGE_ORDER,
   DEFAULT_STAGES,
+  DISPOSITION_OPTIONS,
+  DISPOSITION_META,
   formatLotForEmail,
   bulkCopyForEmail,
 } from '../lib/pviShelfLife.js'
 
-// PVI Shelf Life dashboard.
+// PVI At Risk Inventory Manager (formerly "PVI Shelf Life").
 //
-// Loads four things in parallel:
+// App title change (2026-07-07, Hill): "change the app title to Palermo's
+// At Risk Inventory Manager." Document.title is set below via useEffect so
+// both the standalone build (cswpvi.netlify.app) and the main app show the
+// new name in the browser tab whenever this component is mounted.
+//
+// Loads five things in parallel:
 //   1. Live risk snapshot from /.netlify/functions/pvi-shelf-life
 //   2. Canonical accounts + raw-name map from Supabase
 //   3. Notes from Supabase
-//   4. Material specs (pvi_material_specs) from Supabase — ops-curated
-//      per-material shelf-life days. Wins over allocation/history in the
-//      engine's spec priority.
+//   4. Material specs (pvi_material_specs) — ops-curated per-material
+//      shelf-life days. Wins over allocation/history in the engine's spec
+//      priority (see src/lib/pviShelfLife.js docs).
+//   5. Lot dispositions (pvi_lot_dispositions) — Hill's per-lot Tag +
+//      Owner tags (2026-07-07). Sticks with the lot until changed.
 //
-// Then runs FEFO projection client-side (src/lib/pviShelfLife.js) and renders
-// a filterable table. Side drawer for per-lot notes. Copy-for-email buttons
-// per-lot and bulk. Stage filter defaults to "At Risk and worse".
+// Then runs FEFO projection client-side and merges dispositions onto rows
+// keyed on `${material_code}|${lot_code}`. Renders a filterable table with
+// STAGE + DISPOSITION badges and inline OWNER text. Side drawer for per-lot
+// notes + disposition/owner editing.
 //
-// Sortable columns (2026-07-07, Hill request): every column header (except
-// the trailing action column) is clickable and toggles asc → desc → clear.
-// When no column is active, the default severity-first sort applies. Sort
-// indicator (↑/↓) appears next to the active column label.
+// Sortable columns (2026-07-07, Hill): every column header (except the
+// trailing action column) is clickable and toggles asc → desc → clear.
+// Default severity-first sort applies when no column is active.
 //
-// CSV export (2026-07-07, Hill request): "Export CSV" button next to the
-// copy-for-email button. Exports the currently-filtered, currently-sorted
-// row set with all detail columns (spec source, cases on/committed,
-// projected recipient, velocity, etc.) — richer than the on-screen table so
-// downstream analysis has full context.
+// CSV export (2026-07-07, Hill): "Export CSV" button exports the currently-
+// filtered, currently-sorted row set with all detail columns including the
+// new Disposition + Owner tags.
 
 const STAGES_FOR_TABS = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 const PROJECT_OPTIONS = [
@@ -54,15 +63,17 @@ const PROJECT_OPTIONS = [
 // Sort accessors for each sortable column. Return the value used for
 // comparison. Nulls sort last regardless of direction (see compareRows).
 const SORT_ACCESSORS = {
-  stage:      r => STAGE_ORDER.indexOf(r.verdict?.stage ?? 'watch'),
-  material:   r => (r.material_code || '').toUpperCase(),
-  lot:        r => (r.lot_code || '').toUpperCase(),
-  expiration: r => r.expiration_date_iso ? Date.parse(r.expiration_date_iso) : null,
-  daysToCode: r => r.days_to_code_today,
-  spec:       r => r.shortfall_days,
-  available:  r => r.cases_available,
-  projected:  r => r.primary?.projected_ship_iso ? Date.parse(r.primary.projected_ship_iso) : null,
-  velocity:   r => r.velocity?.shipments_30d ?? null,
+  stage:       r => STAGE_ORDER.indexOf(r.verdict?.stage ?? 'watch'),
+  material:    r => (r.material_code || '').toUpperCase(),
+  lot:         r => (r.lot_code || '').toUpperCase(),
+  expiration:  r => r.expiration_date_iso ? Date.parse(r.expiration_date_iso) : null,
+  daysToCode:  r => r.days_to_code_today,
+  spec:        r => r.shortfall_days,
+  available:   r => r.cases_available,
+  projected:   r => r.primary?.projected_ship_iso ? Date.parse(r.primary.projected_ship_iso) : null,
+  velocity:    r => r.velocity?.shipments_30d ?? null,
+  disposition: r => (r.disposition || '').toUpperCase() || null,
+  owner:       r => (r.owner || '').toUpperCase() || null,
 }
 
 function compareRows(a, b, key, direction) {
@@ -95,19 +106,20 @@ function csvEscape(v) {
 }
 
 export default function PviShelfLife() {
-  const [snapshot, setSnapshot]         = useState(null)   // response from function
+  const [snapshot, setSnapshot]         = useState(null)
   const [canonicals, setCanonicals]     = useState([])
   const [nameMap, setNameMap]           = useState([])
   const [notes, setNotes]               = useState([])
   const [materialSpecs, setMaterialSpecs] = useState([])
+  const [dispositions, setDispositions] = useState([])
   const [loading, setLoading]           = useState(true)
   const [error, setError]               = useState(null)
   const [reloadTick, setReloadTick]     = useState(0)
 
   // Filters
   const [enabledStages, setEnabledStages] = useState(new Set(DEFAULT_STAGES))
-  const [accountFilter, setAccountFilter] = useState('')  // canonical_id string or ''
-  const [projectFilter, setProjectFilter] = useState('')  // PALVI9 | PALMA9 | PALDSD9 | ''
+  const [accountFilter, setAccountFilter] = useState('')
+  const [projectFilter, setProjectFilter] = useState('')
   const [textFilter, setTextFilter]       = useState('')
 
   // Sort — { key: null, direction: 'asc' } means default severity-first sort.
@@ -116,13 +128,22 @@ export default function PviShelfLife() {
   // Selection
   const [selectedLotId, setSelectedLotId] = useState(null)
 
+  // Set browser tab title while this component is mounted. Restored on
+  // unmount so navigating to another CSW tab (or leaving the standalone)
+  // doesn't leave "Palermo's At Risk Inventory Manager" stuck in the tab.
+  useEffect(() => {
+    const prev = document.title
+    document.title = "Palermo's At Risk Inventory Manager"
+    return () => { document.title = prev }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
     ;(async () => {
       try {
-        const [snap, canon, map, noteRows, specs] = await Promise.all([
+        const [snap, canon, map, noteRows, specs, dispRows] = await Promise.all([
           fetch('/.netlify/functions/pvi-shelf-life', { method: 'POST' })
             .then(async r => {
               if (!r.ok) throw new Error(`Shelf-life fetch failed (${r.status}): ${(await r.text()).slice(0, 200)}`)
@@ -132,6 +153,7 @@ export default function PviShelfLife() {
           fetchPviAccountNameMap(),
           fetchPviShelfNotes(),
           fetchPviMaterialSpecs(),
+          fetchPviLotDispositions(),
         ])
         if (cancelled) return
         setSnapshot(snap)
@@ -139,6 +161,7 @@ export default function PviShelfLife() {
         setNameMap(map)
         setNotes(noteRows)
         setMaterialSpecs(specs)
+        setDispositions(dispRows)
       } catch (e) {
         if (!cancelled) setError(e.message || String(e))
       } finally {
@@ -153,16 +176,37 @@ export default function PviShelfLife() {
     [canonicals, nameMap],
   )
 
-  // Run FEFO projection whenever the inputs change.
-  //
-  // NOTE: materialShipHistory is REQUIRED for the material-history baseline
-  // to activate. Without it, the engine has no way to compute strictest-
-  // customer-across-365d and every unallocated lot falls straight through
-  // to the 96d default (or null for internal transfers). The Netlify function
-  // returns it as `snapshot.materialShipHistory`.
+  // Fast O(1) disposition lookup by (material_code, lot_code). Composite
+  // key mirrors the Supabase PK. Rebuilds when dispositions change (edit
+  // in drawer triggers a state update via refetch).
+  const dispositionsByLot = useMemo(() => {
+    const m = new Map()
+    for (const d of dispositions) {
+      m.set(`${d.material_code}|${d.lot_code}`, d)
+    }
+    return m
+  }, [dispositions])
+
+  // Unique owner names across all persisted dispositions — powers the
+  // <datalist> autocomplete in the drawer's Owner input. Sorted, de-duped,
+  // case-insensitive. Free-text with autocomplete beats a hard-coded
+  // dropdown because Palermo's team roster changes and Hill didn't want
+  // to maintain a master list.
+  const uniqueOwners = useMemo(() => {
+    const set = new Set()
+    for (const d of dispositions) {
+      if (d.owner && d.owner.trim()) set.add(d.owner.trim())
+    }
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [dispositions])
+
+  // Run FEFO projection whenever the inputs change, then merge disposition
+  // + owner from pvi_lot_dispositions onto each row. Merging AFTER
+  // projectFefo (rather than inside the engine) keeps the engine pure and
+  // means dispositions can be updated without re-running the FEFO math.
   const rows = useMemo(() => {
     if (!snapshot) return []
-    return projectFefo({
+    const projected = projectFefo({
       lots:                snapshot.lots || [],
       pendingOrders:       snapshot.pendingOrders || [],
       velocity:            snapshot.velocity || [],
@@ -170,11 +214,23 @@ export default function PviShelfLife() {
       materialSpecs,
       canonicalIndex,
     })
-  }, [snapshot, canonicalIndex, materialSpecs])
+    // Second pass: hydrate each row with its persisted disposition/owner.
+    for (const r of projected) {
+      const d = dispositionsByLot.get(`${r.material_code}|${r.lot_code}`)
+      if (d) {
+        r.disposition = d.disposition || null
+        r.owner       = d.owner || null
+      } else {
+        r.disposition = null
+        r.owner       = null
+      }
+    }
+    return projected
+  }, [snapshot, canonicalIndex, materialSpecs, dispositionsByLot])
 
   // Stage counts for the tab row — respect project filter but ignore stage/
-  // account/text filters, so the operator sees the full workload for whatever
-  // project scope they've chosen.
+  // account/text filters, so the operator sees the full workload for
+  // whatever project scope they've chosen.
   const stageCounts = useMemo(() => {
     const c = { expired: 0, unshippable: 0, critical: 0, at_risk: 0, watch: 0 }
     for (const r of rows) {
@@ -195,19 +251,20 @@ export default function PviShelfLife() {
       }
       if (textFilter.trim()) {
         const q = textFilter.trim().toUpperCase()
-        const hay = `${r.material_code} ${r.material_desc} ${r.lot_code}`.toUpperCase()
+        // Include disposition + owner in text-filter search so operators
+        // can jump to e.g. all lots owned by "Heather" or all "Donation" rows.
+        const hay = `${r.material_code} ${r.material_desc} ${r.lot_code} ${r.disposition || ''} ${r.owner || ''}`.toUpperCase()
         if (!hay.includes(q)) return false
       }
       return true
     })
 
     if (sortConfig.key) {
-      // Explicit column sort — respect user's chosen key + direction.
       return [...filtered].sort((a, b) => compareRows(a, b, sortConfig.key, sortConfig.direction))
     }
 
     // Default sort: stage severity DESC, then shortfall DESC (worst first),
-    // then days-to-code ASC. Same order as before Hill's sort request.
+    // then days-to-code ASC.
     return filtered.sort((a, b) => {
       const sa = STAGE_ORDER.indexOf(a.verdict.stage)
       const sb = STAGE_ORDER.indexOf(b.verdict.stage)
@@ -234,8 +291,6 @@ export default function PviShelfLife() {
     })
   }
 
-  // Column-header sort toggle. Same column: asc → desc → clear (back to
-  // default severity sort). Different column: switch and start at asc.
   const handleSort = useCallback((key) => {
     setSortConfig(prev => {
       if (prev.key === key) {
@@ -261,8 +316,16 @@ export default function PviShelfLife() {
     )
   }, [filteredRows])
 
-  // CSV export — currently filtered + sorted rows, all detail columns.
-  // Downloads via Blob + synthetic anchor click; no server round-trip.
+  // Called by NotesDrawer after a successful disposition/owner save.
+  // Refetches the disposition table so all row badges + drawer state
+  // stay in sync.
+  const reloadDispositions = useCallback(async () => {
+    const fresh = await fetchPviLotDispositions()
+    setDispositions(fresh)
+  }, [])
+
+  // CSV export — currently filtered + sorted rows, all detail columns
+  // including Disposition + Owner.
   const handleExportCsv = useCallback(() => {
     if (filteredRows.length === 0) return
     const headers = [
@@ -274,6 +337,7 @@ export default function PviShelfLife() {
       'Projected recipient', 'Projected ship date', 'Ship source',
       'Order lookup',
       'Velocity 30d shipments', 'Velocity tier',
+      'Disposition', 'Owner',
     ]
     const lines = [headers.map(csvEscape).join(',')]
     for (const r of filteredRows) {
@@ -302,6 +366,8 @@ export default function PviShelfLife() {
         prim?.order_lookup ?? '',
         r.velocity?.shipments_30d ?? '',
         r.velocity_confidence?.tier ?? '',
+        r.disposition ?? '',
+        r.owner ?? '',
       ].map(csvEscape).join(','))
     }
     const csv = lines.join('\r\n')
@@ -311,7 +377,7 @@ export default function PviShelfLife() {
     a.href = url
     const today = new Date().toISOString().slice(0, 10)
     const scope = projectFilter ? `-${projectFilter.toLowerCase()}` : ''
-    a.download = `pvi-shelf-life${scope}-${today}.csv`
+    a.download = `pvi-at-risk-inventory${scope}-${today}.csv`
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
@@ -324,7 +390,7 @@ export default function PviShelfLife() {
   if (loading) {
     return (
       <div style={{ padding: 24, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-        Loading PVI shelf-life snapshot…
+        Loading At Risk Inventory snapshot…
       </div>
     )
   }
@@ -345,9 +411,7 @@ export default function PviShelfLife() {
 
   return (
     <div style={{ display: 'flex', gap: 16 }}>
-      {/* Main content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {/* Meta line */}
         <div style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 12 }}>
           {snapshot && (
             <>
@@ -359,7 +423,6 @@ export default function PviShelfLife() {
           )}
         </div>
 
-        {/* Stage tabs */}
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
           {STAGES_FOR_TABS.map(stage => {
             const meta = STAGE_META[stage]
@@ -389,7 +452,6 @@ export default function PviShelfLife() {
           })}
         </div>
 
-        {/* Filter row */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <select
             className="est-drops-select"
@@ -413,10 +475,10 @@ export default function PviShelfLife() {
           </select>
           <input
             className="settings-field-input"
-            placeholder="Filter by item, lot, or description…"
+            placeholder="Filter by item, lot, description, owner, or disposition…"
             value={textFilter}
             onChange={e => setTextFilter(e.target.value)}
-            style={{ width: 260, fontSize: 11 }}
+            style={{ width: 300, fontSize: 11 }}
           />
           <div style={{ flex: 1 }} />
           <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
@@ -441,7 +503,6 @@ export default function PviShelfLife() {
           </button>
         </div>
 
-        {/* Table */}
         {rows.length === 0 ? (
           <div style={{ padding: 24, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
             No lots found. Either PVI inventory is empty at CAL or the risk engine returned no rows.
@@ -454,15 +515,17 @@ export default function PviShelfLife() {
           <table className="hourly-table">
             <thead>
               <tr>
-                <SortableTh sortKey="stage"      align="left"  sortConfig={sortConfig} onSort={handleSort}>Stage</SortableTh>
-                <SortableTh sortKey="material"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Item</SortableTh>
-                <SortableTh sortKey="lot"        align="left"  sortConfig={sortConfig} onSort={handleSort}>Lot</SortableTh>
-                <SortableTh sortKey="expiration" align="left"  sortConfig={sortConfig} onSort={handleSort}>Code date</SortableTh>
-                <SortableTh sortKey="daysToCode" align="right" sortConfig={sortConfig} onSort={handleSort} title="Days remaining until code date (today)">Days to code</SortableTh>
-                <SortableTh sortKey="spec"       align="right" sortConfig={sortConfig} onSort={handleSort} title="Customer's minimum-days-at-receipt spec; positive shortfall = days short of spec at projected ship">Vs. spec</SortableTh>
-                <SortableTh sortKey="available"  align="right" sortConfig={sortConfig} onSort={handleSort}>Available</SortableTh>
-                <SortableTh sortKey="projected"  align="left"  sortConfig={sortConfig} onSort={handleSort}>Projected ship</SortableTh>
-                <SortableTh sortKey="velocity"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Velocity</SortableTh>
+                <SortableTh sortKey="stage"       align="left"  sortConfig={sortConfig} onSort={handleSort}>Stage</SortableTh>
+                <SortableTh sortKey="material"    align="left"  sortConfig={sortConfig} onSort={handleSort}>Item</SortableTh>
+                <SortableTh sortKey="lot"         align="left"  sortConfig={sortConfig} onSort={handleSort}>Lot</SortableTh>
+                <SortableTh sortKey="expiration"  align="left"  sortConfig={sortConfig} onSort={handleSort}>Code date</SortableTh>
+                <SortableTh sortKey="daysToCode"  align="right" sortConfig={sortConfig} onSort={handleSort} title="Days remaining until code date (today)">Days to code</SortableTh>
+                <SortableTh sortKey="spec"        align="right" sortConfig={sortConfig} onSort={handleSort} title="Customer's minimum-days-at-receipt spec; positive shortfall = days short of spec at projected ship">Vs. spec</SortableTh>
+                <SortableTh sortKey="available"   align="right" sortConfig={sortConfig} onSort={handleSort}>Available</SortableTh>
+                <SortableTh sortKey="projected"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Projected ship</SortableTh>
+                <SortableTh sortKey="velocity"    align="left"  sortConfig={sortConfig} onSort={handleSort}>Velocity</SortableTh>
+                <SortableTh sortKey="disposition" align="left"  sortConfig={sortConfig} onSort={handleSort} title="Disposition tag — click a row to edit in the drawer">Disposition</SortableTh>
+                <SortableTh sortKey="owner"       align="left"  sortConfig={sortConfig} onSort={handleSort} title="Owner — Palermo's team member accountable for this lot">Owner</SortableTh>
                 <th></th>
               </tr>
             </thead>
@@ -481,7 +544,6 @@ export default function PviShelfLife() {
         )}
       </div>
 
-      {/* Notes drawer */}
       {selectedRow && (
         <NotesDrawer
           row={selectedRow}
@@ -492,11 +554,13 @@ export default function PviShelfLife() {
           allNotesForItem={notes.filter(n =>
             n.item === selectedRow.material_code
           )}
+          uniqueOwners={uniqueOwners}
           onClose={() => setSelectedLotId(null)}
           onNotesChanged={async () => {
             const fresh = await fetchPviShelfNotes()
             setNotes(fresh)
           }}
+          onDispositionChanged={reloadDispositions}
         />
       )}
     </div>
@@ -504,10 +568,6 @@ export default function PviShelfLife() {
 }
 
 // ── Sortable Th ────────────────────────────────────────────────────────────
-//
-// Clickable table header. Shows a ↑ / ↓ indicator when this column is the
-// active sort column; renders as a normal header when inactive. Toggles
-// asc → desc → clear (back to default severity sort) on repeated clicks.
 
 function SortableTh({ sortKey, align, sortConfig, onSort, title, children }) {
   const isActive = sortConfig.key === sortKey
@@ -531,9 +591,6 @@ function SortableTh({ sortKey, align, sortConfig, onSort, title, children }) {
 
 // ── Row ───────────────────────────────────────────────────────────────────
 
-// Compact spec-source label for the "Vs. spec" cell. Distinguishes ops-
-// curated specs from inferred fallbacks so operators can spot rows that
-// need a real spec set in Settings.
 const SPEC_SOURCE_BADGE = {
   material_spec:    { label: 'spec',    color: '#3a7a3a' },
   allocation:       { label: 'alloc',   color: '#5b9bd5' },
@@ -554,15 +611,19 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
   const req = row.shelf_life_days
   const shortfall = row.shortfall_days
   const specBadge = SPEC_SOURCE_BADGE[row.spec_source] || null
-  // Shortfall coloring:
-  //   > 0  = SHORT of spec (bad)   → red
-  //   = 0  = exactly at spec       → amber
-  //   < 0  = buffer above spec     → green
   const shortColor = shortfall == null
     ? 'var(--text-dim)'
     : shortfall > 0 ? '#d1583a'
     : shortfall < 0 ? '#3a7a3a'
     : '#c88a2a'
+
+  // Disposition badge — DISPOSITION_META lookup with short label for the
+  // tight inline column. Unknown values (not in the canonical 9) render as
+  // a neutral grey badge with the raw value so operators can spot legacy
+  // data. Null renders as a subtle "—" placeholder.
+  const dispMeta = row.disposition ? (DISPOSITION_META[row.disposition] || {
+    label: row.disposition, short: row.disposition, color: '#666', bg: '#eee',
+  }) : null
 
   return (
     <tr
@@ -669,6 +730,36 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
           </div>
         )}
       </td>
+      {/* Disposition — inline badge if set, subtle placeholder if not.
+          Click row to edit via drawer. */}
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        {dispMeta ? (
+          <span
+            style={{
+              display: 'inline-block',
+              padding: '2px 6px',
+              background: dispMeta.bg,
+              color: dispMeta.color,
+              fontSize: 10,
+              fontWeight: 700,
+              borderRadius: 2,
+              whiteSpace: 'nowrap',
+            }}
+            title={dispMeta.label}
+          >
+            {dispMeta.short}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>—</span>
+        )}
+      </td>
+      {/* Owner — plain text, tighter typography since it's usually a
+          first name or "First LastInitial" like "Dave I" or "Greg Y". */}
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        {row.owner
+          ? row.owner
+          : <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>—</span>}
+      </td>
       <td>
         <button
           className="settings-save-btn"
@@ -693,12 +784,26 @@ const NOTE_STATUS_OPTIONS = [
   { value: 'dispose',             label: 'Dispose' },
 ]
 
-function NotesDrawer({ row, notes, allNotesForItem, onClose, onNotesChanged }) {
+function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNotesChanged, onDispositionChanged }) {
   const [newNote, setNewNote]   = useState('')
   const [author, setAuthor]     = useState(loadAuthor())
   const [status, setStatus]     = useState('open')
   const [busy, setBusy]         = useState(false)
   const [err, setErr]           = useState(null)
+
+  // Disposition + Owner editors — initialized from the persisted row values.
+  // Re-initialize when the selected row changes (operator clicks a different
+  // lot without closing the drawer).
+  const [dispDraft, setDispDraft]   = useState(row.disposition || '')
+  const [ownerDraft, setOwnerDraft] = useState(row.owner || '')
+  const [dispBusy, setDispBusy]     = useState(false)
+  const [dispErr, setDispErr]       = useState(null)
+
+  useEffect(() => {
+    setDispDraft(row.disposition || '')
+    setOwnerDraft(row.owner || '')
+    setDispErr(null)
+  }, [row.lot_id])
 
   function loadAuthor() {
     try { return localStorage.getItem('pvi_notes_author') || '' } catch { return '' }
@@ -749,8 +854,36 @@ function NotesDrawer({ row, notes, allNotesForItem, onClose, onNotesChanged }) {
     }
   }
 
+  // Persist the disposition + owner draft. Also stamps updated_by from the
+  // notes author field (shared identity input — no separate login).
+  async function handleSaveDisposition() {
+    setDispErr(null)
+    setDispBusy(true)
+    try {
+      await upsertPviLotDisposition({
+        material_code: row.material_code,
+        lot_code:      row.lot_code,
+        disposition:   dispDraft,
+        owner:         ownerDraft,
+        updated_by:    (author || '').trim() || null,
+      })
+      await onDispositionChanged()
+      flash('Disposition saved')
+    } catch (e) {
+      setDispErr(e.message || String(e))
+    } finally {
+      setDispBusy(false)
+    }
+  }
+
   const lotNotes  = notes
   const itemOnly  = allNotesForItem.filter(n => !lotNotes.some(ln => ln.id === n.id))
+
+  const dispDirty = (dispDraft || '') !== (row.disposition || '') || (ownerDraft || '') !== (row.owner || '')
+
+  // Datalist id for owner autocomplete. Unique per drawer instance so
+  // multiple drawers (unlikely in practice) don't clash.
+  const ownerListId = `pvi-owner-suggestions-${row.lot_id}`
 
   return (
     <div style={{
@@ -789,8 +922,55 @@ function NotesDrawer({ row, notes, allNotesForItem, onClose, onNotesChanged }) {
       </div>
 
       <div style={{ padding: '12px 16px', overflowY: 'auto', flex: 1 }}>
-        {/* Add new note */}
-        <div className="section-label" style={{ marginBottom: 6 }}>Add note</div>
+        {/* Disposition + Owner editor — persisted per-lot. Save button
+            explicit so operators can pick+type without every keystroke
+            hitting the DB. Dirty indicator + disabled Save when unchanged. */}
+        <div className="section-label" style={{ marginBottom: 6 }}>Disposition &amp; Owner</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 6 }}>
+          <select
+            className="est-drops-select"
+            value={dispDraft}
+            onChange={e => setDispDraft(e.target.value)}
+            style={{ fontSize: 11 }}
+          >
+            <option value="">— none —</option>
+            {DISPOSITION_OPTIONS.map(v => {
+              const m = DISPOSITION_META[v]
+              return <option key={v} value={v}>{m?.label || v}</option>
+            })}
+          </select>
+          <input
+            className="settings-field-input"
+            list={ownerListId}
+            placeholder="Owner (e.g. Heather, Dave I, Greg Y)"
+            value={ownerDraft}
+            onChange={e => setOwnerDraft(e.target.value)}
+            style={{ fontSize: 11 }}
+            autoComplete="off"
+          />
+          {/* HTML5 datalist provides the autocomplete dropdown for owner
+              names. Browser-native — zero deps, works offline, ignored
+              gracefully if the browser doesn't support it. */}
+          <datalist id={ownerListId}>
+            {uniqueOwners.map(name => <option key={name} value={name} />)}
+          </datalist>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <button
+              className="settings-save-btn"
+              onClick={handleSaveDisposition}
+              disabled={dispBusy || !dispDirty}
+              style={{ fontSize: 11 }}
+            >
+              {dispBusy ? 'Saving…' : 'Save disposition'}
+            </button>
+            {dispDirty && (
+              <span style={{ fontSize: 9, color: '#c88a2a', fontFamily: 'var(--font-mono)' }}>unsaved</span>
+            )}
+          </div>
+          {dispErr && <div style={{ fontSize: 10, color: '#e05a5a', fontFamily: 'var(--font-mono)' }}>{dispErr}</div>}
+        </div>
+
+        <div className="section-label" style={{ marginTop: 16, marginBottom: 6 }}>Add note</div>
         <textarea
           value={newNote}
           onChange={e => setNewNote(e.target.value)}
@@ -828,7 +1008,6 @@ function NotesDrawer({ row, notes, allNotesForItem, onClose, onNotesChanged }) {
         </div>
         {err && <div style={{ fontSize: 10, color: '#e05a5a', fontFamily: 'var(--font-mono)', marginBottom: 6 }}>{err}</div>}
 
-        {/* Notes for this specific lot */}
         <div className="section-label" style={{ marginTop: 16, marginBottom: 6 }}>
           This lot ({lotNotes.length})
         </div>
