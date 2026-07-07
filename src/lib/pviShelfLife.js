@@ -14,6 +14,8 @@
 //   formatLotForEmail(row)
 //   bulkCopyForEmail(rows)
 //   DISPOSITION_OPTIONS, DISPOSITION_META  (per-lot Tag catalog, 2026-07-07)
+//   PROJECT_CODE_MAP, formatProjectLabel   (Palermo's internal project
+//                                           numbers, 2026-07-07)
 
 export const STAGE_ORDER = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 
@@ -36,6 +38,40 @@ export const DEFAULT_STAGES = new Set(['at_risk', 'critical'])
 // to 96 days if the material hasn't shipped yet." Applied to end-customer
 // and unmapped allocations, NOT to internal_transfer.
 export const DEFAULT_UNSHIPPED_SHELF_LIFE_DAYS = 96
+
+// ── Palermo's internal project numbers (2026-07-07, Hill) ───────────────
+//
+// Palermo's tracks these projects by an internal numeric ID that does NOT
+// exist anywhere in Datex/Omni — it's purely their own bookkeeping
+// convention. Hill asked that both the Omni project_lookup code AND
+// Palermo's number show together everywhere a project appears (filter
+// dropdown, row cells, CSV export, drawer, email copy) so her team doesn't
+// have to mentally translate between the two systems.
+//
+// PALVI9  → 247  (Palermo's Value/PVI project)
+// PALDSD9 → 243  (Palermo's DSD project)
+// PALMA9  → 248  (Palermo's MA project)
+//
+// This mapping is display-only. It never reaches Datex/Omni/MotherDuck —
+// project_lookup (the Omni-side code) remains the actual filter/query key
+// throughout the app; PROJECT_CODE_MAP only decorates the label shown to
+// the user.
+export const PROJECT_CODE_MAP = {
+  PALVI9:  '247',
+  PALDSD9: '243',
+  PALMA9:  '248',
+}
+
+// formatProjectLabel — "PALVI9 · 247" when a mapping exists, otherwise just
+// the raw lookup code (covers any future/unmapped project_lookup values
+// without hiding them). Returns null for falsy input so callers can do
+// `{row.project_lookup && <div>{formatProjectLabel(row.project_lookup)}</div>}`
+// without an extra guard.
+export function formatProjectLabel(projectLookup) {
+  if (!projectLookup) return null
+  const code = PROJECT_CODE_MAP[projectLookup]
+  return code ? `${projectLookup} \u00b7 ${code}` : projectLookup
+}
 
 // ── PVI Lot Dispositions (2026-07-07, Hill request) ─────────────────────
 //
@@ -375,6 +411,9 @@ export function formatLotForEmail(row) {
   const parts = []
   parts.push(`Item: ${row.material_code} \u2014 ${row.material_desc}`)
   parts.push(`Lot: ${row.lot_code || '(no lot code)'}`)
+  if (row.project_lookup) {
+    parts.push(`Project: ${formatProjectLabel(row.project_lookup)}`)
+  }
   parts.push(`Code date: ${row.expiration_date_iso || '(unknown)'}`)
   parts.push(`On hand: ${row.cases_onhand} cases`)
   parts.push(`Committed: ${row.cases_committed} cases`)
@@ -390,7 +429,7 @@ export function formatLotForEmail(row) {
     parts.push(`Customer minimum-at-receipt: ${row.shelf_life_days} days${srcLabel}`)
     if (row.shortfall_days != null) {
       const s = row.shortfall_days
-      parts.push(`Vs. spec: ${s > 0 ? `${s} days SHORT` : s < 0 ? `${-s} days of buffer` : 'exactly at spec'}`)
+      parts.push(`Vs. spec: ${s > 0 ? `${s} days projected ship (under spec)` : s < 0 ? `${-s} days of buffer` : 'exactly at spec'}`)
     }
   }
   if (row.disposition) parts.push(`Disposition: ${row.disposition}`)
