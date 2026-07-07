@@ -6,6 +6,7 @@
 //   - Plain-language verdict copy generator (pack vs expiration aware)
 //   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY → { k, kDay, display }
 //   - Hold status detector — multiple Datex statuses count as "on hold"
+//   - Non-allocatable location detector (receiving, staging, docks, doors, etc.)
 //   - Aggregations: banner counts, KPI row, by-project rollup
 //   - Day stepper helpers (5 ship days)
 //   - Mock fixtures (fefoOrderList) — last-resort fallback when live fetch fails
@@ -23,6 +24,15 @@
 //            lots produced at 10:00 and 14:00 on the same day should NOT flag
 //            as a rotation violation — same-day pack date is same-age
 //            inventory operationally. See Hill's Slack feedback 2026-07-01.
+//
+// ── Location-blocked REM (2026-07-07, team feedback) ────────────────────────
+// REM candidates that live entirely in non-allocatable locations (receiving,
+// staging, docks, equipment scanners) are treated like on-hold lots: the
+// verdict engine downgrades a `violation` to `hold` and the copy annotates
+// the reason. Rationale: those pallets weren't allocated because they aren't
+// in a pickable bin yet, not because of poor rotation discipline. This
+// dramatically reduces noise on the FOF QA workflow where inbound pallets
+// dwell in receiving before inspection clears them.
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
@@ -92,9 +102,6 @@ export function parseFairOaksDate(lookupCode) {
   const d = dateFromYearAndDoy(year, doy)
   const month = d.getUTCMonth() + 1
   const day   = d.getUTCDate()
-  // kDay drops HH:MM:SS so same-day lots compare equal in the verdict
-  // engine (see lineVerdict). k retains full precision for sorting the
-  // truly-oldest lot when we pick a REM candidate within a day.
   const kDay = year * 1000 + doy
   const k    = kDay * 1e6 + hh * 1e4 + mm * 1e2 + ss
   return { k, kDay, display: fmtMDY(year, month, day) }
@@ -108,7 +115,6 @@ export function parseRichelieuDate(lookupCode) {
   const day   = Number(m[2])
   const year  = Number(m[3])
   if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900) return null
-  // MMDDYYYY is inherently day-level — k and kDay are identical here.
   const kDay = year * 10000 + month * 100 + day
   return { k: kDay, kDay, display: fmtMDY(year, month, day) }
 }
@@ -153,21 +159,21 @@ export function isHoldStatus(statusName) {
 export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, clean: 3 }
 
 // lineVerdict — flag a rotation violation only when REM is strictly older
-// than the oldest ship lot BY DAY. Historically compared full k which,
-// for Fair Oaks (YDDDHHMMSS), included HH:MM:SS — meaning two lots on the
-// same day at 10:00 vs 14:00 would flag as a violation despite being
-// operationally same-age inventory. Hill's 2026-07-01 feedback: only flag
-// stuff that's OLDER, not stuff with a different date code.
+// than the oldest ship lot BY DAY.
 //
-// Falls back to `k` when kDay is absent to stay compatible with any older
-// cached response payloads or mock fixtures that predate the two-key model.
+// A REM lot in a non-allocatable location (receiving, staging, docks,
+// scanner locations) reads as `hold` rather than `violation` — the pallet
+// legitimately hasn't been allocated because it isn't in a pickable bin
+// yet, not because rotation is off. Reduces false alerts for FOF product
+// dwelling in receiving pending QA inspection.
 export function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
   const oldKDay = Math.min(...line.ship.map(s => s.kDay ?? s.k))
   const rem = line.rem
   const remKDay = rem?.kDay ?? rem?.k
   if (rem && rem.lps > 0 && remKDay != null && remKDay < oldKDay) {
-    return rem.hold ? 'hold' : 'violation'
+    if (rem.hold || rem.locationBlocked) return 'hold'
+    return 'violation'
   }
   return 'clean'
 }
@@ -189,17 +195,34 @@ export function compareByVerdict(a, b) {
 
 // ─── Verdict copy ───────────────────────────────────────────────────────────
 
+function locSuffix(rem) {
+  if (!rem?.location) return ''
+  return ` at ${rem.location}`
+}
+
+// One-line reason the older lot is being skipped — hold wins over location
+// because hold is the operational blocker; locationBlocked is contextual info
+// about WHERE the stock is dwelling.
+function skipReason(rem) {
+  if (rem?.hold) return `on ${rem.holdType || 'hold'}`
+  if (rem?.locationBlocked) {
+    return rem.location ? `not yet in an allocatable bin (${rem.location})` : 'not yet in an allocatable bin'
+  }
+  return ''
+}
+
 export function verdictCopy(line, projId) {
   const verb = dateVerb(projId)
   const v = lineVerdict(line)
   if (v === 'violation') {
     const oldShip = line.ship.reduce((a, b) => a.k < b.k ? a : b)
     const stockUnit = line.rem.lps > 0 ? `${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}` : 'stock'
-    return `Out of rotation — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs) sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
+    const loc = locSuffix(line.rem)
+    return `Out of rotation — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
   }
   if (v === 'hold') {
-    const holdType = line.rem.holdType || 'hold'
-    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP) but it is on ${holdType}, so it is correctly skipped. Release the hold before it can ship in rotation.`
+    const reason = skipReason(line.rem) || 'on hold'
+    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is ${reason}, so it is correctly skipped. Clear the hold or move to an allocatable bin before it can ship in rotation.`
   }
   if (!line.rem || line.rem.lps === 0) {
     return 'In rotation — the oldest stock on hand is shipping first… fully cleared.'
@@ -279,10 +302,10 @@ export function daySubLabel(dayOffset) {
 // ─── Verdict styling tokens ─────────────────────────────────────────────────
 
 export const VERDICT_TOKENS = {
-  violation: { color: 'var(--red, #c0392b)',    bg: 'rgba(192, 57, 43, 0.08)',  label: '\u26A0 Out of rotation', pill: 'violation' },
-  stale:     { color: 'var(--orange, #d4824a)', bg: 'rgba(212, 130, 74, 0.08)', label: '\u25F7 Stale \u00b7 overdue',  pill: 'stale' },
-  hold:      { color: 'var(--blue, #2a72b8)',   bg: 'rgba(42, 114, 184, 0.08)', label: '\u23F8 Older lot held',  pill: 'hold' },
-  clean:     { color: 'var(--green, #1a8a52)',  bg: 'rgba(26, 138, 82, 0.08)',  label: '\u2713 In rotation',     pill: 'clean' },
+  violation: { color: 'var(--red, #c0392b)',    bg: 'rgba(192, 57, 43, 0.08)',  label: '⚠ Out of rotation', pill: 'violation' },
+  stale:     { color: 'var(--orange, #d4824a)', bg: 'rgba(212, 130, 74, 0.08)', label: '◷ Stale · overdue',  pill: 'stale' },
+  hold:      { color: 'var(--blue, #2a72b8)',   bg: 'rgba(42, 114, 184, 0.08)', label: '⏸ Older lot held',  pill: 'hold' },
+  clean:     { color: 'var(--green, #1a8a52)',  bg: 'rgba(26, 138, 82, 0.08)',  label: '✓ In rotation',     pill: 'clean' },
 }
 
 // ─── Live fetcher (single project — kept for backward compat) ───────────────
@@ -303,11 +326,6 @@ export async function fetchLiveFefoOrders(projectId, { dayCount = 5 } = {}) {
 }
 
 // ─── Live fetcher (batch — multi-project in one Lambda call) ────────────────
-// Calls /.netlify/functions/fefo-orders with a list of projectIds so all
-// projects load on a SINGLE duckdb connection. Replaces the per-project
-// fan-out (which triggered a duckdb connection-init bug under parallel Lambda
-// invocations — connections failed in ~6ms with "Connection was never
-// established"). All projects must share one facility (Phase 7b scope: ken).
 
 export async function fetchLiveFefoOrdersBatch(projectIds, { dayCount = 5 } = {}) {
   const now = () => new Date().toISOString()
@@ -379,7 +397,7 @@ export function fefoOrderList() {
             { date: '6/24/25', k: 250624, lps: 8,  cases: 192, codes: ['LP-882341', 'LP-882347', 'LP-882356', 'LP-882389'], lot: 'L2406A' },
             { date: '6/26/25', k: 250626, lps: 4,  cases: 96,  codes: ['LP-883102', 'LP-883108'], lot: 'L2406B' },
           ],
-          rem: { date: '6/15/25', k: 250615, lps: 5, cases: 120, hold: false, lot: 'L2406C' },
+          rem: { date: '6/15/25', k: 250615, lps: 5, cases: 120, hold: false, lot: 'L2406C', location: 'BG103D', locationBlocked: false },
         },
       ],
     },
@@ -394,7 +412,7 @@ export function fefoOrderList() {
           ship: [
             { date: '12/15/25', k: 251215, lps: 10, cases: 80, codes: ['LP-771042', 'LP-771050', 'LP-771063'], lot: 'R2511A' },
           ],
-          rem: { date: '10/30/25', k: 251030, lps: 4, cases: 32, hold: false, lot: 'R2510B' },
+          rem: { date: '10/30/25', k: 251030, lps: 4, cases: 32, hold: false, lot: 'R2510B', location: 'C5 Receiving', locationBlocked: true },
         },
       ],
     },
