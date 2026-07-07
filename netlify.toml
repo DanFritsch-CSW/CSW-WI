@@ -51,12 +51,10 @@
   schedule = "0 10 * * *"
   timeout = 26
 
-# Password gate for the Palermo's standalone site (cswpvi.netlify.app).
-# Dan ask, 2026-07-07: password-protect that site only. The edge function
-# itself checks VITE_APP_MODE at request time and passes through untouched
-# when it isn't 'palermos', so this registration being repo-wide (both
-# sites share this netlify.toml) does not gate the main CSW-WI app.
-# See netlify/edge-functions/pvi-password-gate.js for the full explanation.
+# Password gate for the Palermo's standalone deploy (cswpvi.netlify.app).
+# The edge function itself checks VITE_APP_MODE and no-ops on the main
+# CSW-WI app, so registering it globally here is safe for both sites.
+# See netlify/edge-functions/pvi-password-gate.js for details.
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"

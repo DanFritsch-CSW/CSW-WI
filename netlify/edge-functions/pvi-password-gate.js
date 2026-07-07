@@ -1,46 +1,57 @@
 // netlify/edge-functions/pvi-password-gate.js
 //
 // Password-gates the Palermo's At Risk Inventory Manager standalone site
-// (cswpvi.netlify.app). Dan ask, 2026-07-07: "make just the PVI/csw url
-// site password protected. Password = palermos2026."
+// (cswpvi.netlify.app). Dan ask (2026-07-07): simple shared password,
+// not per-user auth. Password = palermos2026.
 //
-// SCOPING: this repo builds TWO Netlify sites from the same netlify.toml —
+// SCOPING: this repo builds TWO Netlify sites off the same netlify.toml —
 // the main CSW-WI app (csw-wi.netlify.app) and the Palermo's standalone
-// build (cswpvi.netlify.app, built with VITE_APP_MODE=palermos). Both sites
-// pick up this edge function since it's registered repo-wide. To avoid
-// gating the main app that Dean/Kay/Wasz/etc. use daily, the very first
-// thing this function does is check the VITE_APP_MODE site environment
-// variable and pass through untouched if it isn't 'palermos'.
+// build (cswpvi.netlify.app, VITE_APP_MODE=palermos). Since both sites
+// share this config, the very first thing this function does is check the
+// VITE_APP_MODE site environment variable and pass straight through
+// (return undefined) if it's not 'palermos'. That keeps this gate from
+// ever touching the main app that Dean/Kay/Wasz/etc. use daily.
 //
-// AUTH MODEL: single shared password, not per-user accounts. On success,
-// sets a long-lived cookie so the operator isn't re-prompted every visit.
-// This is a basic site-wide gate — anyone with the password has full
-// access, same as a screen-lock, not a permissions system.
+// HOW IT WORKS (on the Palermo's site only):
+//   1. Cookie check — `pvi_gate=ok-2026`. Present -> pass through, no
+//      re-prompt for the life of the cookie (30 days).
+//   2. POST with a `password` form field matching the expected password
+//      -> set the cookie and 302-redirect back to the originally
+//      requested path (so the SPA loads normally after login).
+//   3. Anything else -> serve a small self-contained HTML login form
+//      (inline CSS, zero external asset requests — it has to render even
+//      though nothing else has passed the gate yet). Shows an error
+//      banner after a failed attempt (401 response, same form).
 //
 // PASSWORD SOURCE: checks the PVI_SITE_PASSWORD site environment variable
-// first (Site settings -> Environment variables in the Netlify dashboard),
-// falling back to the hardcoded default below if that var isn't set. This
-// lets Dan rotate the password later without a code change/redeploy — the
-// hardcoded fallback just means it works immediately without that extra
-// setup step.
+// first; falls back to the hardcoded default below if that env var isn't
+// set. This means Dan can rotate the password later from the Netlify
+// dashboard (Site settings -> Environment variables -> PVI_SITE_PASSWORD)
+// without touching code or redeploying — the hardcoded fallback just means
+// it works immediately without that extra setup step.
+//
+// SECURITY NOTE: this is a basic shared-secret gate suitable for keeping
+// casual/unauthenticated visitors out of an internal-facing dashboard. It
+// is NOT per-user auth, NOT rate-limited, and the cookie is a static
+// marker rather than a signed/expiring token. Fine for this use case;
+// don't extend this pattern to anything handling sensitive data without
+// hardening it first.
 
-const DEFAULT_PASSWORD = 'palermos2026'
-const COOKIE_NAME  = 'pvi_gate'
+const COOKIE_NAME = 'pvi_gate'
 const COOKIE_VALUE = 'ok-2026'
-const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30 // 30 days
+const DEFAULT_PASSWORD = 'palermos2026'
 
-function readEnv(key) {
-  // Netlify Edge Functions run on Deno. Netlify also injects a `Netlify`
-  // global with an `env.get()` helper on recent runtimes — prefer that,
-  // fall back to Deno.env directly so this keeps working either way.
+function getEnv(name) {
   try {
+    // Netlify's documented way to read site env vars from an Edge Function.
     if (typeof Netlify !== 'undefined' && Netlify.env && typeof Netlify.env.get === 'function') {
-      return Netlify.env.get(key)
+      return Netlify.env.get(name)
     }
   } catch (_) { /* fall through */ }
   try {
-    // eslint-disable-next-line no-undef
-    return Deno.env.get(key)
+    // Deno.env works too on Netlify's edge runtime; kept as a fallback in
+    // case the Netlify global isn't present in some execution context.
+    return Deno.env.get(name)
   } catch (_) {
     return undefined
   }
@@ -69,7 +80,7 @@ function renderForm(showError) {
 <style>
   * { box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: #1a1a1a;
     color: #eee;
     display: flex;
@@ -89,6 +100,7 @@ function renderForm(showError) {
     font-size: 16px;
     margin: 0 0 4px;
     color: #c0392b;
+    font-weight: 700;
   }
   p {
     font-size: 12px;
@@ -104,6 +116,10 @@ function renderForm(showError) {
     background: #1a1a1a;
     color: #eee;
     font-size: 14px;
+  }
+  input:focus {
+    outline: none;
+    border-color: #c0392b;
   }
   button {
     width: 100%;
@@ -128,7 +144,7 @@ function renderForm(showError) {
 <form method="POST">
   <h1>Palermo's At Risk Inventory Manager</h1>
   <p>This site is password protected.</p>
-  ${showError ? '<div class="err">Incorrect password — try again.</div>' : ''}
+  ${showError ? '<div class="err">Incorrect password &mdash; try again.</div>' : ''}
   <input type="password" name="password" placeholder="Password" autofocus required>
   <button type="submit">Enter</button>
 </form>
@@ -137,22 +153,20 @@ function renderForm(showError) {
 }
 
 export default async (request, context) => {
-  // Only gate the Palermo's standalone deploy. The main CSW-WI app builds
-  // from the same repo without VITE_APP_MODE set to 'palermos', so this
-  // check keeps the gate scoped correctly across both sites.
-  const appMode = readEnv('VITE_APP_MODE')
+  // Only gate the Palermo's standalone deploy. Main CSW-WI app passes
+  // straight through untouched.
+  const appMode = getEnv('VITE_APP_MODE')
   if (appMode !== 'palermos') {
-    return // passthrough — not the Palermo's site
-  }
-
-  const expectedPassword = readEnv('PVI_SITE_PASSWORD') || DEFAULT_PASSWORD
-
-  const cookies = parseCookies(request.headers.get('cookie'))
-  if (cookies[COOKIE_NAME] === COOKIE_VALUE) {
-    return // already authenticated this browser — let the request through
+    return
   }
 
   const url = new URL(request.url)
+  const expectedPassword = getEnv('PVI_SITE_PASSWORD') || DEFAULT_PASSWORD
+
+  const cookies = parseCookies(request.headers.get('cookie'))
+  if (cookies[COOKIE_NAME] === COOKIE_VALUE) {
+    return
+  }
 
   if (request.method === 'POST') {
     let submitted = null
@@ -162,17 +176,15 @@ export default async (request, context) => {
     } catch (_) {
       submitted = null
     }
-
     if (submitted === expectedPassword) {
       const headers = new Headers()
       headers.set('Location', url.pathname + url.search)
       headers.set(
         'Set-Cookie',
-        `${COOKIE_NAME}=${COOKIE_VALUE}; Path=/; Max-Age=${COOKIE_MAX_AGE_SECONDS}; HttpOnly; Secure; SameSite=Lax`
+        `${COOKIE_NAME}=${COOKIE_VALUE}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax`
       )
       return new Response(null, { status: 302, headers })
     }
-
     return new Response(renderForm(true), {
       status: 401,
       headers: { 'content-type': 'text/html; charset=utf-8' },
