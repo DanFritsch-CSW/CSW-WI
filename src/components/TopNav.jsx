@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
+import { CSW_BEAR_LOGO } from '../lib/csw-logo.js'
 
 const links = [
   { to: '/',          label: 'Labor Planning' },
@@ -17,12 +18,16 @@ function useClock() {
   return now
 }
 
-// Heron silhouette — matches CSW's bird logo concept
-function HeronMark() {
+// Official CSW polar-bear brand mark — replaces the earlier HeronMark
+// placeholder SVG. Logo asset lives in src/lib/csw-logo.js as a base64
+// data URI (see that file for source + prep notes).
+function CswBearMark() {
   return (
-    <svg viewBox="0 0 22 22" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-      <path d="M11 2C9.5 2 8.2 2.8 7.5 4L6 4.5C5.2 4.8 4.5 5.5 4.2 6.4L3 10l2 .5 1-3 1.5-.5C8 8.5 8.5 9.8 9 11l-3 6h2.5l2-4 .5 1v3h2v-3.5L14.5 11c.5-1.2 1-2.5 1.5-3.5l1.5.5 1 3 2-.5-1.2-3.6C19 6.5 18.3 5.8 17.5 5.5L16 5C15.3 3 13.3 2 11 2z"/>
-    </svg>
+    <img
+      src={CSW_BEAR_LOGO}
+      alt="Central Storage & Warehouse"
+      style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+    />
   )
 }
 
@@ -58,7 +63,7 @@ export default function TopNav() {
       <nav className="top-nav">
         <div className="nav-brand">
           <div className="nav-logo-mark">
-            <HeronMark />
+            <CswBearMark />
           </div>
           <div className="nav-brand-text">
             <span className="nav-brand-csw">CSW</span>
