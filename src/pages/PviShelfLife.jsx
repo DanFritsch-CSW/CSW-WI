@@ -31,6 +31,17 @@ import {
 // Then runs FEFO projection client-side (src/lib/pviShelfLife.js) and renders
 // a filterable table. Side drawer for per-lot notes. Copy-for-email buttons
 // per-lot and bulk. Stage filter defaults to "At Risk and worse".
+//
+// Sortable columns (2026-07-07, Hill request): every column header (except
+// the trailing action column) is clickable and toggles asc → desc → clear.
+// When no column is active, the default severity-first sort applies. Sort
+// indicator (↑/↓) appears next to the active column label.
+//
+// CSV export (2026-07-07, Hill request): "Export CSV" button next to the
+// copy-for-email button. Exports the currently-filtered, currently-sorted
+// row set with all detail columns (spec source, cases on/committed,
+// projected recipient, velocity, etc.) — richer than the on-screen table so
+// downstream analysis has full context.
 
 const STAGES_FOR_TABS = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 const PROJECT_OPTIONS = [
@@ -39,6 +50,49 @@ const PROJECT_OPTIONS = [
   { value: 'PALMA9',   label: 'PALMA9' },
   { value: 'PALDSD9',  label: 'PALDSD9' },
 ]
+
+// Sort accessors for each sortable column. Return the value used for
+// comparison. Nulls sort last regardless of direction (see compareRows).
+const SORT_ACCESSORS = {
+  stage:      r => STAGE_ORDER.indexOf(r.verdict?.stage ?? 'watch'),
+  material:   r => (r.material_code || '').toUpperCase(),
+  lot:        r => (r.lot_code || '').toUpperCase(),
+  expiration: r => r.expiration_date_iso ? Date.parse(r.expiration_date_iso) : null,
+  daysToCode: r => r.days_to_code_today,
+  spec:       r => r.shortfall_days,
+  available:  r => r.cases_available,
+  projected:  r => r.primary?.projected_ship_iso ? Date.parse(r.primary.projected_ship_iso) : null,
+  velocity:   r => r.velocity?.shipments_30d ?? null,
+}
+
+function compareRows(a, b, key, direction) {
+  const acc = SORT_ACCESSORS[key]
+  if (!acc) return 0
+  const av = acc(a)
+  const bv = acc(b)
+  // Nulls last regardless of direction — always push blanks to the bottom.
+  if (av == null && bv == null) return 0
+  if (av == null) return 1
+  if (bv == null) return -1
+  if (typeof av === 'string' && typeof bv === 'string') {
+    const cmp = av.localeCompare(bv)
+    return direction === 'asc' ? cmp : -cmp
+  }
+  if (av < bv) return direction === 'asc' ? -1 : 1
+  if (av > bv) return direction === 'asc' ? 1 : -1
+  return 0
+}
+
+// CSV row escape — wrap in quotes if the value contains a delimiter, quote,
+// or newline; escape embedded quotes by doubling.
+function csvEscape(v) {
+  if (v == null) return ''
+  const s = String(v)
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return `"${s.replace(/"/g, '""')}"`
+  }
+  return s
+}
 
 export default function PviShelfLife() {
   const [snapshot, setSnapshot]         = useState(null)   // response from function
@@ -55,6 +109,9 @@ export default function PviShelfLife() {
   const [accountFilter, setAccountFilter] = useState('')  // canonical_id string or ''
   const [projectFilter, setProjectFilter] = useState('')  // PALVI9 | PALMA9 | PALDSD9 | ''
   const [textFilter, setTextFilter]       = useState('')
+
+  // Sort — { key: null, direction: 'asc' } means default severity-first sort.
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' })
 
   // Selection
   const [selectedLotId, setSelectedLotId] = useState(null)
@@ -127,9 +184,9 @@ export default function PviShelfLife() {
     return c
   }, [rows, projectFilter])
 
-  // Filtered rows for the table.
+  // Filtered + sorted rows for the table.
   const filteredRows = useMemo(() => {
-    return rows.filter(r => {
+    const filtered = rows.filter(r => {
       if (projectFilter && r.project_lookup !== projectFilter) return false
       if (!enabledStages.has(r.verdict.stage)) return false
       if (accountFilter) {
@@ -142,9 +199,16 @@ export default function PviShelfLife() {
         if (!hay.includes(q)) return false
       }
       return true
-    }).sort((a, b) => {
-      // Sort by stage severity DESC, then by shortfall DESC (worst first),
-      // then by days-to-code ASC.
+    })
+
+    if (sortConfig.key) {
+      // Explicit column sort — respect user's chosen key + direction.
+      return [...filtered].sort((a, b) => compareRows(a, b, sortConfig.key, sortConfig.direction))
+    }
+
+    // Default sort: stage severity DESC, then shortfall DESC (worst first),
+    // then days-to-code ASC. Same order as before Hill's sort request.
+    return filtered.sort((a, b) => {
       const sa = STAGE_ORDER.indexOf(a.verdict.stage)
       const sb = STAGE_ORDER.indexOf(b.verdict.stage)
       if (sa !== sb) return sa - sb
@@ -155,7 +219,7 @@ export default function PviShelfLife() {
       const db = b.days_to_code_today ?? 9999
       return da - db
     })
-  }, [rows, projectFilter, enabledStages, accountFilter, textFilter])
+  }, [rows, projectFilter, enabledStages, accountFilter, textFilter, sortConfig])
 
   const selectedRow = useMemo(
     () => filteredRows.find(r => r.lot_id === selectedLotId) || rows.find(r => r.lot_id === selectedLotId) || null,
@@ -169,6 +233,18 @@ export default function PviShelfLife() {
       return next
     })
   }
+
+  // Column-header sort toggle. Same column: asc → desc → clear (back to
+  // default severity sort). Different column: switch and start at asc.
+  const handleSort = useCallback((key) => {
+    setSortConfig(prev => {
+      if (prev.key === key) {
+        if (prev.direction === 'asc') return { key, direction: 'desc' }
+        return { key: null, direction: 'asc' }
+      }
+      return { key, direction: 'asc' }
+    })
+  }, [])
 
   const handleCopyLot = useCallback((row) => {
     navigator.clipboard.writeText(formatLotForEmail(row)).then(
@@ -184,6 +260,64 @@ export default function PviShelfLife() {
       () => flash('Copy failed'),
     )
   }, [filteredRows])
+
+  // CSV export — currently filtered + sorted rows, all detail columns.
+  // Downloads via Blob + synthetic anchor click; no server round-trip.
+  const handleExportCsv = useCallback(() => {
+    if (filteredRows.length === 0) return
+    const headers = [
+      'Stage', 'Item code', 'Item description', 'Project',
+      'Lot code', 'Lot status',
+      'Code date', 'Days to code (today)', 'Days to code (at ship)',
+      'Spec days', 'Spec source', 'Vs spec (days short; negative = buffer)',
+      'Cases available', 'Cases on hand', 'Cases committed',
+      'Projected recipient', 'Projected ship date', 'Ship source',
+      'Order lookup',
+      'Velocity 30d shipments', 'Velocity tier',
+    ]
+    const lines = [headers.map(csvEscape).join(',')]
+    for (const r of filteredRows) {
+      const prim = r.primary
+      const shipIso = prim?.projected_ship_iso ? prim.projected_ship_iso.slice(0, 10) : ''
+      const recipient = prim?.canonical?.canonical_name || prim?.ship_to_raw_name || ''
+      lines.push([
+        r.verdict?.label ?? '',
+        r.material_code ?? '',
+        r.material_desc ?? '',
+        r.project_lookup ?? '',
+        r.lot_code ?? '',
+        r.lot_status ?? '',
+        r.expiration_date_iso ?? '',
+        r.days_to_code_today ?? '',
+        r.days_to_code_at_ship ?? '',
+        r.shelf_life_days ?? '',
+        r.spec_source ?? '',
+        r.shortfall_days ?? '',
+        r.cases_available ?? '',
+        r.cases_onhand ?? '',
+        r.cases_committed ?? '',
+        recipient,
+        shipIso,
+        prim?.source ?? '',
+        prim?.order_lookup ?? '',
+        r.velocity?.shipments_30d ?? '',
+        r.velocity_confidence?.tier ?? '',
+      ].map(csvEscape).join(','))
+    }
+    const csv = lines.join('\r\n')
+    const blob = new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const today = new Date().toISOString().slice(0, 10)
+    const scope = projectFilter ? `-${projectFilter.toLowerCase()}` : ''
+    a.download = `pvi-shelf-life${scope}-${today}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    flash(`Exported ${filteredRows.length} lot(s) to CSV`)
+  }, [filteredRows, projectFilter])
 
   const reload = () => setReloadTick(t => t + 1)
 
@@ -290,6 +424,15 @@ export default function PviShelfLife() {
           </span>
           <button
             className="settings-save-btn"
+            onClick={handleExportCsv}
+            disabled={filteredRows.length === 0}
+            style={{ fontSize: 11 }}
+            title="Download the currently filtered + sorted rows as a CSV file"
+          >
+            Export CSV
+          </button>
+          <button
+            className="settings-save-btn"
             onClick={handleCopyBulk}
             disabled={filteredRows.length === 0}
             style={{ fontSize: 11 }}
@@ -311,15 +454,15 @@ export default function PviShelfLife() {
           <table className="hourly-table">
             <thead>
               <tr>
-                <th style={{ textAlign: 'left' }}>Stage</th>
-                <th style={{ textAlign: 'left' }}>Item</th>
-                <th style={{ textAlign: 'left' }}>Lot</th>
-                <th style={{ textAlign: 'left' }}>Code date</th>
-                <th style={{ textAlign: 'right' }} title="Days remaining until code date (today)">Days to code</th>
-                <th style={{ textAlign: 'right' }} title="Customer's minimum-days-at-receipt spec; red delta = days short of spec at projected ship">Vs. spec</th>
-                <th style={{ textAlign: 'right' }}>Available</th>
-                <th style={{ textAlign: 'left' }}>Projected ship</th>
-                <th style={{ textAlign: 'left' }}>Velocity</th>
+                <SortableTh sortKey="stage"      align="left"  sortConfig={sortConfig} onSort={handleSort}>Stage</SortableTh>
+                <SortableTh sortKey="material"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Item</SortableTh>
+                <SortableTh sortKey="lot"        align="left"  sortConfig={sortConfig} onSort={handleSort}>Lot</SortableTh>
+                <SortableTh sortKey="expiration" align="left"  sortConfig={sortConfig} onSort={handleSort}>Code date</SortableTh>
+                <SortableTh sortKey="daysToCode" align="right" sortConfig={sortConfig} onSort={handleSort} title="Days remaining until code date (today)">Days to code</SortableTh>
+                <SortableTh sortKey="spec"       align="right" sortConfig={sortConfig} onSort={handleSort} title="Customer's minimum-days-at-receipt spec; positive shortfall = days short of spec at projected ship">Vs. spec</SortableTh>
+                <SortableTh sortKey="available"  align="right" sortConfig={sortConfig} onSort={handleSort}>Available</SortableTh>
+                <SortableTh sortKey="projected"  align="left"  sortConfig={sortConfig} onSort={handleSort}>Projected ship</SortableTh>
+                <SortableTh sortKey="velocity"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Velocity</SortableTh>
                 <th></th>
               </tr>
             </thead>
@@ -357,6 +500,32 @@ export default function PviShelfLife() {
         />
       )}
     </div>
+  )
+}
+
+// ── Sortable Th ────────────────────────────────────────────────────────────
+//
+// Clickable table header. Shows a ↑ / ↓ indicator when this column is the
+// active sort column; renders as a normal header when inactive. Toggles
+// asc → desc → clear (back to default severity sort) on repeated clicks.
+
+function SortableTh({ sortKey, align, sortConfig, onSort, title, children }) {
+  const isActive = sortConfig.key === sortKey
+  const indicator = isActive ? (sortConfig.direction === 'asc' ? ' ↑' : ' ↓') : ''
+  return (
+    <th
+      style={{
+        textAlign: align,
+        cursor: 'pointer',
+        userSelect: 'none',
+        background: isActive ? 'var(--brand-bg, #fef9ec)' : undefined,
+        fontWeight: isActive ? 700 : undefined,
+      }}
+      title={title || `Sort by ${children}`}
+      onClick={() => onSort(sortKey)}
+    >
+      {children}<span style={{ color: 'var(--brand, #a07818)', fontWeight: 700 }}>{indicator}</span>
+    </th>
   )
 }
 
