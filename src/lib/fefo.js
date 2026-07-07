@@ -7,32 +7,11 @@
 //   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY → { k, kDay, display }
 //   - Hold status detector — multiple Datex statuses count as "on hold"
 //   - Non-allocatable location detector (receiving, staging, docks, doors, etc.)
+//   - Severity tiering (critical >=4d older, warning 1-3d)
 //   - Aggregations: banner counts, KPI row, by-project rollup
 //   - Day stepper helpers (5 ship days)
 //   - Mock fixtures (fefoOrderList) — last-resort fallback when live fetch fails
 //   - Live fetchers (single + batch) — call /.netlify/functions/fefo-orders
-//
-// The verdict engine + copy logic is shape-stable across mock and live —
-// only the Order source changes.
-//
-// ── Two-key sorting model (2026-07-01) ─────────────────────────────────────
-// Parsers return both `k` and `kDay`:
-//   - k    — full-precision sort key (Fair Oaks: includes HH:MM:SS; Richelieu /
-//            Crown: identical to kDay since those formats are day-level only).
-//            Used to pick the truly-oldest lot as REM within a day.
-//   - kDay — day-level integer. Used for violation comparisons. Two Fair Oaks
-//            lots produced at 10:00 and 14:00 on the same day should NOT flag
-//            as a rotation violation — same-day pack date is same-age
-//            inventory operationally. See Hill's Slack feedback 2026-07-01.
-//
-// ── Location-blocked REM (2026-07-07, team feedback) ────────────────────────
-// REM candidates that live entirely in non-allocatable locations (receiving,
-// staging, docks, equipment scanners) are treated like on-hold lots: the
-// verdict engine downgrades a `violation` to `hold` and the copy annotates
-// the reason. Rationale: those pallets weren't allocated because they aren't
-// in a pickable bin yet, not because of poor rotation discipline. This
-// dramatically reduces noise on the FOF QA workflow where inbound pallets
-// dwell in receiving before inspection clears them.
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
@@ -83,6 +62,21 @@ function dateFromYearAndDoy(year, doy) {
 function fmtMDY(year, month, day) {
   const yy = String(year).slice(-2)
   return `${month}/${day}/${yy}`
+}
+
+// Parses back a display date string (M/D/YY or MM/DD/YY) to a UTC-midnight
+// Date. Used by lineDaysOlder to compute day-diffs uniformly across all
+// project date formats — cheaper than plumbing dayEpoch through the backend.
+function parseDisplayDate(display) {
+  if (!display || typeof display !== 'string') return null
+  const m = display.match(/^(\d{1,2})\/(\d{1,2})\/(\d{1,4})$/)
+  if (!m) return null
+  const month = Number(m[1])
+  const day   = Number(m[2])
+  let year    = Number(m[3])
+  if (year < 100) year += 2000  // 25 → 2025
+  const d = new Date(Date.UTC(year, month - 1, day))
+  return Number.isNaN(d.getTime()) ? null : d
 }
 
 export function parseFairOaksDate(lookupCode) {
@@ -158,14 +152,6 @@ export function isHoldStatus(statusName) {
 
 export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, clean: 3 }
 
-// lineVerdict — flag a rotation violation only when REM is strictly older
-// than the oldest ship lot BY DAY.
-//
-// A REM lot in a non-allocatable location (receiving, staging, docks,
-// scanner locations) reads as `hold` rather than `violation` — the pallet
-// legitimately hasn't been allocated because it isn't in a pickable bin
-// yet, not because rotation is off. Reduces false alerts for FOF product
-// dwelling in receiving pending QA inspection.
 export function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
   const oldKDay = Math.min(...line.ship.map(s => s.kDay ?? s.k))
@@ -187,10 +173,69 @@ export function orderVerdict(order) {
   return worst
 }
 
+// ─── Severity (2026-07-07, Bry's tiering ask) ───────────────────────────────
+//
+// Distinguishes 1-day rotation drift ("less concerning") from multi-day drift
+// that indicates a real process problem. Alerts still fire in all cases —
+// severity just modulates urgency in the UI (color + label) and sort order.
+//
+// Uses the human-readable `date` field (MM/DD/YY) rather than kDay because
+// kDay math isn't linear across all formats (Richelieu's Y*10000+M*100+D
+// jumps at month boundaries). parseDisplayDate normalizes to a real Date.
+
+export const SEVERITY_THRESHOLDS = {
+  critical: 4,   // >=4 days older = critical (multi-day drift)
+  warning:  1,   // 1-3 days = warning
+}
+
+export function lineDaysOlder(line) {
+  const v = lineVerdict(line)
+  if (v !== 'violation') return 0
+  if (!line?.ship?.length || !line?.rem?.date) return 0
+  const oldShip = line.ship.reduce((a, b) => a.k < b.k ? a : b)
+  const shipDate = parseDisplayDate(oldShip.date)
+  const remDate  = parseDisplayDate(line.rem.date)
+  if (!shipDate || !remDate) return 0
+  return Math.max(0, Math.round((shipDate.getTime() - remDate.getTime()) / 86400000))
+}
+
+export function lineSeverity(line) {
+  const days = lineDaysOlder(line)
+  if (days === 0) return null
+  if (days >= SEVERITY_THRESHOLDS.critical) return 'critical'
+  return 'warning'
+}
+
+export function orderSeverity(order) {
+  let worst = null
+  for (const line of (order.lines || [])) {
+    const s = lineSeverity(line)
+    if (s === 'critical') return 'critical'
+    if (s === 'warning') worst = 'warning'
+  }
+  return worst
+}
+
+export function orderMaxDaysOlder(order) {
+  let max = 0
+  for (const line of (order.lines || [])) {
+    const d = lineDaysOlder(line)
+    if (d > max) max = d
+  }
+  return max
+}
+
 export function compareByVerdict(a, b) {
   const av = orderVerdict(a)
   const bv = orderVerdict(b)
-  return VERDICT_PRECEDENCE[av] - VERDICT_PRECEDENCE[bv]
+  if (VERDICT_PRECEDENCE[av] !== VERDICT_PRECEDENCE[bv]) {
+    return VERDICT_PRECEDENCE[av] - VERDICT_PRECEDENCE[bv]
+  }
+  // Within the violation bucket, worst offender first.
+  if (av === 'violation') {
+    return orderMaxDaysOlder(b) - orderMaxDaysOlder(a)
+  }
+  return 0
 }
 
 // ─── Verdict copy ───────────────────────────────────────────────────────────
@@ -200,9 +245,6 @@ function locSuffix(rem) {
   return ` at ${rem.location}`
 }
 
-// One-line reason the older lot is being skipped — hold wins over location
-// because hold is the operational blocker; locationBlocked is contextual info
-// about WHERE the stock is dwelling.
 function skipReason(rem) {
   if (rem?.hold) return `on ${rem.holdType || 'hold'}`
   if (rem?.locationBlocked) {
@@ -218,7 +260,9 @@ export function verdictCopy(line, projId) {
     const oldShip = line.ship.reduce((a, b) => a.k < b.k ? a : b)
     const stockUnit = line.rem.lps > 0 ? `${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}` : 'stock'
     const loc = locSuffix(line.rem)
-    return `Out of rotation — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
+    const days = lineDaysOlder(line)
+    const drift = days > 0 ? ` (${days} day${days === 1 ? '' : 's'} older)` : ''
+    return `Out of rotation${drift} — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
   }
   if (v === 'hold') {
     const reason = skipReason(line.rem) || 'on hold'
@@ -233,10 +277,15 @@ export function verdictCopy(line, projId) {
 // ─── Aggregations ───────────────────────────────────────────────────────────
 
 export function bannerCounts(orders) {
-  const out = { violations: [], stale: [], holds: [], allClean: false }
+  const out = { violations: [], criticalCount: 0, warningCount: 0, stale: [], holds: [], allClean: false }
   for (const o of orders) {
     const v = orderVerdict(o)
-    if (v === 'violation') out.violations.push(o.id)
+    if (v === 'violation') {
+      out.violations.push(o.id)
+      const sev = orderSeverity(o)
+      if (sev === 'critical') out.criticalCount++
+      else if (sev === 'warning') out.warningCount++
+    }
     else if (v === 'stale') out.stale.push(o.id)
     else if (v === 'hold') out.holds.push(o.id)
   }
@@ -245,10 +294,15 @@ export function bannerCounts(orders) {
 }
 
 export function kpiRow(orders) {
-  let lps = 0, materials = new Set(), violations = 0, stale = 0, holds = 0
+  let lps = 0, materials = new Set(), violations = 0, critical = 0, warning = 0, stale = 0, holds = 0
   for (const o of orders) {
     const v = orderVerdict(o)
-    if (v === 'violation') violations++
+    if (v === 'violation') {
+      violations++
+      const sev = orderSeverity(o)
+      if (sev === 'critical') critical++
+      else if (sev === 'warning') warning++
+    }
     else if (v === 'stale') stale++
     else if (v === 'hold') holds++
     for (const line of (o.lines || [])) {
@@ -256,13 +310,13 @@ export function kpiRow(orders) {
       for (const s of (line.ship || [])) lps += s.lps || 0
     }
   }
-  return { orders: orders.length, lps, materials: materials.size, violations, stale, holds }
+  return { orders: orders.length, lps, materials: materials.size, violations, critical, warning, stale, holds }
 }
 
 export function rollupByProject(orders) {
   const map = new Map()
   for (const proj of FEFO_PROJECTS) {
-    map.set(proj.id, { proj, orders: 0, lps: 0, violations: 0, stale: 0, holds: 0 })
+    map.set(proj.id, { proj, orders: 0, lps: 0, violations: 0, critical: 0, warning: 0, stale: 0, holds: 0 })
   }
   for (const o of orders) {
     const r = map.get(o.proj)
@@ -271,11 +325,17 @@ export function rollupByProject(orders) {
     for (const line of (o.lines || []))
       for (const s of (line.ship || [])) r.lps += s.lps || 0
     const v = orderVerdict(o)
-    if (v === 'violation') r.violations++
+    if (v === 'violation') {
+      r.violations++
+      const sev = orderSeverity(o)
+      if (sev === 'critical') r.critical++
+      else if (sev === 'warning') r.warning++
+    }
     else if (v === 'stale') r.stale++
     else if (v === 'hold') r.holds++
   }
   return [...map.values()].sort((a, b) => {
+    if (a.critical !== b.critical) return b.critical - a.critical
     if (a.violations !== b.violations) return b.violations - a.violations
     if (a.stale !== b.stale) return b.stale - a.stale
     return b.orders - a.orders
@@ -306,6 +366,11 @@ export const VERDICT_TOKENS = {
   stale:     { color: 'var(--orange, #d4824a)', bg: 'rgba(212, 130, 74, 0.08)', label: '◷ Stale · overdue',  pill: 'stale' },
   hold:      { color: 'var(--blue, #2a72b8)',   bg: 'rgba(42, 114, 184, 0.08)', label: '⏸ Older lot held',  pill: 'hold' },
   clean:     { color: 'var(--green, #1a8a52)',  bg: 'rgba(26, 138, 82, 0.08)',  label: '✓ In rotation',     pill: 'clean' },
+}
+
+export const SEVERITY_TOKENS = {
+  critical: { color: 'var(--red, #c0392b)',    bg: 'rgba(192, 57, 43, 0.12)',  label: 'CRITICAL' },
+  warning:  { color: 'var(--amber, #a07818)', bg: 'rgba(160, 120, 24, 0.12)', label: 'WARNING' },
 }
 
 // ─── Live fetcher (single project — kept for backward compat) ───────────────
@@ -381,7 +446,6 @@ export async function fetchLiveFefoOrdersBatch(projectIds, { dayCount = 5 } = {}
 }
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
-// Last-resort fallback when every live fetch fails.
 
 export function fefoOrderList() {
   return [
