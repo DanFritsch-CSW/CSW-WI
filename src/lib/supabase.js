@@ -1475,18 +1475,29 @@ export async function applyPviAccountSeed(suggestions) {
   return { canonicals: canonicalCount, mappings: mappingCount }
 }
 
+// fetchPviShelfNotes — fetches note rows.
+//
+// Fixed 2026-07-07 (Hill): this previously REQUIRED a non-empty
+// itemLotPairs array and returned [] otherwise. Every call site in
+// PviShelfLife.jsx calls it with NO arguments (fetchPviShelfNotes()),
+// so the notes drawer was silently always empty — including the 113
+// Palermo's + 42 CSW comments already ingested into pvi_shelf_notes
+// from the 7/6 workbook. Now: no argument (or empty array) fetches ALL
+// notes, matching the same pattern already used by
+// fetchPviLotDispositions. Filtering by item/lot still works if a
+// caller ever wants a scoped query — it's just no longer required.
 export async function fetchPviShelfNotes(itemLotPairs) {
-  // itemLotPairs: [{ item, lot_code }, ...]  — pull notes for the specific
-  // lots visible in the dashboard rather than the whole table.
-  if (!supabase || !itemLotPairs?.length) return []
-  const items = [...new Set(itemLotPairs.map(p => p.item))]
-  const lots  = [...new Set(itemLotPairs.map(p => p.lot_code))]
-  const { data, error } = await supabase
+  if (!supabase) return []
+  let query = supabase
     .from('pvi_shelf_notes')
     .select('*')
-    .in('item', items)
-    .in('lot_code', lots)
     .order('created_at', { ascending: false })
+  if (itemLotPairs && itemLotPairs.length) {
+    const items = [...new Set(itemLotPairs.map(p => p.item))]
+    const lots  = [...new Set(itemLotPairs.map(p => p.lot_code))]
+    query = query.in('item', items).in('lot_code', lots)
+  }
+  const { data, error } = await query
   if (error) { console.error('fetchPviShelfNotes:', error); return [] }
   return data ?? []
 }
