@@ -1,5 +1,6 @@
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
+import { CSW_BEAR_LOGO } from '../lib/csw-logo.js'
 
 // Palermo's standalone entry point.
 //
@@ -8,22 +9,20 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // domain). No access to the rest of the CSW app — the other routes don't
 // exist in this build at all.
 //
-// Palermo's-branded header + subtitle so the user experience feels like
-// their own product. Content area renders PviShelfLife exactly as it
-// appears inside the CSW Customers tab — same component, same behavior,
-// same data. Fix a bug in one place, ships to both sites automatically.
-//
-// Header layout: real Palermo's brand mark on the left (from
-// src/lib/palermos-logo.js — see that file for source + prep notes),
-// "Shelf Life" descriptor + subtitle stack on the right. The "powered by
-// CSW" footer stays small so it doesn't compete with the Palermo's
-// identity but stays discoverable if a user needs to know where the data
-// lives.
+// Header layout (2026-07-07, Hill request): Palermo's brand mark on the
+// far left as the primary brand, "Shelf Life" title + tagline in the
+// middle, CSW polar bear brand mark on the far right so the co-branding
+// is visible up front (Hill: "want the Palermo's logo and CSW logo side
+// by side"). Both logos at 56px for equal visual weight. The
+// "CAL lots × canonical account cutoffs" descriptor was removed at the
+// same time — Hill considered it visual noise on the standalone site.
+// Content area renders PviShelfLife exactly as it appears inside the
+// CSW Customers tab — same component, same behavior, same data.
 
 export default function PalermosStandalone() {
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg0, #fafafa)', display: 'flex', flexDirection: 'column' }}>
-      {/* Palermo's-branded header */}
+      {/* Co-branded header — Palermo's | title stack | CSW */}
       <div style={{
         borderBottom: '1px solid var(--border, #e5e5e5)',
         background: 'white',
@@ -58,15 +57,12 @@ export default function PalermosStandalone() {
               live inventory · risk snapshot
             </span>
           </div>
-          <p style={{
-            margin: '4px 0 0',
-            fontSize: 12,
-            color: 'var(--text-secondary, #666)',
-            fontFamily: 'var(--font-mono, monospace)',
-          }}>
-            CAL lots × canonical account cutoffs — refreshed on every load
-          </p>
         </div>
+        <img
+          src={CSW_BEAR_LOGO}
+          alt="Central Storage & Warehouse"
+          style={{ height: 56, width: 'auto', display: 'block', flexShrink: 0 }}
+        />
       </div>
 
       {/* Content */}
@@ -74,8 +70,9 @@ export default function PalermosStandalone() {
         <PviShelfLife />
       </div>
 
-      {/* Footer — quiet, small print. Discoverable but not competitive with
-          the Palermo's identity above. */}
+      {/* Footer — quiet, small print. Kept even with the CSW logo now in the
+          header for a redundant belt-and-suspenders identifier in case
+          someone screenshots just the content area. */}
       <div style={{
         padding: '12px 32px 20px',
         color: 'var(--text-dim, #888)',
