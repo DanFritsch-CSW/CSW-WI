@@ -2,11 +2,18 @@ import { useSearchParams } from 'react-router-dom'
 import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
+import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
 // Customers module — four sub-tabs sharing a common header + tab row.
 // Sub-tab state lives in URL (?tab=space|onboarding|fefo|pvi) so links are
 // shareable and refresh-safe, matching the rest of the app's URL-as-state
 // pattern (LaborPlanning uses ?fac=&date=).
+//
+// When the PVI sub-tab is active, the Palermo's brand mark is displayed
+// in the header (right-aligned) so it's visually clear this section is
+// for a Palermo's-branded feature. Logo asset lives in
+// src/lib/palermos-logo.js as a base64 data URI (same source used by the
+// cswpvi.netlify.app standalone site — one source of truth for the mark).
 const SUB_TABS = [
   {
     id: 'space',
@@ -44,20 +51,31 @@ export default function Customers() {
 
   return (
     <div className="page-content">
-      {/* Page header — title + per-sub-tab subtitle */}
-      <div style={{ padding: '20px 24px 0' }}>
-        <h1 style={{
-          fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: '0.02em',
-          textTransform: 'uppercase', color: 'var(--text-primary)',
-        }}>
-          Customers
-        </h1>
-        <p style={{
-          margin: '4px 0 0', fontSize: 12, color: 'var(--text-secondary)',
-          fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
-        }}>
-          {activeTab.subtitle}
-        </p>
+      {/* Page header — title + per-sub-tab subtitle. When on the PVI tab,
+          the Palermo's brand mark appears on the right so it's obvious
+          this section is a Palermo's-branded feature. */}
+      <div style={{ padding: '20px 24px 0', display: 'flex', alignItems: 'flex-start', gap: 16 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h1 style={{
+            fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: '0.02em',
+            textTransform: 'uppercase', color: 'var(--text-primary)',
+          }}>
+            Customers
+          </h1>
+          <p style={{
+            margin: '4px 0 0', fontSize: 12, color: 'var(--text-secondary)',
+            fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
+          }}>
+            {activeTab.subtitle}
+          </p>
+        </div>
+        {subTab === 'pvi' && (
+          <img
+            src={PALERMOS_LOGO}
+            alt="Palermo's"
+            style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }}
+          />
+        )}
       </div>
 
       {/* Sub-tab row */}
