@@ -213,11 +213,15 @@ export async function purgeStaleAssignments(employeeIds, correctFacility, fromDa
 //   - from_facility != null  → incoming loans; the home facility's B2E owns
 //                              the active/terminated status of that employee
 //
-// Intentionally NOT protected by manually_edited. If B2E says the person no
-// longer exists at this facility, a manual lane move for them (to callin / PTO /
-// specialProject) is just a manager working around the absence of a proper
-// "remove employee" path — and that workaround is exactly what this purge
-// replaces. The B2E source of truth wins.
+// PROTECTED by manually_edited=true. Fixed 2026-07-07 after Dean reported
+// that dragging employees to PTO / specialProject / callin was silently
+// resetting to their original shift lane on the next sync (or the nightly
+// auto-sync at 5am). Reason: this DELETE was silently RLS-blocked before
+// 2026-07-06; after adding the anon_delete_roster policy, its long-standing
+// design decision to "ignore manually_edited" started actually destroying
+// manager overrides. New policy: managers own manually_edited=true rows,
+// full stop. If HR terms someone who has manual callin/PTO/specialProject
+// rows, those rows stay until a manager explicitly removes them.
 //
 // Scope: current plan_date only. For broader cleanup across all future dates
 // (catches stale rows on dates the manager hasn't visited+synced), use
@@ -245,6 +249,7 @@ export async function purgeTerminatedAssignments(facility, planDate, currentB2eE
     .eq('plan_date', planDate)
     .eq('is_temp', false)
     .is('from_facility', null)
+    .eq('manually_edited', false)
     .in('employee_id', staleIds)
   if (delErr) { console.error('purgeTerminatedAssignments delete:', delErr); return delErr.message }
   return null
@@ -272,8 +277,13 @@ export async function purgeTerminatedAssignments(facility, planDate, currentB2eE
 // than risk wiping a facility's roster on a transient failure.
 //
 // Same row-level protections as the per-date variant: preserves is_temp=true
-// (manual temps) and from_facility!=null (incoming loans). Not protected by
-// manually_edited — B2E truth wins over manager workarounds.
+// (manual temps), from_facility!=null (incoming loans), and
+// manually_edited=true (manager overrides). Post-2026-07-07: the third guard
+// is critical. When RLS was silently blocking deletes it was harmless to
+// omit; once deletes actually landed, terminated-employee purges were
+// destroying manager placements (Dean-reported "reset to original column"
+// bug). Managers own manually_edited=true rows even for termed employees;
+// they can wipe leftover callin/PTO rows themselves when ready.
 export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, fromDate) {
   if (!supabase) return null
   if (!activeEmpIdSet || activeEmpIdSet.size === 0) {
@@ -300,6 +310,7 @@ export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, from
     .gte('plan_date', fromDate)
     .eq('is_temp', false)
     .is('from_facility', null)
+    .eq('manually_edited', false)
     .in('employee_id', staleIds)
   if (delErr) { console.error('purgeTerminatedAcrossFuture delete:', delErr); return delErr.message }
   return null
@@ -317,9 +328,15 @@ export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, from
 //      → new row written. Closes the new-hire gap that this function was
 //      originally built for.
 //   2. DELETE: any Supabase row whose (employee, date) is NOT in B2E for
-//      that date → deleted. Off-day rows are deleted REGARDLESS of
-//      manually_edited — a manual lane assignment cannot meaningfully exist
-//      on a day the employee isn't there. is_temp/loan rows still preserved.
+//      that date → deleted, UNLESS manually_edited=true. Manager overrides
+//      (PTO / callin / specialProject placements) persist even on days B2E
+//      doesn't have the employee scheduled — that's often the whole point
+//      of the override ("John's on PTO Saturday even though he wasn't
+//      scheduled"). is_temp/loan rows still preserved.
+//      Post-2026-07-07: previously deleted regardless of manually_edited.
+//      Was silently blocked by missing RLS DELETE policy so the design flaw
+//      never surfaced until 2026-07-06 when the RLS policy was added. Dean
+//      reported the resulting reset-to-original-column bug within a day.
 //   3. REFRESH: existing rows that ARE in B2E but whose shift_start or
 //      shift_hours differ from B2E truth → partial update of shift fields
 //      and last_b2e_sync_at. Lane/role/manually_edited preserved. Fixes the
@@ -411,12 +428,12 @@ export async function seedForwardHorizon(facility, b2eRosterByDate, fromDate, da
       continue
     }
     // B2E does NOT have this employee scheduled on this date. Off-day row.
-    // Delete regardless of manually_edited — a manual lane assignment on a
-    // day the employee isn't there has no meaning. is_temp and loan rows
-    // are still preserved (independent of B2E).
+    // Delete only if the manager hasn't touched the row. is_temp, loan, and
+    // manually_edited=true rows are all preserved.
     if (r.is_temp) continue
     if (r.from_facility !== null) continue
     if (r.on_loan_to) continue
+    if (r.manually_edited) continue
     if (!deleteByDate[r.plan_date]) deleteByDate[r.plan_date] = []
     deleteByDate[r.plan_date].push(r.employee_id)
   }
@@ -460,7 +477,7 @@ export async function seedForwardHorizon(facility, b2eRosterByDate, fromDate, da
         .eq('is_temp', false)
         .is('from_facility', null)
         .is('on_loan_to', null)
-        // NOTE: no manually_edited filter — off-day rows delete regardless
+        .eq('manually_edited', false)
         .then(({ error }) => { if (error) console.error('seedForwardHorizon delete:', error) })
     )
   }
