@@ -51,6 +51,12 @@ import {
 // CSV export (2026-07-07, Hill): "Export CSV" button exports the currently-
 // filtered, currently-sorted row set with all detail columns including the
 // new Disposition + Owner tags.
+//
+// Shortfall label wording (2026-07-07, Hill): "Xd short" read as a failure/
+// problem state to Hill, when in most cases it's just describing where the
+// FEFO-projected ship date lands relative to spec — not a foregone loss.
+// Renamed to "Xd projected ship" in both the row's Vs. spec column and the
+// drawer header so the language stays neutral/descriptive.
 
 const STAGES_FOR_TABS = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 const PROJECT_OPTIONS = [
@@ -520,7 +526,7 @@ export default function PviShelfLife() {
                 <SortableTh sortKey="lot"         align="left"  sortConfig={sortConfig} onSort={handleSort}>Lot</SortableTh>
                 <SortableTh sortKey="expiration"  align="left"  sortConfig={sortConfig} onSort={handleSort}>Code date</SortableTh>
                 <SortableTh sortKey="daysToCode"  align="right" sortConfig={sortConfig} onSort={handleSort} title="Days remaining until code date (today)">Days to code</SortableTh>
-                <SortableTh sortKey="spec"        align="right" sortConfig={sortConfig} onSort={handleSort} title="Customer's minimum-days-at-receipt spec; positive shortfall = days short of spec at projected ship">Vs. spec</SortableTh>
+                <SortableTh sortKey="spec"        align="right" sortConfig={sortConfig} onSort={handleSort} title="Customer's minimum-days-at-receipt spec; positive value = days the lot will land under spec at its projected ship date">Vs. spec</SortableTh>
                 <SortableTh sortKey="available"   align="right" sortConfig={sortConfig} onSort={handleSort}>Available</SortableTh>
                 <SortableTh sortKey="projected"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Projected ship</SortableTh>
                 <SortableTh sortKey="velocity"    align="left"  sortConfig={sortConfig} onSort={handleSort}>Velocity</SortableTh>
@@ -703,7 +709,7 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
               )}
             </div>
             <div style={{ color: shortColor, fontWeight: 600 }}>
-              {shortfall > 0 ? `▼ ${shortfall}d short` : shortfall < 0 ? `▲ ${-shortfall}d buffer` : 'at spec'}
+              {shortfall > 0 ? `▼ ${shortfall}d projected ship` : shortfall < 0 ? `▲ ${-shortfall}d buffer` : 'at spec'}
             </div>
           </>
         )}
@@ -913,7 +919,7 @@ function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNot
                 color: row.shortfall_days > 0 ? '#d1583a' : row.shortfall_days < 0 ? '#3a7a3a' : '#c88a2a',
                 fontWeight: 600,
               }}>
-                {row.shortfall_days > 0 ? `${row.shortfall_days}d short` : row.shortfall_days < 0 ? `${-row.shortfall_days}d buffer` : 'at spec'}
+                {row.shortfall_days > 0 ? `${row.shortfall_days}d projected ship` : row.shortfall_days < 0 ? `${-row.shortfall_days}d buffer` : 'at spec'}
               </span>
             </div>
           )}
