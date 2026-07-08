@@ -354,6 +354,11 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [isLoading, setIsLoading]         = useState(true)
   const [activeId, setActiveId]           = useState(null)
   const [syncState, setSyncState]         = useState(null)
+  // Stage label shown on the Sync from B2E button while syncState==='loading'.
+  // See performB2eSync below — cycles through "Fetching from B2E…" →
+  // "Updating current date…" → "Refreshing roster…" so users see progress
+  // instead of a static "Syncing…" for the full ~2-4s foreground.
+  const [syncStage, setSyncStage]         = useState(null)
   const [showAddTemp, setShowAddTemp]     = useState(false)
   const [pendingWrites, setPendingWrites] = useState(0)
   const [sortOrder, setSortOrder]         = useState('default')
@@ -583,8 +588,30 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setTimeout(() => setSyncToast(null), 1850)
   }, [])
 
+  // performB2eSync — user-initiated sync via the "Sync from B2E" button
+  // (silent=false) or the maybeAutoResync staleness path (silent=true).
+  //
+  // Prior behavior (pre-2026-07-08 session 3): full blocking chain — fetch
+  // B2E + time off, replace employees, seed assignments, 3 purge passes,
+  // fetch active roster, purge across future, fetch B2E range for +14
+  // days, forward-seed, then full page reload. 6+ sequential Omni round
+  // trips, ~10-30s with Omni retries. Kay reported still-slow syncs after
+  // the load() fg/bg split shipped because THIS path was untouched.
+  //
+  // New behavior: mirrors the load() split. Foreground refreshes the
+  // viewed date only and flips the button to "Synced ✓" in ~2-4s. The
+  // +7 day horizon reconcile + purges + across-future cleanup runs in
+  // background via scheduleBackgroundHorizonSync (same helper as load()).
+  //
+  // Stage labels: syncStage feeds the button text during foreground so
+  // users see what's happening instead of a static "Syncing…":
+  //   "Fetching from B2E…" → "Updating current date…" → "Refreshing roster…"
+  //
+  // Error messaging: distinguishes Omni timeout / network failure from
+  // an empty B2E response, and further distinguishes "Omni returned
+  // nothing" from "Omni returned only carryover rows for this date".
   const performB2eSync = useCallback(async ({ silent = false } = {}) => {
-    if (!silent) setSyncState('loading')
+    if (!silent) { setSyncState('loading'); setSyncStage('Fetching from B2E…') }
     try {
       const date = planDate || todayISO()
       const [b2eRosterFull, timeOffMap] = await Promise.all([
@@ -593,39 +620,56 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       ])
       const persistable = withoutCarryovers(b2eRosterFull)
       if (!persistable.length) {
-        if (!silent) setSyncState('No B2E data found')
+        if (!silent) {
+          setSyncStage(null)
+          if (b2eRosterFull.length === 0) {
+            // Log the raw count so we can distinguish "Omni returned empty"
+            // from "B2E genuinely has no schedule for this date" in the
+            // browser console until we get proper telemetry.
+            console.warn(`[Sync] ${facility} ${date}: B2E returned 0 rows (possibly Omni timeout, missing schedule, or location filter mismatch)`)
+            setSyncState('No schedule found in B2E for this date. If Omni is slow, wait a moment and retry — otherwise check that shifts have been published.')
+          } else {
+            setSyncState('B2E returned only carryover rows — no new schedule to sync for this date.')
+          }
+        }
         return
       }
+      if (!silent) setSyncStage('Updating current date…')
       const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
       const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
       const err = await replaceEmployees(facility, empRows)
-      if (err) { if (!silent) setSyncState(err); return }
+      if (err) { if (!silent) { setSyncStage(null); setSyncState(err) }; return }
       const seedErr = await seedRosterAssignments(withTimeOff, date)
-      if (seedErr) { if (!silent) setSyncState(seedErr); return }
-      const empIds = withTimeOff.map(e => e.id)
-      await purgeStaleAssignments(empIds, facility, date)
-      await purgeTerminatedAssignments(facility, date, empIds)
-      // Broader-scope cleanup: catch terminated/transferred employees who
-      // still have rows on OTHER future dates the manager hasn't visited.
-      // Per-date purge above only handles the currently-viewed date.
-      const activeRoster = await fetchActiveB2eEmployees(facility)
-      await purgeTerminatedAcrossFuture(facility, activeRoster, date)
-      // Forward-seed: pull B2E for the next 14 plan_dates and reconcile.
-      // Inserts new-hire rows AND deletes false rows (employees no longer
-      // scheduled on a given day) in one pass. Manual/temp/loan rows are
-      // never touched. See comments on seedForwardHorizon in supabase.js.
-      const b2eRosterByDate = await fetchB2eRosterForRange(facility, date, 14).catch(() => ({}))
-      await seedForwardHorizon(facility, b2eRosterByDate, date)
+      if (seedErr) { if (!silent) { setSyncStage(null); setSyncState(seedErr) }; return }
+      if (!silent) setSyncStage('Refreshing roster…')
       await load(facility, date)
       if (!silent) {
+        setSyncStage(null)
         setSyncState('ok')
         setTimeout(() => setSyncState(null), 3000)
       }
+      // Background horizon reconcile — same helper as the cold-cache load
+      // path. 5-min per-facility cooldown protects against back-to-back
+      // Sync clicks. Purges + purgeTerminatedAcrossFuture + range fetch
+      // + forward-seed run silently; user can keep working while the
+      // horizon catches up.
+      scheduleBackgroundHorizonSync(facility, date, withTimeOff.map(e => e.id))
     } catch (e) {
-      if (!silent) setSyncState(e.message)
-      else console.warn('Auto-sync failed (non-fatal):', e.message)
+      const msg = e?.message ?? 'Sync failed'
+      if (!silent) {
+        setSyncStage(null)
+        // Omni failures commonly surface as fetch/timeout/abort errors.
+        // Give the user something actionable rather than the raw message.
+        if (/timeout|timed out|abort|ECONNRESET|network|fetch|failed/i.test(msg)) {
+          setSyncState('Omni is slow right now — try again in a moment.')
+        } else {
+          setSyncState(msg)
+        }
+      } else {
+        console.warn('Auto-sync failed (non-fatal):', msg)
+      }
     }
-  }, [facility, planDate])
+  }, [facility, planDate, scheduleBackgroundHorizonSync])
 
   const handleB2eSync = useCallback(() => performB2eSync({ silent: false }), [performB2eSync])
 
@@ -962,7 +1006,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           <button className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`} onClick={nextSort} title="Cycle sort">{currentSort.label}</button>
           <button className="b2e-sync-btn" onClick={() => setShowAddTemp(true)}>+ Add Temp</button>
           <button className="b2e-sync-btn" onClick={handleB2eSync} disabled={syncState === 'loading'} title="Pull latest shift schedules from B2E. Manual lane/shift changes you've made are preserved.">
-            {syncState === 'loading' ? 'Syncing…' : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
+            {syncState === 'loading' ? (syncStage || 'Syncing…') : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
           </button>
           {syncState && syncState !== 'loading' && syncState !== 'ok' && <span className="b2e-sync-err">{syncState}</span>}
         </div>
