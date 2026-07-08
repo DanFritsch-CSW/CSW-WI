@@ -24,13 +24,16 @@
 // This function pulls active dismissals at request time and filters those
 // lots out of REM candidates so violations stop firing for them.
 //
-// ── Onhand perf (2026-07-08 hotfix) ─────────────────────────────────────────
+// ── Onhand perf (2026-07-08 hotfixes) ───────────────────────────────────────
 //
-// Original PR #63 lot_locations CTE scanned every lot in the warehouse for
-// STRING_AGG. Combined with the committed_raw scan (both branches) and the
-// per-project sequential loop with Birchwood's 50k lots, Lambda was blowing
-// past 5min. Fix: scope_lots CTE narrows both to the current project's
-// materials. Reduces scanned rows from tens of thousands to a few hundred.
+// scope_lots CTE narrows committed_raw + lot_locations to lots RELEVANT to
+// this project. Two iterations:
+//   v1 (11:47 UTC): scope by material_id — but that still includes every
+//       historical lot for those materials. For Birchwood: 41,136 rows.
+//   v2 (this fix):  scope to lots with active on-site inventory — joins
+//       licenseplatecontents + licenseplates with archived=false + qty>0.
+//       For Birchwood: 1,970 rows. 20× reduction.
+// Verified against MotherDuck: query completes in <2s for Birchwood scale.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -337,16 +340,23 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
-    // scope_lots CTE limits committed_raw + lot_locations to lots for our
-    // in-scope materials. Before this scoping, both CTEs scanned every lot
-    // in the warehouse (~6900 for KEN + 30k lpc rows), then multiplied by
-    // 5 projects × sequential loop = Lambda timeout. Now: hundreds of lots
-    // per project, cheap hash join.
+    // scope_lots CTE — ONLY lots with active on-site inventory for our
+    // in-scope materials. Filters at lot creation source (licenseplatecontents
+    // + licenseplates.archived=false + packaged_amount>0) so we don't drag
+    // in historical/shipped lots. Cuts row count by 20× vs the earlier
+    // material_id-only scope for high-lot-count projects like Birchwood.
     const onhandSql = `
       WITH scope_lots AS (
-        SELECT lot_id
-        FROM production_db.silver.datex_slv_lots
-        WHERE material_id IN (${matIdList})
+        SELECT DISTINCT lpc.lot_id
+        FROM production_db.silver.datex_slv_licenseplatecontents lpc
+        JOIN production_db.silver.datex_slv_licenseplates lp
+          ON lpc.license_plate_id = lp.license_plate_id
+        JOIN production_db.silver.datex_slv_lots l
+          ON l.lot_id = lpc.lot_id
+        WHERE lp.warehouse_id = ${warehouseId}
+          AND lp.Archived = false
+          AND lpc.packaged_amount > 0
+          AND l.material_id IN (${matIdList})
       ),
       committed_raw AS (
         SELECT t.lot_id, t.expected_packaged_amount AS cases_committed
