@@ -3,8 +3,8 @@
 // What ships here:
 //   - Project config with date semantic + facility mapping
 //   - Pure verdict engine (line + order + severity ordering)
-//   - Plain-language verdict copy generator (pack vs expiration aware)
-//   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY → { k, kDay, display }
+//   - Plain-language verdict copy generator (pack vs expiration vs received)
+//   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY / receiveDate
 //   - Hold status detector — multiple Datex statuses count as "on hold"
 //   - Non-allocatable location detector (receiving, staging, docks, doors, etc.)
 //   - Severity tiering (critical >=4d older, warning 1-3d)
@@ -40,6 +40,16 @@ export const FEFO_PROJECTS = [
     color: '#3dba7e', facility: 'ken',
     datexProjectName: 'CROWN BAKERIES',
   },
+  {
+    // Birchwood lots don't encode dates in lookup_code (PO195487, KA762, etc).
+    // Backend uses lot.receive_date TIMESTAMP as the age proxy — verb becomes
+    // "received" so ops isn't misled that it's a pack date. Datex project
+    // name has an intentional DOUBLE SPACE (confirmed via silver query).
+    id: 'birch5', code: 'BIRCH5', name: 'Birchwood Foods',
+    proj: 242, dateFormat: 'receiveDate', dateSemantic: 'received',
+    color: '#8b5a3c', facility: 'ken',
+    datexProjectName: 'BIRCHWOOD FOODS  KENOSHA',
+  },
 ]
 
 export function getProject(projId) {
@@ -48,7 +58,9 @@ export function getProject(projId) {
 
 export function dateVerb(projId) {
   const p = getProject(projId)
-  return p?.dateSemantic === 'expiration' ? 'expiring' : 'packed'
+  if (p?.dateSemantic === 'expiration') return 'expiring'
+  if (p?.dateSemantic === 'received')   return 'received'
+  return 'packed'
 }
 
 // ─── Date parsers (Phase 7a) ────────────────────────────────────────────────
@@ -128,6 +140,7 @@ export function parseLotDateKey(lookupCode, projId) {
   if (project.dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
   else if (project.dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
   else if (project.dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
+  // 'receiveDate' is only parsed server-side (needs lot.receive_date from DB)
   else parsed = null
   if (!parsed) {
     return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${project.dateFormat}` }
@@ -173,15 +186,7 @@ export function orderVerdict(order) {
   return worst
 }
 
-// ─── Severity (2026-07-07, Bry's tiering ask) ───────────────────────────────
-//
-// Distinguishes 1-day rotation drift ("less concerning") from multi-day drift
-// that indicates a real process problem. Alerts still fire in all cases —
-// severity just modulates urgency in the UI (color + label) and sort order.
-//
-// Uses the human-readable `date` field (MM/DD/YY) rather than kDay because
-// kDay math isn't linear across all formats (Richelieu's Y*10000+M*100+D
-// jumps at month boundaries). parseDisplayDate normalizes to a real Date.
+// ─── Severity ──────────────────────────────────────────────────────────────
 
 export const SEVERITY_THRESHOLDS = {
   critical: 4,   // >=4 days older = critical (multi-day drift)
@@ -231,7 +236,6 @@ export function compareByVerdict(a, b) {
   if (VERDICT_PRECEDENCE[av] !== VERDICT_PRECEDENCE[bv]) {
     return VERDICT_PRECEDENCE[av] - VERDICT_PRECEDENCE[bv]
   }
-  // Within the violation bucket, worst offender first.
   if (av === 'violation') {
     return orderMaxDaysOlder(b) - orderMaxDaysOlder(a)
   }
