@@ -1200,6 +1200,25 @@ export async function fetchB2eTimeOff(facilityId, date) {
 }
 
 // Internal helper — fetches active schedule rows for a single B2E entry_date.
+//
+// IMPORTANT — stale-snapshot filter scope: the schedule query pulls a 14-day
+// forward window (not just entryDate) so per-employee max_ingestion_ts is
+// computed across the full window, not just the requested date's rows.
+//
+// Why: B2E's futurescheduleentries is append-only. When an employee's
+// schedule pattern changes (Daniel Franco 2026-07-08: M-F 8am → M/T/F/S 6am),
+// the OLD batch's rows for the now-off days (Wed/Thu) remain as ghosts
+// forever. A per-date query for one of those Wed/Thu dates returns ONLY
+// the old ghost row — its ingestion_ts is trivially the "max" within that
+// one date's row set, so the naive per-date max filter can't tell it's stale.
+// The employee then gets seeded into Supabase with 8am shift data based on
+// a schedule they no longer have. Dean/Taylor 2026-07-08.
+//
+// The fix expands the query to 14 days and uses per-employee-across-window
+// max_ingestion_ts (matching fetchB2eRosterForRange's behavior). Rows are
+// then filtered back to entryDate only after the stale-filter has done its
+// job. If an employee's newest snapshot doesn't include entryDate, their
+// row for entryDate is filtered out — which is exactly what we want.
 async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssignments) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
@@ -1220,24 +1239,47 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
       `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
       `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
       `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
-      `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`,
+      `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`, `${SCHEDULE}.entry_date`,
     ],
     filters: {
       [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${SCHEDULE}.entry_date`]: {
         kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: entryDate, is_negative: false, offset_interval_string: '0 days',
+        isFiscal: false, left_side: entryDate, is_negative: false, offset_interval_string: '14 days',
       },
     },
     sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-    limit: 500,
+    limit: 5000,
   })
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
-  const schedMap  = new Map()
+
+  // Compute per-employee max_ingestion_ts ACROSS the full 14-day window.
+  // This lets us detect stale-snapshot ghost rows: an employee whose newest
+  // snapshot doesn't include entryDate will have that row filtered.
+  const maxIngestByEmp = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
+    if (!activeIds.has(id)) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    if (!maxIngestByEmp.has(id) || ts > maxIngestByEmp.get(id)) {
+      maxIngestByEmp.set(id, ts)
+    }
+  }
+
+  // Filter to entryDate rows only, AND require ts === per-employee max_ts.
+  const schedMap = new Map()
+  for (const r of scheduleRows) {
+    const id = String(r[`${SCHEDULE}.employee_id`])
+    if (!activeIds.has(id)) continue
+    const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
+    if (ts !== maxIngestByEmp.get(id)) continue  // stale-snapshot filter
+    const dateRaw = r[`${SCHEDULE}.entry_date`]
+    if (!dateRaw) continue
+    const dateIso = typeof dateRaw === 'string'
+      ? dateRaw.slice(0, 10)
+      : new Date(dateRaw).toISOString().slice(0, 10)
+    if (dateIso !== entryDate) continue  // narrow back down to just the requested date
     if (!schedMap.has(id) || ts > schedMap.get(id).ts) schedMap.set(id, { row: r, ts })
   }
 
