@@ -479,6 +479,40 @@ async function omniQuery(query) {
   return rows
 }
 
+
+// motherduckB2eQuery — same fetch surface as omniQuery but hits the
+// MotherDuck-direct B2E roster function. Used for all B2E roster/
+// schedule reads (2026-07-08 pivot) so the app doesn't depend on
+// Omni's B2E model, which returned empty rows twice this week for
+// KEN queries where MotherDuck ground truth had the data. See
+// netlify/functions/motherduck-b2e-roster.cjs for the server side.
+//
+// Rows come back with Omni-qualified column names (SCHEDULE.field,
+// ROSTER.field) so downstream stale-snapshot + filter + lane
+// derivation logic runs unchanged.
+async function motherduckB2eQuery(payload) {
+  let res
+  try {
+    res = await fetch('/.netlify/functions/motherduck-b2e-roster', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  } catch (e) {
+    throw new OmniQueryError(`Network error reaching motherduck-b2e-roster: ${e.message}`, { status: 0 })
+  }
+  if (!res.ok) {
+    let body = {}
+    try { body = await res.json() } catch { /* non-json */ }
+    throw new OmniQueryError(
+      body.error || `motherduck-b2e-roster ${res.status}`,
+      { status: res.status }
+    )
+  }
+  const { rows } = await res.json()
+  return rows
+}
+
 function activityDateFilter(date, view = VIEW_H) {
   return {
     [`${view}.activity_date`]: {
@@ -1223,34 +1257,13 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
-  const rosterRows = await omniQuery({
-    modelId: B2E_MODEL_ID, table: ROSTER,
-    fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
-    filters: {
-      [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-      [`${ROSTER}.employee_status`]: { kind: 'EQUALS', type: 'string', values: ['Active'] },
-    },
-    limit: 500,
-  })
-
-  const scheduleRows = await omniQuery({
-    modelId: B2E_MODEL_ID, table: SCHEDULE,
-    fields: [
-      `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
-      `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
-      `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
-      `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`, `${SCHEDULE}.entry_date`,
-    ],
-    filters: {
-      [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-      [`${SCHEDULE}.entry_date`]: {
-        kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-        isFiscal: false, left_side: entryDate, is_negative: false, offset_interval_string: '14 days',
-      },
-    },
-    sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-    limit: 5000,
-  })
+  // MotherDuck-direct fetch (was two sequential omniQuery calls before
+  // the 2026-07-08 pivot away from Omni for B2E reads). Parallelised
+  // because we're no longer chasing Omni's connection reuse behaviour.
+  const [rosterRows, scheduleRows] = await Promise.all([
+    motherduckB2eQuery({ kind: 'active_roster_all_jobcodes', facilityId }),
+    motherduckB2eQuery({ kind: 'schedule_date', facilityId, fromDate: entryDate }),
+  ])
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
 
@@ -1367,35 +1380,11 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
   if (!location) return {}
   const isCal = facilityId === 'cal'
 
+  // MotherDuck-direct fetch (was two omniQuery calls before the
+  // 2026-07-08 pivot away from Omni for B2E reads).
   const [rosterRows, scheduleRows, dockAssignments] = await Promise.all([
-    omniQuery({
-      modelId: B2E_MODEL_ID, table: ROSTER,
-      fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
-      filters: {
-        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      },
-      limit: 500,
-    }),
-    omniQuery({
-      modelId: B2E_MODEL_ID, table: SCHEDULE,
-      fields: [
-        `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
-        `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
-        `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
-        `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`, `${SCHEDULE}.entry_date`,
-      ],
-      filters: {
-        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${SCHEDULE}.entry_date`]: {
-          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-          isFiscal: false, left_side: fromDate, is_negative: false,
-          offset_interval_string: `${daysForward} days`,
-        },
-      },
-      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-      limit: 5000,
-    }),
+    motherduckB2eQuery({ kind: 'active_roster_all_jobcodes', facilityId }),
+    motherduckB2eQuery({ kind: 'schedule_range', facilityId, fromDate, daysForward }),
     isCal ? fetchCal2DockAssignments() : Promise.resolve(new Map()),
   ])
 
@@ -1473,17 +1462,7 @@ export async function fetchActiveB2eEmployees(facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return new Set()
   try {
-    const rosterRows = await omniQuery({
-      modelId: B2E_MODEL_ID, table: ROSTER,
-      fields: [`${ROSTER}.employee_id`],
-      filters: {
-        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
-        [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: ['205'] },
-      },
-      sorts: [],
-      limit: 500,
-    })
+    const rosterRows = await motherduckB2eQuery({ kind: 'active_roster', facilityId })
     return new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
   } catch (e) {
     console.warn('fetchActiveB2eEmployees failed (non-fatal):', e.message)
