@@ -9,7 +9,7 @@
 // manager opens the app in the morning.
 //
 // Runs the same three operations that manual Sync-from-B2E does, per facility:
-//   1. fetchB2eRosterForRange  — 14-day forward window with per-employee
+//   1. fetchB2eRosterForRange  — 21-day forward window with per-employee
 //      stale-snapshot filter (fixes the append-only ghost-schedule problem).
 //   2. purgeTerminatedAcrossFuture — deletes future roster_assignments rows
 //      for employees no longer Active in B2E's master roster.
@@ -44,7 +44,12 @@ const { createClient } = require('@supabase/supabase-js')
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const FACILITIES = ['cal', 'mad', 'ec', 'ken', 'wr']
-const FORWARD_DAYS = 14
+// 21-day forward window. Was 14; widened 2026-07-08 to give the nightly a
+// larger safety net when a day gets missed (Omni ingestion lag, a failed
+// cron run, or a weekend gap). Combined with the parallelized facility
+// loop below, total runtime stays comfortably under the 26s function
+// timeout even at the wider window.
+const FORWARD_DAYS = 21
 const ALLOWED_JOB_CODES = new Set(['205'])
 
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
@@ -519,16 +524,25 @@ exports.handler = async (event) => {
   const today = new Date().toISOString().slice(0, 10)
   const cal2Docks = await fetchCal2DockAssignments(supabase)
 
-  // Sequential per facility to keep Omni load bounded and stay under the
-  // 26s function timeout. Each facility runs its 2 Omni queries in parallel
-  // internally so a single facility takes ~2-4s (proxy round-trip adds ~50ms).
-  const results = {}
-  for (const facility of FACILITIES) {
-    results[facility] = await syncFacility(supabase, baseUrl, facility, today, cal2Docks)
-    // Fail-forward: log each facility's outcome even if it errors, so a
-    // partial success is visible in Netlify function logs.
-    console.log(`[nightly-b2e-sync] ${facility}:`, JSON.stringify(results[facility]))
-  }
+  // Parallel per facility. Was sequential to keep Omni load bounded; changed
+  // 2026-07-08 alongside the 14 -> 21 day window widening. Each facility runs
+  // its 2 Omni queries in parallel internally, so parallelizing across
+  // facilities means ~10 concurrent Omni calls, which the omni-query proxy
+  // handles fine (its own retry + timeout policy applies per call). Total
+  // runtime collapses from sum-of-facilities to max-of-facilities, giving
+  // us headroom under the 26s function timeout even at the wider window
+  // and preventing the last facility in the loop (KEN, WR) from being
+  // starved when earlier facilities are slow.
+  const facilityResults = await Promise.all(
+    FACILITIES.map(async facility => {
+      const result = await syncFacility(supabase, baseUrl, facility, today, cal2Docks)
+      // Log each facility's outcome as it completes so partial success is
+      // visible in Netlify function logs even if a later facility errors.
+      console.log(`[nightly-b2e-sync] ${facility}:`, JSON.stringify(result))
+      return [facility, result]
+    })
+  )
+  const results = Object.fromEntries(facilityResults)
 
   const summary = {
     ok:      Object.values(results).every(r => r.ok),
