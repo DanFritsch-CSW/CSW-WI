@@ -4,7 +4,8 @@ import {
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
   bannerCounts, kpiRow, rollupByProject,
   dayLabel, daySubLabel,
-  VERDICT_TOKENS,
+  VERDICT_TOKENS, SEVERITY_TOKENS,
+  lineSeverity, orderSeverity, orderMaxDaysOlder, lineDaysOlder,
   fefoOrderList, fetchLiveFefoOrdersBatch,
 } from '../../lib/fefo.js'
 
@@ -250,9 +251,13 @@ function ProjectSelect({ proj, onChange }) {
 function Banners({ banners }) {
   const items = []
   if (banners.violations.length > 0) {
+    const n = banners.violations.length
+    const c = banners.criticalCount || 0
+    const w = banners.warningCount || 0
+    const split = (c > 0 || w > 0) ? ` (${c ? `${c} critical` : ''}${c && w ? ' · ' : ''}${w ? `${w} warning` : ''})` : ''
     items.push({
       key: 'v', kind: 'violation',
-      title: `${banners.violations.length} FEFO violation${banners.violations.length === 1 ? '' : 's'}`,
+      title: `${n} FEFO violation${n === 1 ? '' : 's'}${split}`,
       body: `Orders shipping newer stock while older unallocated, off-hold inventory is on hand: ${banners.violations.join(', ')}. Resolve before the truck leaves.`,
     })
   }
@@ -302,12 +307,13 @@ function KpiRow({ kpis }) {
     { label: 'ORDERS SHIPPING', value: kpis.orders,     color: null },
     { label: 'PALLET POSITIONS', value: kpis.lps,        color: null },
     { label: 'MATERIALS',        value: kpis.materials, color: null },
-    { label: 'VIOLATIONS',       value: kpis.violations, color: kpis.violations > 0 ? VERDICT_TOKENS.violation.color : VERDICT_TOKENS.clean.color },
+    { label: 'CRITICAL',         value: kpis.critical || 0, color: (kpis.critical || 0) > 0 ? SEVERITY_TOKENS.critical.color : 'var(--text-dim)' },
+    { label: 'WARNING',          value: kpis.warning  || 0, color: (kpis.warning  || 0) > 0 ? SEVERITY_TOKENS.warning.color  : 'var(--text-dim)' },
     { label: 'STALE',            value: kpis.stale,      color: kpis.stale > 0 ? VERDICT_TOKENS.stale.color : 'var(--text-dim)' },
     { label: 'LOTS ON HOLD',     value: kpis.holds,      color: kpis.holds > 0 ? VERDICT_TOKENS.hold.color : 'var(--text-dim)' },
   ]
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
       {cells.map(c => (
         <div key={c.label} style={{
           background: 'var(--bg2, #f8f9fb)',
@@ -331,11 +337,16 @@ function ProjectRollup({ rollup, onProjClick }) {
       <SectionLabel>BY PROJECT</SectionLabel>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 10, marginTop: 8 }}>
         {visible.map(r => {
+          const hasCritical = (r.critical || 0) > 0
           const hasIssue = r.violations > 0 || r.stale > 0
-          const flagToken = hasIssue ? VERDICT_TOKENS.violation : VERDICT_TOKENS.clean
-          const flagText = r.violations > 0
-            ? `${r.violations} violation${r.violations === 1 ? '' : 's'}`
-            : r.stale > 0 ? `${r.stale} stale` : 'in rotation'
+          const flagToken = hasCritical
+            ? VERDICT_TOKENS.violation
+            : hasIssue ? VERDICT_TOKENS.violation : VERDICT_TOKENS.clean
+          const flagText = hasCritical
+            ? `${r.critical} critical`
+            : r.violations > 0
+              ? `${r.violations} violation${r.violations === 1 ? '' : 's'}`
+              : r.stale > 0 ? `${r.stale} stale` : 'in rotation'
           return (
             <button
               key={r.proj.id}
@@ -403,6 +414,8 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
   const project = getProject(order.proj)
   const totalLps = order.lines.reduce((s, l) => s + l.ship.reduce((a, b) => a + (b.lps || 0), 0), 0)
   const skuCount = order.lines.length
+  const severity = verdict === 'violation' ? orderSeverity(order) : null
+  const maxDays  = verdict === 'violation' ? orderMaxDaysOlder(order) : 0
 
   return (
     <div style={{
@@ -455,6 +468,7 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
         <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', pointerEvents: 'none' }}>
           {totalLps} LP · {skuCount} SKU{skuCount === 1 ? '' : 's'}
         </span>
+        {severity && maxDays > 0 && <SeverityBadge severity={severity} days={maxDays} />}
         <VerdictPill verdict={verdict} />
       </button>
 
@@ -473,6 +487,27 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
         </div>
       )}
     </div>
+  )
+}
+
+function SeverityBadge({ severity, days }) {
+  const s = SEVERITY_TOKENS[severity]
+  if (!s) return null
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 700,
+      padding: '3px 8px',
+      background: s.bg,
+      color: s.color,
+      border: `1px solid ${s.color}`,
+      borderRadius: 'var(--r-sm, 4px)',
+      fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+      whiteSpace: 'nowrap',
+      pointerEvents: 'none',
+      letterSpacing: '0.04em',
+    }}>
+      {days}d · {s.label}
+    </span>
   )
 }
 
@@ -500,6 +535,11 @@ function SkuLineRow({ line, projId }) {
   const t = VERDICT_TOKENS[v]
   const verb = dateVerb(projId)
   const sortedShip = [...line.ship].sort((a, b) => a.k - b.k)
+  // For violations, use severity color on the left border to signal urgency
+  const sev = v === 'violation' ? lineSeverity(line) : null
+  const days = v === 'violation' ? lineDaysOlder(line) : 0
+  const borderColor = sev ? SEVERITY_TOKENS[sev].color : t.color
+  const bg          = sev ? SEVERITY_TOKENS[sev].bg    : t.bg
   return (
     <div style={{
       background: 'var(--bg1, #fff)',
@@ -510,6 +550,7 @@ function SkuLineRow({ line, projId }) {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 }}>
         <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{line.code}</span>
         <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>{line.desc}</span>
+        {sev && days > 0 && <SeverityBadge severity={sev} days={days} />}
         {line.pack && (
           <span style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginLeft: 'auto' }}>{line.pack}</span>
         )}
@@ -523,12 +564,12 @@ function SkuLineRow({ line, projId }) {
       <div style={{
         marginTop: 10,
         padding: '8px 10px',
-        background: t.bg,
-        borderLeft: `3px solid ${t.color}`,
+        background: bg,
+        borderLeft: `3px solid ${borderColor}`,
         borderRadius: 'var(--r-sm, 4px)',
         fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.45,
       }}>
-        <span style={{ fontWeight: 600, color: t.color }}>{t.label}: </span>
+        <span style={{ fontWeight: 600, color: borderColor }}>{t.label}: </span>
         {verdictCopy(line, projId)}
       </div>
     </div>
