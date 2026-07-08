@@ -14,6 +14,12 @@
 //   - Live fetchers (single + batch) — call /.netlify/functions/fefo-orders
 
 // ─── Projects ───────────────────────────────────────────────────────────────
+//
+// Birchwood (birch5) is TEMPORARILY REMOVED from the default set due to a
+// perf regression: the onhand scope_lots CTE scanned every historical lot
+// for the material set (~50k for Birchwood), not just lots with active
+// on-site inventory. Backend PROJECTS map still knows about it, so re-enable
+// is a one-line add here once the SQL is fixed.
 
 export const FEFO_PROJECTS = [
   {
@@ -39,16 +45,6 @@ export const FEFO_PROJECTS = [
     proj: 88,  dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack',
     color: '#3dba7e', facility: 'ken',
     datexProjectName: 'CROWN BAKERIES',
-  },
-  {
-    // Birchwood lots don't encode dates in lookup_code (PO195487, KA762, etc).
-    // Backend uses lot.receive_date TIMESTAMP as the age proxy — verb becomes
-    // "received" so ops isn't misled that it's a pack date. Datex project
-    // name has an intentional DOUBLE SPACE (confirmed via silver query).
-    id: 'birch5', code: 'BIRCH5', name: 'Birchwood Foods',
-    proj: 242, dateFormat: 'receiveDate', dateSemantic: 'received',
-    color: '#8b5a3c', facility: 'ken',
-    datexProjectName: 'BIRCHWOOD FOODS  KENOSHA',
   },
 ]
 
