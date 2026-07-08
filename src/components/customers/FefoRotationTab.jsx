@@ -20,11 +20,12 @@ export default function FefoRotationTab() {
 
   const [liveResult, setLiveResult] = useState(null)
   const [loading, setLoading] = useState(true)
-  const fetchedRef = useRef(false)
+  const [refetchTick, setRefetchTick] = useState(0)
+  const fetchedRef = useRef(0)
 
   useEffect(() => {
-    if (fetchedRef.current) return
-    fetchedRef.current = true
+    if (fetchedRef.current === refetchTick) return
+    fetchedRef.current = refetchTick
     setLoading(true)
     fetchLiveFefoOrdersBatch(ALL_PROJECT_IDS)
       .then(result => { setLiveResult(result); setLoading(false) })
@@ -35,7 +36,9 @@ export default function FefoRotationTab() {
         })
         setLoading(false)
       })
-  }, [])
+  }, [refetchTick])
+
+  const refetch = () => setRefetchTick(t => t + 1)
 
   const scopedProjectIds = proj === 'all' ? ALL_PROJECT_IDS : [proj]
   const errorsByProject = liveResult?.errorsByProject || {}
@@ -92,6 +95,7 @@ export default function FefoRotationTab() {
         allFailed={allFailed}
         failedScoped={failedScoped}
         liveResult={liveResult}
+        onRefresh={refetch}
       />
       <Banners banners={banners} />
       <KpiRow kpis={kpis} />
@@ -104,12 +108,13 @@ export default function FefoRotationTab() {
         onToggle={toggleOrder}
         showProjectChip={proj === 'all'}
         loading={loading && visible.length === 0}
+        onRefetch={refetch}
       />
     </div>
   )
 }
 
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult }) {
+function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -130,6 +135,24 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading
         }}>
           {orderCount} {orderCount === 1 ? 'order' : 'orders'}
         </span>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          title="Refetch FEFO data"
+          style={{
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            letterSpacing: '0.04em',
+            background: 'var(--bg1, #fff)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-sm, 4px)',
+            color: loading ? 'var(--text-dim)' : 'var(--text-primary)',
+            cursor: loading ? 'not-allowed' : 'pointer',
+          }}
+        >↻ REFRESH</button>
         <ProjectSelect proj={proj} onChange={onProjChange} />
       </div>
     </div>
@@ -389,7 +412,7 @@ function ProjectRollup({ rollup, onProjClick }) {
   )
 }
 
-function OrdersList({ orders, openOrders, onToggle, showProjectChip, loading }) {
+function OrdersList({ orders, openOrders, onToggle, showProjectChip, loading, onRefetch }) {
   if (loading) {
     return <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>Loading live FEFO data…</div>
   }
@@ -401,14 +424,14 @@ function OrdersList({ orders, openOrders, onToggle, showProjectChip, loading }) 
       <SectionLabel>ORDERS · sorted by severity</SectionLabel>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
         {orders.map(o => (
-          <OrderCard key={o.id} order={o} open={openOrders.has(o.id)} onToggle={() => onToggle(o.id)} showProjectChip={showProjectChip} />
+          <OrderCard key={o.id} order={o} open={openOrders.has(o.id)} onToggle={() => onToggle(o.id)} showProjectChip={showProjectChip} onRefetch={onRefetch} />
         ))}
       </div>
     </div>
   )
 }
 
-function OrderCard({ order, open, onToggle, showProjectChip }) {
+function OrderCard({ order, open, onToggle, showProjectChip, onRefetch }) {
   const verdict = orderVerdict(order)
   const t = VERDICT_TOKENS[verdict]
   const project = getProject(order.proj)
@@ -480,7 +503,7 @@ function OrderCard({ order, open, onToggle, showProjectChip }) {
         }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {order.lines.map((line, i) => (
-              <SkuLineRow key={`${order.id}-${line.code}-${i}`} line={line} projId={order.proj} />
+              <SkuLineRow key={`${order.id}-${line.code}-${i}`} line={line} projId={order.proj} onRefetch={onRefetch} />
             ))}
           </div>
           <OrderFooter order={order} />
@@ -530,12 +553,11 @@ function VerdictPill({ verdict }) {
   )
 }
 
-function SkuLineRow({ line, projId }) {
+function SkuLineRow({ line, projId, onRefetch }) {
   const v = lineVerdict(line)
   const t = VERDICT_TOKENS[v]
   const verb = dateVerb(projId)
   const sortedShip = [...line.ship].sort((a, b) => a.k - b.k)
-  // For violations, use severity color on the left border to signal urgency
   const sev = v === 'violation' ? lineSeverity(line) : null
   const days = v === 'violation' ? lineDaysOlder(line) : 0
   const borderColor = sev ? SEVERITY_TOKENS[sev].color : t.color
@@ -571,6 +593,176 @@ function SkuLineRow({ line, projId }) {
       }}>
         <span style={{ fontWeight: 600, color: borderColor }}>{t.label}: </span>
         {verdictCopy(line, projId)}
+      </div>
+
+      {v === 'violation' && line.rem?.lot && (
+        <DismissAction
+          projectId={projId}
+          lotLookupCode={line.rem.lot}
+          materialCode={line.code}
+          onDone={onRefetch}
+        />
+      )}
+    </div>
+  )
+}
+
+// DismissAction — inline "Dismiss lot" button + expandable form for
+// violation rows. On submit, POSTs to /.netlify/functions/fefo-dismissals
+// and calls onDone() so the parent re-fetches. The next fetch will drop
+// this lot from REM candidates, so the row either resolves to clean or
+// falls to the next-oldest lot.
+function DismissAction({ projectId, lotLookupCode, materialCode, onDone }) {
+  const [open, setOpen] = useState(false)
+  const [days, setDays] = useState(7)
+  const [reason, setReason] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async () => {
+    setSubmitting(true)
+    setError('')
+    try {
+      const dismissedUntil = new Date(Date.now() + days * 86400000).toISOString()
+      // Best-effort user attribution from Supabase session, else 'anonymous'.
+      let dismissedBy = 'anonymous'
+      try {
+        const mod = await import('../../lib/supabase.js')
+        const { data } = await mod.supabase.auth.getUser()
+        dismissedBy = data?.user?.email || 'anonymous'
+      } catch { /* ignore */ }
+      const res = await fetch('/.netlify/functions/fefo-dismissals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId,
+          lotLookupCode,
+          materialCode,
+          dismissedBy,
+          dismissedUntil,
+          reason: reason.trim() || null,
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
+      setOpen(false)
+      setReason('')
+      onDone?.()
+    } catch (e) {
+      setError(e.message || 'Failed to dismiss')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          style={{
+            fontSize: 11, fontWeight: 600,
+            padding: '4px 10px',
+            background: 'var(--bg2, #f8f9fb)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-sm, 4px)',
+            color: 'var(--text-primary)',
+            cursor: 'pointer',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            letterSpacing: '0.04em',
+          }}
+        >
+          ✕ DISMISS LOT {lotLookupCode}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      marginTop: 8,
+      padding: 10,
+      background: 'var(--bg2, #f8f9fb)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-sm, 4px)',
+      display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        Suppress this lot from FEFO checks (e.g. it's a known replacement or QA-cleared).
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+          For:
+          <select
+            value={days}
+            onChange={e => setDays(Number(e.target.value))}
+            disabled={submitting}
+            style={{
+              marginLeft: 6, fontSize: 11,
+              padding: '2px 6px',
+              background: 'var(--bg1, #fff)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--r-sm, 4px)',
+            }}
+          >
+            <option value={1}>1 day</option>
+            <option value={7}>7 days</option>
+            <option value={30}>30 days</option>
+          </select>
+        </label>
+        <input
+          type="text"
+          value={reason}
+          onChange={e => setReason(e.target.value)}
+          placeholder="Reason (optional)"
+          disabled={submitting}
+          style={{
+            flex: 1, minWidth: 160,
+            fontSize: 11, padding: '4px 8px',
+            background: 'var(--bg1, #fff)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-sm, 4px)',
+          }}
+        />
+      </div>
+      {error && (
+        <div style={{ fontSize: 11, color: 'var(--red, #c0392b)' }}>{error}</div>
+      )}
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setReason(''); setError('') }}
+          disabled={submitting}
+          style={{
+            fontSize: 11, fontWeight: 500,
+            padding: '4px 10px',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--r-sm, 4px)',
+            color: 'var(--text-secondary)',
+            cursor: submitting ? 'not-allowed' : 'pointer',
+          }}
+        >Cancel</button>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={submitting}
+          style={{
+            fontSize: 11, fontWeight: 600,
+            padding: '4px 10px',
+            background: 'var(--red, #c0392b)',
+            border: '1px solid var(--red, #c0392b)',
+            borderRadius: 'var(--r-sm, 4px)',
+            color: '#fff',
+            cursor: submitting ? 'not-allowed' : 'pointer',
+            opacity: submitting ? 0.6 : 1,
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            letterSpacing: '0.04em',
+          }}
+        >{submitting ? 'DISMISSING…' : 'DISMISS'}</button>
       </div>
     </div>
   )

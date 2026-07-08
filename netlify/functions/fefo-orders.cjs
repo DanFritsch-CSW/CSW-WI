@@ -13,10 +13,16 @@
 //   YDDDHHMMSS       — Fair Oaks lot lookup_code (year+DOY+time)
 //   MMDDYYYY         — Richelieu lot lookup_code (expiration date)
 //   PPW+MMDDYYYY     — Crown lot lookup_code (PPW-prefixed pack date)
-//   receiveDate      — Birchwood — no date encoded in lookup_code (samples:
-//                      PO195487, 9c10293, KA762). Use lot.receive_date
-//                      TIMESTAMP directly as the age proxy. Verb changes to
-//                      "received" on the client since it's not pack date.
+//   receiveDate      — Birchwood — no date encoded in lookup_code.
+//                      Use lot.receive_date TIMESTAMP directly. Verb changes
+//                      to "received" on the client since it's not pack date.
+//
+// ── Dismissals (2026-07-08, Sadie's replacement-batch ask) ──────────────────
+//
+// Users can dismiss individual lots via /.netlify/functions/fefo-dismissals.
+// Rows are in Supabase.fefo_dismissals with a dismissed_until timestamp.
+// This function pulls active dismissals at request time and filters those
+// lots out of REM candidates so violations stop firing for them.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -32,8 +38,6 @@ const PROJECTS = {
   fofwe5: { datexName: 'FAIR OAKS FARMS WEST',    dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
   riche5: { datexName: 'RICHELIEU KENOSHA',       dateFormat: 'MMDDYYYY',     dateSemantic: 'expiration' },
   golst5: { datexName: 'CROWN BAKERIES',          dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack' },
-  // Birchwood — datex_name has an intentional DOUBLE SPACE between "FOODS"
-  // and "KENOSHA". Confirmed 2026-07-08 via silver.datex_slv_projects.
   birch5: { datexName: 'BIRCHWOOD FOODS  KENOSHA', dateFormat: 'receiveDate', dateSemantic: 'received' },
 }
 
@@ -62,6 +66,48 @@ function classifyLocations(locationsString) {
   if (parts.length === 0) return { locations: [], primary: '', locationBlocked: false }
   const blocked = parts.map(p => NON_ALLOCATABLE_LOCATION_PATTERNS.some(rx => rx.test(p)))
   return { locations: parts, primary: parts[0], locationBlocked: blocked.every(Boolean) }
+}
+
+// ─── Dismissals (Supabase) ──────────────────────────────────────────────────
+//
+// Best-effort — if the fetch fails we return an empty set and log. FEFO data
+// still returns; users just don't see the effect of dismissals until Supabase
+// recovers.
+
+async function loadActiveDismissals(projectIds) {
+  const SUPABASE_URL =
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  const SUPABASE_KEY =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    ''
+  if (!SUPABASE_URL || !SUPABASE_KEY || !projectIds?.length) return new Set()
+  try {
+    const inList = projectIds.map(p => `"${p}"`).join(',')
+    const nowIso = new Date().toISOString()
+    const params = new URLSearchParams()
+    params.set('select', 'project_id,lot_lookup_code')
+    params.set('project_id', `in.(${inList})`)
+    params.set('dismissed_until', `gt.${nowIso}`)
+    const url = `${SUPABASE_URL}/rest/v1/fefo_dismissals?${params.toString()}`
+    const res = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+    })
+    if (!res.ok) return new Set()
+    const rows = await res.json()
+    const set = new Set()
+    for (const r of rows) set.add(`${r.project_id}|${r.lot_lookup_code}`)
+    return set
+  } catch (e) {
+    console.warn('loadActiveDismissals failed:', e.message)
+    return new Set()
+  }
 }
 
 // ─── Date parsers ──────────────────────────────────────────────────────────
@@ -106,10 +152,6 @@ function parseCrownDate(lookupCode) {
   return parseRichelieuDate(lookupCode.replace(/^PPW/i, ''))
 }
 
-// parseReceiveDate — for projects whose lots don't encode dates in the
-// lookup_code. Uses the lot.receive_date TIMESTAMP from silver directly.
-// receiveDate is passed in from the calling code (SQL returns it alongside
-// the lot lookup_code).
 function parseReceiveDate(receiveDate) {
   if (!receiveDate) return null
   const d = receiveDate instanceof Date ? receiveDate : new Date(receiveDate)
@@ -125,9 +167,6 @@ function parseReceiveDate(receiveDate) {
   return { k, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
 }
 
-// parseLotDateKey — dispatches to the right parser. For 'receiveDate' the
-// lookup_code doesn't carry the date, so callers pass the SQL-fetched
-// receive_date via extras.
 function parseLotDateKey(lookupCode, dateFormat, extras) {
   let parsed
   if (dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
@@ -196,7 +235,7 @@ function fmtDest(name, city, state) {
 
 // ─── Per-project query block ───────────────────────────────────────────────
 
-async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount }) {
+async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount, dismissedSet }) {
   const safeProjectName = project.datexName.replace(/'/g, "''")
 
   const orderSql = `
@@ -260,8 +299,6 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   const orderIds = orderRows.map(r => Number(r.order_id))
   const orderIdList = orderIds.join(',')
 
-  // Alloc query — l.receive_date needed for Birchwood-style lots that don't
-  // encode a date in the lookup_code. Harmless for other projects.
   const allocSql = `
     SELECT
       t.order_id, t.order_line_number, t.material_id,
@@ -298,8 +335,6 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
-    // Onhand — receive_date is one-per-lot, so MAX() is a no-op that just
-    // lets us select it alongside the aggregation.
     const onhandSql = `
       WITH committed_raw AS (
         SELECT t.lot_id, t.expected_packaged_amount AS cases_committed
@@ -430,6 +465,9 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const allocLots = allocLotsByLine.get(key)
     const candidates = (onhandByMaterial.get(line.materialId) || [])
       .filter(c => !allocLots.has(c.lotId))
+      // Drop dismissed lots — Sadie's replacement-batch fix. dismissedSet
+      // keys are `${projectId}|${lot_lookup_code}` for active dismissals.
+      .filter(c => !dismissedSet || !dismissedSet.has(`${projectId}|${c.lotCode}`))
       .map(c => {
         const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate })
         return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display }
@@ -549,6 +587,10 @@ exports.handler = async (event) => {
   const dateFrom = fmtDateISO(new Date(today.getTime() - 86400000))
   const dateTo   = fmtDateISO(new Date(today.getTime() + (dayCount - 1) * 86400000))
 
+  // Pull active dismissals BEFORE the duckdb work — parallel with almost no
+  // added latency because Supabase REST is fast.
+  const dismissedSetPromise = loadActiveDismissals(projectIds)
+
   let conn, db
   const ordersByProject = {}
   const errorsByProject = {}
@@ -572,12 +614,15 @@ exports.handler = async (event) => {
     await exec('LOAD motherduck')
     await exec(`ATTACH 'md:production_db'`)
 
+    const dismissedSet = await dismissedSetPromise
+
     for (const pid of projectIds) {
       try {
         const result = await loadOrdersForProject(runQuery, {
           projectId: pid,
           project: PROJECTS[pid],
           warehouseId, today, dateFrom, dateTo, dayCount,
+          dismissedSet,
         })
         ordersByProject[pid] = result.orders
         rowCountsByProject[pid] = result.rowCounts
