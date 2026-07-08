@@ -54,6 +54,23 @@ const SORT_MODES = [
   { key: 'last',    label: 'A–Z Last' },
 ]
 
+// ── Background horizon sync tuning ─────────────────────────────────────
+// See scheduleBackgroundHorizonSync below for full context.
+//   COOLDOWN: per-facility rate limit so rapid facility/date switching
+//     doesn't stampede Omni. First cold hit primes the horizon; later
+//     switches inside the cooldown are no-ops.
+//   FORWARD_DAYS: how far ahead the client-side BG seed reaches. The
+//     nightly-b2e-sync cron already covers +21 days at 5am CDT, so 7
+//     is enough overlap to catch dates missed since last night's run
+//     (late B2E ingestion, cron failure, weekend gap).
+//   FAR_FUTURE_SKIP_DAYS: if the viewed date is beyond this offset,
+//     only the foreground single-date seed runs. Firing a 7-day range
+//     fetch rooted at a far-future date wastes an Omni call — nightly
+//     will handle the near horizon in due course.
+const BG_HORIZON_COOLDOWN_MS   = 5 * 60 * 1000
+const BG_HORIZON_FORWARD_DAYS  = 7
+const BG_HORIZON_FAR_FUTURE_DAYS = 21
+
 const SEND_ZONE_PREFIX = '__send__'
 function sendZoneId(laneId) { return `${SEND_ZONE_PREFIX}${laneId}` }
 function isSendZone(id)     { return String(id).startsWith(SEND_ZONE_PREFIX) }
@@ -76,6 +93,12 @@ function getLaneSettings(laneId, settings) {
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10)
+}
+
+function daysBetweenISO(fromIso, toIso) {
+  const from = new Date(fromIso + 'T00:00:00Z')
+  const to   = new Date(toIso   + 'T00:00:00Z')
+  return Math.floor((to - from) / 86400000)
 }
 
 function sortEmployees(employees, sortOrder) {
@@ -341,8 +364,64 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   const [syncToast, setSyncToast]             = useState(null)
   const loadRef            = useRef(null)
   const autoSyncCheckedRef = useRef(new Set())
+  // Per-facility timestamp of last background horizon sync. Used for a
+  // 5-minute cooldown so rapid facility/date switching during a planning
+  // session doesn't spam Omni. Keyed by facility (not facility:date) —
+  // once the +7 horizon has been reconciled for a facility, hopping
+  // between individual days within the window is DB-only.
+  const backgroundSyncRef  = useRef(new Map())
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+
+  // Background horizon reconcile — fires after render on the cold-cache
+  // load path so the foreground UI doesn't wait on the multi-day Omni
+  // fetch + forward-seed. See BG_HORIZON_* constants at top of file for
+  // tuning rationale.
+  //
+  // Non-blocking, no cancellation: every operation is a Supabase write;
+  // if the user has navigated away by the time this completes, the
+  // writes are still valid (they populate future dates that other
+  // managers or future sessions will visit).
+  //
+  // Errors are swallowed with a [BG horizon] warning; the cooldown is
+  // cleared on error so the next load can retry rather than waiting
+  // 5 min for the next attempt.
+  const scheduleBackgroundHorizonSync = useCallback((facId, date, currentDateEmpIds) => {
+    const now = Date.now()
+    const last = backgroundSyncRef.current.get(facId)
+    if (last && now - last < BG_HORIZON_COOLDOWN_MS) return
+
+    const daysOut = daysBetweenISO(todayISO(), date)
+    if (daysOut > BG_HORIZON_FAR_FUTURE_DAYS) return
+
+    backgroundSyncRef.current.set(facId, now)
+
+    ;(async () => {
+      try {
+        // Same-day purges. Quick Supabase-only ops that would have run
+        // inline in the pre-2026-07-08 load() flow.
+        if (currentDateEmpIds?.length) {
+          await purgeStaleAssignments(currentDateEmpIds, facId, date)
+          await purgeTerminatedAssignments(facId, date, currentDateEmpIds)
+        }
+        // Broader-scope cleanup — catches employees terminated/transferred
+        // who still have rows on future dates the user hasn't visited.
+        const activeRoster = await fetchActiveB2eEmployees(facId)
+        await purgeTerminatedAcrossFuture(facId, activeRoster, date)
+        // Forward-seed +7 days. Nightly cron covers +21, so 7 is enough
+        // overlap to catch dates missed since last night's run. Any
+        // manual/temp/loan/manually-edited rows are protected inside
+        // seedForwardHorizon.
+        const b2eRosterByDate = await fetchB2eRosterForRange(facId, date, BG_HORIZON_FORWARD_DAYS)
+          .catch(() => ({}))
+        await seedForwardHorizon(facId, b2eRosterByDate, date)
+        console.log(`[BG horizon] ${facId} +${BG_HORIZON_FORWARD_DAYS}d from ${date} synced`)
+      } catch (e) {
+        backgroundSyncRef.current.delete(facId)
+        console.warn(`[BG horizon] ${facId} from ${date} failed (non-fatal):`, e.message)
+      }
+    })()
+  }, [])
 
   async function load(facId, date) {
     setIsLoading(true)
@@ -361,30 +440,27 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     if (assignments.length === 0) {
       const persistable = withoutCarryovers(b2eRosterFull)
       if (persistable.length > 0) {
+        // Cold-cache path: Supabase has no rows for this date but B2E does.
+        // Prior to 2026-07-08 this was ~10-30s inline (single-date seed +
+        // 3 purge passes + 14-day range fetch + forward-seed + refetch).
+        // Kay reported blank-then-slow when opening a new date (7/10 on
+        // 7/8), refreshing multiple times waiting on the multi-day query.
+        //
+        // Split into foreground + background:
+        //   foreground: seed THIS date only, render (~2-4s)
+        //   background: purges + forward-horizon reconcile (fires after
+        //     render via scheduleBackgroundHorizonSync)
+        // The nightly-b2e-sync cron covers the +21-day horizon at 5am CDT,
+        // so the client-side background sync is a safety catch for late
+        // B2E ingestion / cron gaps, not the primary seed path.
         const withTimeOff = applyTimeOffOverrides(persistable, timeOffMap)
         const empRows = withTimeOff.map(({ shift_hours, ...e }) => e)
         await replaceEmployees(facId, empRows)
         await seedRosterAssignments(withTimeOff, date)
-        const empIds = withTimeOff.map(e => e.id)
-        await purgeStaleAssignments(empIds, facId, date)
-        await purgeTerminatedAssignments(facId, date, empIds)
-        // Broader-scope cleanup: catch rows on OTHER future dates that the
-        // per-date purge above doesn't see. Uses master-roster Active set so
-        // someone off-schedule today isn't accidentally purged.
-        const activeRoster = await fetchActiveB2eEmployees(facId)
-        await purgeTerminatedAcrossFuture(facId, activeRoster, date)
-        // Forward-seed: pull B2E for the next 14 plan_dates in ONE round trip
-        // and write per-date rows. Replaces the old cartesian projection that
-        // wrote rows for every employee on every future date — created false
-        // rows for 4/10, part-time, and Mon-Wed-only schedules. Now each
-        // (employee, date) only exists in roster_assignments if B2E actually
-        // has them scheduled. Also reconciles existing rows: anything B2E
-        // doesn't have gets deleted (manual/temp/loan rows still protected).
-        const b2eRosterByDate = await fetchB2eRosterForRange(facId, date, 14).catch(() => ({}))
-        await seedForwardHorizon(facId, b2eRosterByDate, date)
         const seeded = await fetchTodayAssignments(facId, date)
         _buildState(facId, seeded, timeOffMap, carryovers)
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
+        scheduleBackgroundHorizonSync(facId, date, withTimeOff.map(e => e.id))
         return
       }
     } else {
