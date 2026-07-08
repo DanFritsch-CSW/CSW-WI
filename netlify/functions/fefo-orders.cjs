@@ -5,72 +5,18 @@
 // POST input: { facility, projectIds, dayCount = 5 }
 //   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
 //   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
-//                 'riche5', 'golst5'). Single `projectId` is accepted for
-//                 backward compat and wrapped in an array.
+//                 'riche5', 'golst5', 'birch5').
 //   - dayCount:   optional, 1..7 (default 5)
 //
-// Response: {
-//   ordersByProject: { [projectId]: Order[] },
-//   errorsByProject: { [projectId]: string },
-//   fetchedAt: ISO, elapsedMs, source: 'motherduck',
-//   rowCounts: { [projectId]: { orders, allocations, onhand } },
-// }
+// ── Date formats per project ────────────────────────────────────────────────
 //
-// ── duckdb / MotherDuck init pattern ────────────────────────────────────────
-//
-// Took several rounds of diagnostics in production to find the right pattern.
-// What works on Netlify Lambda (Node 22, Linux x64):
-//
-//   1. Set HOME=/tmp BEFORE require('duckdb'). duckdb reads HOME at load
-//      time to know where to cache extensions. Lambda's HOME is empty by
-//      default. /tmp is the only writable directory on Lambda.
-//   2. process.env.motherduck_token = TOKEN. The token MUST come via env
-//      var, NOT as a Database constructor option.
-//   3. Open an in-memory database. Don't use `md:production_db` as the
-//      URI — eager MotherDuck init in the constructor swallows errors and
-//      surfaces them as the misleading "Connection was never established".
-//   4. SET home_directory='/tmp' explicitly on the connection.
-//   5. INSTALL motherduck + LOAD motherduck. Cold start fetches the
-//      extension (~10-20 MB) from extensions.duckdb.org into /tmp.
-//   6. ATTACH 'md:production_db' WITHOUT an alias. Attaching with AS prod
-//      broke schema resolution — queries that reference `silver.<table>`
-//      produced "Catalog 'production_db' does not exist" because MotherDuck
-//      internally addresses the catalog by its real name and the alias
-//      'prod' broke that resolution path. Attaching without an alias keeps
-//      the catalog name = production_db so 3-part names resolve correctly.
-//
-// ── Filtering: dock appointments, not requested_delivery_date ───────────────
-//
-// Phase 7c switched the order date filter from requested_delivery_date to
-// scheduled_arrival on the dock appointment. Reason: orders in Datex often
-// carry a stale requested_delivery_date after rescheduling, while the dock
-// appointment is the actual "this truck is leaving today" signal.
-//
-// ── Committed-cases subtraction ─────────────────────────────────────────────
-//
-// The onhand SQL LEFT JOINs a `committed` CTE that sums
-// expected_packaged_amount per lot for tasks in Planned/Released/Started/
-// Suspended status at the warehouse. Those cases are soft-allocated: the
-// pick task has been created or released to a picker but not yet executed,
-// and Datex binds the allocation to the LOCATION not the LP.
-//
-// Statuses (2026-07-07 broadening — Bry's PSH0087544 false-negative):
-//   - Planned:   task created, not yet released
-//   - Released:  released to picker, not yet started
-//   - Started:   picker actively picking (in-progress)
-//   - Suspended: paused mid-pick (still committed)
-//
-// LP-source fallback UNION: some pick tasks reference source_license_plate_id
-// but NOT lot_id (LP-bound rather than lot-bound picks). Resolve the lot via
-// license_plate_contents so those cases are still counted as committed.
-//
-// ── Location visibility (2026-07-07, Bry's team feedback) ───────────────────
-//
-// REM candidates now include their storage location(s) so ops can see WHERE
-// the older unallocated stock is sitting. When the location matches a
-// non-allocatable pattern (receiving dock, staging, quarantine, equipment
-// scanner locations), the row is flagged locationBlocked=true so the UI
-// can show it as informational rather than a rotation violation.
+//   YDDDHHMMSS       — Fair Oaks lot lookup_code (year+DOY+time)
+//   MMDDYYYY         — Richelieu lot lookup_code (expiration date)
+//   PPW+MMDDYYYY     — Crown lot lookup_code (PPW-prefixed pack date)
+//   receiveDate      — Birchwood — no date encoded in lookup_code (samples:
+//                      PO195487, 9c10293, KA762). Use lot.receive_date
+//                      TIMESTAMP directly as the age proxy. Verb changes to
+//                      "received" on the client since it's not pack date.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -82,10 +28,13 @@ const NO_CACHE_HEADERS = {
 }
 
 const PROJECTS = {
-  faioa5: { datexName: 'FAIR OAKS FARMS',      dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
-  fofwe5: { datexName: 'FAIR OAKS FARMS WEST', dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
-  riche5: { datexName: 'RICHELIEU KENOSHA',    dateFormat: 'MMDDYYYY',     dateSemantic: 'expiration' },
-  golst5: { datexName: 'CROWN BAKERIES',       dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack' },
+  faioa5: { datexName: 'FAIR OAKS FARMS',         dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
+  fofwe5: { datexName: 'FAIR OAKS FARMS WEST',    dateFormat: 'YDDDHHMMSS',   dateSemantic: 'pack' },
+  riche5: { datexName: 'RICHELIEU KENOSHA',       dateFormat: 'MMDDYYYY',     dateSemantic: 'expiration' },
+  golst5: { datexName: 'CROWN BAKERIES',          dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack' },
+  // Birchwood — datex_name has an intentional DOUBLE SPACE between "FOODS"
+  // and "KENOSHA". Confirmed 2026-07-08 via silver.datex_slv_projects.
+  birch5: { datexName: 'BIRCHWOOD FOODS  KENOSHA', dateFormat: 'receiveDate', dateSemantic: 'received' },
 }
 
 const FACILITY_WAREHOUSE_ID = {
@@ -102,22 +51,9 @@ function isHoldStatus(s) {
   return /hold|not released/i.test(s)
 }
 
-// Location-name patterns for "not yet in an allocatable bin". If the OLDEST
-// REM lot lives entirely in one of these location types, the app treats it
-// as informational, not a rotation violation.
-//
-// Match is case-insensitive substring. Verified against KEN locations
-// 2026-07-07: BG### / BE### / equipment scanner names (Desktop / Scanner)
-// are the ones ops treats as non-allocatable dwell zones.
 const NON_ALLOCATABLE_LOCATION_PATTERNS = [
-  /receiving/i,       // C5 Receiving, Dock Receiving, etc.
-  /staging/i,         // Staging zones
-  /quarantine/i,      // Post-inspection holds
-  /\bdock\b/i,        // Loading docks
-  /\bdoor\b/i,        // Loading doors
-  /desktop/i,         // Equipment scanner locations (e.g. "C5 Desktop")
-  /\bscanner\b/i,     // Handheld scanner locations
-  /inspection/i,      // QA inspection zones
+  /receiving/i, /staging/i, /quarantine/i,
+  /\bdock\b/i, /\bdoor\b/i, /desktop/i, /\bscanner\b/i, /inspection/i,
 ]
 
 function classifyLocations(locationsString) {
@@ -125,15 +61,10 @@ function classifyLocations(locationsString) {
   const parts = String(locationsString).split(' | ').map(s => s.trim()).filter(Boolean)
   if (parts.length === 0) return { locations: [], primary: '', locationBlocked: false }
   const blocked = parts.map(p => NON_ALLOCATABLE_LOCATION_PATTERNS.some(rx => rx.test(p)))
-  const allBlocked = blocked.every(Boolean)
-  return {
-    locations: parts,
-    primary: parts[0],
-    locationBlocked: allBlocked,
-  }
+  return { locations: parts, primary: parts[0], locationBlocked: blocked.every(Boolean) }
 }
 
-// ─── Date parsers (server copy — mirrors src/lib/fefo.js) ───────────────────
+// ─── Date parsers ──────────────────────────────────────────────────────────
 
 function parseFairOaksDate(lookupCode) {
   if (!lookupCode || typeof lookupCode !== 'string') return null
@@ -175,11 +106,34 @@ function parseCrownDate(lookupCode) {
   return parseRichelieuDate(lookupCode.replace(/^PPW/i, ''))
 }
 
-function parseLotDateKey(lookupCode, dateFormat) {
+// parseReceiveDate — for projects whose lots don't encode dates in the
+// lookup_code. Uses the lot.receive_date TIMESTAMP from silver directly.
+// receiveDate is passed in from the calling code (SQL returns it alongside
+// the lot lookup_code).
+function parseReceiveDate(receiveDate) {
+  if (!receiveDate) return null
+  const d = receiveDate instanceof Date ? receiveDate : new Date(receiveDate)
+  if (Number.isNaN(d.getTime())) return null
+  const year  = d.getUTCFullYear()
+  const month = d.getUTCMonth() + 1
+  const day   = d.getUTCDate()
+  const hh    = d.getUTCHours()
+  const mm    = d.getUTCMinutes()
+  const ss    = d.getUTCSeconds()
+  const kDay = year * 10000 + month * 100 + day
+  const k    = kDay * 1e6 + hh * 1e4 + mm * 1e2 + ss
+  return { k, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
+}
+
+// parseLotDateKey — dispatches to the right parser. For 'receiveDate' the
+// lookup_code doesn't carry the date, so callers pass the SQL-fetched
+// receive_date via extras.
+function parseLotDateKey(lookupCode, dateFormat, extras) {
   let parsed
   if (dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
   else if (dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
   else if (dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
+  else if (dateFormat === 'receiveDate')  parsed = parseReceiveDate(extras?.receiveDate)
   else parsed = null
   if (!parsed) return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${dateFormat}` }
   return parsed
@@ -224,9 +178,7 @@ function todayUtcMidnight() {
   return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()))
 }
 
-function fmtDateISO(d) {
-  return d.toISOString().slice(0, 10)
-}
+function fmtDateISO(d) { return d.toISOString().slice(0, 10) }
 
 function shortUser(u) {
   if (!u) return ''
@@ -308,8 +260,8 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   const orderIds = orderRows.map(r => Number(r.order_id))
   const orderIdList = orderIds.join(',')
 
-  // Allocations query — l.status_name surfaces hold info for SHIPPING lots
-  // so the UI can flag pallets on QA hold on the order itself, not just REM.
+  // Alloc query — l.receive_date needed for Birchwood-style lots that don't
+  // encode a date in the lookup_code. Harmless for other projects.
   const allocSql = `
     SELECT
       t.order_id, t.order_line_number, t.material_id,
@@ -317,6 +269,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       mp.pallet_tie, mp.pallet_high,
       iu.short_name AS pack_unit_short,
       t.lot_id, l.lookup_code AS lot_code, l.status_name AS lot_status,
+      l.receive_date AS lot_receive_date,
       COUNT(DISTINCT t.task_id) AS lp_count_planned,
       COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
       SUM(t.expected_packaged_amount) AS expected_cases,
@@ -336,7 +289,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     GROUP BY t.order_id, t.order_line_number, t.material_id,
              m.lookup_code, m.Description,
              mp.pallet_tie, mp.pallet_high, iu.short_name,
-             t.lot_id, l.lookup_code, l.status_name
+             t.lot_id, l.lookup_code, l.status_name, l.receive_date
   `
   const allocRows = await runQuery(allocSql)
 
@@ -345,10 +298,8 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
-    // Onhand query with:
-    //   - committed CTE (broader statuses + LP-source fallback)
-    //   - lot_locations CTE (STRING_AGG of distinct location names)
-    //   - cases_available = GREATEST(onhand - committed, 0)
+    // Onhand — receive_date is one-per-lot, so MAX() is a no-op that just
+    // lets us select it alongside the aggregation.
     const onhandSql = `
       WITH committed_raw AS (
         SELECT t.lot_id, t.expected_packaged_amount AS cases_committed
@@ -395,6 +346,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       SELECT
         l.material_id, l.lot_id,
         l.lookup_code AS lot_code, l.status_name AS lot_status,
+        MAX(l.receive_date) AS lot_receive_date,
         COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
         SUM(lpc.packaged_amount) AS cases_onhand,
         COALESCE(MAX(c.cases_committed), 0) AS cases_committed,
@@ -437,7 +389,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const allocLots = allocLotsByLine.get(key)
     allocLots.add(Number(r.lot_id))
 
-    const parsed = parseLotDateKey(r.lot_code, project.dateFormat)
+    const parsed = parseLotDateKey(r.lot_code, project.dateFormat, { receiveDate: r.lot_receive_date })
     const cases = Number(r.actual_cases) > 0 ? Number(r.actual_cases) : Number(r.expected_cases) || 0
     const lps = Number(r.lp_count_actual) > 0
       ? Number(r.lp_count_actual)
@@ -463,6 +415,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       lotId:    Number(r.lot_id),
       lotCode:  r.lot_code,
       status:   r.lot_status,
+      receiveDate:   r.lot_receive_date,
       cases:          Number(r.cases_available) || 0,
       casesGross:     Number(r.cases_onhand) || 0,
       casesCommitted: Number(r.cases_committed) || 0,
@@ -478,7 +431,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const candidates = (onhandByMaterial.get(line.materialId) || [])
       .filter(c => !allocLots.has(c.lotId))
       .map(c => {
-        const parsed = parseLotDateKey(c.lotCode, project.dateFormat)
+        const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate })
         return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display }
       })
       .filter(c => c.cases > 0)
