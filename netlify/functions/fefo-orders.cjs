@@ -23,6 +23,14 @@
 // Rows are in Supabase.fefo_dismissals with a dismissed_until timestamp.
 // This function pulls active dismissals at request time and filters those
 // lots out of REM candidates so violations stop firing for them.
+//
+// ── Onhand perf (2026-07-08 hotfix) ─────────────────────────────────────────
+//
+// Original PR #63 lot_locations CTE scanned every lot in the warehouse for
+// STRING_AGG. Combined with the committed_raw scan (both branches) and the
+// per-project sequential loop with Birchwood's 50k lots, Lambda was blowing
+// past 5min. Fix: scope_lots CTE narrows both to the current project's
+// materials. Reduces scanned rows from tens of thousands to a few hundred.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -67,12 +75,6 @@ function classifyLocations(locationsString) {
   const blocked = parts.map(p => NON_ALLOCATABLE_LOCATION_PATTERNS.some(rx => rx.test(p)))
   return { locations: parts, primary: parts[0], locationBlocked: blocked.every(Boolean) }
 }
-
-// ─── Dismissals (Supabase) ──────────────────────────────────────────────────
-//
-// Best-effort — if the fetch fails we return an empty set and log. FEFO data
-// still returns; users just don't see the effect of dismissals until Supabase
-// recovers.
 
 async function loadActiveDismissals(projectIds) {
   const SUPABASE_URL =
@@ -335,14 +337,24 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
+    // scope_lots CTE limits committed_raw + lot_locations to lots for our
+    // in-scope materials. Before this scoping, both CTEs scanned every lot
+    // in the warehouse (~6900 for KEN + 30k lpc rows), then multiplied by
+    // 5 projects × sequential loop = Lambda timeout. Now: hundreds of lots
+    // per project, cheap hash join.
     const onhandSql = `
-      WITH committed_raw AS (
+      WITH scope_lots AS (
+        SELECT lot_id
+        FROM production_db.silver.datex_slv_lots
+        WHERE material_id IN (${matIdList})
+      ),
+      committed_raw AS (
         SELECT t.lot_id, t.expected_packaged_amount AS cases_committed
         FROM production_db.silver.datex_slv_tasks t
         JOIN production_db.silver.datex_slv_taskstatuses ts
           ON ts.task_status_id = t.status_id
         WHERE t.warehouse_id = ${warehouseId}
-          AND t.lot_id IS NOT NULL
+          AND t.lot_id IN (SELECT lot_id FROM scope_lots)
           AND ts.status_name IN ('Planned', 'Released', 'Started', 'Suspended')
 
         UNION ALL
@@ -356,7 +368,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         WHERE t.warehouse_id = ${warehouseId}
           AND t.lot_id IS NULL
           AND t.actual_source_license_plate_id IS NOT NULL
-          AND lpc.lot_id IS NOT NULL
+          AND lpc.lot_id IN (SELECT lot_id FROM scope_lots)
           AND ts.status_name IN ('Planned', 'Released', 'Started', 'Suspended')
       ),
       committed AS (
@@ -376,6 +388,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         WHERE lp.warehouse_id = ${warehouseId}
           AND lp.Archived = false
           AND lpc.packaged_amount > 0
+          AND lpc.lot_id IN (SELECT lot_id FROM scope_lots)
         GROUP BY lpc.lot_id
       )
       SELECT
@@ -465,8 +478,6 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const allocLots = allocLotsByLine.get(key)
     const candidates = (onhandByMaterial.get(line.materialId) || [])
       .filter(c => !allocLots.has(c.lotId))
-      // Drop dismissed lots — Sadie's replacement-batch fix. dismissedSet
-      // keys are `${projectId}|${lot_lookup_code}` for active dismissals.
       .filter(c => !dismissedSet || !dismissedSet.has(`${projectId}|${c.lotCode}`))
       .map(c => {
         const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate })
@@ -587,8 +598,6 @@ exports.handler = async (event) => {
   const dateFrom = fmtDateISO(new Date(today.getTime() - 86400000))
   const dateTo   = fmtDateISO(new Date(today.getTime() + (dayCount - 1) * 86400000))
 
-  // Pull active dismissals BEFORE the duckdb work — parallel with almost no
-  // added latency because Supabase REST is fast.
   const dismissedSetPromise = loadActiveDismissals(projectIds)
 
   let conn, db
