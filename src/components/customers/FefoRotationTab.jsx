@@ -21,7 +21,9 @@ export default function FefoRotationTab() {
   const [liveResult, setLiveResult] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refetchTick, setRefetchTick] = useState(0)
-  const fetchedRef = useRef(0)
+  // Init to -1 so the initial mount (refetchTick=0) doesn't early-return
+  // as "already fetched" and skip the fetch. Bug from PR #66 refetch impl.
+  const fetchedRef = useRef(-1)
 
   useEffect(() => {
     if (fetchedRef.current === refetchTick) return
