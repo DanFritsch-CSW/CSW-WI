@@ -60,11 +60,13 @@
 //      -14d to +45d from now) — revisions are about live operational
 //      issues, not year-old completed shipments, so this alone kills
 //      most of the stale-year false positives.
-//   2. If more than one appointment still matches within that window,
-//      DO NOT auto-pick — mark match_status='ambiguous' and store every
-//      candidate in match_candidates for a manager to confirm in the tab
-//      (writes to the LOCAL-OWNED resolved_match field, never touched
-//      by this function).
+//   2. If a SINGLE token still matches more than one appointment within
+//      that window, DO NOT auto-pick — mark match_status='ambiguous' and
+//      store every candidate in match_candidates for a manager to confirm
+//      in the tab (writes to the LOCAL-OWNED resolved_match field, never
+//      touched by this function). See session 10 note below for the
+//      distinction between this (true ambiguity) and multiple distinct
+//      order numbers in one thread (not ambiguous).
 // Short tokens (3-4 digits) only match via exact reference_number
 // equality — substring-matching short tokens against lookup_code would
 // false-positive constantly (e.g. "749" appearing inside a longer code).
@@ -108,6 +110,28 @@
 // jsonb array of {id, url, size, filename, content_type} — filenames are
 // low-noise (no phone numbers/addresses like body text has) so they're
 // extracted directly, no stripSignatureNoise needed.
+//
+// ── True ambiguity vs. multiple valid orders (added 2026-07-09, session 10) ──
+// Dan flagged cnv_1buhq5ec: subject "Confirm Lots - NATURAL CHOICE 517450
+// & 517491" — two DIFFERENT real order numbers, each individually
+// resolving cleanly to its own single appointment (517450 -> Jul 13,
+// 517491 -> Jul 14). The old logic merged candidates across ALL of a
+// conversation's tokens into one pool and flagged 'ambiguous' the moment
+// that pool had more than one entry — conflating two very different
+// situations:
+//   1. TRUE ambiguity — one token, multiple candidate appointments (the
+//      original 2025-Saputo-vs-2026-Palermo-Villa case this feature was
+//      built for). Still requires a manual pick — the system genuinely
+//      can't tell which one is right.
+//   2. Multiple DISTINCT order numbers in one thread, each of which
+//      resolves cleanly on its own. Not ambiguous at all — both are
+//      correct, they're just different shipments on different days.
+// Per Dan 2026-07-09: for case 2, auto-pick the candidate with the
+// EARLIEST scheduled_arrival as the primary match (match_status stays
+// 'matched') rather than forcing a manual pick. All distinct candidates
+// are still stored in match_candidates (even though status='matched')
+// so the tab can show "also linked to 517491, ships Jul 14" instead of
+// silently dropping the other order.
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' };
 
@@ -407,30 +431,63 @@ exports.handler = async function () {
     // 3. Upsert conversations — Front-owned + MD-derived columns ONLY.
     const conversationRows = conversations.map((c) => {
       const tokens = tokensByConversation.get(c.id) || [];
-      // Union of candidate appointments across all of this conversation's
-      // tokens, deduped by appointment_id (a conversation can mention more
-      // than one number; we want the appointment(s) any of them point to).
+
+      // Per-token candidate lists — kept separate (not merged yet) so we
+      // can tell TRUE ambiguity (one token, multiple candidates) apart
+      // from multiple distinct order numbers that each resolve cleanly
+      // on their own. See session 10 header comment.
+      const perTokenCandidates = tokens
+        .map((t) => matchByToken.get(t) || [])
+        .filter((list) => list.length > 0);
+
+      const tokenLevelAmbiguity = perTokenCandidates.some(
+        (list) => new Set(list.map((cand) => cand.appointment_id)).size > 1
+      );
+
+      // Distinct candidates across every token, deduped by appointment_id —
+      // used both for the "multiple valid orders" auto-pick and for the
+      // match_candidates transparency field.
       const candidatesById = new Map();
-      for (const token of tokens) {
-        for (const cand of matchByToken.get(token) || []) {
-          candidatesById.set(cand.appointment_id, cand);
-        }
+      for (const list of perTokenCandidates) {
+        for (const cand of list) candidatesById.set(cand.appointment_id, cand);
       }
-      const candidates = [...candidatesById.values()];
+      const distinctCandidates = [...candidatesById.values()];
 
       let matchStatus = 'none';
       let matchedAppointmentId = null;
       let matchedWarehouse = null;
       let matchedScheduledArrival = null;
       let matchedReferenceNumber = null;
-      if (candidates.length === 1) {
-        matchStatus = 'matched';
-        matchedAppointmentId = candidates[0].appointment_id;
-        matchedWarehouse = candidates[0].warehouse_name;
-        matchedScheduledArrival = candidates[0].scheduled_arrival;
-        matchedReferenceNumber = candidates[0].reference_number;
-      } else if (candidates.length > 1) {
+      let storedCandidates = null;
+
+      if (tokenLevelAmbiguity) {
+        // Same number legitimately points to multiple different
+        // appointments (e.g. reused across customers/years) — genuinely
+        // needs a human pick via the candidate picker.
         matchStatus = 'ambiguous';
+        storedCandidates = distinctCandidates;
+      } else if (distinctCandidates.length === 1) {
+        matchStatus = 'matched';
+        const only = distinctCandidates[0];
+        matchedAppointmentId = only.appointment_id;
+        matchedWarehouse = only.warehouse_name;
+        matchedScheduledArrival = only.scheduled_arrival;
+        matchedReferenceNumber = only.reference_number;
+      } else if (distinctCandidates.length > 1) {
+        // Multiple DIFFERENT valid order numbers in one thread (e.g.
+        // "517450 & 517491"), each individually resolving cleanly to a
+        // different appointment/date. Not ambiguous — auto-pick earliest
+        // per Dan 2026-07-09, but keep every candidate in
+        // match_candidates so the tab can still surface the others.
+        matchStatus = 'matched';
+        const earliest = [...distinctCandidates].sort(
+          (a, b) => new Date(a.scheduled_arrival) - new Date(b.scheduled_arrival)
+        )[0];
+        matchedAppointmentId = earliest.appointment_id;
+        matchedWarehouse = earliest.warehouse_name;
+        matchedScheduledArrival = earliest.scheduled_arrival;
+        matchedReferenceNumber = earliest.reference_number;
+        storedCandidates = distinctCandidates;
       }
 
       const inferredFacility =
@@ -453,7 +510,7 @@ exports.handler = async function () {
         matched_scheduled_arrival: matchedScheduledArrival,
         matched_reference_number: matchedReferenceNumber,
         match_status: matchStatus,
-        match_candidates: candidates.length > 1 ? candidates : null, // NOT JSON.stringify()'d here — supabaseUpsert already stringifies the whole rows array once; double-encoding stored this as literal string text in the jsonb column instead of a real array, breaking `.map()` on the frontend (fixed 2026-07-09 after live "r.map is not a function" report)
+        match_candidates: storedCandidates, // NOT JSON.stringify()'d here — supabaseUpsert already stringifies the whole rows array once; double-encoding stored this as literal string text in the jsonb column instead of a real array, breaking `.map()` on the frontend (fixed 2026-07-09 after live "r.map is not a function" report)
         synced_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
