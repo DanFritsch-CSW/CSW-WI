@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   BUCKETS, BUCKET_COLORS,
   fetchTaskTemplate, addTemplateTask, updateTemplateTask, deleteTemplateTask, swapTemplateTaskOrder,
+  fetchFrontTeammates,
 } from '../../lib/onboarding.js'
 
 // Template Editor — added 2026-07-09. Edits onboarding_task_templates, the
@@ -12,6 +13,7 @@ export default function TemplateEditor({ onClose }) {
   const [tasks, setTasks] = useState([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
+  const [teammates, setTeammates] = useState([])
 
   const reload = () => {
     setLoading(true)
@@ -19,6 +21,7 @@ export default function TemplateEditor({ onClose }) {
   }
 
   useEffect(() => { reload() }, [])
+  useEffect(() => { fetchFrontTeammates().then(setTeammates) }, [])
 
   const move = async (task, direction) => {
     const sorted = [...tasks].sort((a, b) => a.sort_order - b.sort_order)
@@ -51,6 +54,7 @@ export default function TemplateEditor({ onClose }) {
             <TemplateRow
               key={t.id}
               task={t}
+              teammates={teammates}
               isFirst={i === 0}
               isLast={i === sortedTasks.length - 1}
               onMoveUp={() => move(t, 'up')}
@@ -79,6 +83,7 @@ export default function TemplateEditor({ onClose }) {
 
       {showAdd && (
         <AddTemplateRow
+          teammates={teammates}
           nextSortOrder={(sortedTasks.at(-1)?.sort_order ?? 0) + 1}
           onClose={() => setShowAdd(false)}
           onAdded={(task) => { setTasks(prev => [...prev, task]); setShowAdd(false) }}
@@ -88,20 +93,28 @@ export default function TemplateEditor({ onClose }) {
   )
 }
 
-function TemplateRow({ task, isFirst, isLast, onMoveUp, onMoveDown, onSave, onDelete }) {
+function TemplateRow({ task, teammates, isFirst, isLast, onMoveUp, onMoveDown, onSave, onDelete }) {
   const [label, setLabel] = useState(task.label)
   const [bucket, setBucket] = useState(task.bucket)
-  const [ownerName, setOwnerName] = useState(task.default_owner_name || '')
-  const [ownerTeammateId, setOwnerTeammateId] = useState(task.default_owner_teammate_id || '')
 
   const commit = (field, value) => {
     const patchMap = {
       label: { label: value },
       bucket: { bucket: value },
-      ownerName: { default_owner_name: value || null },
-      ownerTeammateId: { default_owner_teammate_id: value || null },
     }
     onSave(patchMap[field])
+  }
+
+  const handleTeammateChange = (teammateId) => {
+    if (!teammateId) {
+      onSave({ default_owner_teammate_id: null, default_owner_name: null })
+      return
+    }
+    const tm = teammates.find(t => t.teammate_id === teammateId)
+    onSave({
+      default_owner_teammate_id: teammateId,
+      default_owner_name: tm ? (tm.first_name || tm.username) : null,
+    })
   }
 
   return (
@@ -129,25 +142,10 @@ function TemplateRow({ task, isFirst, isLast, onMoveUp, onMoveDown, onSave, onDe
         style={{ flex: 1, fontSize: 13, padding: '4px 8px', border: '1px solid transparent', borderRadius: 4, background: 'transparent' }}
       />
 
-      <input
-        placeholder="Owner name"
-        value={ownerName}
-        onChange={(e) => setOwnerName(e.target.value)}
-        onBlur={() => ownerName !== (task.default_owner_name || '') && commit('ownerName', ownerName)}
-        style={{ fontSize: 12, padding: '4px 6px', width: 90, border: '1px solid var(--border)', borderRadius: 4 }}
-      />
-
-      <input
-        placeholder="tea_xxxxx (optional)"
-        value={ownerTeammateId}
-        onChange={(e) => setOwnerTeammateId(e.target.value)}
-        onBlur={() => ownerTeammateId !== (task.default_owner_teammate_id || '') && commit('ownerTeammateId', ownerTeammateId)}
-        title="Front teammate ID — required for the handoff notification to actually fire for this owner"
-        style={{
-          fontSize: 12, padding: '4px 6px', width: 140, borderRadius: 4,
-          border: `1px solid ${ownerTeammateId ? 'var(--border)' : '#fde68a'}`,
-          background: ownerTeammateId ? 'transparent' : '#fffbeb',
-        }}
+      <TeammatePicker
+        teammates={teammates}
+        value={task.default_owner_teammate_id}
+        onChange={handleTeammateChange}
       />
 
       <button type="button" onClick={onDelete} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: 14 }}>
@@ -157,21 +155,46 @@ function TemplateRow({ task, isFirst, isLast, onMoveUp, onMoveDown, onSave, onDe
   )
 }
 
-function AddTemplateRow({ nextSortOrder, onClose, onAdded }) {
+// TeammatePicker — dropdown showing "@username — First Last" instead of a
+// raw tea_xxxxx field. Added 2026-07-09 per Dan: the team thinks in @dfritsch
+// / @awasz terms (same as typing @ in Front itself), not opaque teammate IDs.
+function TeammatePicker({ teammates, value, onChange }) {
+  return (
+    <select
+      value={value || ''}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        fontSize: 12, padding: '4px 6px', width: 190, borderRadius: 4,
+        border: `1px solid ${value ? 'var(--border)' : '#fde68a'}`,
+        background: value ? 'transparent' : '#fffbeb',
+      }}
+      title={value ? undefined : 'No teammate selected — handoff notification/assignment won\'t fire for this task'}
+    >
+      <option value="">— unassigned —</option>
+      {teammates.map(tm => (
+        <option key={tm.teammate_id} value={tm.teammate_id}>
+          @{tm.username}{tm.first_name ? ` — ${tm.first_name} ${tm.last_name || ''}`.trimEnd() : ''}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+function AddTemplateRow({ teammates, nextSortOrder, onClose, onAdded }) {
   const [bucket, setBucket] = useState(BUCKETS[0])
   const [label, setLabel] = useState('')
-  const [ownerName, setOwnerName] = useState('')
-  const [ownerTeammateId, setOwnerTeammateId] = useState('')
+  const [teammateId, setTeammateId] = useState('')
   const [saving, setSaving] = useState(false)
 
   const submit = async () => {
     if (!label.trim()) return
     setSaving(true)
     try {
+      const tm = teammates.find(t => t.teammate_id === teammateId)
       const task = await addTemplateTask({
         bucket, label: label.trim(), sortOrder: nextSortOrder,
-        ownerName: ownerName.trim() || null,
-        ownerTeammateId: ownerTeammateId.trim() || null,
+        ownerName: tm ? (tm.first_name || tm.username) : null,
+        ownerTeammateId: teammateId || null,
       })
       onAdded(task)
     } catch (err) {
@@ -195,18 +218,7 @@ function AddTemplateRow({ nextSortOrder, onClose, onAdded }) {
         onChange={(e) => setLabel(e.target.value)}
         style={{ fontSize: 12, padding: '4px 8px', flex: 1, minWidth: 140 }}
       />
-      <input
-        placeholder="Owner name"
-        value={ownerName}
-        onChange={(e) => setOwnerName(e.target.value)}
-        style={{ fontSize: 12, padding: '4px 8px', width: 110 }}
-      />
-      <input
-        placeholder="tea_xxxxx (optional)"
-        value={ownerTeammateId}
-        onChange={(e) => setOwnerTeammateId(e.target.value)}
-        style={{ fontSize: 12, padding: '4px 8px', width: 140 }}
-      />
+      <TeammatePicker teammates={teammates} value={teammateId} onChange={setTeammateId} />
       <button type="button" onClick={submit} disabled={saving} style={smallBtnStyle}>
         {saving ? 'Adding…' : 'Add'}
       </button>
