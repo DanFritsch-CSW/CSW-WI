@@ -16,14 +16,14 @@
 // Front-sourced / MotherDuck-derived columns (subject, status,
 // customer_name, inbox_name, last_message_at, sla_status, synced_at,
 // updated_at, matched_appointment_id, matched_warehouse,
-// matched_scheduled_arrival, match_status, match_candidates). It must
-// NEVER include facility, order_number, resolved, resolved_by,
-// resolved_at, or resolved_match in the upsert payload — those are
-// CSW-WI-local enrichments set by managers in the Revisions tab, and a
-// PostgREST merge-duplicates upsert only touches columns present in the
-// payload, so omitting them is what protects them. Same pattern as
-// roster_assignments.manually_edited — don't clobber human-owned fields
-// with an automated sync.
+// matched_scheduled_arrival, matched_reference_number, match_status,
+// match_candidates). It must NEVER include facility, order_number,
+// resolved, resolved_by, resolved_at, or resolved_match in the upsert
+// payload — those are CSW-WI-local enrichments set by managers in the
+// Revisions tab, and a PostgREST merge-duplicates upsert only touches
+// columns present in the payload, so omitting them is what protects them.
+// Same pattern as roster_assignments.manually_edited — don't clobber
+// human-owned fields with an automated sync.
 //
 // Tag IDs and the "kb" schema are specific to the csw-kb-assistant project
 // and were confirmed via direct SQL inspection on 2026-07-09 (not guessed).
@@ -89,6 +89,14 @@
 // (phone numbers, "ext. 1234", street addresses, zip/zip+4) before token
 // extraction runs. Not bulletproof, but removes the concrete noise
 // sources actually observed in real message bodies during testing.
+//
+// ── matched_reference_number (added 2026-07-09, session 8) ─────────────
+// Dan caught that the Order/PO # field in the tab was always empty even
+// on cleanly matched conversations — the actual reference_number that
+// matched (e.g. "517051") was only ever a local variable during this
+// function's run and never persisted, so there was nothing for the UI to
+// show or default to. This column carries it through so the frontend can
+// pre-fill Order/PO # instead of always showing "not linked".
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' };
 
@@ -390,11 +398,13 @@ exports.handler = async function () {
       let matchedAppointmentId = null;
       let matchedWarehouse = null;
       let matchedScheduledArrival = null;
+      let matchedReferenceNumber = null;
       if (candidates.length === 1) {
         matchStatus = 'matched';
         matchedAppointmentId = candidates[0].appointment_id;
         matchedWarehouse = candidates[0].warehouse_name;
         matchedScheduledArrival = candidates[0].scheduled_arrival;
+        matchedReferenceNumber = candidates[0].reference_number;
       } else if (candidates.length > 1) {
         matchStatus = 'ambiguous';
       }
@@ -417,6 +427,7 @@ exports.handler = async function () {
         matched_appointment_id: matchedAppointmentId,
         matched_warehouse: matchedWarehouse,
         matched_scheduled_arrival: matchedScheduledArrival,
+        matched_reference_number: matchedReferenceNumber,
         match_status: matchStatus,
         match_candidates: candidates.length > 1 ? candidates : null, // NOT JSON.stringify()'d here — supabaseUpsert already stringifies the whole rows array once; double-encoding stored this as literal string text in the jsonb column instead of a real array, breaking `.map()` on the frontend (fixed 2026-07-09 after live "r.map is not a function" report)
         synced_at: new Date().toISOString(),
