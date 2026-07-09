@@ -6,14 +6,33 @@ import {
   updateRevisionConversation,
   markResolved,
   markUnresolved,
+  resolveAmbiguousMatch,
+  effectiveMatch,
 } from '../../lib/revisions.js'
 
 // Revisions sub-tab, added 2026-07-09 — lives next to FEFO Rotation inside
-// the Customers page (not a top-level nav route; moved here per Dan after
-// an initial standalone-tab build). See src/lib/revisions.js and
-// netlify/functions/revision-sync.cjs for the data pipeline this reads
-// from, and the Supabase Schema / Pending Issues sections in the Notion
-// doc for the two external prerequisites the sync job depends on.
+// the Customers page. Day-slider + appointment matching added same day
+// (Dan: "filter down to just today's ... shipments" + "cross reference
+// and correlate them to each other").
+//
+// Date filtering and cross-conversation correlation both hang off the
+// SAME join: revision-sync.cjs extracts numeric tokens from Front subject
+// lines and matches them against production_db.gold.truck_appointments
+// (reference_number / lookup_code). A single match gives us a real
+// scheduled_arrival to slide the day-stepper on, plus an appointment_id
+// that's the natural correlation key — conversations that resolve to the
+// same appointment_id are the "cross reference and correlate" ask,
+// grouped together below instead of guessing at text similarity.
+//
+// Not every conversation resolves cleanly: the same reference number can
+// belong to a different customer/appointment from a prior year (confirmed
+// live — "517450" matched both a 2025 and a 2026 appointment). Those land
+// as match_status='ambiguous' with every candidate stored, and sit in the
+// "Needs Review" section until a manager picks the right one (writes to
+// resolved_match — see src/lib/revisions.js effectiveMatch()). Needs
+// Review is deliberately NOT subject to the day filter — an unresolved
+// ambiguous or unmatched conversation has no confirmed date yet, so
+// hiding it behind a day slider would just make it invisible.
 
 const SLA_LABEL = { breach: 'SLA Breach', warning: 'SLA Warning', applies: 'SLA Applies' }
 const SLA_COLOR = { breach: 'var(--red, #c0392b)', warning: 'var(--amber, #a07818)', applies: 'var(--text-dim, #9aaabb)' }
@@ -29,6 +48,72 @@ function timeAgo(iso) {
   if (hrs < 1) return '<1h ago'
   if (hrs < 24) return `${hrs}h ago`
   return `${Math.floor(hrs / 24)}d ago`
+}
+
+function isSameLocalDay(iso, dayOffset) {
+  if (!iso) return false
+  const d = new Date(iso)
+  const target = new Date()
+  target.setDate(target.getDate() + dayOffset)
+  return d.getFullYear() === target.getFullYear() && d.getMonth() === target.getMonth() && d.getDate() === target.getDate()
+}
+
+function dayLabel(offset) {
+  if (offset === 0) return 'Today'
+  if (offset === -1) return 'Yesterday'
+  if (offset === 1) return 'Tomorrow'
+  const d = new Date()
+  d.setDate(d.getDate() + offset)
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+function daySubLabel(offset) {
+  const d = new Date()
+  d.setDate(d.getDate() + offset)
+  return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+}
+
+function DayStepper({ offset, onChange }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '4px 8px',
+      background: 'var(--bg2, #f8f9fb)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md, 8px)',
+    }}>
+      <button
+        type="button"
+        onClick={() => onChange(offset - 1)}
+        disabled={offset <= -7}
+        style={{
+          width: 24, height: 24, padding: 0, background: 'transparent',
+          border: '1px solid var(--border)', borderRadius: 'var(--r-sm, 4px)',
+          color: offset <= -7 ? 'var(--text-dim)' : 'var(--text-primary)',
+          cursor: offset <= -7 ? 'not-allowed' : 'pointer', fontSize: 14, fontWeight: 600,
+          opacity: offset <= -7 ? 0.4 : 1,
+        }}
+      >‹</button>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 130, lineHeight: 1.2 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{dayLabel(offset)}</span>
+        <span style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.06em', marginTop: 2 }}>
+          {daySubLabel(offset)}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={() => onChange(offset + 1)}
+        disabled={offset >= 14}
+        style={{
+          width: 24, height: 24, padding: 0, background: 'transparent',
+          border: '1px solid var(--border)', borderRadius: 'var(--r-sm, 4px)',
+          color: offset >= 14 ? 'var(--text-dim)' : 'var(--text-primary)',
+          cursor: offset >= 14 ? 'not-allowed' : 'pointer', fontSize: 14, fontWeight: 600,
+          opacity: offset >= 14 ? 0.4 : 1,
+        }}
+      >›</button>
+    </div>
+  )
 }
 
 function CommentThread({ comments }) {
@@ -51,14 +136,48 @@ function CommentThread({ comments }) {
   )
 }
 
-function ConversationCard({ conv, comments, onChange }) {
+function CandidatePicker({ conv, onResolved }) {
+  const candidates = conv.match_candidates || []
+  async function pick(cand) {
+    await resolveAmbiguousMatch(conv.id, cand)
+    onResolved()
+  }
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+        This reference number matches more than one appointment — pick the right one:
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {candidates.map((cand) => (
+          <button
+            key={cand.appointment_id}
+            type="button"
+            onClick={() => pick(cand)}
+            style={{
+              textAlign: 'left', padding: '8px 10px',
+              background: 'var(--bg2, #f8f9fb)', border: '1px solid var(--border)',
+              borderRadius: 'var(--r-sm, 4px)', cursor: 'pointer', font: 'inherit', color: 'inherit',
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 600 }}>{cand.owner_name || 'Unknown owner'} · {cand.warehouse_name || 'unknown facility'}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, monospace)', marginTop: 2 }}>
+              ref {cand.reference_number} · {cand.scheduled_arrival ? new Date(cand.scheduled_arrival).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'no date'}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ConversationCard({ conv, comments, onChange, relatedCount }) {
   const [expanded, setExpanded] = useState(false)
   const [orderNumber, setOrderNumber] = useState(conv.order_number || '')
   const meta = facilityMeta(conv.facility)
+  const match = effectiveMatch(conv)
 
   async function handleFacilityChange(e) {
-    const facility = e.target.value || null
-    await updateRevisionConversation(conv.id, { facility })
+    await updateRevisionConversation(conv.id, { facility: e.target.value || null })
     onChange()
   }
 
@@ -91,9 +210,17 @@ function ConversationCard({ conv, comments, onChange }) {
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{conv.subject || '(no subject)'}</div>
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
             {conv.customer_name || 'Unknown customer'} · {conv.status} · {timeAgo(conv.last_message_at)}
+            {match?.scheduled_arrival && (
+              <> · ships {new Date(match.scheduled_arrival).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+          {relatedCount > 1 && (
+            <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--blue, #2a72b8)', border: '1px solid var(--blue, #2a72b8)', borderRadius: 'var(--r-sm, 4px)', padding: '2px 6px', fontFamily: 'var(--font-mono, monospace)' }}>
+              {relatedCount} RELATED
+            </span>
+          )}
           {conv.sla_status && (
             <span style={{ fontSize: 10, fontWeight: 600, color: SLA_COLOR[conv.sla_status], border: `1px solid ${SLA_COLOR[conv.sla_status]}`, borderRadius: 'var(--r-sm, 4px)', padding: '2px 6px', fontFamily: 'var(--font-mono, monospace)' }}>
               {SLA_LABEL[conv.sla_status]}
@@ -142,6 +269,9 @@ function ConversationCard({ conv, comments, onChange }) {
               {conv.resolved ? 'REOPEN' : 'MARK RESOLVED'}
             </button>
           </div>
+          {conv.match_status === 'ambiguous' && !conv.resolved_match && (
+            <CandidatePicker conv={conv} onResolved={onChange} />
+          )}
           <CommentThread comments={comments} />
         </div>
       )}
@@ -156,6 +286,7 @@ export default function RevisionsTab() {
   const [error, setError] = useState(null)
   const [facilityFilter, setFacilityFilter] = useState('all')
   const [showResolved, setShowResolved] = useState(false)
+  const [dayOffset, setDayOffset] = useState(0)
 
   async function load() {
     try {
@@ -180,13 +311,48 @@ export default function RevisionsTab() {
     load()
   }, [])
 
-  const filtered = useMemo(() => {
+  const baseFiltered = useMemo(() => {
     return conversations.filter((c) => {
       if (!showResolved && c.resolved) return false
       if (facilityFilter !== 'all' && c.facility !== facilityFilter) return false
       return true
     })
   }, [conversations, facilityFilter, showResolved])
+
+  // Day-filtered: only conversations with a confirmed appointment match
+  // whose scheduled_arrival falls on the selected day.
+  const dayFiltered = useMemo(() => {
+    return baseFiltered.filter((c) => {
+      const m = effectiveMatch(c)
+      return m && isSameLocalDay(m.scheduled_arrival, dayOffset)
+    })
+  }, [baseFiltered, dayOffset])
+
+  // Needs Review: ambiguous (unresolved) or genuinely unmatched — no
+  // confirmed date, so day filter doesn't apply. Always visible.
+  const needsReview = useMemo(() => {
+    return baseFiltered.filter((c) => {
+      if (effectiveMatch(c)) return false
+      return c.match_status === 'ambiguous' || c.match_status === 'none' || !c.match_status
+    })
+  }, [baseFiltered])
+
+  // Group the day-filtered list by appointment_id — the "correlate them
+  // to each other" ask. Groups of >1 render with a shared "N related" badge.
+  const groups = useMemo(() => {
+    const byAppt = new Map()
+    for (const c of dayFiltered) {
+      const m = effectiveMatch(c)
+      const key = m.appointment_id
+      if (!byAppt.has(key)) byAppt.set(key, [])
+      byAppt.get(key).push(c)
+    }
+    return [...byAppt.values()].sort((a, b) => {
+      const ma = effectiveMatch(a[0])
+      const mb = effectiveMatch(b[0])
+      return new Date(ma.scheduled_arrival) - new Date(mb.scheduled_arrival)
+    })
+  }, [dayFiltered])
 
   if (loading) {
     return <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>Loading revisions…</div>
@@ -201,8 +367,9 @@ export default function RevisionsTab() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+        <DayStepper offset={dayOffset} onChange={setDayOffset} />
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <select value={facilityFilter} onChange={(e) => setFacilityFilter(e.target.value)}>
             <option value="all">All facilities</option>
@@ -215,25 +382,52 @@ export default function RevisionsTab() {
             <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} />
             Show resolved
           </label>
+          <span style={{ fontSize: 11, color: 'var(--text-dim, #9aaabb)', fontFamily: 'var(--font-mono, monospace)' }}>
+            {dayFiltered.length} shipping {dayLabel(dayOffset).toLowerCase()}
+          </span>
         </div>
-        <span style={{ fontSize: 11, color: 'var(--text-dim, #9aaabb)', fontFamily: 'var(--font-mono, monospace)' }}>
-          {filtered.length} of {conversations.length} shown
-        </span>
       </div>
 
-      {filtered.length === 0 ? (
-        <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>
-          Nothing here — either it's all resolved or the sync hasn't run yet.
+      <div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8 }}>
+          SHIPPING {dayLabel(dayOffset).toUpperCase()}
         </div>
-      ) : (
-        filtered.map((conv) => (
-          <ConversationCard
-            key={conv.id}
-            conv={conv}
-            comments={commentsByConv[conv.id] || []}
-            onChange={load}
-          />
-        ))
+        {groups.length === 0 ? (
+          <div style={{ padding: '30px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>
+            Nothing matched to a shipment on this day.
+          </div>
+        ) : (
+          groups.map((group) => (
+            <div key={group[0].id}>
+              {group.map((conv) => (
+                <ConversationCard
+                  key={conv.id}
+                  conv={conv}
+                  comments={commentsByConv[conv.id] || []}
+                  onChange={load}
+                  relatedCount={group.length}
+                />
+              ))}
+            </div>
+          ))
+        )}
+      </div>
+
+      {needsReview.length > 0 && (
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--amber, #a07818)', fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8 }}>
+            NEEDS REVIEW · {needsReview.length} unmatched or ambiguous
+          </div>
+          {needsReview.map((conv) => (
+            <ConversationCard
+              key={conv.id}
+              conv={conv}
+              comments={commentsByConv[conv.id] || []}
+              onChange={load}
+              relatedCount={1}
+            />
+          ))}
+        </div>
       )}
     </div>
   )
