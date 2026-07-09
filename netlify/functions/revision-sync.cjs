@@ -83,6 +83,14 @@ async function kbFetch(path) {
       apikey: KB_SERVICE_KEY,
       Authorization: `Bearer ${KB_SERVICE_KEY}`,
       Accept: 'application/json',
+      // PostgREST defaults every request to the `public` schema regardless
+      // of what's exposed in Data API settings — Accept-Profile is what
+      // actually routes a read request into a non-default exposed schema.
+      // Without this, kb.conversation_tags etc. 404 as "Could not find the
+      // table 'public.conversation_tags'" even with kb correctly exposed.
+      // Confirmed via live error message on the first real invocation,
+      // 2026-07-09.
+      'Accept-Profile': 'kb',
     },
   });
   const text = await res.text();
