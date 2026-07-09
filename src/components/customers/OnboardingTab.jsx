@@ -6,6 +6,7 @@ import {
   fetchTaskInstances, addTaskInstance, updateTaskInstance, deleteTaskInstance,
   completeTaskAndNotifyNext,
 } from '../../lib/onboarding.js'
+import TemplateEditor from './TemplateEditor.jsx'
 
 // Customer Onboarding — v1 built 2026-07-08 for feedback/iteration, not a
 // final design. Pulled forward from the 2026-06-05 mock session (real
@@ -18,6 +19,7 @@ export default function OnboardingTab() {
   const [selectedId, setSelectedId] = useState(null)
   const [showArchived, setShowArchived] = useState(false)
   const [showNewForm, setShowNewForm] = useState(false)
+  const [view, setView] = useState('customer') // 'customer' | 'template'
 
   const load = () => {
     setLoading(true)
@@ -46,41 +48,46 @@ export default function OnboardingTab() {
       <Sidebar
         customers={visibleCustomers}
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={(id) => { setSelectedId(id); setView('customer') }}
         showArchived={showArchived}
         onToggleArchived={setShowArchived}
         onNewCustomer={() => setShowNewForm(true)}
+        onManageTemplate={() => setView('template')}
       />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</div>}
-        {error && !loading && <div style={{ color: 'var(--danger, #dc2626)', fontSize: 13 }}>{error}</div>}
-        {!loading && !error && !selected && (
-          <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-            {visibleCustomers.length === 0
-              ? (showArchived ? 'No archived customers.' : 'No customers yet — click "+ New Customer" to start one.')
-              : 'Select a customer.'}
-          </div>
-        )}
-        {!loading && !error && selected && (
-          <CustomerDetail
-            customer={selected}
-            onStageChange={(stage) => {
-              updateCustomerStage(selected.id, stage)
-              setCustomers(prev => prev.map(c => c.id === selected.id ? { ...c, stage } : c))
-            }}
-            onArchiveToggle={() => {
-              const next = !selected.archived
-              setCustomerArchived(selected.id, next)
-              setCustomers(prev => prev.map(c => c.id === selected.id ? { ...c, archived: next } : c))
-            }}
-            onDelete={() => {
-              if (!window.confirm(`Delete ${selected.name}? This removes all its onboarding tasks too.`)) return
-              deleteOnboardingCustomer(selected.id)
-              setCustomers(prev => prev.filter(c => c.id !== selected.id))
-            }}
-          />
-        )}
-      </div>
+      {view === 'template' ? (
+        <TemplateEditor onClose={() => setView('customer')} />
+      ) : (
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</div>}
+          {error && !loading && <div style={{ color: 'var(--danger, #dc2626)', fontSize: 13 }}>{error}</div>}
+          {!loading && !error && !selected && (
+            <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+              {visibleCustomers.length === 0
+                ? (showArchived ? 'No archived customers.' : 'No customers yet — click "+ New Customer" to start one.')
+                : 'Select a customer.'}
+            </div>
+          )}
+          {!loading && !error && selected && (
+            <CustomerDetail
+              customer={selected}
+              onStageChange={(stage) => {
+                updateCustomerStage(selected.id, stage)
+                setCustomers(prev => prev.map(c => c.id === selected.id ? { ...c, stage } : c))
+              }}
+              onArchiveToggle={() => {
+                const next = !selected.archived
+                setCustomerArchived(selected.id, next)
+                setCustomers(prev => prev.map(c => c.id === selected.id ? { ...c, archived: next } : c))
+              }}
+              onDelete={() => {
+                if (!window.confirm(`Delete ${selected.name}? This removes all its onboarding tasks too.`)) return
+                deleteOnboardingCustomer(selected.id)
+                setCustomers(prev => prev.filter(c => c.id !== selected.id))
+              }}
+            />
+          )}
+        </div>
+      )}
       {showNewForm && (
         <NewCustomerModal
           onClose={() => setShowNewForm(false)}
@@ -95,19 +102,31 @@ export default function OnboardingTab() {
   )
 }
 
-function Sidebar({ customers, selectedId, onSelect, showArchived, onToggleArchived, onNewCustomer }) {
+function Sidebar({ customers, selectedId, onSelect, showArchived, onToggleArchived, onNewCustomer, onManageTemplate }) {
   return (
     <div style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--border)', paddingRight: 16 }}>
       <button
         type="button"
         onClick={onNewCustomer}
         style={{
-          width: '100%', padding: '8px 12px', marginBottom: 12,
+          width: '100%', padding: '8px 12px', marginBottom: 8,
           background: 'var(--brand, #a07818)', color: '#fff', border: 'none',
           borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
         }}
       >
         + New Customer
+      </button>
+
+      <button
+        type="button"
+        onClick={onManageTemplate}
+        style={{
+          width: '100%', padding: '6px 12px', marginBottom: 12,
+          background: 'transparent', color: 'var(--text-secondary)',
+          border: '1px solid var(--border)', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+        }}
+      >
+        ⚙ Manage Template
       </button>
 
       <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
