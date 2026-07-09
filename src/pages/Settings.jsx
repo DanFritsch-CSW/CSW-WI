@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react'
-import { FACILITY_LIST } from '../lib/constants.js'
+import { FACILITY_LIST, FACILITIES } from '../lib/constants.js'
 import {
   fetchFacilitySettings, upsertFacilitySettings,
   fetchCal2Employees, upsertEmployeeDockSide,
   fetchCustomDropProjects, addCustomDropProject, deleteCustomDropProject,
   fetchProjectLaborAssumptions,
   upsertProjectLaborAssumption, deleteProjectLaborAssumption,
+  fetchDailyDiscussionConfigs, upsertDailyDiscussionConfigActive,
+  fetchFrontTeammates, fetchDiscussionRecipients, saveDiscussionRecipients,
+  triggerDailyDiscussionTest,
 } from '../lib/supabase.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
@@ -13,11 +16,12 @@ import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
 // ── Tab nav ────────────────────────────────────────────────
 
 const TABS = [
-  { id: 'labor',    label: 'Labor Planning' },
-  { id: 'breaks',   label: 'Break Assumptions' },
-  { id: 'dock',     label: 'CAL Dock Assignment' },
-  { id: 'estdrops', label: 'EST Drop Projects' },
-  { id: 'pvi',      label: 'PVI Accounts' },
+  { id: 'labor',       label: 'Labor Planning' },
+  { id: 'breaks',      label: 'Break Assumptions' },
+  { id: 'dock',        label: 'CAL Dock Assignment' },
+  { id: 'estdrops',    label: 'EST Drop Projects' },
+  { id: 'pvi',         label: 'PVI Accounts' },
+  { id: 'discussions', label: 'Daily Discussions' },
 ]
 
 // Hardcoded EST drop projects per facility (mirrors PROJECT_DROP_RULES in omni.js).
@@ -528,6 +532,173 @@ function EstDropProjectsEditor() {
   )
 }
 
+// ── Daily Discussions Editor ────────────────────────────────
+//
+// Manages front_daily_discussion_configs (per-facility active toggle) and
+// notification_recipients (list_name = daily_discussion_<facility>). See
+// front-daily-discussion-run.cjs for the scheduled side.
+
+function DailyDiscussionsEditor() {
+  const [configs, setConfigs]     = useState([])
+  const [teammates, setTeammates] = useState([])
+  const [facility, setFacility]   = useState(FACILITY_LIST[0].id)
+  const [selected, setSelected]   = useState(new Set())
+  const [loading, setLoading]     = useState(true)
+  const [recipientsLoading, setRecipientsLoading] = useState(true)
+  const [saveState, setSave]      = useState(null)
+  const [testState, setTestState] = useState(null)
+  const [testDetail, setTestDetail] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const [cfgs, tms] = await Promise.all([fetchDailyDiscussionConfigs(), fetchFrontTeammates()])
+      if (cancelled) return
+      setConfigs(cfgs)
+      setTeammates(tms)
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    setRecipientsLoading(true)
+    fetchDiscussionRecipients(facility).then(rows => {
+      if (cancelled) return
+      setSelected(new Set(rows.filter(r => r.front_teammate_id).map(r => r.front_teammate_id)))
+      setRecipientsLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [facility])
+
+  const config = configs.find(c => c.facility === facility)
+
+  async function handleToggleActive() {
+    const next = !config?.active
+    setConfigs(prev => prev.map(c => c.facility === facility ? { ...c, active: next } : c))
+    await upsertDailyDiscussionConfigActive(facility, next)
+  }
+
+  function toggleTeammate(teammateId) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(teammateId)) next.delete(teammateId)
+      else next.add(teammateId)
+      return next
+    })
+  }
+
+  async function handleSave() {
+    setSave('saving')
+    const chosen = teammates.filter(t => selected.has(t.teammate_id))
+    try {
+      await saveDiscussionRecipients(facility, chosen)
+      setSave('ok')
+      setTimeout(() => setSave(null), 2500)
+    } catch {
+      setSave('error')
+      setTimeout(() => setSave(null), 3000)
+    }
+  }
+
+  async function handleTest() {
+    setTestState('running')
+    setTestDetail(null)
+    try {
+      const res = await triggerDailyDiscussionTest(facility)
+      const result = res?.results?.[0]
+      if (result?.ok) {
+        setTestState('ok')
+        setTestDetail(`Created "${result.subject}" with ${result.recipientCount} recipient(s).`)
+      } else {
+        setTestState('error')
+        setTestDetail(result?.reason || 'No result returned.')
+      }
+    } catch (err) {
+      setTestState('error')
+      setTestDetail(err.message)
+    }
+    setTimeout(() => { setTestState(null); setTestDetail(null) }, 6000)
+  }
+
+  if (loading) {
+    return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>Loading…</div>
+  }
+
+  const facilityName = FACILITIES[facility]?.name ?? facility
+  const selectedCount = selected.size
+
+  return (
+    <div className="daily-discussions-editor">
+      <div className="break-schedule-controls" style={{ marginBottom: 16 }}>
+        <div className="break-schedule-warehouse">
+          <span className="break-schedule-warehouse-label">Facility</span>
+          <select className="est-drops-select" value={facility} onChange={e => setFacility(e.target.value)}>
+            {FACILITY_LIST.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+          </select>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+          <input type="checkbox" checked={!!config?.active} onChange={handleToggleActive} />
+          Auto-create daily discussion (6pm CT, for the next day)
+        </label>
+      </div>
+
+      <p className="settings-page-sub" style={{ marginBottom: 12 }}>
+        Recipients get added to a new Front discussion titled "{facilityName} Weekday M/D", created the evening before.
+        Only people with a resolved Front teammate ID (synced nightly) can be selected — {teammates.length} available.
+        {selectedCount > 0 && <> Currently selected: <strong>{selectedCount}</strong>.</>}
+      </p>
+
+      {recipientsLoading ? (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>Loading recipients…</div>
+      ) : (
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 6,
+          maxHeight: 340, overflowY: 'auto', padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+        }}>
+          {teammates.map(t => {
+            const label = [t.first_name, t.last_name].filter(Boolean).join(' ') || t.email
+            const checked = selected.has(t.teammate_id)
+            return (
+              <label
+                key={t.teammate_id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', borderRadius: 3,
+                  fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer',
+                  background: checked ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
+                }}
+              >
+                <input type="checkbox" checked={checked} onChange={() => toggleTeammate(t.teammate_id)} />
+                <span>{label}</span>
+              </label>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="settings-card-footer" style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
+          {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save recipients'}
+        </button>
+        <button className="settings-save-btn" onClick={handleTest} disabled={testState === 'running' || !config?.active}>
+          {testState === 'running' ? 'Creating…' : testState === 'ok' ? 'Created ✓' : testState === 'error' ? 'Failed' : 'Create Now (test)'}
+        </button>
+        {testDetail && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: testState === 'error' ? '#e05a5a' : 'var(--text-dim)' }}>
+            {testDetail}
+          </span>
+        )}
+      </div>
+      {!config?.active && (
+        <p className="settings-page-sub" style={{ marginTop: 8, fontStyle: 'italic' }}>
+          Turn on the checkbox above to enable both the nightly auto-create and the test button for this facility.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── Page ───────────────────────────────────────────────────
 
 export default function Settings() {
@@ -615,6 +786,16 @@ export default function Settings() {
             <p className="settings-page-sub">Canonical customer accounts + raw Datex ship-to name mappings + shelf-life days per customer. Drives the PVI Shelf Life dashboard on the Customers tab.</p>
           </div>
           <PviAccountsTab />
+        </>
+      )}
+
+      {activeTab === 'discussions' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">Daily Discussions</h2>
+            <p className="settings-page-sub">Automated per-facility Front discussion threads for daily check-ins — leadership, supervisors, GM/CEM, etc. Created automatically each evening for the next day.</p>
+          </div>
+          <DailyDiscussionsEditor />
         </>
       )}
     </div>
