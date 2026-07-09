@@ -66,6 +66,19 @@
 [functions."front-daily-discussion-run"]
   schedule = "0 23 * * *"
 
+# Revision Tracker sync — runs every 15 min (unlike the daily/nightly jobs
+# above, this covers time-sensitive customer-facing issues — SLA breach/
+# warning tags need to show up in-app well before end of day). Pulls
+# "Revision"/"Revisions"-tagged Front conversations + comments from the
+# separate csw-kb-assistant Supabase project into revision_conversations/
+# revision_comments here. See netlify/functions/revision-sync.cjs header
+# comment for the two external prerequisites (kb schema exposure +
+# service_role key) this depends on — until both are set, every run
+# fails fast with a clear config error rather than syncing silently wrong.
+[functions."revision-sync"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
 # Password gate for the Palermo's standalone deploy (cswpvi.netlify.app).
 # The edge function itself checks VITE_APP_MODE and no-ops on the main
 # CSW-WI app, so registering it globally here is safe for both sites.
