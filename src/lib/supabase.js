@@ -1684,3 +1684,115 @@ export async function fetchNotificationRecipients(listName) {
   if (error) { console.error('fetchNotificationRecipients:', error); return [] }
   return data ?? []
 }
+
+// ─── Daily Front Discussions (per-facility automated check-in threads) ────
+//
+// front_daily_discussion_configs — one row per facility. active=true means
+// front-daily-discussion-run.cjs (scheduled nightly at 23:00 UTC / 6pm CDT)
+// creates a new Front discussion for the NEXT calendar day, named
+// "{display_name} {Weekday} {M/D}". Seeded 2026-07-09 with ken + cal active,
+// mad/wr/ec present but inactive — flip the toggle in Settings once a
+// facility's recipient list is populated.
+//
+// Recipients reuse the existing notification_recipients table via the
+// established list_name-scoping convention (list_name = 'daily_discussion_'
+// + facility) instead of a new join table. front_teammate_id must be set —
+// resolved from the front_teammates table (synced nightly from Front) —
+// since Front discussions can only add real teammate IDs, not raw emails.
+
+export async function fetchDailyDiscussionConfigs() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('front_daily_discussion_configs')
+    .select('*')
+    .order('facility')
+  if (error) { console.error('fetchDailyDiscussionConfigs:', error); return [] }
+  return data ?? []
+}
+
+export async function upsertDailyDiscussionConfigActive(facility, active) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('front_daily_discussion_configs')
+    .update({ active, updated_at: new Date().toISOString() })
+    .eq('facility', facility)
+  if (error) console.error('upsertDailyDiscussionConfigActive:', error)
+}
+
+// front_teammates is synced nightly from Front (front-teammates-nightly-sync.cjs).
+// Filters out rows with no email since notification_recipients.email is NOT NULL
+// and is the upsert conflict target.
+export async function fetchFrontTeammates() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('front_teammates')
+    .select('teammate_id, email, username, first_name, last_name')
+    .order('first_name')
+  if (error) { console.error('fetchFrontTeammates:', error); return [] }
+  return (data ?? []).filter(t => t.email)
+}
+
+export async function fetchDiscussionRecipients(facility) {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('notification_recipients')
+    .select('*')
+    .eq('list_name', `daily_discussion_${facility}`)
+    .order('name')
+  if (error) { console.error('fetchDiscussionRecipients:', error); return [] }
+  return data ?? []
+}
+
+// saveDiscussionRecipients — full replace-set for one facility's list.
+// Upserts every chosen teammate (onConflict list_name+email, matching the
+// table's unique constraint), then deletes any existing row for this
+// list_name whose email isn't in the new selection. Two-step rather than
+// delete-then-insert so a failed upsert never leaves the list empty.
+export async function saveDiscussionRecipients(facility, chosenTeammates) {
+  if (!supabase) return
+  const listName = `daily_discussion_${facility}`
+  const rows = (chosenTeammates ?? []).map(t => ({
+    list_name: listName,
+    name: [t.first_name, t.last_name].filter(Boolean).join(' ') || t.email,
+    email: t.email,
+    front_teammate_id: t.teammate_id,
+    active: true,
+    updated_at: new Date().toISOString(),
+  }))
+  if (rows.length) {
+    const { error: upErr } = await supabase
+      .from('notification_recipients')
+      .upsert(rows, { onConflict: 'list_name,email', ignoreDuplicates: false })
+    if (upErr) { console.error('saveDiscussionRecipients upsert:', upErr); throw upErr }
+  }
+  const { data: existing, error: fetchErr } = await supabase
+    .from('notification_recipients')
+    .select('id, email')
+    .eq('list_name', listName)
+  if (fetchErr) { console.error('saveDiscussionRecipients fetch:', fetchErr); throw fetchErr }
+  const keepEmails = new Set(rows.map(r => r.email))
+  const removeIds = (existing ?? []).filter(r => !keepEmails.has(r.email)).map(r => r.id)
+  if (removeIds.length) {
+    const { error: delErr } = await supabase
+      .from('notification_recipients')
+      .delete()
+      .in('id', removeIds)
+    if (delErr) { console.error('saveDiscussionRecipients delete:', delErr); throw delErr }
+  }
+}
+
+// triggerDailyDiscussionTest — calls the scheduled function's manual-test
+// path (single facility, no secret required — see front-daily-discussion-run.cjs
+// top comment for why that's safe: recipients and content are always
+// server-resolved, the client can only pick which already-configured
+// facility fires).
+export async function triggerDailyDiscussionTest(facility) {
+  const res = await fetch('/.netlify/functions/front-daily-discussion-run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility }),
+  })
+  const json = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
+  return json
+}
