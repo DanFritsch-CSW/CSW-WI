@@ -89,6 +89,38 @@ const PROJECT_LOOKUPS = ['PALVI9', 'PALDSD9', 'PALMA9']
 // project-side counterpart.
 const DEFAULT_PROJECT_FILTERS = new Set(['PALVI9'])
 
+// Resizable grid columns (2026-07-09, team ask): default widths shrink Item/
+// Lot to make room for a wider Latest Note column. User drags let them go
+// from there — width. Persisted to localStorage per-browser so a manager's
+// layout sticks across sessions without needing a backend column-prefs table
+// for what's a per-person display preference, not shared state.
+const DEFAULT_COL_WIDTHS = {
+  stage: 64,
+  material: 150,
+  lot: 76,
+  expiration: 84,
+  daysToCode: 72,
+  spec: 150,
+  available: 80,
+  projected: 130,
+  velocity: 100,
+  disposition: 96,
+  owner: 76,
+  latestNote: 280,
+  action: 56,
+}
+const MIN_COL_WIDTH = 40
+const COL_WIDTHS_STORAGE_KEY = 'pvi_grid_col_widths_v1'
+
+function loadColWidths() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COL_WIDTHS_STORAGE_KEY) || '{}')
+    return { ...DEFAULT_COL_WIDTHS, ...saved }
+  } catch {
+    return { ...DEFAULT_COL_WIDTHS }
+  }
+}
+
 // Sort accessors for each sortable column. Return the value used for
 // comparison. Nulls sort last regardless of direction (see compareRows).
 const SORT_ACCESSORS = {
@@ -157,6 +189,45 @@ export default function PviShelfLife() {
 
   // Selection
   const [selectedLotId, setSelectedLotId] = useState(null)
+
+  // Resizable grid columns (2026-07-09 ask).
+  const [colWidths, setColWidths] = useState(loadColWidths)
+
+  // handleResizeStart — drag-to-resize a column. Reads the starting width
+  // fresh off the DOM (getBoundingClientRect) rather than off React state,
+  // so there's no stale-closure risk; the move/up handlers are created and
+  // torn down per-drag rather than living in useCallback deps.
+  const handleResizeStart = useCallback((key, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const thEl = e.currentTarget.closest('th')
+    const startWidth = thEl ? thEl.getBoundingClientRect().width : (colWidths[key] ?? DEFAULT_COL_WIDTHS[key])
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+
+    function onMove(ev) {
+      const next = Math.max(MIN_COL_WIDTH, Math.round(startWidth + (ev.clientX - startX)))
+      setColWidths(prev => ({ ...prev, [key]: next }))
+    }
+    function onUp() {
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      setColWidths(current => {
+        try { localStorage.setItem(COL_WIDTHS_STORAGE_KEY, JSON.stringify(current)) } catch { /* ignore */ }
+        return current
+      })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [colWidths])
+
+  const resetColWidths = useCallback(() => {
+    setColWidths({ ...DEFAULT_COL_WIDTHS })
+    try { localStorage.removeItem(COL_WIDTHS_STORAGE_KEY) } catch { /* ignore */ }
+  }, [])
 
   // Set browser tab title while this component is mounted. Restored on
   // unmount so navigating to another CSW tab (or leaving the standalone)
@@ -601,6 +672,14 @@ export default function PviShelfLife() {
           >
             Copy all ({filteredRows.length}) for email
           </button>
+          <button
+            className="settings-save-btn"
+            onClick={resetColWidths}
+            style={{ fontSize: 11 }}
+            title="Restore default column widths (drag a column header's right edge to resize)"
+          >
+            Reset columns
+          </button>
         </div>
 
         {rows.length === 0 ? (
@@ -612,21 +691,47 @@ export default function PviShelfLife() {
             No lots match the current filters. Toggle a stage or clear filters above.
           </div>
         ) : (
-          <table className="hourly-table">
+          <div style={{ overflowX: 'auto' }}>
+          <table className="hourly-table" style={{ tableLayout: 'fixed', whiteSpace: 'normal' }}>
+            <colgroup>
+              <col style={{ width: colWidths.stage }} />
+              <col style={{ width: colWidths.material }} />
+              <col style={{ width: colWidths.lot }} />
+              <col style={{ width: colWidths.expiration }} />
+              <col style={{ width: colWidths.daysToCode }} />
+              <col style={{ width: colWidths.spec }} />
+              <col style={{ width: colWidths.available }} />
+              <col style={{ width: colWidths.projected }} />
+              <col style={{ width: colWidths.velocity }} />
+              <col style={{ width: colWidths.disposition }} />
+              <col style={{ width: colWidths.owner }} />
+              <col style={{ width: colWidths.latestNote }} />
+              <col style={{ width: colWidths.action }} />
+            </colgroup>
             <thead>
               <tr>
-                <SortableTh sortKey="stage"       align="left"  sortConfig={sortConfig} onSort={handleSort}>Stage</SortableTh>
-                <SortableTh sortKey="material"    align="left"  sortConfig={sortConfig} onSort={handleSort}>Item</SortableTh>
-                <SortableTh sortKey="lot"         align="left"  sortConfig={sortConfig} onSort={handleSort}>Lot</SortableTh>
-                <SortableTh sortKey="expiration"  align="left"  sortConfig={sortConfig} onSort={handleSort}>Code date</SortableTh>
-                <SortableTh sortKey="daysToCode"  align="right" sortConfig={sortConfig} onSort={handleSort} title="Days remaining until code date (today)">Days to code</SortableTh>
-                <SortableTh sortKey="spec"        align="right" sortConfig={sortConfig} onSort={handleSort} title="Customer's minimum-days-at-receipt spec; positive value = days the lot will land under spec at its projected ship date">Vs. spec</SortableTh>
-                <SortableTh sortKey="available"   align="right" sortConfig={sortConfig} onSort={handleSort}>Available</SortableTh>
-                <SortableTh sortKey="projected"   align="left"  sortConfig={sortConfig} onSort={handleSort}>Projected ship</SortableTh>
-                <SortableTh sortKey="velocity"    align="left"  sortConfig={sortConfig} onSort={handleSort}>Velocity</SortableTh>
-                <SortableTh sortKey="disposition" align="left"  sortConfig={sortConfig} onSort={handleSort} title="Disposition tag — click a row to edit in the drawer">Disposition</SortableTh>
-                <SortableTh sortKey="owner"       align="left"  sortConfig={sortConfig} onSort={handleSort} title="Owner — Palermo's team member accountable for this lot">Owner</SortableTh>
-                <th title="Most recent note on this lot — click the row to see full history">Latest Note</th>
+                <SortableTh sortKey="stage"       align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="stage">Stage</SortableTh>
+                <SortableTh sortKey="material"    align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="material">Item</SortableTh>
+                <SortableTh sortKey="lot"         align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="lot">Lot</SortableTh>
+                <SortableTh sortKey="expiration"  align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="expiration">Code date</SortableTh>
+                <SortableTh sortKey="daysToCode"  align="right" sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="daysToCode" title="Days remaining until code date (today)">Days to code</SortableTh>
+                <SortableTh sortKey="spec"        align="right" sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="spec" title="Customer's minimum-days-at-receipt spec; positive value = days the lot will land under spec at its projected ship date">Vs. spec</SortableTh>
+                <SortableTh sortKey="available"   align="right" sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="available">Available</SortableTh>
+                <SortableTh sortKey="projected"   align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="projected">Projected ship</SortableTh>
+                <SortableTh sortKey="velocity"    align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="velocity">Velocity</SortableTh>
+                <SortableTh sortKey="disposition" align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="disposition" title="Disposition tag — click a row to edit in the drawer">Disposition</SortableTh>
+                <SortableTh sortKey="owner"       align="left"  sortConfig={sortConfig} onSort={handleSort} onResizeStart={handleResizeStart} resizeKey="owner" title="Owner — Palermo's team member accountable for this lot">Owner</SortableTh>
+                <th
+                  title="Most recent note on this lot — click the row to see full history"
+                  style={{ position: 'relative', overflow: 'hidden' }}
+                >
+                  Latest Note
+                  <div
+                    onMouseDown={(e) => handleResizeStart('latestNote', e)}
+                    title="Drag to resize column"
+                    style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 6, cursor: 'col-resize' }}
+                  />
+                </th>
                 <th></th>
               </tr>
             </thead>
@@ -643,6 +748,7 @@ export default function PviShelfLife() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -784,7 +890,7 @@ function ProjectMultiSelect({ lookups, selected, onToggle, onClear, onSelectOnly
 
 // ── Sortable Th ────────────────────────────────────────────────────────────
 
-function SortableTh({ sortKey, align, sortConfig, onSort, title, children }) {
+function SortableTh({ sortKey, align, sortConfig, onSort, title, children, onResizeStart, resizeKey }) {
   const isActive = sortConfig.key === sortKey
   const indicator = isActive ? (sortConfig.direction === 'asc' ? ' ↑' : ' ↓') : ''
   return (
@@ -795,11 +901,24 @@ function SortableTh({ sortKey, align, sortConfig, onSort, title, children }) {
         userSelect: 'none',
         background: isActive ? 'var(--brand-bg, #fef9ec)' : undefined,
         fontWeight: isActive ? 700 : undefined,
+        position: 'relative',
+        overflow: 'hidden',
       }}
       title={title || `Sort by ${children}`}
       onClick={() => onSort(sortKey)}
     >
       {children}<span style={{ color: 'var(--brand, #a07818)', fontWeight: 700 }}>{indicator}</span>
+      {onResizeStart && (
+        <div
+          onMouseDown={(e) => onResizeStart(resizeKey, e)}
+          onClick={(e) => e.stopPropagation()}
+          title="Drag to resize column"
+          style={{
+            position: 'absolute', top: 0, right: 0, bottom: 0, width: 6,
+            cursor: 'col-resize',
+          }}
+        />
+      )}
     </th>
   )
 }
@@ -827,7 +946,7 @@ function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
   const shortfall = row.shortfall_days
   const specBadge = SPEC_SOURCE_BADGE[row.spec_source] || null
   const shortColor = shortfall == null
-    ? 'var(--text-dim)'
+    ? 'var(--text-secondary)'
     : shortfall > 0 ? '#d1583a'
     : shortfall < 0 ? '#3a7a3a'
     : '#c88a2a'
@@ -848,7 +967,7 @@ function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
         background: isSelected ? 'var(--brand-bg, #fef9ec)' : 'transparent',
       }}
     >
-      <td>
+      <td style={{ verticalAlign: 'top' }}>
         <span style={{
           display: 'inline-block',
           padding: '2px 6px',
@@ -862,40 +981,40 @@ function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
           {meta.label}
         </span>
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'normal', wordBreak: 'break-word', verticalAlign: 'top' }}>
         <div>{row.material_code}</div>
-        <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{row.material_desc}</div>
+        <div style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{row.material_desc}</div>
         {row.project_lookup && (
-          <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>{formatProjectLabel(row.project_lookup)}</div>
+          <div style={{ fontSize: 9, color: 'var(--text-secondary)' }}>{formatProjectLabel(row.project_lookup)}</div>
         )}
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'normal', wordBreak: 'break-word', verticalAlign: 'top' }}>
         {row.lot_code}
         {row.lot_status && row.lot_status !== 'Available' && (
           <div style={{ fontSize: 9, color: '#c88a2a', fontStyle: 'italic' }}>{row.lot_status}</div>
         )}
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-        {row.expiration_date_iso || <span style={{ color: 'var(--text-dim)' }}>—</span>}
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
+        {row.expiration_date_iso || <span style={{ color: 'var(--text-secondary)' }}>—</span>}
       </td>
-      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
         {daysToCode == null ? '—' : (
           <>
             <div>{daysToCode}</div>
             {daysAtShip != null && daysAtShip !== daysToCode && (
-              <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>@ship: {daysAtShip}</div>
+              <div style={{ fontSize: 9, color: 'var(--text-secondary)' }}>@ship: {daysAtShip}</div>
             )}
           </>
         )}
       </td>
-      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
         {req == null ? (
-          <span style={{ color: 'var(--text-dim)' }} title={prim?.canonical?.account_type === 'internal_transfer' ? 'Internal transfer — no shelf-life spec' : 'No shelf-life spec configured for this account'}>
+          <span style={{ color: 'var(--text-secondary)' }} title={prim?.canonical?.account_type === 'internal_transfer' ? 'Internal transfer — no shelf-life spec' : 'No shelf-life spec configured for this account'}>
             —
           </span>
         ) : (
           <>
-            <div style={{ color: 'var(--text-dim)', fontSize: 10 }}>
+            <div style={{ color: 'var(--text-secondary)', fontSize: 10 }}>
               req {req}d
               {specBadge && (
                 <span style={{
@@ -923,31 +1042,31 @@ function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
           </>
         )}
       </td>
-      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
         <div>{row.cases_available}</div>
         {row.cases_committed > 0 && (
-          <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>
+          <div style={{ fontSize: 9, color: 'var(--text-secondary)' }}>
             {row.cases_onhand} on / {row.cases_committed} cmt
           </div>
         )}
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
         <div>{acct}</div>
-        <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>
+        <div style={{ fontSize: 9, color: 'var(--text-secondary)' }}>
           {shipIso} · {shipSrc}
         </div>
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, verticalAlign: 'top' }}>
         <span style={{ color: vc.color, fontWeight: 600 }}>{vc.label}</span>
         {row.velocity && (
-          <div style={{ fontSize: 9, color: 'var(--text-dim)' }}>
+          <div style={{ fontSize: 9, color: 'var(--text-secondary)' }}>
             {row.velocity.shipments_30d} orders / 30d
           </div>
         )}
       </td>
       {/* Disposition — inline badge if set, subtle placeholder if not.
           Click row to edit via drawer. */}
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
         {dispMeta ? (
           <span
             style={{
@@ -965,39 +1084,33 @@ function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
             {dispMeta.short}
           </span>
         ) : (
-          <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>—</span>
+          <span style={{ color: 'var(--text-secondary)', fontSize: 10 }}>—</span>
         )}
       </td>
       {/* Owner — plain text, tighter typography since it's usually a
           first name or "First LastInitial" like "Dave I" or "Greg Y". */}
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, verticalAlign: 'top' }}>
         {row.owner
           ? row.owner
-          : <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>—</span>}
+          : <span style={{ color: 'var(--text-secondary)', fontSize: 10 }}>—</span>}
       </td>
-      {/* Latest Note — truncated inline preview (2026-07-08, Wade/Jessica
-          ask: don't make them open the drawer to see if there's already a
-          comment on a lot). Full text + author + timestamp in the title
-          attribute for hover; click the row to open the drawer for the
-          full history and to add a new one. */}
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, maxWidth: 180 }}>
+      {/* Latest Note — full text, wraps and expands the row height instead
+          of truncating (2026-07-08→07-09, Wade/Jessica: cut-off notes forced
+          a hover to read; team wants the whole comment visible without
+          hovering). title attribute kept as a redundant hover fallback. */}
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, whiteSpace: 'normal', wordBreak: 'break-word', verticalAlign: 'top' }}>
         {latestNote ? (
           <div
             title={`${latestNote.author || '(anon)'} · ${latestNote.created_at ? new Date(latestNote.created_at).toLocaleString() : ''}\n\n${latestNote.note}`}
-            style={{
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
           >
-            <span style={{ color: 'var(--text-dim)', fontSize: 9 }}>{latestNote.author || '(anon)'}:</span>{' '}
+            <span style={{ color: 'var(--text-secondary)', fontSize: 9 }}>{latestNote.author || '(anon)'}:</span>{' '}
             {latestNote.note}
           </div>
         ) : (
-          <span style={{ color: 'var(--text-dim)' }}>—</span>
+          <span style={{ color: 'var(--text-secondary)' }}>—</span>
         )}
       </td>
-      <td>
+      <td style={{ verticalAlign: 'top' }}>
         <button
           className="settings-save-btn"
           onClick={(e) => { e.stopPropagation(); onCopy() }}
