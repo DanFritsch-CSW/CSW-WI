@@ -99,8 +99,9 @@ export function undismissConversation(id) {
 
 // Manual ship date — for conversations with a real target date written
 // in plain text (not a Datex reference number the sync can match), e.g.
-// "Pallet needed back from CSW 07/10/2026". Lets a manager place it on
-// the day-slider view manually. Pass null to clear.
+// "Pallet needed back from CSW 07/10/2026". Lets a manager type the date
+// in by hand so it still shows up in the day-slider view. Pass null to
+// clear.
 export function setManualShipDate(id, dateStr) {
   return updateRevisionConversation(id, { manual_ship_date: dateStr || null })
 }
@@ -112,6 +113,11 @@ export function setManualShipDate(id, dateStr) {
 //   3. manual_ship_date (manager typed in a date by hand — no appointment_id/
 //      warehouse, just a date to filter/display by)
 //   4. null (no date signal at all)
+//
+// reference_number (added 2026-07-09, session 8) is included so the tab
+// can pre-fill the Order/PO # field from the matched Datex reference
+// instead of always showing "not linked" — see matched_reference_number
+// in revision-sync.cjs for where the auto value comes from.
 export function effectiveMatch(conv) {
   if (conv.resolved_match) {
     return {
@@ -119,6 +125,7 @@ export function effectiveMatch(conv) {
       warehouse_name: conv.resolved_match.warehouse_name,
       scheduled_arrival: conv.resolved_match.scheduled_arrival,
       owner_name: conv.resolved_match.owner_name,
+      reference_number: conv.resolved_match.reference_number || null,
       source: 'resolved',
     }
   }
@@ -128,6 +135,7 @@ export function effectiveMatch(conv) {
       warehouse_name: conv.matched_warehouse,
       scheduled_arrival: conv.matched_scheduled_arrival,
       owner_name: null,
+      reference_number: conv.matched_reference_number || null,
       source: 'auto',
     }
   }
@@ -137,6 +145,7 @@ export function effectiveMatch(conv) {
       warehouse_name: null,
       scheduled_arrival: conv.manual_ship_date,
       owner_name: null,
+      reference_number: null,
       source: 'manual',
     }
   }
