@@ -71,6 +71,14 @@ import {
 //      the day-slider view. See effectiveMatch() in src/lib/revisions.js
 //      for how it slots in as a fallback (source: 'manual', no
 //      appointment_id — so it's never falsely grouped with other threads).
+//
+// Order/PO # auto-fill (2026-07-09, session 8): Dan caught that this
+// field always showed "not linked" even on conversations with a confirmed
+// matched_appointment_id — the actual reference_number (e.g. "517051")
+// was only ever a transient value during sync and never persisted, so
+// there was nothing to show. Now pre-fills from match.reference_number
+// (see matched_reference_number in revision-sync.cjs) when nothing's been
+// manually entered; still fully editable/overridable.
 
 const RECENT_WINDOW_DAYS = 14
 const FRONT_WORKSPACE_SUBDOMAIN = 'central-storage-and-warehouse-co'
@@ -219,10 +227,14 @@ function CandidatePicker({ conv, onResolved }) {
 
 function ConversationCard({ conv, comments, onChange, relatedCount }) {
   const [expanded, setExpanded] = useState(false)
-  const [orderNumber, setOrderNumber] = useState(conv.order_number || '')
+  const match = effectiveMatch(conv)
+  // Pre-fill from the matched Datex reference number when nothing's been
+  // manually entered yet (see header comment, session 8). Still fully
+  // editable — typing here always saves as an explicit manual override.
+  const [orderNumber, setOrderNumber] = useState(conv.order_number || match?.reference_number || '')
   const [shipDate, setShipDate] = useState(conv.manual_ship_date || '')
   const meta = facilityMeta(conv.facility)
-  const match = effectiveMatch(conv)
+  const isAutoFilledOrderNumber = !conv.order_number && !!match?.reference_number
 
   async function handleFacilityChange(e) {
     await updateRevisionConversation(conv.id, { facility: e.target.value || null })
@@ -336,6 +348,9 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
                 placeholder="not linked"
                 style={{ marginLeft: 4, width: 120 }}
               />
+              {isAutoFilledOrderNumber && (
+                <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--text-dim, #9aaabb)', fontFamily: 'var(--font-mono, monospace)' }}>(auto)</span>
+              )}
             </label>
             {!match && (
               <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
