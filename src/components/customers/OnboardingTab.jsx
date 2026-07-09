@@ -7,6 +7,7 @@ import {
   completeTaskAndNotifyNext, fetchFrontTeammates,
 } from '../../lib/onboarding.js'
 import TemplateEditor from './TemplateEditor.jsx'
+import TeammatePicker from './TeammatePicker.jsx'
 
 // Customer Onboarding — v1 built 2026-07-08 for feedback/iteration, not a
 // final design. Pulled forward from the 2026-06-05 mock session (real
@@ -382,22 +383,7 @@ function AddTaskInline({ customerId, teammates, nextSortOrder, onClose, onAdded 
         onChange={(e) => setLabel(e.target.value)}
         style={{ fontSize: 12, padding: '4px 8px', flex: 1, minWidth: 140 }}
       />
-      <select
-        value={teammateId}
-        onChange={(e) => setTeammateId(e.target.value)}
-        style={{
-          fontSize: 12, padding: '4px 6px', width: 190, borderRadius: 4,
-          border: `1px solid ${teammateId ? 'var(--border)' : '#fde68a'}`,
-          background: teammateId ? 'transparent' : '#fffbeb',
-        }}
-      >
-        <option value="">— unassigned —</option>
-        {teammates.map(tm => (
-          <option key={tm.teammate_id} value={tm.teammate_id}>
-            @{tm.username}{tm.first_name ? ` — ${tm.first_name} ${tm.last_name || ''}`.trimEnd() : ''}
-          </option>
-        ))}
-      </select>
+      <TeammatePicker teammates={teammates} value={teammateId} onChange={setTeammateId} />
       <button type="button" onClick={submit} disabled={saving} style={smallBtnStyle}>
         {saving ? 'Adding…' : 'Add'}
       </button>
