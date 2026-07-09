@@ -51,6 +51,13 @@
   schedule = "0 10 * * *"
   timeout = 26
 
+# Scheduled nightly Front teammates sync — runs at 10:10 UTC daily (right
+# after nightly-b2e-sync at 10:00, offset by 10min to avoid overlapping cold
+# starts). Keeps front_teammates current for the Customer Onboarding
+# @username picker as CSW staff join/leave/change roles.
+[functions."front-teammates-nightly-sync"]
+  schedule = "10 10 * * *"
+
 # Password gate for the Palermo's standalone deploy (cswpvi.netlify.app).
 # The edge function itself checks VITE_APP_MODE and no-ops on the main
 # CSW-WI app, so registering it globally here is safe for both sites.
