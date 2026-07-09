@@ -18,6 +18,7 @@ const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
 const Customers          = lazy(() => import('./pages/Customers.jsx'))
 const OrderCreator       = lazy(() => import('./pages/OrderCreator.jsx'))
 const Analytics          = lazy(() => import('./pages/Analytics.jsx'))
+const Revisions          = lazy(() => import('./pages/Revisions.jsx'))
 const Settings           = lazy(() => import('./pages/Settings.jsx'))
 const PalermosStandalone = lazy(() => import('./pages/PalermosStandalone.jsx'))
 
@@ -119,6 +120,7 @@ export default function App() {
               <Route path="/customers" element={<Customers />}        />
               <Route path="/orders"    element={<OrderCreator />}     />
               <Route path="/analytics" element={<Analytics />}        />
+              <Route path="/revisions" element={<Revisions />}        />
               <Route path="/settings"  element={<Settings />}         />
             </Routes>
           </Suspense>
