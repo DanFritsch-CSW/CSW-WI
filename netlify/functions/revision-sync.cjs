@@ -97,6 +97,17 @@
 // function's run and never persisted, so there was nothing for the UI to
 // show or default to. This column carries it through so the frontend can
 // pre-fill Order/PO # instead of always showing "not linked".
+//
+// ── Attachment filename extraction (added 2026-07-09, session 9) ───────
+// Dan caught (via cnv_1buk5xxw) that the actual order number often sits
+// right in an attached file's name — e.g. "Aldi Center Valley 516990
+// REVISED.pdf" — and that this specific conversation only worked because
+// the CSR ALSO happened to type "516990" in the reply text. If a CSR ever
+// just attaches the revised file without restating the number, body-text
+// extraction alone would miss it entirely. kb.messages.attachments is a
+// jsonb array of {id, url, size, filename, content_type} — filenames are
+// low-noise (no phone numbers/addresses like body text has) so they're
+// extracted directly, no stripSignatureNoise needed.
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' };
 
@@ -166,8 +177,8 @@ function stripSignatureNoise(text) {
 }
 
 // Pull 3+ digit runs out of text, drop plain-calendar-year looking 4-digit
-// tokens (2020-2035), dedupe. Used for both subject (as-is) and body text
-// (after stripSignatureNoise).
+// tokens (2020-2035), dedupe. Used for subjects and body text (stripped)
+// and attachment filenames (as-is).
 function extractTokens(text) {
   if (!text) return [];
   const matches = text.match(/\d{3,}/g) || [];
@@ -319,12 +330,14 @@ exports.handler = async function () {
       return { statusCode: 200, headers: NO_CACHE_HEADERS, body: JSON.stringify({ success: true, conversations_synced: 0, comments_synced: 0 }) };
     }
 
-    // 2. Pull conversation rows + SLA tags + message bodies (for token
-    // extraction — see header comment) in id-chunks (URL length safety).
+    // 2. Pull conversation rows + SLA tags + message bodies + attachment
+    // filenames (for token extraction — see header comment) in id-chunks
+    // (URL length safety).
     const idChunks = chunk(conversationIds, 100);
     const conversations = [];
     const slaByConversation = {};
     const bodiesByConversation = new Map();
+    const filenamesByConversation = new Map();
 
     for (const ids of idChunks) {
       const idsFilter = ids.join(',');
@@ -347,24 +360,35 @@ exports.handler = async function () {
       }
 
       const messageRows = await kbFetch(
-        `messages?conversation_id=in.(${idsFilter})&select=conversation_id,body`
+        `messages?conversation_id=in.(${idsFilter})&select=conversation_id,body,attachments`
       );
       for (const row of messageRows) {
-        if (!row.body) continue;
-        if (!bodiesByConversation.has(row.conversation_id)) bodiesByConversation.set(row.conversation_id, []);
-        bodiesByConversation.get(row.conversation_id).push(row.body);
+        if (row.body) {
+          if (!bodiesByConversation.has(row.conversation_id)) bodiesByConversation.set(row.conversation_id, []);
+          bodiesByConversation.get(row.conversation_id).push(row.body);
+        }
+        if (Array.isArray(row.attachments)) {
+          for (const att of row.attachments) {
+            if (!att?.filename) continue;
+            if (!filenamesByConversation.has(row.conversation_id)) filenamesByConversation.set(row.conversation_id, []);
+            filenamesByConversation.get(row.conversation_id).push(att.filename);
+          }
+        }
       }
     }
 
     // 2b. Extract tokens per conversation (subject + all message bodies,
-    // bodies noise-stripped first), batch-match against MotherDuck once.
+    // noise-stripped, + attachment filenames), batch-match against
+    // MotherDuck once.
     const tokensByConversation = new Map();
     const allTokens = new Set();
     for (const c of conversations) {
       const subjectTokens = extractTokens(c.subject);
       const bodies = bodiesByConversation.get(c.id) || [];
       const bodyTokens = bodies.flatMap((b) => extractTokens(stripSignatureNoise(b)));
-      const tokens = [...new Set([...subjectTokens, ...bodyTokens])];
+      const filenames = filenamesByConversation.get(c.id) || [];
+      const filenameTokens = filenames.flatMap((f) => extractTokens(f));
+      const tokens = [...new Set([...subjectTokens, ...bodyTokens, ...filenameTokens])];
       tokensByConversation.set(c.id, tokens);
       tokens.forEach((t) => allTokens.add(t));
     }
