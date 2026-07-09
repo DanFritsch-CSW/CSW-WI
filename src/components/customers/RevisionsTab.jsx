@@ -44,8 +44,16 @@ import {
 // made the section useless (confirmed with Dan: 252 of 268 unmatched were
 // >7 days old). So Needs Review only shows unmatched/ambiguous items from
 // the last 14 days by default; older ones sit behind a collapsed toggle.
+//
+// Front deep link (2026-07-09, session 6): subdomain inferred from
+// attachment URLs seen in kb.messages during earlier investigation
+// (central-storage-and-warehouse-co.api.frontapp.com) — the web app
+// deep-link pattern swaps the api. host for the plain workspace subdomain.
+// Not independently browser-tested; if it 404s, the subdomain guess is
+// the first thing to check.
 
 const RECENT_WINDOW_DAYS = 14
+const FRONT_WORKSPACE_SUBDOMAIN = 'central-storage-and-warehouse-co'
 
 const SLA_LABEL = { breach: 'SLA Breach', warning: 'SLA Warning', applies: 'SLA Applies' }
 const SLA_COLOR = { breach: 'var(--red, #c0392b)', warning: 'var(--amber, #a07818)', applies: 'var(--text-dim, #9aaabb)' }
@@ -231,6 +239,21 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
             {conv.customer_name || 'Unknown customer'} · {conv.status} · {timeAgo(conv.last_message_at)}
             {match?.scheduled_arrival && (
               <> · ships {new Date(match.scheduled_arrival).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</>
+            )}
+            {conv.front_id && (
+              <>
+                {' · '}
+                <a
+                  href={`https://${FRONT_WORKSPACE_SUBDOMAIN}.frontapp.com/open/${conv.front_id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  title="Open this conversation in Front"
+                  style={{ color: 'var(--text-dim, #9aaabb)', fontFamily: 'var(--font-mono, monospace)', fontSize: 10, textDecoration: 'underline' }}
+                >
+                  {conv.front_id}
+                </a>
+              </>
             )}
           </div>
         </div>
