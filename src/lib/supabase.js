@@ -1657,3 +1657,30 @@ export async function deletePviLotDisposition(material_code, lot_code) {
     .eq('lot_code', String(lot_code))
   if (error) { console.error('deletePviLotDisposition:', error); throw error }
 }
+
+// ─── Notification Recipients (Front email / discussion notifications) ─────
+//
+// Generic recipient list backing outbound notifications sent via Front
+// (email digests via front-send-email.cjs, and later @mention-based internal
+// discussions via a future front-post-discussion.cjs). One table serves
+// multiple features via list_name scoping (e.g. 'fefo_ken_digest',
+// 'onboarding_ken') instead of a separate table per feature.
+//
+// front_teammate_id is nullable — only populated for people with a Front
+// seat, which is required to @mention them in a discussion (internal-only,
+// per Front's API — comments never leave Front and have no concept of an
+// external recipient). Email-only rows (including external contacts like
+// Palermo's) just need `email` populated and work fine with
+// front-send-email.cjs regardless of this field.
+
+export async function fetchNotificationRecipients(listName) {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('notification_recipients')
+    .select('*')
+    .eq('list_name', listName)
+    .eq('active', true)
+    .order('name')
+  if (error) { console.error('fetchNotificationRecipients:', error); return [] }
+  return data ?? []
+}
