@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   BUCKETS, BUCKET_COLORS, STAGES,
   fetchOnboardingCustomers, createOnboardingCustomer, updateCustomerStage,
@@ -13,7 +14,16 @@ import TeammatePicker from './TeammatePicker.jsx'
 // final design. Pulled forward from the 2026-06-05 mock session (real
 // buckets/owners/template, not invented) rather than starting from scratch.
 // See src/lib/onboarding.js header comment for the Front handoff mechanic.
+//
+// 2026-07-09: added ?customer=<id> URL state (same pattern as the parent
+// Customers page's ?tab=) so a specific customer's checklist is directly
+// linkable — e.g. to paste into the Front discussion thread for that
+// customer. Sequential Supabase IDs are used as-is (option chosen over a
+// non-guessable token) — flagged to Dan that this app has no auth layer, so
+// anyone with a link can view AND act on that customer, and the ID is
+// enumerable. Accepted as fine for an internal-only tool.
 export default function OnboardingTab() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [customers, setCustomers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -21,6 +31,7 @@ export default function OnboardingTab() {
   const [showArchived, setShowArchived] = useState(false)
   const [showNewForm, setShowNewForm] = useState(false)
   const [view, setView] = useState('customer') // 'customer' | 'template'
+  const [urlInitDone, setUrlInitDone] = useState(false)
 
   const load = () => {
     setLoading(true)
@@ -32,14 +43,46 @@ export default function OnboardingTab() {
 
   useEffect(() => { load() }, [])
 
+  // Honor a ?customer=<id> link once customers have loaded — runs exactly
+  // once. If the linked customer is archived, also flip the Archived filter
+  // so the link actually resolves instead of silently falling through to
+  // the auto-select-first fallback below.
+  useEffect(() => {
+    if (urlInitDone || customers.length === 0) return
+    const urlId = Number(searchParams.get('customer'))
+    if (urlId) {
+      const match = customers.find(c => c.id === urlId)
+      if (match) {
+        setSelectedId(urlId)
+        if (match.archived) setShowArchived(true)
+      }
+    }
+    setUrlInitDone(true)
+  }, [customers, urlInitDone, searchParams])
+
   useEffect(() => {
     // Auto-select the first visible customer when none is selected, or when
-    // the archived filter changes and the current selection drops out of view.
+    // the archived filter changes and the current selection drops out of
+    // view. Gated on urlInitDone so it doesn't fight with honoring a
+    // ?customer= link on first load.
+    if (!urlInitDone) return
     const visible = customers.filter(c => !!c.archived === showArchived)
     if (!visible.find(c => c.id === selectedId)) {
       setSelectedId(visible[0]?.id ?? null)
     }
-  }, [customers, showArchived, selectedId])
+  }, [customers, showArchived, selectedId, urlInitDone])
+
+  // selectCustomer — sets local state AND keeps ?customer= in the URL in
+  // sync, so the address bar is always a valid link to whatever's selected
+  // (merges with existing params rather than overwriting ?tab=onboarding).
+  const selectCustomer = (id) => {
+    setSelectedId(id)
+    setView('customer')
+    const next = new URLSearchParams(searchParams)
+    if (id) next.set('customer', String(id))
+    else next.delete('customer')
+    setSearchParams(next)
+  }
 
   const visibleCustomers = customers.filter(c => !!c.archived === showArchived)
   const selected = customers.find(c => c.id === selectedId) || null
@@ -49,7 +92,7 @@ export default function OnboardingTab() {
       <Sidebar
         customers={visibleCustomers}
         selectedId={selectedId}
-        onSelect={(id) => { setSelectedId(id); setView('customer') }}
+        onSelect={selectCustomer}
         showArchived={showArchived}
         onToggleArchived={setShowArchived}
         onNewCustomer={() => setShowNewForm(true)}
@@ -94,7 +137,7 @@ export default function OnboardingTab() {
           onClose={() => setShowNewForm(false)}
           onCreated={(customer) => {
             setCustomers(prev => [customer, ...prev])
-            setSelectedId(customer.id)
+            selectCustomer(customer.id)
             setShowNewForm(false)
           }}
         />
@@ -182,6 +225,7 @@ function CustomerDetail({ customer, onStageChange, onArchiveToggle, onDelete }) 
   const [notice, setNotice] = useState(null) // { text, tone } | null — transient handoff-result banner
   const [showAddTask, setShowAddTask] = useState(false)
   const [teammates, setTeammates] = useState([])
+  const [linkCopied, setLinkCopied] = useState(false)
 
   const reload = () => {
     setLoading(true)
@@ -208,6 +252,17 @@ function CustomerDetail({ customer, onStageChange, onArchiveToggle, onDelete }) 
 
   const doneCount = tasks.filter(t => t.status === 'done').length
 
+  const copyLink = () => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('customer', String(customer.id))
+    navigator.clipboard.writeText(url.toString())
+      .then(() => {
+        setLinkCopied(true)
+        setTimeout(() => setLinkCopied(false), 1500)
+      })
+      .catch(() => window.alert(`Copy failed — link is: ${url.toString()}`))
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 12 }}>
@@ -219,6 +274,9 @@ function CustomerDetail({ customer, onStageChange, onArchiveToggle, onDelete }) 
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <button type="button" onClick={copyLink} style={smallBtnStyle}>
+            {linkCopied ? 'Copied!' : 'Copy link'}
+          </button>
           <select
             value={customer.stage}
             onChange={(e) => onStageChange(e.target.value)}
