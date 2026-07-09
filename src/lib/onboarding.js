@@ -165,3 +165,55 @@ export async function completeTaskAndNotifyNext(taskId) {
   }
   return json
 }
+
+// ─── Template Editor support ────────────────────────────────────────────────
+// Added 2026-07-09 to back the Template Editor screen — lets Dan add/edit/
+// reorder/delete master template tasks and their default owners without
+// asking Claude to run SQL each time. Editing these rows only affects
+// customers created AFTER the change; existing customers are frozen
+// snapshots per the original design decision (see createOnboardingCustomer).
+
+export async function addTemplateTask({ bucket, label, sortOrder, ownerName, ownerTeammateId }) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('onboarding_task_templates')
+    .insert({
+      bucket, label, sort_order: sortOrder,
+      default_owner_name: ownerName || null,
+      default_owner_teammate_id: ownerTeammateId || null,
+    })
+    .select()
+    .single()
+  if (error) { console.error('addTemplateTask:', error); throw error }
+  return data
+}
+
+export async function updateTemplateTask(id, patch) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('onboarding_task_templates')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (error) { console.error('updateTemplateTask:', error); throw error }
+}
+
+export async function deleteTemplateTask(id) {
+  if (!supabase) return
+  const { error } = await supabase.from('onboarding_task_templates').delete().eq('id', id)
+  if (error) { console.error('deleteTemplateTask:', error); throw error }
+}
+
+// swapTemplateTaskOrder — swaps sort_order between two adjacent template
+// rows, backing the up/down reorder controls in the Template Editor.
+export async function swapTemplateTaskOrder(taskA, taskB) {
+  if (!supabase) return
+  const { error: e1 } = await supabase
+    .from('onboarding_task_templates')
+    .update({ sort_order: taskB.sort_order })
+    .eq('id', taskA.id)
+  const { error: e2 } = await supabase
+    .from('onboarding_task_templates')
+    .update({ sort_order: taskA.sort_order })
+    .eq('id', taskB.id)
+  if (e1 || e2) console.error('swapTemplateTaskOrder:', e1 || e2)
+}
