@@ -149,6 +149,18 @@ function TemplateRow({ task, teammates, isFirst, isLast, onMoveUp, onMoveDown, o
         onChange={handleTeammateChange}
       />
 
+      {(task.notes || task.dependencies) && (
+        <span
+          title={[
+            task.dependencies ? `Depends on: ${task.dependencies}` : null,
+            task.notes || null,
+          ].filter(Boolean).join('\n\n')}
+          style={{ fontSize: 13, color: 'var(--text-secondary)', cursor: 'help', flexShrink: 0 }}
+        >
+          ⓘ
+        </span>
+      )}
+
       <button type="button" onClick={onDelete} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: 14 }}>
         ×
       </button>
