@@ -4,6 +4,7 @@ import {
   fetchTaskTemplate, addTemplateTask, updateTemplateTask, deleteTemplateTask, swapTemplateTaskOrder,
   fetchFrontTeammates,
 } from '../../lib/onboarding.js'
+import TeammatePicker from './TeammatePicker.jsx'
 
 // Template Editor — added 2026-07-09. Edits onboarding_task_templates, the
 // master checklist cloned into new customers. Changes here do NOT affect
@@ -152,31 +153,6 @@ function TemplateRow({ task, teammates, isFirst, isLast, onMoveUp, onMoveDown, o
         ×
       </button>
     </div>
-  )
-}
-
-// TeammatePicker — dropdown showing "@username — First Last" instead of a
-// raw tea_xxxxx field. Added 2026-07-09 per Dan: the team thinks in @dfritsch
-// / @awasz terms (same as typing @ in Front itself), not opaque teammate IDs.
-function TeammatePicker({ teammates, value, onChange }) {
-  return (
-    <select
-      value={value || ''}
-      onChange={(e) => onChange(e.target.value)}
-      style={{
-        fontSize: 12, padding: '4px 6px', width: 190, borderRadius: 4,
-        border: `1px solid ${value ? 'var(--border)' : '#fde68a'}`,
-        background: value ? 'transparent' : '#fffbeb',
-      }}
-      title={value ? undefined : 'No teammate selected — handoff notification/assignment won\'t fire for this task'}
-    >
-      <option value="">— unassigned —</option>
-      {teammates.map(tm => (
-        <option key={tm.teammate_id} value={tm.teammate_id}>
-          @{tm.username}{tm.first_name ? ` — ${tm.first_name} ${tm.last_name || ''}`.trimEnd() : ''}
-        </option>
-      ))}
-    </select>
   )
 }
 
