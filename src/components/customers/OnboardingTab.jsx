@@ -389,6 +389,17 @@ function BucketSection({ bucket, tasks, onComplete, onDelete }) {
                 </span>
               )}
             </span>
+            {(t.notes || t.dependencies) && (
+              <span
+                title={[
+                  t.dependencies ? `Depends on: ${t.dependencies}` : null,
+                  t.notes || null,
+                ].filter(Boolean).join('\n\n')}
+                style={{ fontSize: 13, color: 'var(--text-secondary)', cursor: 'help', flexShrink: 0 }}
+              >
+                ⓘ
+              </span>
+            )}
             <button
               type="button"
               onClick={() => onDelete(t.id)}
