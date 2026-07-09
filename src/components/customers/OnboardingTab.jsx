@@ -4,7 +4,7 @@ import {
   fetchOnboardingCustomers, createOnboardingCustomer, updateCustomerStage,
   setCustomerArchived, deleteOnboardingCustomer,
   fetchTaskInstances, addTaskInstance, updateTaskInstance, deleteTaskInstance,
-  completeTaskAndNotifyNext,
+  completeTaskAndNotifyNext, fetchFrontTeammates,
 } from '../../lib/onboarding.js'
 import TemplateEditor from './TemplateEditor.jsx'
 
@@ -180,6 +180,7 @@ function CustomerDetail({ customer, onStageChange, onArchiveToggle, onDelete }) 
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState(null) // { text, tone } | null — transient handoff-result banner
   const [showAddTask, setShowAddTask] = useState(false)
+  const [teammates, setTeammates] = useState([])
 
   const reload = () => {
     setLoading(true)
@@ -187,6 +188,7 @@ function CustomerDetail({ customer, onStageChange, onArchiveToggle, onDelete }) 
   }
 
   useEffect(() => { reload() }, [customer.id])
+  useEffect(() => { fetchFrontTeammates().then(setTeammates) }, [])
 
   const handleComplete = async (task) => {
     setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'done' } : t))
@@ -277,6 +279,7 @@ function CustomerDetail({ customer, onStageChange, onArchiveToggle, onDelete }) 
       {showAddTask && (
         <AddTaskInline
           customerId={customer.id}
+          teammates={teammates}
           nextSortOrder={(tasks.at(-1)?.sort_order ?? 0) + 1}
           onClose={() => setShowAddTask(false)}
           onAdded={(task) => { setTasks(prev => [...prev, task]); setShowAddTask(false) }}
@@ -341,19 +344,21 @@ function BucketSection({ bucket, tasks, onComplete, onDelete }) {
   )
 }
 
-function AddTaskInline({ customerId, nextSortOrder, onClose, onAdded }) {
+function AddTaskInline({ customerId, teammates, nextSortOrder, onClose, onAdded }) {
   const [bucket, setBucket] = useState(BUCKETS[0])
   const [label, setLabel] = useState('')
-  const [ownerName, setOwnerName] = useState('')
+  const [teammateId, setTeammateId] = useState('')
   const [saving, setSaving] = useState(false)
 
   const submit = async () => {
     if (!label.trim()) return
     setSaving(true)
     try {
+      const tm = teammates.find(t => t.teammate_id === teammateId)
       const task = await addTaskInstance({
         customerId, bucket, label: label.trim(), sortOrder: nextSortOrder,
-        ownerName: ownerName.trim() || null, ownerTeammateId: null,
+        ownerName: tm ? (tm.first_name || tm.username) : null,
+        ownerTeammateId: teammateId || null,
       })
       onAdded(task)
     } catch (err) {
@@ -377,12 +382,22 @@ function AddTaskInline({ customerId, nextSortOrder, onClose, onAdded }) {
         onChange={(e) => setLabel(e.target.value)}
         style={{ fontSize: 12, padding: '4px 8px', flex: 1, minWidth: 140 }}
       />
-      <input
-        placeholder="Owner name (optional)"
-        value={ownerName}
-        onChange={(e) => setOwnerName(e.target.value)}
-        style={{ fontSize: 12, padding: '4px 8px', width: 140 }}
-      />
+      <select
+        value={teammateId}
+        onChange={(e) => setTeammateId(e.target.value)}
+        style={{
+          fontSize: 12, padding: '4px 6px', width: 190, borderRadius: 4,
+          border: `1px solid ${teammateId ? 'var(--border)' : '#fde68a'}`,
+          background: teammateId ? 'transparent' : '#fffbeb',
+        }}
+      >
+        <option value="">— unassigned —</option>
+        {teammates.map(tm => (
+          <option key={tm.teammate_id} value={tm.teammate_id}>
+            @{tm.username}{tm.first_name ? ` — ${tm.first_name} ${tm.last_name || ''}`.trimEnd() : ''}
+          </option>
+        ))}
+      </select>
       <button type="button" onClick={submit} disabled={saving} style={smallBtnStyle}>
         {saving ? 'Adding…' : 'Add'}
       </button>
