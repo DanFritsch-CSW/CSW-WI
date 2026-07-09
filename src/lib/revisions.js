@@ -42,7 +42,10 @@ export async function fetchRevisionComments(conversationIds) {
 // roster_assignments.manually_edited).
 export async function updateRevisionConversation(id, patch) {
   const allowed = {}
-  for (const key of ['facility', 'order_number', 'resolved', 'resolved_by', 'resolved_at', 'resolved_match']) {
+  for (const key of [
+    'facility', 'order_number', 'resolved', 'resolved_by', 'resolved_at',
+    'resolved_match', 'dismissed', 'manual_ship_date',
+  ]) {
     if (key in patch) allowed[key] = patch[key]
   }
   const { error } = await supabase
@@ -82,10 +85,33 @@ export function clearResolvedMatch(id) {
   return updateRevisionConversation(id, { resolved_match: null })
 }
 
+// Dismiss — for Front tag false positives (e.g. the "Revision" tag rule
+// matching a keyword in CSW's own reply, not anything the customer said).
+// Distinct from resolved: dismissed means this was never really a
+// revision issue; resolved means a real one got handled.
+export function dismissConversation(id) {
+  return updateRevisionConversation(id, { dismissed: true })
+}
+
+export function undismissConversation(id) {
+  return updateRevisionConversation(id, { dismissed: false })
+}
+
+// Manual ship date — for conversations with a real target date written
+// in plain text (not a Datex reference number the sync can match), e.g.
+// "Pallet needed back from CSW 07/10/2026". Lets a manager place it on
+// the day-slider view manually. Pass null to clear.
+export function setManualShipDate(id, dateStr) {
+  return updateRevisionConversation(id, { manual_ship_date: dateStr || null })
+}
+
 // Single source of truth for "what appointment does this conversation
-// belong to, if any" — a manager's resolved_match always wins over the
-// sync's own matched_* columns, since it represents a human confirming
-// the right one out of several candidates that shared a numeric token.
+// belong to, if any" — priority order:
+//   1. resolved_match (manager confirmed one of several ambiguous candidates)
+//   2. matched_* (sync auto-matched exactly one candidate)
+//   3. manual_ship_date (manager typed in a date by hand — no appointment_id/
+//      warehouse, just a date to filter/display by)
+//   4. null (no date signal at all)
 export function effectiveMatch(conv) {
   if (conv.resolved_match) {
     return {
@@ -103,6 +129,15 @@ export function effectiveMatch(conv) {
       scheduled_arrival: conv.matched_scheduled_arrival,
       owner_name: null,
       source: 'auto',
+    }
+  }
+  if (conv.manual_ship_date) {
+    return {
+      appointment_id: null, // no real appointment — never grouped with other conversations
+      warehouse_name: null,
+      scheduled_arrival: conv.manual_ship_date,
+      owner_name: null,
+      source: 'manual',
     }
   }
   return null
