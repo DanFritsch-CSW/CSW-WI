@@ -58,6 +58,14 @@
 [functions."front-teammates-nightly-sync"]
   schedule = "10 10 * * *"
 
+# Daily Front discussion creator — runs at 23:00 UTC = 6pm CDT / 5pm CST
+# (DST-unadjusted, same caveat as every other scheduled function above).
+# Creates tomorrow's "{Facility} {Weekday} {M/D}" discussion for every active
+# row in front_daily_discussion_configs. Recipients managed in
+# Settings > Daily Discussions.
+[functions."front-daily-discussion-run"]
+  schedule = "0 23 * * *"
+
 # Password gate for the Palermo's standalone deploy (cswpvi.netlify.app).
 # The edge function itself checks VITE_APP_MODE and no-ops on the main
 # CSW-WI app, so registering it globally here is safe for both sites.
