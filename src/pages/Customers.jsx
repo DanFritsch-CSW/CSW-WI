@@ -2,13 +2,14 @@ import { useSearchParams } from 'react-router-dom'
 import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
+import RevisionsTab from '../components/customers/RevisionsTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
-// Customers module — four sub-tabs sharing a common header + tab row.
-// Sub-tab state lives in URL (?tab=space|onboarding|fefo|pvi) so links are
-// shareable and refresh-safe, matching the rest of the app's URL-as-state
-// pattern (LaborPlanning uses ?fac=&date=).
+// Customers module — five sub-tabs sharing a common header + tab row.
+// Sub-tab state lives in URL (?tab=space|onboarding|fefo|revisions|pvi) so
+// links are shareable and refresh-safe, matching the rest of the app's
+// URL-as-state pattern (LaborPlanning uses ?fac=&date=).
 //
 // When the PVI sub-tab is active, the Palermo's brand mark is displayed
 // in the header (right-aligned) so it's visually clear this section is
@@ -20,6 +21,13 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // to Palermo's At Risk Inventory Manager." Label + subtitle updated here;
 // the browser tab title is set by PviShelfLife.jsx via document.title
 // useEffect so it flips to the new name only while that tab is active.
+//
+// Revisions sub-tab (2026-07-09): tracks Front conversations tagged
+// "Revision"/"Revisions" (order-revision misses), mirrored on a schedule
+// from the separate csw-kb-assistant Supabase project. Placed next to
+// FEFO Rotation — same "verify before it ships" spirit, different failure
+// mode (revision handling vs shelf-life). See RevisionsTab.jsx,
+// src/lib/revisions.js, and netlify/functions/revision-sync.cjs.
 const SUB_TABS = [
   {
     id: 'space',
@@ -35,6 +43,11 @@ const SUB_TABS = [
     id: 'fefo',
     label: 'FEFO Rotation',
     subtitle: 'Pre-ship FEFO rotation verification · live from Datex / Omni',
+  },
+  {
+    id: 'revisions',
+    label: 'Revisions',
+    subtitle: 'Order-revision misses tracked from Front · synced every 15 min',
   },
   {
     id: 'pvi',
@@ -122,6 +135,7 @@ export default function Customers() {
         {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingTab />}
         {subTab === 'fefo'       && <FefoRotationTab />}
+        {subTab === 'revisions'  && <RevisionsTab />}
         {subTab === 'pvi'        && <PviShelfLife />}
       </div>
     </div>
