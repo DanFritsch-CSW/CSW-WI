@@ -17,12 +17,13 @@ import {
 //
 // Date filtering and cross-conversation correlation both hang off the
 // SAME join: revision-sync.cjs extracts numeric tokens from Front subject
-// lines and matches them against production_db.gold.truck_appointments
-// (reference_number / lookup_code). A single match gives us a real
-// scheduled_arrival to slide the day-stepper on, plus an appointment_id
-// that's the natural correlation key — conversations that resolve to the
-// same appointment_id are the "cross reference and correlate" ask,
-// grouped together below instead of guessing at text similarity.
+// lines AND message bodies, and matches them against
+// production_db.gold.truck_appointments (reference_number / lookup_code).
+// A single match gives us a real scheduled_arrival to slide the
+// day-stepper on, plus an appointment_id that's the natural correlation
+// key — conversations that resolve to the same appointment_id are the
+// "cross reference and correlate" ask, grouped together below instead of
+// guessing at text similarity.
 //
 // Not every conversation resolves cleanly: the same reference number can
 // belong to a different customer/appointment from a prior year (confirmed
@@ -33,6 +34,18 @@ import {
 // Review is deliberately NOT subject to the day filter — an unresolved
 // ambiguous or unmatched conversation has no confirmed date yet, so
 // hiding it behind a day slider would just make it invisible.
+//
+// Recency split (2026-07-09, session 5): the Revision tag's history goes
+// back to April 2026, and the vast majority of conversations that never
+// resolved to an appointment are legitimately stale — threads about
+// shipments from months ago that fall outside revision-sync.cjs's
+// -14d/+45d matching window on purpose. Dumping all ~270 of those into
+// "Needs Review" alongside the handful that are ACTUALLY actionable today
+// made the section useless (confirmed with Dan: 252 of 268 unmatched were
+// >7 days old). So Needs Review only shows unmatched/ambiguous items from
+// the last 14 days by default; older ones sit behind a collapsed toggle.
+
+const RECENT_WINDOW_DAYS = 14
 
 const SLA_LABEL = { breach: 'SLA Breach', warning: 'SLA Warning', applies: 'SLA Applies' }
 const SLA_COLOR = { breach: 'var(--red, #c0392b)', warning: 'var(--amber, #a07818)', applies: 'var(--text-dim, #9aaabb)' }
@@ -56,6 +69,12 @@ function isSameLocalDay(iso, dayOffset) {
   const target = new Date()
   target.setDate(target.getDate() + dayOffset)
   return d.getFullYear() === target.getFullYear() && d.getMonth() === target.getMonth() && d.getDate() === target.getDate()
+}
+
+function isRecent(iso, days) {
+  if (!iso) return false
+  const ms = Date.now() - new Date(iso).getTime()
+  return ms <= days * 86400000
 }
 
 function dayLabel(offset) {
@@ -287,6 +306,7 @@ export default function RevisionsTab() {
   const [facilityFilter, setFacilityFilter] = useState('all')
   const [showResolved, setShowResolved] = useState(false)
   const [dayOffset, setDayOffset] = useState(0)
+  const [showOlderBacklog, setShowOlderBacklog] = useState(false)
 
   async function load() {
     try {
@@ -329,13 +349,24 @@ export default function RevisionsTab() {
   }, [baseFiltered, dayOffset])
 
   // Needs Review: ambiguous (unresolved) or genuinely unmatched — no
-  // confirmed date, so day filter doesn't apply. Always visible.
-  const needsReview = useMemo(() => {
+  // confirmed date, so day filter doesn't apply. Split by recency (see
+  // header comment) — most of the historical backlog will never match
+  // and shouldn't crowd out the handful that actually need eyes today.
+  const needsReviewAll = useMemo(() => {
     return baseFiltered.filter((c) => {
       if (effectiveMatch(c)) return false
       return c.match_status === 'ambiguous' || c.match_status === 'none' || !c.match_status
     })
   }, [baseFiltered])
+
+  const needsReviewRecent = useMemo(
+    () => needsReviewAll.filter((c) => isRecent(c.last_message_at, RECENT_WINDOW_DAYS)),
+    [needsReviewAll]
+  )
+  const needsReviewOlder = useMemo(
+    () => needsReviewAll.filter((c) => !isRecent(c.last_message_at, RECENT_WINDOW_DAYS)),
+    [needsReviewAll]
+  )
 
   // Group the day-filtered list by appointment_id — the "correlate them
   // to each other" ask. Groups of >1 render with a shared "N related" badge.
@@ -413,12 +444,39 @@ export default function RevisionsTab() {
         )}
       </div>
 
-      {needsReview.length > 0 && (
+      {needsReviewRecent.length > 0 && (
         <div>
           <div style={{ fontSize: 10, color: 'var(--amber, #a07818)', fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8 }}>
-            NEEDS REVIEW · {needsReview.length} unmatched or ambiguous
+            NEEDS REVIEW · {needsReviewRecent.length} unmatched or ambiguous, last {RECENT_WINDOW_DAYS}d
           </div>
-          {needsReview.map((conv) => (
+          {needsReviewRecent.map((conv) => (
+            <ConversationCard
+              key={conv.id}
+              conv={conv}
+              comments={commentsByConv[conv.id] || []}
+              onChange={load}
+              relatedCount={1}
+            />
+          ))}
+        </div>
+      )}
+
+      {needsReviewOlder.length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowOlderBacklog((v) => !v)}
+            style={{
+              fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              padding: '6px 12px', background: 'var(--bg2, #f8f9fb)',
+              border: '1px solid var(--border)', borderRadius: 'var(--r-sm, 4px)',
+              color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, monospace)',
+              marginBottom: showOlderBacklog ? 8 : 0,
+            }}
+          >
+            {showOlderBacklog ? '▾' : '▸'} {needsReviewOlder.length} OLDER, UNMATCHED (over {RECENT_WINDOW_DAYS}d — likely stale history)
+          </button>
+          {showOlderBacklog && needsReviewOlder.map((conv) => (
             <ConversationCard
               key={conv.id}
               conv={conv}
