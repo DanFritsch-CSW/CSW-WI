@@ -18,7 +18,6 @@ const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
 const Customers          = lazy(() => import('./pages/Customers.jsx'))
 const OrderCreator       = lazy(() => import('./pages/OrderCreator.jsx'))
 const Analytics          = lazy(() => import('./pages/Analytics.jsx'))
-const Revisions          = lazy(() => import('./pages/Revisions.jsx'))
 const Settings           = lazy(() => import('./pages/Settings.jsx'))
 const PalermosStandalone = lazy(() => import('./pages/PalermosStandalone.jsx'))
 
@@ -107,7 +106,8 @@ export default function App() {
   // Default CSW build: full app with all routes. Unchanged from before the
   // palermos-mode flag was introduced. PVI Shelf Life still lives inside
   // Customers > ?tab=pvi as it did — same component the palermos build
-  // renders standalone.
+  // renders standalone. Revisions (2026-07-09) similarly lives inside
+  // Customers > ?tab=revisions, not its own top-level route.
   return (
     <BrowserRouter>
       <div className="app-shell">
@@ -120,7 +120,6 @@ export default function App() {
               <Route path="/customers" element={<Customers />}        />
               <Route path="/orders"    element={<OrderCreator />}     />
               <Route path="/analytics" element={<Analytics />}        />
-              <Route path="/revisions" element={<Revisions />}        />
               <Route path="/settings"  element={<Settings />}         />
             </Routes>
           </Suspense>
