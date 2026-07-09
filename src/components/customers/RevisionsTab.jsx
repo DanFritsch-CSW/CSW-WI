@@ -79,6 +79,15 @@ import {
 // there was nothing to show. Now pre-fills from match.reference_number
 // (see matched_reference_number in revision-sync.cjs) when nothing's been
 // manually entered; still fully editable/overridable.
+//
+// True ambiguity vs. multiple valid orders (2026-07-09, session 10): a
+// thread mentioning two DIFFERENT real order numbers (e.g. "517450 &
+// 517491"), each cleanly resolving to its own appointment/date, is no
+// longer flagged 'ambiguous' — the sync now auto-picks the earliest date
+// as the primary match (per Dan) and keeps every candidate in
+// match_candidates. OtherLinkedOrders below surfaces the ones NOT picked
+// as a non-blocking hint, so the other order/date doesn't just silently
+// disappear from view.
 
 const RECENT_WINDOW_DAYS = 14
 const FRONT_WORKSPACE_SUBDOMAIN = 'central-storage-and-warehouse-co'
@@ -221,6 +230,27 @@ function CandidatePicker({ conv, onResolved }) {
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+function OtherLinkedOrders({ conv, match }) {
+  const candidates = conv.match_candidates || []
+  if (conv.match_status !== 'matched' || candidates.length <= 1) return null
+  const others = candidates.filter((c) => c.appointment_id !== match?.appointment_id)
+  if (!others.length) return null
+  return (
+    <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-secondary)' }}>
+      Also linked to:{' '}
+      {others.map((c, i) => (
+        <span key={c.appointment_id}>
+          {i > 0 ? ', ' : ''}
+          <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>{c.reference_number}</span>
+          {' (ships '}
+          {c.scheduled_arrival ? new Date(c.scheduled_arrival).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'unknown'}
+          {')'}
+        </span>
+      ))}
     </div>
   )
 }
@@ -392,6 +422,7 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
           {conv.match_status === 'ambiguous' && !conv.resolved_match && (
             <CandidatePicker conv={conv} onResolved={onChange} />
           )}
+          <OtherLinkedOrders conv={conv} match={match} />
           <CommentThread comments={comments} />
         </div>
       )}
