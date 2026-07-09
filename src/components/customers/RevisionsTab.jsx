@@ -7,6 +7,9 @@ import {
   markResolved,
   markUnresolved,
   resolveAmbiguousMatch,
+  dismissConversation,
+  undismissConversation,
+  setManualShipDate,
   effectiveMatch,
 } from '../../lib/revisions.js'
 
@@ -51,6 +54,23 @@ import {
 // deep-link pattern swaps the api. host for the plain workspace subdomain.
 // Not independently browser-tested; if it 404s, the subdomain guess is
 // the first thing to check.
+//
+// Dismiss + manual ship date (2026-07-09, session 7): two real gaps found
+// on cnv_1bue6oic ("Pallet needed back from CSW 07/10/2026") —
+//   1. Front's "Revision" tag rule matches the keyword anywhere in the
+//      thread, including CSW's OWN reply ("Yes, revision received.") even
+//      when the customer never asked for a revision. Not fixable in our
+//      sync (we only mirror whatever tag Front applied) — "Dismiss" lets
+//      a manager mark it as never-really-a-revision, distinct from
+//      "Resolved" (which implies a real issue got handled). Dismissed
+//      conversations are hidden everywhere by default.
+//   2. This thread has no Datex reference number at all (just a product
+//      code and a plain-English date, "07/10/2026") — nothing for
+//      revision-sync.cjs to match against MotherDuck. Manual ship date
+//      lets a manager type the date in by hand so it still shows up in
+//      the day-slider view. See effectiveMatch() in src/lib/revisions.js
+//      for how it slots in as a fallback (source: 'manual', no
+//      appointment_id — so it's never falsely grouped with other threads).
 
 const RECENT_WINDOW_DAYS = 14
 const FRONT_WORKSPACE_SUBDOMAIN = 'central-storage-and-warehouse-co'
@@ -200,6 +220,7 @@ function CandidatePicker({ conv, onResolved }) {
 function ConversationCard({ conv, comments, onChange, relatedCount }) {
   const [expanded, setExpanded] = useState(false)
   const [orderNumber, setOrderNumber] = useState(conv.order_number || '')
+  const [shipDate, setShipDate] = useState(conv.manual_ship_date || '')
   const meta = facilityMeta(conv.facility)
   const match = effectiveMatch(conv)
 
@@ -214,9 +235,22 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
     onChange()
   }
 
+  async function handleShipDateChange(e) {
+    const val = e.target.value
+    setShipDate(val)
+    await setManualShipDate(conv.id, val)
+    onChange()
+  }
+
   async function toggleResolved() {
     if (conv.resolved) await markUnresolved(conv.id)
     else await markResolved(conv.id)
+    onChange()
+  }
+
+  async function toggleDismissed() {
+    if (conv.dismissed) await undismissConversation(conv.id)
+    else await dismissConversation(conv.id)
     onChange()
   }
 
@@ -229,7 +263,7 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
         borderRadius: 'var(--r-md, 8px)',
         padding: 12,
         marginBottom: 10,
-        opacity: conv.resolved ? 0.55 : 1,
+        opacity: conv.resolved || conv.dismissed ? 0.55 : 1,
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -238,7 +272,7 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
             {conv.customer_name || 'Unknown customer'} · {conv.status} · {timeAgo(conv.last_message_at)}
             {match?.scheduled_arrival && (
-              <> · ships {new Date(match.scheduled_arrival).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</>
+              <> · ships {new Date(match.scheduled_arrival).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}{match.source === 'manual' ? ' (manual)' : ''}</>
             )}
             {conv.front_id && (
               <>
@@ -258,6 +292,11 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+          {conv.dismissed && (
+            <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-dim, #9aaabb)', border: '1px solid var(--text-dim, #9aaabb)', borderRadius: 'var(--r-sm, 4px)', padding: '2px 6px', fontFamily: 'var(--font-mono, monospace)' }}>
+              DISMISSED
+            </span>
+          )}
           {relatedCount > 1 && (
             <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--blue, #2a72b8)', border: '1px solid var(--blue, #2a72b8)', borderRadius: 'var(--r-sm, 4px)', padding: '2px 6px', fontFamily: 'var(--font-mono, monospace)' }}>
               {relatedCount} RELATED
@@ -298,6 +337,17 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
                 style={{ marginLeft: 4, width: 120 }}
               />
             </label>
+            {!match && (
+              <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                Ship date (manual){' '}
+                <input
+                  type="date"
+                  value={shipDate}
+                  onChange={handleShipDateChange}
+                  style={{ marginLeft: 4 }}
+                />
+              </label>
+            )}
             <button
               type="button"
               onClick={toggleResolved}
@@ -309,6 +359,19 @@ function ConversationCard({ conv, comments, onChange, relatedCount }) {
               }}
             >
               {conv.resolved ? 'REOPEN' : 'MARK RESOLVED'}
+            </button>
+            <button
+              type="button"
+              onClick={toggleDismissed}
+              title="Use when Front tagged this as a Revision incorrectly (e.g. the keyword only appeared in CSW's own reply, not the customer's request)"
+              style={{
+                fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                padding: '4px 10px', background: 'var(--bg2, #f8f9fb)',
+                border: '1px solid var(--border)', borderRadius: 'var(--r-sm, 4px)',
+                color: 'var(--text-dim, #9aaabb)', fontFamily: 'var(--font-mono, monospace)',
+              }}
+            >
+              {conv.dismissed ? 'RESTORE' : 'DISMISS — NOT A REVISION'}
             </button>
           </div>
           {conv.match_status === 'ambiguous' && !conv.resolved_match && (
@@ -328,6 +391,7 @@ export default function RevisionsTab() {
   const [error, setError] = useState(null)
   const [facilityFilter, setFacilityFilter] = useState('all')
   const [showResolved, setShowResolved] = useState(false)
+  const [showDismissed, setShowDismissed] = useState(false)
   const [dayOffset, setDayOffset] = useState(0)
   const [showOlderBacklog, setShowOlderBacklog] = useState(false)
 
@@ -356,14 +420,15 @@ export default function RevisionsTab() {
 
   const baseFiltered = useMemo(() => {
     return conversations.filter((c) => {
+      if (!showDismissed && c.dismissed) return false
       if (!showResolved && c.resolved) return false
       if (facilityFilter !== 'all' && c.facility !== facilityFilter) return false
       return true
     })
-  }, [conversations, facilityFilter, showResolved])
+  }, [conversations, facilityFilter, showResolved, showDismissed])
 
   // Day-filtered: only conversations with a confirmed appointment match
-  // whose scheduled_arrival falls on the selected day.
+  // (or a manager's manual ship date) whose date falls on the selected day.
   const dayFiltered = useMemo(() => {
     return baseFiltered.filter((c) => {
       const m = effectiveMatch(c)
@@ -392,12 +457,16 @@ export default function RevisionsTab() {
   )
 
   // Group the day-filtered list by appointment_id — the "correlate them
-  // to each other" ask. Groups of >1 render with a shared "N related" badge.
+  // to each other" ask. Groups of >1 render with a shared "N related"
+  // badge. Manual-ship-date entries have no real appointment_id (null),
+  // so they're keyed by conversation id instead — otherwise every manually
+  // dated conversation would incorrectly collapse into one fake group
+  // together just because they all share a null key.
   const groups = useMemo(() => {
     const byAppt = new Map()
     for (const c of dayFiltered) {
       const m = effectiveMatch(c)
-      const key = m.appointment_id
+      const key = m.appointment_id != null ? m.appointment_id : `manual:${c.id}`
       if (!byAppt.has(key)) byAppt.set(key, [])
       byAppt.get(key).push(c)
     }
@@ -424,7 +493,7 @@ export default function RevisionsTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
         <DayStepper offset={dayOffset} onChange={setDayOffset} />
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <select value={facilityFilter} onChange={(e) => setFacilityFilter(e.target.value)}>
             <option value="all">All facilities</option>
             <option value="">Unassigned</option>
@@ -435,6 +504,10 @@ export default function RevisionsTab() {
           <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4 }}>
             <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} />
             Show resolved
+          </label>
+          <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <input type="checkbox" checked={showDismissed} onChange={(e) => setShowDismissed(e.target.checked)} />
+            Show dismissed
           </label>
           <span style={{ fontSize: 11, color: 'var(--text-dim, #9aaabb)', fontFamily: 'var(--font-mono, monospace)' }}>
             {dayFiltered.length} shipping {dayLabel(dayOffset).toLowerCase()}
