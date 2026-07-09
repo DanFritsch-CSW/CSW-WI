@@ -606,6 +606,11 @@ function DailyDiscussionsEditor() {
     setTestState('running')
     setTestDetail(null)
     try {
+      // Save current checkbox state first — otherwise a freshly-checked
+      // teammate who hasn't been saved yet produces a confusing "no active
+      // recipients" failure even though the picker clearly shows them checked.
+      const chosen = teammates.filter(t => selected.has(t.teammate_id))
+      await saveDiscussionRecipients(facility, chosen)
       const res = await triggerDailyDiscussionTest(facility)
       const result = res?.results?.[0]
       if (result?.ok) {
