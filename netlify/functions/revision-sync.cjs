@@ -72,6 +72,23 @@
 // A 4-digit token that looks like a plain calendar year (2020-2035) is
 // dropped entirely before matching — those are almost always a date
 // mentioned in the subject line, not a reference number.
+//
+// ── Body-text extraction (added 2026-07-09, session 5) ─────────────────
+// Subject-only extraction misses a real, common case: customer emails
+// that only say "see attached" (the actual order numbers are in an Excel/
+// PDF attachment we don't parse — out of scope, see Notion Pending
+// Issues), but CSW's own reply in the SAME thread often restates the
+// order numbers in plain text ("These orders have been revised: 515110,
+// 517054"). Confirmed live on 2026-07-09 — recovers real matches that
+// subject-only extraction was missing entirely.
+//
+// Email bodies are noisy in ways subjects aren't — signature blocks carry
+// phone numbers, extensions, street addresses, and zip codes, all of
+// which are 3-5 digit runs that could coincidentally collide with a real
+// reference_number. stripSignatureNoise() removes the common patterns
+// (phone numbers, "ext. 1234", street addresses, zip/zip+4) before token
+// extraction runs. Not bulletproof, but removes the concrete noise
+// sources actually observed in real message bodies during testing.
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' };
 
@@ -121,11 +138,31 @@ function chunk(arr, size) {
   return out;
 }
 
-// Pull 3+ digit runs out of a subject line, drop plain-calendar-year
-// looking 4-digit tokens (2020-2035), dedupe.
-function extractTokens(subject) {
-  if (!subject) return [];
-  const matches = subject.match(/\d{3,}/g) || [];
+// Removes the concrete noise sources observed in real Front message bodies
+// (signature blocks) before token extraction: phone numbers, extensions,
+// street addresses, zip/zip+4. See header comment for why this matters —
+// without it, body-text extraction would pick up things like the "7800"
+// in "7800 95th St." or the "1524" in "ext. 1524" as if they were order
+// references.
+function stripSignatureNoise(text) {
+  return text
+    // phone numbers: 262-947-7800, 262.947.7800, (262) 947-7800
+    .replace(/\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/g, ' ')
+    // extensions: ext. 1524, extension 1524, x1158
+    .replace(/\b(?:ext\.?|extension)\s*\d+/gi, ' ')
+    .replace(/\bx\d{3,5}\b/gi, ' ')
+    // street addresses: 7800 95th St., 12725 4 Mile Rd
+    .replace(/\b\d+\s+\w+(\s+\w+)?\s+(St|Ave|Rd|Dr|Blvd|Street|Avenue|Road|Way|Ln|Lane)\.?\b/gi, ' ')
+    // zip / zip+4 at end of an address line: "Pleasant Prairie, WI 53158"
+    .replace(/\b\d{5}(-\d{4})?\b(?=[,.\n]|\s+USA|\s*$)/gi, ' ');
+}
+
+// Pull 3+ digit runs out of text, drop plain-calendar-year looking 4-digit
+// tokens (2020-2035), dedupe. Used for both subject (as-is) and body text
+// (after stripSignatureNoise).
+function extractTokens(text) {
+  if (!text) return [];
+  const matches = text.match(/\d{3,}/g) || [];
   const isYearLike = (t) => t.length === 4 && Number(t) >= 2020 && Number(t) <= 2035;
   return [...new Set(matches.filter((t) => !isYearLike(t)))];
 }
@@ -274,10 +311,12 @@ exports.handler = async function () {
       return { statusCode: 200, headers: NO_CACHE_HEADERS, body: JSON.stringify({ success: true, conversations_synced: 0, comments_synced: 0 }) };
     }
 
-    // 2. Pull conversation rows + SLA tags in id-chunks (URL length safety).
+    // 2. Pull conversation rows + SLA tags + message bodies (for token
+    // extraction — see header comment) in id-chunks (URL length safety).
     const idChunks = chunk(conversationIds, 100);
     const conversations = [];
     const slaByConversation = {};
+    const bodiesByConversation = new Map();
 
     for (const ids of idChunks) {
       const idsFilter = ids.join(',');
@@ -298,13 +337,26 @@ exports.handler = async function () {
           slaByConversation[row.conversation_id] = slaKey;
         }
       }
+
+      const messageRows = await kbFetch(
+        `messages?conversation_id=in.(${idsFilter})&select=conversation_id,body`
+      );
+      for (const row of messageRows) {
+        if (!row.body) continue;
+        if (!bodiesByConversation.has(row.conversation_id)) bodiesByConversation.set(row.conversation_id, []);
+        bodiesByConversation.get(row.conversation_id).push(row.body);
+      }
     }
 
-    // 2b. Extract tokens per conversation, batch-match against MotherDuck once.
+    // 2b. Extract tokens per conversation (subject + all message bodies,
+    // bodies noise-stripped first), batch-match against MotherDuck once.
     const tokensByConversation = new Map();
     const allTokens = new Set();
     for (const c of conversations) {
-      const tokens = extractTokens(c.subject);
+      const subjectTokens = extractTokens(c.subject);
+      const bodies = bodiesByConversation.get(c.id) || [];
+      const bodyTokens = bodies.flatMap((b) => extractTokens(stripSignatureNoise(b)));
+      const tokens = [...new Set([...subjectTokens, ...bodyTokens])];
       tokensByConversation.set(c.id, tokens);
       tokens.forEach((t) => allTokens.add(t));
     }
