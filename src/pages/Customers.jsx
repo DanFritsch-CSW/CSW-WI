@@ -1,5 +1,6 @@
 import { useSearchParams } from 'react-router-dom'
 import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
+import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
@@ -119,22 +120,10 @@ export default function Customers() {
       {/* Sub-tab content */}
       <div style={{ padding: '24px' }}>
         {subTab === 'space'      && <SpacePlanningTab />}
-        {subTab === 'onboarding' && <OnboardingPlaceholder />}
+        {subTab === 'onboarding' && <OnboardingTab />}
         {subTab === 'fefo'       && <FefoRotationTab />}
         {subTab === 'pvi'        && <PviShelfLife />}
       </div>
-    </div>
-  )
-}
-
-function OnboardingPlaceholder() {
-  return (
-    <div className="stub-page">
-      <h2>Customer Onboarding</h2>
-      <p>Single source of truth for onboarding new customers — master checklist + per-customer status tracking.</p>
-      <p style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 8 }}>
-        Phase 5 — schema + template + checklist UI (deferred per Dan; FEFO took priority)
-      </p>
     </div>
   )
 }
