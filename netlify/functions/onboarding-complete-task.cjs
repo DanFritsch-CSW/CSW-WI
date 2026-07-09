@@ -2,25 +2,42 @@
 // browser (OnboardingTab.jsx) — deliberately does NOT require the
 // FRONT_SEND_SECRET header that front-send-email.cjs / front-post-discussion.cjs
 // use, because putting that secret in client-side React code would expose it
-// in the page source, defeating the whole point of the guard on those generic
-// functions. This endpoint is safe to leave open because its scope is fixed:
-// given a taskId that actually exists in Supabase, it can only (a) mark that
-// task done and (b) notify the next pending task's owner. It can't be used to
-// send arbitrary email or messages to arbitrary people.
+// in the page source. Safe to leave open: given a taskId that actually exists
+// in Supabase, this can only (a) mark that task done, (b) comment into the
+// customer's own Front conversation, and (c) reassign that conversation.
 //
-// Flow:
-//   1. Look up the task instance + its customer.
-//   2. Mark it done (status='done', completed_at=now).
-//   3. Find the next pending task for this customer (by sort_order).
-//   4. If found AND it has a resolved owner_teammate_id, POST a new Front
-//      discussion @-adding that owner, with the task instance's
-//      front_conversation_id updated to the new conversation.
-//   5. If the next task has no owner_teammate_id (Tony/Kris case as of
-//      2026-07-08 seed data), skip the Front push and say so in the response
-//      — the app still works, just without the handoff notification.
+// OPTION A BEHAVIOR (2026-07-09, per Dan) — replaces the original "always
+// create a new standalone discussion" approach. Dan pointed out that
+// completing a task was spawning a fresh cnv_ each time instead of staying
+// in the customer's original Front thread (cnv_1bud7sus for the Test
+// customer) — confusing, and not what he expected from "single source of
+// truth" onboarding.
 //
-// One-way push only, per the original design constraint: this function never
-// reads Front state back into Supabase.
+// New flow when customer.source_conversation_id IS set:
+//   1. Mark the completed task done.
+//   2. Find the next pending task.
+//   3. POST a plain-text comment into the ORIGINAL conversation summarizing
+//      the handoff (Add Comment endpoint — no @mention field exists on this
+//      endpoint per Front's docs, confirmed 2026-07-09, so this is a log
+//      entry, not itself the notification).
+//   4. If the next task has a resolved owner_teammate_id, REASSIGN the
+//      original conversation to that teammate (PUT .../assignee) — this is
+//      what actually puts it in their queue, replacing the @mention.
+//   5. If no owner_teammate_id, still comment (so the log is complete) but
+//      skip reassignment and say why.
+//
+// Fallback when customer.source_conversation_id is NOT set: nothing to
+// attach a comment to, so this falls back to the original standalone-
+// discussion-with-mention behavior (Create Discussion endpoint,
+// teammate_ids field) — the only case where a new cnv_ is still created.
+//
+// Required Front scopes: comments:write (Add Comment), plus whatever scope
+// covers the assignee endpoint (appears to fall under conversations:write —
+// same scope already used for the discussion fallback; verify if a 403
+// shows up).
+//
+// One-way push only, per the original design constraint: never reads Front
+// state back into Supabase.
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' };
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY;
@@ -42,6 +59,22 @@ async function sbFetch(path, opts = {}) {
   try { json = text ? JSON.parse(text) : null; } catch { json = text; }
   if (!res.ok) throw new Error(typeof json === 'string' ? json : JSON.stringify(json));
   return json;
+}
+
+async function frontFetch(path, opts = {}) {
+  const res = await fetch(`https://api2.frontapp.com${path}`, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${FRONT_TOKEN}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...(opts.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+  return { ok: res.ok, status: res.status, json };
 }
 
 exports.handler = async function (event) {
@@ -69,8 +102,10 @@ exports.handler = async function (event) {
       return { statusCode: 404, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'task not found' }) };
     }
 
-    const customerRows = await sbFetch(`onboarding_customers?id=eq.${task.customer_id}&select=name`);
-    const customerName = customerRows?.[0]?.name || `customer #${task.customer_id}`;
+    const customerRows = await sbFetch(`onboarding_customers?id=eq.${task.customer_id}&select=name,source_conversation_id`);
+    const customer = customerRows?.[0];
+    const customerName = customer?.name || `customer #${task.customer_id}`;
+    const sourceConvId = customer?.source_conversation_id || null;
 
     // 2. Mark this task done.
     await sbFetch(`onboarding_task_instances?id=eq.${taskId}`, {
@@ -93,18 +128,6 @@ exports.handler = async function (event) {
       };
     }
 
-    if (!nextTask.owner_teammate_id) {
-      return {
-        statusCode: 200,
-        headers: NO_CACHE_HEADERS,
-        body: JSON.stringify({
-          success: true, completed: taskId, notified: false,
-          reason: `next task owner (${nextTask.owner_name || 'unassigned'}) has no confirmed Front teammate_id`,
-          nextTask: { id: nextTask.id, label: nextTask.label, bucket: nextTask.bucket },
-        }),
-      };
-    }
-
     if (!FRONT_TOKEN) {
       return {
         statusCode: 200,
@@ -113,43 +136,104 @@ exports.handler = async function (event) {
       };
     }
 
-    // 4. Post the handoff discussion.
-    const frontRes = await fetch('https://api2.frontapp.com/conversations', {
+    const commentBody = `"${task.label}" (${task.bucket}) is complete for ${customerName}. Next up: "${nextTask.label}" (${nextTask.bucket}), assigned to ${nextTask.owner_name || 'unassigned'}.`;
+
+    // ─── Path A: customer has a source Front conversation — comment there
+    // and reassign it to the next owner. No new conversation is created. ───
+    if (sourceConvId) {
+      const commentRes = await frontFetch(`/conversations/${sourceConvId}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body: commentBody }),
+      });
+
+      if (!commentRes.ok) {
+        return {
+          statusCode: 200,
+          headers: NO_CACHE_HEADERS,
+          body: JSON.stringify({ success: true, completed: taskId, notified: false, reason: 'Front comment API error', detail: commentRes.json }),
+        };
+      }
+
+      if (!nextTask.owner_teammate_id) {
+        return {
+          statusCode: 200,
+          headers: NO_CACHE_HEADERS,
+          body: JSON.stringify({
+            success: true, completed: taskId, notified: false,
+            reason: `logged in ${sourceConvId}, but next task owner (${nextTask.owner_name || 'unassigned'}) has no confirmed Front teammate — conversation not reassigned`,
+            nextTask: { id: nextTask.id, label: nextTask.label, bucket: nextTask.bucket },
+          }),
+        };
+      }
+
+      const assignRes = await frontFetch(`/conversations/${sourceConvId}/assignee`, {
+        method: 'PUT',
+        body: JSON.stringify({ assignee_id: nextTask.owner_teammate_id }),
+      });
+
+      if (!assignRes.ok) {
+        return {
+          statusCode: 200,
+          headers: NO_CACHE_HEADERS,
+          body: JSON.stringify({
+            success: true, completed: taskId, notified: false,
+            reason: 'comment logged, but reassigning the conversation failed',
+            detail: assignRes.json,
+            nextTask: { id: nextTask.id, label: nextTask.label, bucket: nextTask.bucket, owner: nextTask.owner_name },
+          }),
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers: NO_CACHE_HEADERS,
+        body: JSON.stringify({
+          success: true, completed: taskId, notified: true,
+          nextTask: { id: nextTask.id, label: nextTask.label, bucket: nextTask.bucket, owner: nextTask.owner_name },
+          frontConversationId: sourceConvId,
+          mode: 'comment+reassign',
+        }),
+      };
+    }
+
+    // ─── Path B: no source conversation — fall back to the original
+    // standalone-discussion-with-mention behavior. Only place a new cnv_
+    // still gets created. ───
+    if (!nextTask.owner_teammate_id) {
+      return {
+        statusCode: 200,
+        headers: NO_CACHE_HEADERS,
+        body: JSON.stringify({
+          success: true, completed: taskId, notified: false,
+          reason: `no source conversation on this customer, and next task owner (${nextTask.owner_name || 'unassigned'}) has no confirmed Front teammate_id`,
+          nextTask: { id: nextTask.id, label: nextTask.label, bucket: nextTask.bucket },
+        }),
+      };
+    }
+
+    const discussionRes = await frontFetch('/conversations', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${FRONT_TOKEN}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
       body: JSON.stringify({
         type: 'discussion',
         teammate_ids: [nextTask.owner_teammate_id],
         subject: `Onboarding handoff — ${customerName}`,
-        comment: {
-          body: `"${task.label}" (${task.bucket}) is complete for ${customerName}. Next up: "${nextTask.label}" (${nextTask.bucket}), assigned to ${nextTask.owner_name || 'you'}.`,
-        },
+        comment: { body: commentBody },
       }),
     });
-    const frontText = await frontRes.text();
-    let frontJson;
-    try { frontJson = JSON.parse(frontText); } catch { frontJson = { raw: frontText }; }
 
-    if (!frontRes.ok) {
-      // Task is still marked done — Front push failing shouldn't roll that back.
-      // Surface the error so the UI can show "handoff notification failed."
+    if (!discussionRes.ok) {
       return {
         statusCode: 200,
         headers: NO_CACHE_HEADERS,
-        body: JSON.stringify({ success: true, completed: taskId, notified: false, reason: 'Front API error', detail: frontJson }),
+        body: JSON.stringify({ success: true, completed: taskId, notified: false, reason: 'Front API error', detail: discussionRes.json }),
       };
     }
 
-    // 5. Stash the new conversation ID on the next task instance for reference.
-    if (frontJson?.id) {
+    if (discussionRes.json?.id) {
       await sbFetch(`onboarding_task_instances?id=eq.${nextTask.id}`, {
         method: 'PATCH',
         prefer: 'return=minimal',
-        body: JSON.stringify({ front_conversation_id: frontJson.id }),
+        body: JSON.stringify({ front_conversation_id: discussionRes.json.id }),
       });
     }
 
@@ -159,7 +243,8 @@ exports.handler = async function (event) {
       body: JSON.stringify({
         success: true, completed: taskId, notified: true,
         nextTask: { id: nextTask.id, label: nextTask.label, bucket: nextTask.bucket, owner: nextTask.owner_name },
-        frontConversationId: frontJson?.id || null,
+        frontConversationId: discussionRes.json?.id || null,
+        mode: 'new-discussion-fallback',
       }),
     };
   } catch (err) {
