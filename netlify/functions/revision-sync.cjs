@@ -418,7 +418,7 @@ exports.handler = async function () {
         matched_warehouse: matchedWarehouse,
         matched_scheduled_arrival: matchedScheduledArrival,
         match_status: matchStatus,
-        match_candidates: candidates.length > 1 ? JSON.stringify(candidates) : null,
+        match_candidates: candidates.length > 1 ? candidates : null, // NOT JSON.stringify()'d here — supabaseUpsert already stringifies the whole rows array once; double-encoding stored this as literal string text in the jsonb column instead of a real array, breaking `.map()` on the frontend (fixed 2026-07-09 after live "r.map is not a function" report)
         synced_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
