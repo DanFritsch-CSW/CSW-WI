@@ -217,3 +217,20 @@ export async function swapTemplateTaskOrder(taskA, taskB) {
     .eq('id', taskB.id)
   if (e1 || e2) console.error('swapTemplateTaskOrder:', e1 || e2)
 }
+
+// ─── Front Teammate Lookup ──────────────────────────────────────────────────
+// Added 2026-07-09. Seeded once from the 87-teammate pull (2026-07-08) —
+// lets the UI show a real "@username — First Last" picker instead of asking
+// people to type raw tea_xxxxx IDs, which nobody at CSW actually knows or
+// uses day-to-day (they think in @dfritsch / @awasz terms, same as Front's
+// own UI). No auto-refresh yet — if the team changes, re-seed by re-running
+// the Front teammates pull and asking Claude to update this table.
+export async function fetchFrontTeammates() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('front_teammates')
+    .select('*')
+    .order('username')
+  if (error) { console.error('fetchFrontTeammates:', error); return [] }
+  return data ?? []
+}
