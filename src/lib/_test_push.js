@@ -1,2 +1,1 @@
-// test file - ascii only
-export const TEST_MARKER = 'hello'
+// unused - safe to delete

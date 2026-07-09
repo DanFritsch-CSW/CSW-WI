@@ -2,14 +2,17 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   fetchPviCanonicalAccounts,
   fetchPviAccountNameMap,
-  fetchPviShelfNotes,
   fetchPviMaterialSpecs,
   fetchPviLotDispositions,
   upsertPviLotDisposition,
   insertPviShelfNote,
-  updatePviShelfNoteStatus,
-  deletePviShelfNote,
 } from '../lib/supabase.js'
+import {
+  fetchPviShelfNotesActive,
+  updatePviShelfNoteStatusAudited,
+  softDeletePviShelfNote,
+  fetchPviLotDispositionHistory,
+} from '../lib/pviAudit.js'
 import {
   buildRawNameToCanonical,
   projectFefo,
@@ -178,7 +181,7 @@ export default function PviShelfLife() {
             }),
           fetchPviCanonicalAccounts(),
           fetchPviAccountNameMap(),
-          fetchPviShelfNotes(),
+          fetchPviShelfNotesActive(),
           fetchPviMaterialSpecs(),
           fetchPviLotDispositions(),
         ])
@@ -247,6 +250,19 @@ export default function PviShelfLife() {
     }
     return m
   }, [notes])
+
+  // Most-recent comment per lot, for the grid's inline "Latest note" column
+  // and the CSV export (2026-07-08, Wade/Jessica ask). notes is already
+  // ordered created_at DESC (fetchPviShelfNotesActive), and notesByItemLot
+  // pushes in that same fetch order, so arr[0] is the latest note for that
+  // lot without a second sort pass.
+  const latestNoteByLot = useMemo(() => {
+    const m = new Map()
+    for (const [key, arr] of notesByItemLot) {
+      if (arr.length) m.set(key, arr[0])
+    }
+    return m
+  }, [notesByItemLot])
 
   // Run FEFO projection whenever the inputs change, then merge disposition
   // + owner from pvi_lot_dispositions onto each row. Merging AFTER
@@ -386,6 +402,13 @@ export default function PviShelfLife() {
   // lookup + Palermo's number) rather than the combined "PALVI9 · 247"
   // display string, since a spreadsheet column is more useful to filter/
   // pivot on as two discrete values than as one formatted string.
+  //
+  // Note columns (2026-07-08, Wade/Jessica ask): Latest Note/Author/Date
+  // pull the same latestNoteByLot map that drives the grid's inline column.
+  // Note History concatenates every note on the lot (oldest to newest, for
+  // readable chronology) as "[MM/DD/YY HH:MM] Author: text" entries joined
+  // by " | " — a single cell rather than a variable number of columns,
+  // since a lot can have anywhere from zero to a dozen+ notes.
   const handleExportCsv = useCallback(() => {
     if (filteredRows.length === 0) return
     const headers = [
@@ -398,12 +421,21 @@ export default function PviShelfLife() {
       'Order lookup',
       'Velocity 30d shipments', 'Velocity tier',
       'Disposition', 'Owner',
+      'Latest Note', 'Latest Note Author', 'Latest Note Date', 'Note Count', 'Note History',
     ]
     const lines = [headers.map(csvEscape).join(',')]
     for (const r of filteredRows) {
       const prim = r.primary
       const shipIso = prim?.projected_ship_iso ? prim.projected_ship_iso.slice(0, 10) : ''
       const recipient = prim?.canonical?.canonical_name || prim?.ship_to_raw_name || ''
+      const lotKey = `${r.material_code}|${r.lot_code}`
+      const lotNotes = notesByItemLot.get(lotKey) || []
+      const latest = latestNoteByLot.get(lotKey)
+      const latestDate = latest?.created_at ? new Date(latest.created_at).toLocaleString() : ''
+      const history = [...lotNotes].reverse().map(n => {
+        const d = n.created_at ? new Date(n.created_at).toLocaleString() : ''
+        return `[${d}] ${n.author || '(anon)'}: ${n.note}`
+      }).join(' | ')
       lines.push([
         r.verdict?.label ?? '',
         r.material_code ?? '',
@@ -429,6 +461,11 @@ export default function PviShelfLife() {
         r.velocity_confidence?.tier ?? '',
         r.disposition ?? '',
         r.owner ?? '',
+        latest?.note ?? '',
+        latest?.author ?? '',
+        latestDate,
+        lotNotes.length,
+        history,
       ].map(csvEscape).join(','))
     }
     const csv = lines.join('\r\n')
@@ -446,7 +483,7 @@ export default function PviShelfLife() {
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
     flash(`Exported ${filteredRows.length} lot(s) to CSV`)
-  }, [filteredRows, projectFilters])
+  }, [filteredRows, projectFilters, notesByItemLot, latestNoteByLot])
 
   const reload = () => setReloadTick(t => t + 1)
 
@@ -589,6 +626,7 @@ export default function PviShelfLife() {
                 <SortableTh sortKey="velocity"    align="left"  sortConfig={sortConfig} onSort={handleSort}>Velocity</SortableTh>
                 <SortableTh sortKey="disposition" align="left"  sortConfig={sortConfig} onSort={handleSort} title="Disposition tag — click a row to edit in the drawer">Disposition</SortableTh>
                 <SortableTh sortKey="owner"       align="left"  sortConfig={sortConfig} onSort={handleSort} title="Owner — Palermo's team member accountable for this lot">Owner</SortableTh>
+                <th title="Most recent note on this lot — click the row to see full history">Latest Note</th>
                 <th></th>
               </tr>
             </thead>
@@ -597,6 +635,7 @@ export default function PviShelfLife() {
                 <ShelfLifeRow
                   key={r.lot_id}
                   row={r}
+                  latestNote={latestNoteByLot.get(`${r.material_code}|${r.lot_code}`)}
                   isSelected={r.lot_id === selectedLotId}
                   onSelect={() => setSelectedLotId(r.lot_id)}
                   onCopy={() => handleCopyLot(r)}
@@ -615,7 +654,7 @@ export default function PviShelfLife() {
           uniqueOwners={uniqueOwners}
           onClose={() => setSelectedLotId(null)}
           onNotesChanged={async () => {
-            const fresh = await fetchPviShelfNotes()
+            const fresh = await fetchPviShelfNotesActive()
             setNotes(fresh)
           }}
           onDispositionChanged={reloadDispositions}
@@ -774,7 +813,7 @@ const SPEC_SOURCE_BADGE = {
   default_96:       { label: 'default', color: '#999' },
 }
 
-function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
+function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
   const meta = STAGE_META[row.verdict.stage]
   const prim = row.primary
   const acct = prim?.canonical?.canonical_name
@@ -936,6 +975,28 @@ function ShelfLifeRow({ row, isSelected, onSelect, onCopy }) {
           ? row.owner
           : <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>—</span>}
       </td>
+      {/* Latest Note — truncated inline preview (2026-07-08, Wade/Jessica
+          ask: don't make them open the drawer to see if there's already a
+          comment on a lot). Full text + author + timestamp in the title
+          attribute for hover; click the row to open the drawer for the
+          full history and to add a new one. */}
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, maxWidth: 180 }}>
+        {latestNote ? (
+          <div
+            title={`${latestNote.author || '(anon)'} · ${latestNote.created_at ? new Date(latestNote.created_at).toLocaleString() : ''}\n\n${latestNote.note}`}
+            style={{
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <span style={{ color: 'var(--text-dim)', fontSize: 9 }}>{latestNote.author || '(anon)'}:</span>{' '}
+            {latestNote.note}
+          </div>
+        ) : (
+          <span style={{ color: 'var(--text-dim)' }}>—</span>
+        )}
+      </td>
       <td>
         <button
           className="settings-save-btn"
@@ -1011,9 +1072,14 @@ function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNot
     }
   }
 
+  // Status changes and deletes now require an author name (2026-07-08,
+  // Wade/Jessica ask: previously anyone could flip status or delete a note
+  // with zero record of who did it). Reuses the same author input as
+  // "Add note" — one identity field for the whole drawer, no separate login.
   async function handleStatusChange(id, next) {
+    if (!author.trim()) { alert('Enter your name in the author field before changing a note\'s status.'); return }
     try {
-      await updatePviShelfNoteStatus(id, next)
+      await updatePviShelfNoteStatusAudited(id, next, author.trim())
       await onNotesChanged()
     } catch (e) {
       alert(`Failed to update status: ${e.message}`)
@@ -1021,14 +1087,20 @@ function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNot
   }
 
   async function handleDelete(id) {
+    if (!author.trim()) { alert('Enter your name in the author field before deleting a note.'); return }
     if (!confirm('Delete this note?')) return
     try {
-      await deletePviShelfNote(id)
+      await softDeletePviShelfNote(id, author.trim())
       await onNotesChanged()
     } catch (e) {
       alert(`Failed to delete: ${e.message}`)
     }
   }
+
+  // Bumped after every successful disposition save so DispositionHistory
+  // (below) refetches pvi_lot_disposition_history and shows the new entry
+  // without the operator needing to close/reopen the drawer.
+  const [historyRefreshTick, setHistoryRefreshTick] = useState(0)
 
   // Persist the disposition + owner draft. Also stamps updated_by from the
   // notes author field (shared identity input — no separate login).
@@ -1044,6 +1116,7 @@ function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNot
         updated_by:    (author || '').trim() || null,
       })
       await onDispositionChanged()
+      setHistoryRefreshTick(t => t + 1)
       flash('Disposition saved')
     } catch (e) {
       setDispErr(e.message || String(e))
@@ -1150,6 +1223,12 @@ function NotesDrawer({ row, notes, allNotesForItem, uniqueOwners, onClose, onNot
           </div>
           {dispErr && <div style={{ fontSize: 10, color: '#e05a5a', fontFamily: 'var(--font-mono)' }}>{dispErr}</div>}
         </div>
+
+        <DispositionHistory
+          materialCode={row.material_code}
+          lotCode={row.lot_code}
+          refreshKey={historyRefreshTick}
+        />
 
         <div className="section-label" style={{ marginTop: 16, marginBottom: 6 }}>Add note</div>
         <textarea
@@ -1263,6 +1342,80 @@ function NoteCard({ note, onStatusChange, onDelete, showLot }) {
           Delete
         </button>
       </div>
+    </div>
+  )
+}
+
+// ── Disposition change log ─────────────────────────────────────────────────
+//
+// Renders the append-only pvi_lot_disposition_history for the selected lot
+// (2026-07-08, Wade ask: "can we see history of who did what"). Refetches
+// whenever the lot changes or refreshKey bumps (fires right after a save in
+// the parent drawer, so a new entry shows up without reopening the drawer).
+// Collapsed by default since most lots have zero or one prior change and a
+// long always-open list would just be noise on the common case.
+function DispositionHistory({ materialCode, lotCode, refreshKey }) {
+  const [open, setOpen]       = useState(false)
+  const [entries, setEntries] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoading(true)
+    fetchPviLotDispositionHistory(materialCode, lotCode).then(rows => {
+      if (!cancelled) { setEntries(rows); setLoading(false) }
+    })
+    return () => { cancelled = true }
+  }, [open, materialCode, lotCode, refreshKey])
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          fontSize: 10, color: 'var(--text-dim)', background: 'none', border: 'none',
+          cursor: 'pointer', textDecoration: 'underline', padding: 0,
+        }}
+      >
+        {open ? '▾' : '▸'} Change history
+      </button>
+      {open && (
+        loading ? (
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>Loading…</div>
+        ) : entries.length === 0 ? (
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic', marginTop: 4 }}>
+            No changes logged yet.
+          </div>
+        ) : (
+          <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {entries.map(e => {
+              const dispMeta = e.disposition ? (DISPOSITION_META[e.disposition] || { label: e.disposition }) : null
+              return (
+                <div
+                  key={e.id}
+                  style={{
+                    fontSize: 10, fontFamily: 'var(--font-mono)',
+                    padding: 6, background: 'var(--bg0, white)', border: '1px solid var(--border)',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontWeight: 600 }}>{e.changed_by || '(unknown)'}</span>
+                    <span style={{ color: 'var(--text-dim)' }}>
+                      {e.changed_at ? new Date(e.changed_at).toLocaleString() : ''}
+                    </span>
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', marginTop: 2 }}>
+                    {e.action === 'created' ? 'Set' : 'Changed to'}: {dispMeta?.label || '(none)'}
+                    {e.owner ? ` · Owner: ${e.owner}` : ''}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )
+      )}
     </div>
   )
 }
