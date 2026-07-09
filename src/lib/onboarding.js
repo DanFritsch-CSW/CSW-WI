@@ -2,23 +2,27 @@ import { supabase } from './supabase.js'
 
 // ─── Customer Onboarding ────────────────────────────────────────────────────
 //
-// Built 2026-07-08 from the design mock explored in a prior session (never
-// implemented). Core mechanic: completing a checklist task auto-notifies the
-// NEXT pending task's owner via a Front discussion (@mention), forming a
-// handoff chain. Front push is ONE-WAY (app → Front only, nothing read back)
-// and internal-only (discussions, never customer-facing email) — both
-// deliberate constraints from the original design session.
+// Built 2026-07-08 from a design mock (see prior comment history in git log
+// for the original mechanic notes — completing a task auto-notifies the
+// NEXT pending task's owner via Front, one-way push, internal-only).
 //
-// Bucket/owner content and the 8-task default template are pulled from that
-// same mock, not invented. Two owners (Tony, Kris) don't have a confirmed
-// Front teammate_id yet — see onboarding_task_templates migration comment.
-// The app works fully for those buckets; only the Front auto-notify silently
-// no-ops for them until a real teammate_id is supplied.
+// 2026-07-09: bucket/template content REPLACED with the real 29-task process
+// from CSW_Onboarding_Checklist__Draft_.xlsx (Dan's actual document, not the
+// mock's invented 8-task Sales/Finance/OPS/IT/Quality scheme). The real
+// checklist organizes by PHASE, not department, so BUCKETS below reflects
+// that: Discovery & Solution Development → Onboarding Kickoff → WMS &
+// Systems Setup → Post-Launch. Owners were imported as free-text
+// default_owner_name only (e.g. "Wasz", "IT", "Wasz / Dean / Dan F.") with
+// NO teammate_id resolution — per Dan's explicit instruction, that mapping
+// happens later in-app via the Template Editor's @username picker.
 
-export const BUCKETS = ['Sales', 'Finance', 'OPS', 'IT', 'Quality']
+export const BUCKETS = ['Discovery & Solution Development', 'Onboarding Kickoff', 'WMS & Systems Setup', 'Post-Launch']
 export const STAGES = ['Lead', 'Setup', 'Go-Live', 'Active']
 export const BUCKET_COLORS = {
-  Sales: '#0ea5e9', Finance: '#10b981', OPS: '#f59e0b', IT: '#8b5cf6', Quality: '#ef4444',
+  'Discovery & Solution Development': '#0ea5e9',
+  'Onboarding Kickoff': '#f59e0b',
+  'WMS & Systems Setup': '#8b5cf6',
+  'Post-Launch': '#10b981',
 }
 
 export async function fetchOnboardingCustomers() {
@@ -78,6 +82,8 @@ export async function createOnboardingCustomer({ name, facility, sourceConversat
       sort_order: t.sort_order,
       owner_name: t.default_owner_name,
       owner_teammate_id: t.default_owner_teammate_id,
+      notes: t.notes,
+      dependencies: t.dependencies,
       status: 'pending',
     }))
     const { error: taskErr } = await supabase.from('onboarding_task_instances').insert(rows)
@@ -111,7 +117,7 @@ export async function deleteOnboardingCustomer(customerId) {
   if (error) console.error('deleteOnboardingCustomer:', error)
 }
 
-export async function addTaskInstance({ customerId, bucket, label, sortOrder, ownerName, ownerTeammateId }) {
+export async function addTaskInstance({ customerId, bucket, label, sortOrder, ownerName, ownerTeammateId, notes, dependencies }) {
   if (!supabase) return null
   const { data, error } = await supabase
     .from('onboarding_task_instances')
@@ -121,6 +127,8 @@ export async function addTaskInstance({ customerId, bucket, label, sortOrder, ow
       sort_order: sortOrder,
       owner_name: ownerName || null,
       owner_teammate_id: ownerTeammateId || null,
+      notes: notes || null,
+      dependencies: dependencies || null,
       status: 'pending',
     })
     .select()
@@ -173,7 +181,7 @@ export async function completeTaskAndNotifyNext(taskId) {
 // customers created AFTER the change; existing customers are frozen
 // snapshots per the original design decision (see createOnboardingCustomer).
 
-export async function addTemplateTask({ bucket, label, sortOrder, ownerName, ownerTeammateId }) {
+export async function addTemplateTask({ bucket, label, sortOrder, ownerName, ownerTeammateId, notes, dependencies }) {
   if (!supabase) return null
   const { data, error } = await supabase
     .from('onboarding_task_templates')
@@ -181,6 +189,8 @@ export async function addTemplateTask({ bucket, label, sortOrder, ownerName, own
       bucket, label, sort_order: sortOrder,
       default_owner_name: ownerName || null,
       default_owner_teammate_id: ownerTeammateId || null,
+      notes: notes || null,
+      dependencies: dependencies || null,
     })
     .select()
     .single()
