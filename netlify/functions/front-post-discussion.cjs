@@ -59,11 +59,13 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: '"body" is required' }) };
   }
 
-  // Front @mentions use inline syntax in the comment body: [](mention:tea_xxxxx)
-  // Adding this on top of teammate_ids ensures an actual @mention notification
-  // fires, not just silent addition to the conversation's participant list.
-  const mentionPrefix = teammateIds.map((id) => `[](mention:${id})`).join(' ');
-  const fullBody = `${mentionPrefix} ${body}`;
+  // NOTE: no inline @mention markdown is added to the body. An earlier version
+  // tried `[](mention:tea_xxxxx)` syntax to force an @mention, but Front's API
+  // rejected it with "Comment text contains unsafe markdown" (empty-link-text
+  // patterns look like phishing to their sanitizer, and this syntax isn't in
+  // Front's public docs anyway — it was a guess). teammate_ids alone already
+  // adds these people as participants on the conversation, which is what
+  // actually triggers their notification, so the inline mention was redundant.
 
   try {
     const res = await fetch('https://api2.frontapp.com/conversations', {
@@ -78,7 +80,7 @@ exports.handler = async function (event) {
         teammate_ids: teammateIds,
         subject,
         comment: {
-          body: fullBody,
+          body,
           author_id: authorId || undefined,
         },
       }),
