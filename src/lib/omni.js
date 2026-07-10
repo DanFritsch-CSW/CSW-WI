@@ -351,7 +351,13 @@ const B2E_LOCATION = {
   wr:   '023 - Wisconsin Rapids',
 }
 
-const ALLOWED_JOB_CODES = new Set(['205'])
+// Madison-only: Shift Supervisors (209) count toward labor hours at MAD
+// per Dan, 2026-07-10 (see Notion for context). All other facilities keep
+// excluding 209s exactly as before (ALLOWED_JOB_CODES was '205' only,
+// fixed 2026-04-28).
+function getAllowedJobCodes(facilityId) {
+  return facilityId === 'mad' ? new Set(['205', '209']) : new Set(['205'])
+}
 
 const CAL2_DOCK_NAMES_35 = new Set([
   'Calvieon Howard', 'Ethan Lindsey', 'Jose Cuevas', 'Nicholas J. Free',
@@ -1206,7 +1212,7 @@ export async function fetchB2eTimeOff(facilityId, date) {
       ],
       filters: {
         [`${TIME_OFF}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: ['205'] },
+        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: facilityId === 'mad' ? ['205', '209'] : ['205'] }, // Madison-only: include Shift Supervisors (209) per Dan, 2026-07-10
         [`${TIME_OFF}.date`]: {
           kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
           isFiscal: false, left_side: date, is_negative: false,
@@ -1299,7 +1305,8 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
   return [...schedMap.entries()]
     .filter(([id, { row: r }]) => {
       if (!activeIds.has(id)) return false
-      return ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))
+      // Madison-only: also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
+      return getAllowedJobCodes(facilityId).has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))
     })
     .map(([id, { row: r }]) => {
       const startTime = r[`${SCHEDULE}.modified_start_time`] ?? r[`${SCHEDULE}.start_time`]
@@ -1404,7 +1411,8 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
     if (!activeIds.has(id)) continue
-    if (!ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
+    // Madison-only: also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
+    if (!getAllowedJobCodes(facilityId).has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
     if (ts !== maxIngestByEmp.get(id)) continue
     const dateRaw = r[`${SCHEDULE}.entry_date`]
