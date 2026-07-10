@@ -6,6 +6,7 @@ const links = [
   { to: '/',          label: 'Labor Planning' },
   { to: '/inventory', label: 'Inventory'      },
   { to: '/customers', label: 'Customers'      },
+  { to: '/dvr',       label: 'DVR Tracker'    },
   { to: '/settings',  label: 'Settings'       },
 ]
 
@@ -18,9 +19,6 @@ function useClock() {
   return now
 }
 
-// Official CSW polar-bear brand mark — replaces the earlier HeronMark
-// placeholder SVG. Logo asset lives in src/lib/csw-logo.js as a base64
-// data URI (see that file for source + prep notes).
 function CswBearMark() {
   return (
     <img
