@@ -6,7 +6,8 @@ const links = [
   { to: '/',          label: 'Labor Planning' },
   { to: '/inventory', label: 'Inventory'      },
   { to: '/customers', label: 'Customers'      },
-  { to: '/dvr',       label: 'DVR Tracker'    },
+  // DVR Tracker suppressed — pending LoadProof Zapier API activation
+  // Re-enable by adding: { to: '/dvr', label: 'DVR Tracker' }
   { to: '/settings',  label: 'Settings'       },
 ]
 
