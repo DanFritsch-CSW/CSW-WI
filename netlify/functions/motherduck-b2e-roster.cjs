@@ -1,1 +1,204 @@
-J3VzZSBzdHJpY3QnCgovLyBNb3RoZXJEdWNrLWRpcmVjdCBCMkUgcm9zdGVyICsgc2NoZWR1bGUgZmV0Y2guCi8vCi8vIEJ5cGFzc2VzIE9tbmkgZm9yIEIyRSByZWFkcy4gU2VlIHRvcC1vZi1maWxlIGNoYW5nZWxvZyBmb3IgY29udGV4dC4KLy8KLy8gUmVxdWVzdCBzaGFwZSAoUE9TVCBKU09OKToKLy8gICB7IGtpbmQ6ICdhY3RpdmVfcm9zdGVyJywgICAgICAgICAgICAgIGZhY2lsaXR5SWQ6ICdrZW4nIH0KLy8gICB7IGtpbmQ6ICdhY3RpdmVfcm9zdGVyX2FsbF9qb2Jjb2RlcycsIGZhY2lsaXR5SWQ6ICdrZW4nIH0KLy8gICB7IGtpbmQ6ICdzY2hlZHVsZV9kYXRlJywgICAgICAgICAgICAgIGZhY2lsaXR5SWQ6ICdrZW4nLCBmcm9tRGF0ZTogJzIwMjYtMDctMTAnIH0KLy8gICB7IGtpbmQ6ICdzY2hlZHVsZV9yYW5nZScsICAgICAgICAgICAgIGZhY2lsaXR5SWQ6ICdrZW4nLCBmcm9tRGF0ZTogJzIwMjYtMDctMTAnLCBkYXlzRm9yd2FyZDogMTQgfQovLwovLyBSZXNwb25zZSBzaGFwZToKLy8gICB7IHJvd3M6IFsgeyAnc2lsdmVyX19iMmVfc2x2X2Z1dHVyZXNjaGVkdWxlZW50cmllcy5lbXBsb3llZV9pZCc6ICc1MzUnLCAuLi4gfSBdIH0KLy8KLy8gVGhlIE9tbmktcXVhbGlmaWVkIGNvbHVtbi1uYW1lIHNoYXBlIGlzIGRlbGliZXJhdGUg4oCUIHRoZSBjbGllbnQncwovLyBkb3duc3RyZWFtIGZpbHRlci9tYXAgbG9naWMgaW4gZmV0Y2hCMmVSb3N0ZXJGb3JFbnRyeURhdGUgYW5kCi8vIGZldGNoQjJlUm9zdGVyRm9yUmFuZ2UgYWNjZXNzZXMgZmllbGRzIHZpYQovLyByW2Ake1NDSEVEVUxFfS5lbXBsb3llZV9pZGBdIGV0Yy4gUHJlc2VydmluZyB0aGF0IHNoYXBlIGxldHMgdXMgc3dhcAovLyB0aGUgdW5kZXJseWluZyBkYXRhIHNvdXJjZSB3aXRob3V0IHRvdWNoaW5nIGFueSBvZiB0aGUgfjIwMCBsaW5lcyBvZgovLyBwb3N0LXByb2Nlc3NpbmcgKHN0YWxlLXNuYXBzaG90IGZpbHRlciwgam9iX2NvZGUgZmlsdGVyLCBzaGlmdC9sYW5lCi8vIGRlcml2YXRpb24pLgoKY29uc3QgTk9fQ0FDSEVfSEVBREVSUyA9IHsKICAnQ29udGVudC1UeXBlJzogJ2FwcGxpY2F0aW9uL2pzb24nLAogICdDYWNoZS1Db250cm9sJzogJ25vLXN0b3JlLCBuby1jYWNoZSwgbXVzdC1yZXZhbGlkYXRlJywKICAnUHJhZ21hJzogJ25vLWNhY2hlJywKfQoKY29uc3QgQjJFX0xPQ0FUSU9OID0gewogIGNhbDogICcwMTkgLSBDYWxlZG9uaWEnLAogIG1hZDogICcwMTEgLSBNYWRpc29uJywKICBlYzogICAnMDEyIC0gRWF1IENsYWlyZScsCiAga2VuOiAgJzAxNSAtIEtlbm9zaGEnLAogIHdyOiAgICcwMjMgLSBXaXNjb25zaW4gUmFwaWRzJywKfQoKY29uc3QgUk9TVEVSICAgPSAnc2lsdmVyX19iMmVfc2x2X2VtcGxveWVlcm9zdGVyJwpjb25zdCBTQ0hFRFVMRSA9ICdzaWx2ZXJfX2IyZV9zbHZfZnV0dXJlc2NoZWR1bGVlbnRyaWVzJwoKY29uc3QgUk9TVEVSX1RBQkxFX1BBVEggICA9ICdwcm9kdWN0aW9uX2RiLnNpbHZlci5iMmVfc2x2X2VtcGxveWVlcm9zdGVyJwpjb25zdCBTQ0hFRFVMRV9UQUJMRV9QQVRIID0gJ3Byb2R1Y3Rpb25fZGIuc2lsdmVyLmIyZV9zbHZfZnV0dXJlc2NoZWR1bGVlbnRyaWVzJwoKZXhwb3J0cy5oYW5kbGVyID0gYXN5bmMgKGV2ZW50KSA9PiB7CiAgaWYgKGV2ZW50Lmh0dHBNZXRob2QgIT09ICdQT1NUJykgewogICAgcmV0dXJuIHsgc3RhdHVzQ29kZTogNDA1LCBoZWFkZXJzOiBOT19DQUNIRV9IRUFERVJTLCBib2R5OiAnTWV0aG9kIE5vdCBBbGxvd2VkJyB9CiAgfQoKICBjb25zdCBUT0tFTiA9IHByb2Nlc3MuZW52Lk1PVEhFUkRVQ0tfVE9LRU4KICBpZiAoIVRPS0VOKSB7CiAgICByZXR1cm4gewogICAgICBzdGF0dXNDb2RlOiA1MDAsCiAgICAgIGhlYWRlcnM6IE5PX0NBQ0hFX0hFQURFUlMsCiAgICAgIGJvZHk6IEpTT04uc3RyaW5naWZ5KHsgZXJyb3I6ICdNT1RIRVJEVUNLX1RPS0VOIG5vdCBjb25maWd1cmVkJyB9KSwKICAgIH0KICB9CgogIGxldCBib2R5CiAgdHJ5IHsKICAgIGJvZHkgPSBKU09OLnBhcnNlKGV2ZW50LmJvZHkgfHwgJ3t9JykKICB9IGNhdGNoIHsKICAgIHJldHVybiB7IHN0YXR1c0NvZGU6IDQwMCwgaGVhZGVyczogTk9fQ0FDSEVfSEVBREVSUywgYm9keTogSlNPTi5zdHJpbmdpZnkoeyBlcnJvcjogJ0ludmFsaWQgSlNPTiBib2R5JyB9KSB9CiAgfQoKICBjb25zdCB7IGtpbmQsIGZhY2lsaXR5SWQsIGZyb21EYXRlLCBkYXlzRm9yd2FyZCB9ID0gYm9keQogIGNvbnN0IGxvY2F0aW9uID0gQjJFX0xPQ0FUSU9OW2ZhY2lsaXR5SWRdCiAgaWYgKCFsb2NhdGlvbikgewogICAgcmV0dXJuIHsgc3RhdHVzQ29kZTogNDAwLCBoZWFkZXJzOiBOT19DQUNIRV9IRUFERVJTLCBib2R5OiBKU09OLnN0cmluZ2lmeSh7IGVycm9yOiBgVW5rbm93biBmYWNpbGl0eUlkOiAke2ZhY2lsaXR5SWR9YCB9KSB9CiAgfQoKICAvLyBJbnB1dCB2YWxpZGF0aW9uIHRvIHByb3RlY3QgYWdhaW5zdCBTUUwgaW5qZWN0aW9uIHRocm91Z2ggZnJvbURhdGUvZGF5c0ZvcndhcmQuCiAgLy8gbG9jYXRpb24gY29tZXMgZnJvbSBhIHN0YXRpYyBhbGxvd2xpc3QsIHNvIGEgc2luZ2xlLXF1b3RlIGVzY2FwZSBpcyBkZWZlbnNpdmUuCiAgaWYgKGtpbmQgPT09ICdzY2hlZHVsZV9yYW5nZScgfHwga2luZCA9PT0gJ3NjaGVkdWxlX2RhdGUnKSB7CiAgICBpZiAoIS9eXGR7NH0tXGR7Mn0tXGR7Mn0kLy50ZXN0KFN0cmluZyhmcm9tRGF0ZSB8fCAnJykpKSB7CiAgICAgIHJldHVybiB7IHN0YXR1c0NvZGU6IDQwMCwgaGVhZGVyczogTk9fQ0FDSEVfSEVBREVSUywgYm9keTogSlNPTi5zdHJpbmdpZnkoeyBlcnJvcjogJ0ludmFsaWQgb3IgbWlzc2luZyBmcm9tRGF0ZSAoWVlZWS1NTS1ERCknIH0pIH0KICAgIH0KICAgIGlmIChraW5kID09PSAnc2NoZWR1bGVfcmFuZ2UnKSB7CiAgICAgIGNvbnN0IGQgPSBOdW1iZXIoZGF5c0ZvcndhcmQpCiAgICAgIGlmICghTnVtYmVyLmlzRmluaXRlKGQpIHx8IGQgPCAxIHx8IGQgPiA2MCkgewogICAgICAgIHJldHVybiB7IHN0YXR1c0NvZGU6IDQwMCwgaGVhZGVyczogTk9fQ0FDSEVfSEVBREVSUywgYm9keTogSlNPTi5zdHJpbmdpZnkoeyBlcnJvcjogJ2RheXNGb3J3YXJkIG11c3QgYmUgYW4gaW50ZWdlciAxLi42MCcgfSkgfQogICAgICB9CiAgICB9CiAgfQoKICBjb25zdCBzYWZlTG9jID0gbG9jYXRpb24ucmVwbGFjZSgvJy9nLCAiJyciKQoKICBsZXQgc3FsLCBzY29wZVRhYmxlCiAgaWYgKGtpbmQgPT09ICdhY3RpdmVfcm9zdGVyJykgewogICAgLy8gTWlycm9ycyBmZXRjaEFjdGl2ZUIyZUVtcGxveWVlcyBpbiBvbW5pLmpzOiBBY3RpdmUgKyBqb2JfY29kZSAyMDUgb25seS4KICAgIC8vIFVzZWQgYnkgcHVyZ2UgcGF0aHMgdG8gaWRlbnRpZnkgdGhlIGN1cnJlbnQgbGl2ZSByb3N0ZXIuCiAgICAvLwogICAgLy8gTWFkaXNvbi1vbmx5OiBhbHNvIGluY2x1ZGUgam9iX2NvZGUgMjA5IChTaGlmdCBTdXBlcnZpc29ycykgaGVyZSDigJQKICAgIC8vIERhbiwgMjAyNi0wNy0xMCAoc2VlIE5vdGlvbiBmb3IgY29udGV4dCkuIFdpdGhvdXQgdGhpcywgTUFEJ3MgMjA5cwogICAgLy8gd291bGQgYmUgc2lsZW50bHkgcHVyZ2VkIGZyb20gdGhlIHJvc3RlciBib2FyZCBvbiBldmVyeSBzeW5jIGFzCiAgICAvLyAidGVybWluYXRlZCIgb25jZSB0aGV5J3JlIGFsbG93ZWQgb250byB0aGUgYm9hcmQgZWxzZXdoZXJlLiBBbGwKICAgIC8vIG90aGVyIGZhY2lsaXRpZXMgYXJlIHVudG91Y2hlZC4KICAgIHNjb3BlVGFibGUgPSBST1NURVIKICAgIGNvbnN0IGpvYkNvZGVGaWx0ZXIgPSBmYWNpbGl0eUlkID09PSAnbWFkJwogICAgICA/ICJkZWZhdWx0X2pvYl9jb2RlIElOICgnMjA1JywgJzIwOScpIgogICAgICA6ICJkZWZhdWx0X2pvYl9jb2RlID0gJzIwNSciCiAgICBzcWwgPSBgCiAgICAgIFNFTEVDVCBESVNUSU5DVCBlbXBsb3llZV9pZAogICAgICBGUk9NICR7Uk9TVEVSX1RBQkxFX1BBVEh9CiAgICAgIFdIRVJFIGRlZmF1bHRfbG9jYXRpb25fZnVsbF9wYXRoID0gJyR7c2FmZUxvY30nCiAgICAgICAgQU5EIGVtcGxveWVlX3N0YXR1cyA9ICdBY3RpdmUnCiAgICAgICAgQU5EICR7am9iQ29kZUZpbHRlcn0KICAgIGAKICB9IGVsc2UgaWYgKGtpbmQgPT09ICdhY3RpdmVfcm9zdGVyX2FsbF9qb2Jjb2RlcycpIHsKICAgIC8vIE1pcnJvcnMgdGhlIFJPU1RFUiBvbW5pUXVlcnkgaW5zaWRlIGZldGNoQjJlUm9zdGVyRm9yRW50cnlEYXRlIGFuZAogICAgLy8gZmV0Y2hCMmVSb3N0ZXJGb3JSYW5nZTogQWN0aXZlIG9ubHksIG5vIGpvYl9jb2RlIGZpbHRlciAodGhlIGNsaWVudAogICAgLy8gYXBwbGllcyBBTExPV0VEX0pPQl9DT0RFUyBpbiBKUyBhZnRlciB0aGUgc3RhbGUtc25hcHNob3QgZmlsdGVyKS4KICAgIHNjb3BlVGFibGUgPSBST1NURVIKICAgIHNxbCA9IGAKICAgICAgU0VMRUNUIERJU1RJTkNUIGVtcGxveWVlX2lkLCBlbXBsb3llZV9zdGF0dXMKICAgICAgRlJPTSAke1JPU1RFUl9UQUJMRV9QQVRIfQogICAgICBXSEVSRSBkZWZhdWx0X2xvY2F0aW9uX2Z1bGxfcGF0aCA9ICcke3NhZmVMb2N9JwogICAgICAgIEFORCBlbXBsb3llZV9zdGF0dXMgPSAnQWN0aXZlJwogICAgYAogIH0gZWxzZSBpZiAoa2luZCA9PT0gJ3NjaGVkdWxlX3JhbmdlJyB8fCBraW5kID09PSAnc2NoZWR1bGVfZGF0ZScpIHsKICAgIC8vIHNjaGVkdWxlX2RhdGUgaXMgYSBzcGVjaWFsaXNhdGlvbiBvZiBzY2hlZHVsZV9yYW5nZSB3aXRoCiAgICAvLyBkYXlzRm9yd2FyZD0xNCAobWF0Y2hlcyB0aGUgd2lkZW5lZCB3aW5kb3cgaW4KICAgIC8vIGZldGNoQjJlUm9zdGVyRm9yRW50cnlEYXRlIOKAlCB0aGUgMTRkIHNwYW4gaXMgbmVlZGVkIHNvIHRoZQogICAgLy8gcGVyLWVtcGxveWVlIG1heF9pbmdlc3Rpb25fdHMgZmlsdGVyIGNhbiBkZXRlY3QgZ2hvc3Qgcm93cyBmcm9tCiAgICAvLyBzdGFsZSBzbmFwc2hvdCBiYXRjaGVzOyBjbGllbnQgbmFycm93cyBiYWNrIHRvIGVudHJ5RGF0ZSBhZnRlcikuCiAgICBzY29wZVRhYmxlID0gU0NIRURVTEUKICAgIGNvbnN0IGRheXMgPSBraW5kID09PSAnc2NoZWR1bGVfcmFuZ2UnID8gTnVtYmVyKGRheXNGb3J3YXJkKSA6IDE0CiAgICBzcWwgPSBgCiAgICAgIFNFTEVDVAogICAgICAgIGVtcGxveWVlX2lkLCBmaXJzdF9uYW1lLCBsYXN0X25hbWUsIGRlZmF1bHRfam9iX2NvZGUsCiAgICAgICAgc3RhcnRfdGltZSwgZW5kX3RpbWUsIG1vZGlmaWVkX3N0YXJ0X3RpbWUsIG1vZGlmaWVkX2VuZF90aW1lLAogICAgICAgIHdvcmtfc2NoZWR1bGUsIGluZ2VzdGlvbl90cywgZW50cnlfZGF0ZQogICAgICBGUk9NICR7U0NIRURVTEVfVEFCTEVfUEFUSH0KICAgICAgV0hFUkUgZGVmYXVsdF9sb2NhdGlvbl9mdWxsX3BhdGggPSAnJHtzYWZlTG9jfScKICAgICAgICBBTkQgZW50cnlfZGF0ZSBCRVRXRUVOIERBVEUgJyR7ZnJvbURhdGV9JyBBTkQgREFURSAnJHtmcm9tRGF0ZX0nICsgSU5URVJWQUwgJyR7ZGF5c30gZGF5cycKICAgICAgT1JERVIgQlkgaW5nZXN0aW9uX3RzIERFU0MKICAgICAgTElNSVQgNTAwMAogICAgYAogIH0gZWxzZSB7CiAgICByZXR1cm4geyBzdGF0dXNDb2RlOiA0MDAsIGhlYWRlcnM6IE5PX0NBQ0hFX0hFQURFUlMsIGJvZHk6IEpTT04uc3RyaW5naWZ5KHsgZXJyb3I6IGBVbmtub3duIGtpbmQ6ICR7a2luZH1gIH0pIH0KICB9CgogIGxldCBkYiwgY29ubgogIHRyeSB7CiAgICAvLyBIT01FPS90bXAgc28gTW90aGVyRHVjayBDKysgaW5pdCBoYXMgYSB3cml0YWJsZSBwYXRoIGZvciBleHRlbnNpb24gZmlsZXMuCiAgICBwcm9jZXNzLmVudi5IT01FICAgICAgICAgICAgID0gJy90bXAnCiAgICAvLyBtb3RoZXJkdWNrX3Rva2VuIGVudiB2YXIgaXMgcmVhZCBhdXRvbWF0aWNhbGx5IGJ5IHRoZSBleHRlbnNpb24gYWZ0ZXIgTE9BRC4KICAgIHByb2Nlc3MuZW52Lm1vdGhlcmR1Y2tfdG9rZW4gPSBUT0tFTgoKICAgIGNvbnN0IGR1Y2tkYiA9IHJlcXVpcmUoJ2R1Y2tkYicpCgogICAgZGIgICA9IG5ldyBkdWNrZGIuRGF0YWJhc2UoJzptZW1vcnk6JykKICAgIGNvbm4gPSBkYi5jb25uZWN0KCkKCiAgICBhd2FpdCBuZXcgUHJvbWlzZSgocmVzb2x2ZSwgcmVqZWN0KSA9PiB7CiAgICAgIGNvbm4ucnVuKCdMT0FEIG1vdGhlcmR1Y2snLCBlcnIgPT4gZXJyID8gcmVqZWN0KGVycikgOiByZXNvbHZlKCkpCiAgICB9KQogICAgYXdhaXQgbmV3IFByb21pc2UoKHJlc29sdmUsIHJlamVjdCkgPT4gewogICAgICBjb25uLnJ1bigiQVRUQUNIICdtZDpwcm9kdWN0aW9uX2RiJyBBUyBwcm9kdWN0aW9uX2RiIChSRUFEX09OTFkpIiwgZXJyID0+IGVyciA/IHJlamVjdChlcnIpIDogcmVzb2x2ZSgpKQogICAgfSkKCiAgICBjb25zdCByYXdSb3dzID0gYXdhaXQgbmV3IFByb21pc2UoKHJlc29sdmUsIHJlamVjdCkgPT4gewogICAgICBjb25uLmFsbChzcWwsIChlcnIsIHJlc3VsdCkgPT4gZXJyID8gcmVqZWN0KGVycikgOiByZXNvbHZlKHJlc3VsdCkpCiAgICB9KQoKICAgIGNvbm4uY2xvc2UoKQogICAgZGIuY2xvc2UoKQoKICAgIC8vIFJlc2hhcGUgdG8gT21uaS1xdWFsaWZpZWQgY29sdW1uIG5hbWUgc2hhcGUuIFRoZSBjbGllbnQgYWNjZXNzZXMKICAgIC8vIGZpZWxkcyB2aWEgcltgJHtTQ0hFRFVMRX0uZW1wbG95ZWVfaWRgXSB0ZW1wbGF0ZSBsaXRlcmFsczsgbWF0Y2hpbmcKICAgIC8vIHRoYXQgc2hhcGUgbWVhbnMgZmV0Y2hCMmVSb3N0ZXJGb3JFbnRyeURhdGUgLyBmZXRjaEIyZVJvc3RlckZvclJhbmdlCiAgICAvLyBzdGF5IHVuY2hhbmdlZCBhcGFydCBmcm9tIHRoZSB0b3AtbGV2ZWwgZmV0Y2ggY2FsbCBzd2FwLgogICAgLy8KICAgIC8vIFRpbWVzdGFtcHMgY29lcmNlZCB0byBJU08gc3RyaW5ncyBzbyB0aGUgY2xpZW50J3Mgc3RyaW5nLWJhc2VkCiAgICAvLyBzdGFsZS1maWx0ZXIgY29tcGFyaXNvbiAoYHRzID4gbWF4SW5nZXN0QnlFbXAuZ2V0KGlkKWApIHN0aWxsIHdvcmtzLgogICAgLy8gQmlnSW50IGNvZXJjZWQgdG8gc3RyaW5nIHRvIHN1cnZpdmUgSlNPTi5zdHJpbmdpZnkuCiAgICBjb25zdCByb3dzID0gcmF3Um93cy5tYXAociA9PiB7CiAgICAgIGNvbnN0IG91dCA9IHt9CiAgICAgIGZvciAoY29uc3QgW2ssIHZdIG9mIE9iamVjdC5lbnRyaWVzKHIpKSB7CiAgICAgICAgbGV0IHZhbCA9IHYKICAgICAgICBpZiAodmFsIGluc3RhbmNlb2YgRGF0ZSkgewogICAgICAgICAgdmFsID0gdmFsLnRvSVNPU3RyaW5nKCkKICAgICAgICB9IGVsc2UgaWYgKHR5cGVvZiB2YWwgPT09ICdiaWdpbnQnKSB7CiAgICAgICAgICB2YWwgPSBTdHJpbmcodmFsKQogICAgICAgIH0KICAgICAgICBvdXRbYCR7c2NvcGVUYWJsZX0uJHtrfWBdID0gdmFsCiAgICAgIH0KICAgICAgcmV0dXJuIG91dAogICAgfSkKCiAgICByZXR1cm4gewogICAgICBzdGF0dXNDb2RlOiAyMDAsCiAgICAgIGhlYWRlcnM6IE5PX0NBQ0hFX0hFQURFUlMsCiAgICAgIGJvZHk6IEpTT04uc3RyaW5naWZ5KHsgcm93cyB9KSwKICAgIH0KICB9IGNhdGNoIChlKSB7CiAgICB0cnkgeyBpZiAoY29ubikgY29ubi5jbG9zZSgpIH0gY2F0Y2gge30KICAgIHRyeSB7IGlmIChkYikgICBkYi5jbG9zZSgpICAgfSBjYXRjaCB7fQogICAgcmV0dXJuIHsKICAgICAgc3RhdHVzQ29kZTogNTAyLAogICAgICBoZWFkZXJzOiBOT19DQUNIRV9IRUFERVJTLAogICAgICBib2R5OiBKU09OLnN0cmluZ2lmeSh7IGVycm9yOiBlLm1lc3NhZ2UsIHN0YWNrOiBlLnN0YWNrPy5zbGljZSgwLCA4MDApIH0pLAogICAgfQogIH0KfQo=
+'use strict'
+
+// MotherDuck-direct B2E roster + schedule fetch.
+//
+// Bypasses Omni for B2E reads. See top-of-file changelog for context.
+//
+// Request shape (POST JSON):
+//   { kind: 'active_roster',              facilityId: 'ken' }
+//   { kind: 'active_roster_all_jobcodes', facilityId: 'ken' }
+//   { kind: 'schedule_date',              facilityId: 'ken', fromDate: '2026-07-10' }
+//   { kind: 'schedule_range',             facilityId: 'ken', fromDate: '2026-07-10', daysForward: 14 }
+//
+// Response shape:
+//   { rows: [ { 'silver__b2e_slv_futurescheduleentries.employee_id': '535', ... } ] }
+//
+// The Omni-qualified column-name shape is deliberate — the client's
+// downstream filter/map logic in fetchB2eRosterForEntryDate and
+// fetchB2eRosterForRange accesses fields via
+// r[`${SCHEDULE}.employee_id`] etc. Preserving that shape lets us swap
+// the underlying data source without touching any of the ~200 lines of
+// post-processing (stale-snapshot filter, job_code filter, shift/lane
+// derivation).
+
+const NO_CACHE_HEADERS = {
+  'Content-Type': 'application/json',
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  'Pragma': 'no-cache',
+}
+
+const B2E_LOCATION = {
+  cal:  '019 - Caledonia',
+  mad:  '011 - Madison',
+  ec:   '012 - Eau Claire',
+  ken:  '015 - Kenosha',
+  wr:   '023 - Wisconsin Rapids',
+}
+
+const ROSTER   = 'silver__b2e_slv_employeeroster'
+const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
+
+const ROSTER_TABLE_PATH   = 'production_db.silver.b2e_slv_employeeroster'
+const SCHEDULE_TABLE_PATH = 'production_db.silver.b2e_slv_futurescheduleentries'
+
+exports.handler = async (event) => {
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, headers: NO_CACHE_HEADERS, body: 'Method Not Allowed' }
+  }
+
+  const TOKEN = process.env.MOTHERDUCK_TOKEN
+  if (!TOKEN) {
+    return {
+      statusCode: 500,
+      headers: NO_CACHE_HEADERS,
+      body: JSON.stringify({ error: 'MOTHERDUCK_TOKEN not configured' }),
+    }
+  }
+
+  let body
+  try {
+    body = JSON.parse(event.body || '{}')
+  } catch {
+    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Invalid JSON body' }) }
+  }
+
+  const { kind, facilityId, fromDate, daysForward } = body
+  const location = B2E_LOCATION[facilityId]
+  if (!location) {
+    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: `Unknown facilityId: ${facilityId}` }) }
+  }
+
+  // Input validation to protect against SQL injection through fromDate/daysForward.
+  // location comes from a static allowlist, so a single-quote escape is defensive.
+  if (kind === 'schedule_range' || kind === 'schedule_date') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromDate || ''))) {
+      return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Invalid or missing fromDate (YYYY-MM-DD)' }) }
+    }
+    if (kind === 'schedule_range') {
+      const d = Number(daysForward)
+      if (!Number.isFinite(d) || d < 1 || d > 60) {
+        return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'daysForward must be an integer 1..60' }) }
+      }
+    }
+  }
+
+  const safeLoc = location.replace(/'/g, "''")
+
+  let sql, scopeTable
+  if (kind === 'active_roster') {
+    // Mirrors fetchActiveB2eEmployees in omni.js: Active + job_code 205 only.
+    // Used by purge paths to identify the current live roster.
+    //
+    // Madison-only: also include job_code 209 (Shift Supervisors) here —
+    // Dan, 2026-07-10 (see Notion for context). Without this, MAD's 209s
+    // would be silently purged from the roster board on every sync as
+    // "terminated" once they're allowed onto the board elsewhere. All
+    // other facilities are untouched.
+    scopeTable = ROSTER
+    const jobCodeFilter = facilityId === 'mad'
+      ? "default_job_code IN ('205', '209')"
+      : "default_job_code = '205'"
+    sql = `
+      SELECT DISTINCT employee_id
+      FROM ${ROSTER_TABLE_PATH}
+      WHERE default_location_full_path = '${safeLoc}'
+        AND employee_status = 'Active'
+        AND ${jobCodeFilter}
+    `
+  } else if (kind === 'active_roster_all_jobcodes') {
+    // Mirrors the ROSTER omniQuery inside fetchB2eRosterForEntryDate and
+    // fetchB2eRosterForRange: Active only, no job_code filter (the client
+    // applies ALLOWED_JOB_CODES in JS after the stale-snapshot filter).
+    scopeTable = ROSTER
+    sql = `
+      SELECT DISTINCT employee_id, employee_status
+      FROM ${ROSTER_TABLE_PATH}
+      WHERE default_location_full_path = '${safeLoc}'
+        AND employee_status = 'Active'
+    `
+  } else if (kind === 'schedule_range' || kind === 'schedule_date') {
+    // schedule_date is a specialisation of schedule_range with
+    // daysForward=14 (matches the widened window in
+    // fetchB2eRosterForEntryDate — the 14d span is needed so the
+    // per-employee max_ingestion_ts filter can detect ghost rows from
+    // stale snapshot batches; client narrows back to entryDate after).
+    scopeTable = SCHEDULE
+    const days = kind === 'schedule_range' ? Number(daysForward) : 14
+    sql = `
+      SELECT
+        employee_id, first_name, last_name, default_job_code,
+        start_time, end_time, modified_start_time, modified_end_time,
+        work_schedule, ingestion_ts, entry_date
+      FROM ${SCHEDULE_TABLE_PATH}
+      WHERE default_location_full_path = '${safeLoc}'
+        AND entry_date BETWEEN DATE '${fromDate}' AND DATE '${fromDate}' + INTERVAL '${days} days'
+      ORDER BY ingestion_ts DESC
+      LIMIT 5000
+    `
+  } else {
+    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: `Unknown kind: ${kind}` }) }
+  }
+
+  let db, conn
+  try {
+    // HOME=/tmp so MotherDuck C++ init has a writable path for extension files.
+    process.env.HOME             = '/tmp'
+    // motherduck_token env var is read automatically by the extension after LOAD.
+    process.env.motherduck_token = TOKEN
+
+    const duckdb = require('duckdb')
+
+    db   = new duckdb.Database(':memory:')
+    conn = db.connect()
+
+    await new Promise((resolve, reject) => {
+      conn.run('LOAD motherduck', err => err ? reject(err) : resolve())
+    })
+    await new Promise((resolve, reject) => {
+      conn.run("ATTACH 'md:production_db' AS production_db (READ_ONLY)", err => err ? reject(err) : resolve())
+    })
+
+    const rawRows = await new Promise((resolve, reject) => {
+      conn.all(sql, (err, result) => err ? reject(err) : resolve(result))
+    })
+
+    conn.close()
+    db.close()
+
+    // Reshape to Omni-qualified column name shape. The client accesses
+    // fields via r[`${SCHEDULE}.employee_id`] template literals; matching
+    // that shape means fetchB2eRosterForEntryDate / fetchB2eRosterForRange
+    // stay unchanged apart from the top-level fetch call swap.
+    //
+    // Timestamps coerced to ISO strings so the client's string-based
+    // stale-filter comparison (`ts > maxIngestByEmp.get(id)`) still works.
+    // BigInt coerced to string to survive JSON.stringify.
+    const rows = rawRows.map(r => {
+      const out = {}
+      for (const [k, v] of Object.entries(r)) {
+        let val = v
+        if (val instanceof Date) {
+          val = val.toISOString()
+        } else if (typeof val === 'bigint') {
+          val = String(val)
+        }
+        out[`${scopeTable}.${k}`] = val
+      }
+      return out
+    })
+
+    return {
+      statusCode: 200,
+      headers: NO_CACHE_HEADERS,
+      body: JSON.stringify({ rows }),
+    }
+  } catch (e) {
+    try { if (conn) conn.close() } catch {}
+    try { if (db)   db.close()   } catch {}
+    return {
+      statusCode: 502,
+      headers: NO_CACHE_HEADERS,
+      body: JSON.stringify({ error: e.message, stack: e.stack?.slice(0, 800) }),
+    }
+  }
+}
