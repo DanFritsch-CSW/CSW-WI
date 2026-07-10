@@ -234,8 +234,17 @@ export function undatedLotsInView(orders) {
 }
 
 // ─── Verdict engine ─────────────────────────────────────────────────────────
+//
+// 2026-07-10 (Dan, Slack screenshot feedback): "hold" and "blocked" used to
+// be one verdict ('hold') covering two different root causes — a lot on a
+// genuine Datex hold (QA, Food Safety, Administrative, etc.) vs. a lot that's
+// simply not yet putaway (sitting in receiving/staging/dock/door). Those need
+// different actions (clear the hold vs. move/putaway the pallet), so they're
+// now two distinct verdicts: 'hold' and 'blocked'. `hold` takes precedence if
+// a lot is somehow both (shouldn't normally happen, but a lot in receiving
+// could theoretically also carry a hold status).
 
-export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, clean: 3 }
+export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, blocked: 3, clean: 4 }
 
 export function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
@@ -248,7 +257,8 @@ export function lineVerdict(line) {
   const rem = line.rem
   const remKDay = rem?.kDay ?? rem?.k
   if (rem && !rem.dateUnknown && rem.lps > 0 && remKDay != null && remKDay < oldKDay) {
-    if (rem.hold || rem.locationBlocked) return 'hold'
+    if (rem.hold) return 'hold'
+    if (rem.locationBlocked) return 'blocked'
     return 'violation'
   }
   return 'clean'
@@ -328,14 +338,6 @@ function locSuffix(rem) {
   return ` at ${rem.location}`
 }
 
-function skipReason(rem) {
-  if (rem?.hold) return `on ${rem.holdType || 'hold'}`
-  if (rem?.locationBlocked) {
-    return rem.location ? `not yet in an allocatable bin (${rem.location})` : 'not yet in an allocatable bin'
-  }
-  return ''
-}
-
 export function verdictCopy(line, projId) {
   const verb = dateVerb(projId)
   const v = lineVerdict(line)
@@ -349,8 +351,11 @@ export function verdictCopy(line, projId) {
     return `Out of rotation${drift} — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
   }
   if (v === 'hold') {
-    const reason = skipReason(line.rem) || 'on hold'
-    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is ${reason}, so it is correctly skipped. Clear the hold or move to an allocatable bin before it can ship in rotation.`
+    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
+  }
+  if (v === 'blocked') {
+    const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
+    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
   }
   if (!line.rem || line.rem.lps === 0) {
     return 'In rotation — the oldest stock on hand is shipping first… fully cleared.'
@@ -361,7 +366,7 @@ export function verdictCopy(line, projId) {
 // ─── Aggregations ───────────────────────────────────────────────────────────
 
 export function bannerCounts(orders) {
-  const out = { violations: [], criticalCount: 0, warningCount: 0, stale: [], holds: [], allClean: false }
+  const out = { violations: [], criticalCount: 0, warningCount: 0, stale: [], holds: [], blocked: [], allClean: false }
   for (const o of orders) {
     const v = orderVerdict(o)
     if (v === 'violation') {
@@ -372,13 +377,14 @@ export function bannerCounts(orders) {
     }
     else if (v === 'stale') out.stale.push(o.id)
     else if (v === 'hold') out.holds.push(o.id)
+    else if (v === 'blocked') out.blocked.push(o.id)
   }
-  out.allClean = orders.length > 0 && !out.violations.length && !out.stale.length && !out.holds.length
+  out.allClean = orders.length > 0 && !out.violations.length && !out.stale.length && !out.holds.length && !out.blocked.length
   return out
 }
 
 export function kpiRow(orders) {
-  let lps = 0, materials = new Set(), violations = 0, critical = 0, warning = 0, stale = 0, holds = 0
+  let lps = 0, materials = new Set(), violations = 0, critical = 0, warning = 0, stale = 0, holds = 0, blocked = 0
   for (const o of orders) {
     const v = orderVerdict(o)
     if (v === 'violation') {
@@ -389,18 +395,19 @@ export function kpiRow(orders) {
     }
     else if (v === 'stale') stale++
     else if (v === 'hold') holds++
+    else if (v === 'blocked') blocked++
     for (const line of (o.lines || [])) {
       materials.add(line.code)
       for (const s of (line.ship || [])) lps += s.lps || 0
     }
   }
-  return { orders: orders.length, lps, materials: materials.size, violations, critical, warning, stale, holds }
+  return { orders: orders.length, lps, materials: materials.size, violations, critical, warning, stale, holds, blocked }
 }
 
 export function rollupByProject(orders) {
   const map = new Map()
   for (const proj of FEFO_PROJECTS) {
-    map.set(proj.id, { proj, orders: 0, lps: 0, violations: 0, critical: 0, warning: 0, stale: 0, holds: 0 })
+    map.set(proj.id, { proj, orders: 0, lps: 0, violations: 0, critical: 0, warning: 0, stale: 0, holds: 0, blocked: 0 })
   }
   for (const o of orders) {
     const r = map.get(o.proj)
@@ -417,6 +424,7 @@ export function rollupByProject(orders) {
     }
     else if (v === 'stale') r.stale++
     else if (v === 'hold') r.holds++
+    else if (v === 'blocked') r.blocked++
   }
   return [...map.values()].sort((a, b) => {
     if (a.critical !== b.critical) return b.critical - a.critical
@@ -446,10 +454,11 @@ export function daySubLabel(dayOffset) {
 // ─── Verdict styling tokens ─────────────────────────────────────────────────
 
 export const VERDICT_TOKENS = {
-  violation: { color: 'var(--red, #c0392b)',    bg: 'rgba(192, 57, 43, 0.08)',  label: '⚠ Out of rotation', pill: 'violation' },
-  stale:     { color: 'var(--orange, #d4824a)', bg: 'rgba(212, 130, 74, 0.08)', label: '◷ Stale · overdue',  pill: 'stale' },
-  hold:      { color: 'var(--blue, #2a72b8)',   bg: 'rgba(42, 114, 184, 0.08)', label: '⏸ Older lot held',  pill: 'hold' },
-  clean:     { color: 'var(--green, #1a8a52)',  bg: 'rgba(26, 138, 82, 0.08)',  label: '✓ In rotation',     pill: 'clean' },
+  violation: { color: 'var(--red, #c0392b)',    bg: 'rgba(192, 57, 43, 0.08)',  label: '⚠ Out of rotation',   pill: 'violation' },
+  stale:     { color: 'var(--orange, #d4824a)', bg: 'rgba(212, 130, 74, 0.08)', label: '◷ Stale · overdue',    pill: 'stale' },
+  hold:      { color: 'var(--blue, #2a72b8)',   bg: 'rgba(42, 114, 184, 0.08)', label: '⏸ Older lot held',    pill: 'hold' },
+  blocked:   { color: 'var(--amber, #a07818)',  bg: 'rgba(160, 120, 24, 0.08)', label: '⚑ Older lot in receiving', pill: 'blocked' },
+  clean:     { color: 'var(--green, #1a8a52)',  bg: 'rgba(26, 138, 82, 0.08)',  label: '✓ In rotation',       pill: 'clean' },
 }
 
 export const SEVERITY_TOKENS = {
