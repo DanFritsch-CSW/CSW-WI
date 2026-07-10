@@ -88,13 +88,22 @@ exports.handler = async (event) => {
   if (kind === 'active_roster') {
     // Mirrors fetchActiveB2eEmployees in omni.js: Active + job_code 205 only.
     // Used by purge paths to identify the current live roster.
+    //
+    // Madison-only: also include job_code 209 (Shift Supervisors) here —
+    // Dan, 2026-07-10 (see Notion for context). Without this, MAD's 209s
+    // would be silently purged from the roster board on every sync as
+    // "terminated" once they're allowed onto the board elsewhere. All
+    // other facilities are untouched.
     scopeTable = ROSTER
+    const jobCodeFilter = facilityId === 'mad'
+      ? "default_job_code IN ('205', '209')"
+      : "default_job_code = '205'"
     sql = `
       SELECT DISTINCT employee_id
       FROM ${ROSTER_TABLE_PATH}
       WHERE default_location_full_path = '${safeLoc}'
         AND employee_status = 'Active'
-        AND default_job_code = '205'
+        AND ${jobCodeFilter}
     `
   } else if (kind === 'active_roster_all_jobcodes') {
     // Mirrors the ROSTER omniQuery inside fetchB2eRosterForEntryDate and
