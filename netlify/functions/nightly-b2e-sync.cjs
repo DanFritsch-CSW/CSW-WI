@@ -50,7 +50,16 @@ const FACILITIES = ['cal', 'mad', 'ec', 'ken', 'wr']
 // loop below, total runtime stays comfortably under the 26s function
 // timeout even at the wider window.
 const FORWARD_DAYS = 21
-const ALLOWED_JOB_CODES = new Set(['205'])
+
+// Madison-only: Shift Supervisors (209) count toward labor hours at MAD per
+// Dan, 2026-07-10 (see Notion for context). All other facilities keep
+// excluding 209s exactly as before (this was '205' only, fixed 2026-04-28).
+// This is a self-contained port of the client-side logic in src/lib/omni.js
+// (see getAllowedJobCodes there) — kept faithful per the file's own
+// "Self-contained port" convention so the nightly cron matches manual sync.
+function getAllowedJobCodes(facilityId) {
+  return facilityId === 'mad' ? new Set(['205', '209']) : new Set(['205'])
+}
 
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
 const ROSTER       = 'silver__b2e_slv_employeeroster'
@@ -206,11 +215,13 @@ async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward
     }
   }
 
+  const allowedJobCodes = getAllowedJobCodes(facilityId)
   const byDateEmp = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
     if (!activeIds.has(id)) continue
-    if (!ALLOWED_JOB_CODES.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
+    // Madison-only: also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
+    if (!allowedJobCodes.has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
     if (ts !== maxIngestByEmp.get(id)) continue
     const dateRaw = r[`${SCHEDULE}.entry_date`]
@@ -273,7 +284,9 @@ async function fetchActiveB2eEmployees(baseUrl, facilityId) {
     filters: {
       [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: ['205'] },
+      // Madison-only: also allow 209 (Shift Supervisors) per Dan, 2026-07-10
+      // (see Notion for context). All other facilities stay '205' only.
+      [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: facilityId === 'mad' ? ['205', '209'] : ['205'] },
     },
     sorts: [],
     limit: 500,
