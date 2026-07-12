@@ -1,15 +1,16 @@
 'use strict'
 
 // MotherDuck query for outbound "Pre-Picked Order Status" — Madison labor
-// planning tab. Built 2026-07-11 per Dan.
+// planning tab. Built 2026-07-11 per Dan. Matching logic corrected 2026-07-12
+// after production showed everything as "Unresolved" — see notes below.
 //
 // For every outbound appointment on a given facility/date, resolves the
-// linked Datex order (best-effort match on lookup_code — see matching notes
-// below), determines whether it's fully picked with no outstanding work,
-// and — for orders still being picked — scores pick difficulty based on
-// how many warehouse locations the picker must visit and whether any of
-// those locations mix multiple lots together (the real driver of pick time,
-// not raw pallet count — see 2026-07-11 conversation with Dan).
+// linked Datex order (best-effort match — see matching notes below),
+// determines whether it's fully picked with no outstanding work, and — for
+// orders still being picked — scores pick difficulty based on how many
+// warehouse locations the picker must visit and whether any of those
+// locations mix multiple lots together (the real driver of pick time, not
+// raw pallet count — see 2026-07-11 conversation with Dan).
 //
 // POST body: { facilityId: 'mad', date: 'YYYY-MM-DD' }
 //
@@ -26,16 +27,40 @@
 //     fetchedAt,
 //   }
 //
-// ── Order matching notes (2026-07-11) ───────────────────────────────────
-// gold.truck_appointments.lookup_code is sometimes a shortened/truncated
-// version of the real Datex order lookup_code (observed case: appointment
-// showed "64527", the real order was "5464527" — a "54" facility/customer
-// prefix Datex adds that doesn't always make it into the appointment feed).
-// So matching is: exact match first, then substring match (order lookup_code
-// CONTAINS appointment lookup_code), guarded by a minimum length so short
-// codes don't cause false-positive matches. If neither matches, the order
-// is 'unresolved' — this is a real data gap, not a bug, and should be
-// surfaced to the user rather than hidden.
+// ── Order matching notes (corrected 2026-07-12) ─────────────────────────
+// gold.truck_appointments.lookup_code is NOT a clean order code — it's a
+// noisy compound string like "*(NOVONESIS) - 85155270" or
+// "*(GRASSLAND) - 1150897 (0005153991)". The original 2026-07-11 version of
+// this function assumed Madison's lookup_code was already clean (based on
+// an ad-hoc Omni pull that happened to return a cleaner field) and never
+// re-validated against this actual table — that shipped a real bug where
+// EVERY appointment came back "Unresolved" in production, because the
+// entire noisy string was being used as the match key instead of the real
+// order code embedded inside it.
+//
+// Fix: tokenize the raw lookup_code on anything that isn't a letter/digit/
+// dash, then treat any token containing a digit and at least 4 characters
+// long as a candidate order code (handles "85155270", "1150897" +
+// "0005153991" as two candidates, "M027", "HCI-0190-103616-16", etc. — all
+// confirmed against real Madison orders this session). Each appointment can
+// have multiple candidates (e.g. an order number AND a trailing PO
+// reference in parens); exact match on any candidate wins.
+//
+// Substring fallback is intentionally conservative (candidates >=6 chars,
+// accepted only when exactly one order matches). Validated against real
+// data that short candidates can be genuinely ambiguous — the previously
+// assumed "54-prefix truncation" case (appointment shows "64527", a real
+// order is "5464527") turned out to ALSO substring-match five other,
+// completely unrelated orders company-wide that merely happen to end in
+// the same 5 digits (e.g. "0010264527", "PSH0064527", "SO364527"). Guessing
+// one would be an outright wrong match. Such appointments now correctly
+// surface as 'unresolved' rather than silently picking a possibly-wrong
+// order — a real data gap, surfaced honestly rather than hidden or guessed.
+//
+// Placeholder detection (also fixed 2026-07-12): HOLD/SAVE appointments are
+// compound strings too ("(JONES) - HOLD", "GRASSLAND SAVE"), not bare
+// "HOLD"/"SAVE" — the original exact-string regex never matched these
+// either. Fixed by tokenizing and checking for a HOLD/SAVE token anywhere.
 //
 // ── "Ready" definition ───────────────────────────────────────────────────
 // An order is 'ready' when it has zero tasks in Released/Planned status
@@ -74,7 +99,7 @@ const WAREHOUSE_ID = {
   wr:  6,
 }
 
-const PLACEHOLDER_LOOKUP_RE = /^(hold|save)$/i
+const PLACEHOLDER_TOKENS = new Set(['HOLD', 'SAVE'])
 
 function nextDayISO(date) {
   const d = new Date(date + 'T00:00:00Z')
@@ -84,6 +109,26 @@ function nextDayISO(date) {
 
 function sqlLit(s) {
   return `'${String(s).replace(/'/g, "''")}'`
+}
+
+// Split a raw lookup_code on anything that isn't a letter/digit/dash.
+// Dashes are kept as token characters (not delimiters) so compound codes
+// like "HCI-0190-103616-16" survive intact as one token.
+function tokenize(raw) {
+  return String(raw || '').split(/[^A-Za-z0-9-]+/).filter(Boolean)
+}
+
+// Candidate order/PO codes embedded in a noisy appointment lookup_code.
+// Any token containing at least one digit and >=4 characters is a
+// candidate — customer-name tokens (all letters, e.g. "NOVONESIS",
+// "RHODES") are naturally excluded since they have no digits.
+function extractCandidateCodes(raw) {
+  const tokens = tokenize(raw)
+  return [...new Set(tokens.filter(t => /\d/.test(t) && t.length >= 4))]
+}
+
+function isPlaceholder(raw) {
+  return tokenize(raw).some(t => PLACEHOLDER_TOKENS.has(t.toUpperCase()))
 }
 
 exports.handler = async (event) => {
@@ -162,56 +207,74 @@ exports.handler = async (event) => {
     const realAppts = []
     const placeholderAppts = []
     for (const a of apptRows) {
-      if (!a.lookup_code || PLACEHOLDER_LOOKUP_RE.test(a.lookup_code.trim())) {
+      if (!a.lookup_code || isPlaceholder(a.lookup_code)) {
         placeholderAppts.push(a)
       } else {
         realAppts.push(a)
       }
     }
 
+    // ── Step 2: extract candidate order codes per appointment ────────────
+    const apptsWithCandidates = realAppts.map(a => ({
+      appt: a,
+      candidates: extractCandidateCodes(a.lookup_code),
+    }))
+
     let matchedOrders = []
-    if (realAppts.length > 0) {
-      // ── Step 2: candidate orders — exact OR substring match ─────────────
-      // Small N (typically <20/day) so an OR-chain of LIKE clauses is fine
-      // and keeps the matching logic (exact-preferred, substring-fallback)
-      // simple and inspectable in JS rather than buried in SQL string logic.
-      const codes = [...new Set(realAppts.map(a => a.lookup_code.trim()))]
-      const whereClauses = codes
-        .filter(c => c.length >= 4) // guard against short-code false positives
+    const allCodes = [...new Set(apptsWithCandidates.flatMap(x => x.candidates))]
+    if (allCodes.length > 0) {
+      const whereClauses = allCodes
         .map(c => `lookup_code = ${sqlLit(c)} OR lookup_code LIKE ${sqlLit('%' + c + '%')}`)
         .join(' OR ')
-      const exactOnly = codes.filter(c => c.length < 4).map(sqlLit)
+      const orderSql = `
+        SELECT order_id, lookup_code, order_status_id, preferred_warehouse_id
+        FROM production_db.silver.datex_slv_orders
+        WHERE ${whereClauses}
+      `
+      matchedOrders = await runQuery(orderSql)
+    }
 
-      const orderWhere = [
-        whereClauses ? `(${whereClauses})` : null,
-        exactOnly.length ? `lookup_code IN (${exactOnly.join(',')})` : null,
-      ].filter(Boolean).join(' OR ')
+    // Resolve an appointment's candidate codes to (at most) one order.
+    // Exact match on any candidate first, in candidate order (earlier
+    // candidates are typically the primary order number, later ones
+    // trailing PO references). When multiple orders share the exact same
+    // lookup_code (confirmed real case: "M027" exists on 3 separate order
+    // records from different dates), prefer the one currently Processing
+    // (order_status_id=2) over old Completed ones, tie-broken by highest
+    // order_id (most recent).
+    //
+    // Substring fallback is intentionally conservative: only attempted for
+    // candidates >=6 characters, and only accepted when EXACTLY ONE order
+    // contains it. Validated this session that short candidates (e.g. the
+    // confirmed 5-digit truncation case "64527") can substring-match SIX
+    // unrelated orders company-wide that merely happen to end in the same
+    // digits (e.g. "0010264527", "PSH0064527", "SO364527") — silently
+    // picking one of those would be an outright wrong match, worse than
+    // surfacing 'unresolved' honestly.
+    function pickBestAmong(orders) {
+      if (orders.length === 0) return null
+      if (orders.length === 1) return orders[0]
+      const active = orders.filter(o => Number(o.order_status_id) === 2)
+      const pool = active.length > 0 ? active : orders
+      return pool.reduce((best, o) => (Number(o.order_id) > Number(best.order_id) ? o : best), pool[0])
+    }
 
-      if (orderWhere) {
-        const orderSql = `
-          SELECT order_id, lookup_code, order_status_id, preferred_warehouse_id
-          FROM production_db.silver.datex_slv_orders
-          WHERE ${orderWhere}
-        `
-        matchedOrders = await runQuery(orderSql)
+    function findOrderForCandidates(candidates) {
+      for (const c of candidates) {
+        const exactMatches = matchedOrders.filter(o => o.lookup_code === c)
+        if (exactMatches.length > 0) return pickBestAmong(exactMatches)
       }
+      for (const c of candidates) {
+        if (c.length < 6) continue
+        const subs = matchedOrders.filter(o => o.lookup_code && o.lookup_code.includes(c))
+        if (subs.length === 1) return subs[0]
+      }
+      return null
     }
 
-    // Resolve each appointment to (at most) one order: exact match preferred,
-    // then longest substring match (reduces ambiguity when multiple orders
-    // happen to contain the same short substring).
-    function findOrderForAppt(lookupCode) {
-      const exact = matchedOrders.find(o => o.lookup_code === lookupCode)
-      if (exact) return exact
-      const substrMatches = matchedOrders
-        .filter(o => o.lookup_code && o.lookup_code.includes(lookupCode))
-        .sort((a, b) => a.lookup_code.length - b.lookup_code.length) // shortest containing match first
-      return substrMatches[0] || null
-    }
-
-    const apptOrderPairs = realAppts.map(a => ({
-      appt: a,
-      order: findOrderForAppt(a.lookup_code.trim()),
+    const apptOrderPairs = apptsWithCandidates.map(({ appt, candidates }) => ({
+      appt,
+      order: findOrderForCandidates(candidates),
     }))
 
     const resolvedOrderIds = [...new Set(
