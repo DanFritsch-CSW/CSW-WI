@@ -6,6 +6,7 @@ import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
 import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
+import PrePickStatus from '../components/PrePickStatus.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
@@ -950,6 +951,10 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
             facilityCode={facility.code}
             date={planDate}
           />
+
+          {isMad && (
+            <PrePickStatus facilityId={facility.id} planDate={planDate} />
+          )}
         </>
       )}
 
