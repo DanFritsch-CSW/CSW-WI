@@ -60,3 +60,9 @@ export const CAL2_DOCK_MAP = {
   'Karelys Vega-Cartagena':    'side12_shift1',
   'Karelys N. Vega-Cartagena': 'side12_shift1',
 }
+
+// Priority customers/carriers for the Pre-Picked Order Status feature
+// (Madison Daily view, added 2026-07-12). Matching orders are pinned to
+// the top of the list regardless of sort mode. Edit freely — no other
+// code changes needed to add/remove names.
+export const PRIORITY_CUSTOMERS = ['Walmart']
