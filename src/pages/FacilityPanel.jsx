@@ -46,6 +46,14 @@ const CAL2_TABS = [
 const WR_TABS = [
   { id: 'warehouse', label: 'Warehouse' }, { id: 'pickline', label: 'Pickline' },
 ]
+// Madison-only sub-tab row (added 2026-07-12) — sits below the global
+// Daily/Weekly toggle, same pattern as WR_TABS above. "Pre-Pick Status"
+// only makes sense in Daily view (it's tied to a specific date's outbound
+// appointments), so this row is only rendered when isDaily — see render
+// logic in the isMad branch below.
+const MAD_TABS = [
+  { id: 'ops', label: 'Daily Ops' }, { id: 'prepick', label: 'Pre-Pick Status' },
+]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
 const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000
@@ -177,6 +185,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
 
   const [sideTab, setSideTab] = useState('all')
   const [wrTab, setWrTab]     = useState('warehouse')
+  const [madTab, setMadTab]   = useState('ops')
 
   const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
   const [picklineOverrides, setPicklineOverrides] = useState({})
@@ -951,10 +960,6 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
             facilityCode={facility.code}
             date={planDate}
           />
-
-          {isMad && (
-            <PrePickStatus facilityId={facility.id} planDate={planDate} />
-          )}
         </>
       )}
 
@@ -967,6 +972,27 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
       )}
     </div>
   )
+
+  if (isMad) {
+    return (
+      <div>
+        {isDaily && (
+          <div className="cal2-tab-row">
+            {MAD_TABS.map(t => (
+              <button key={t.id} data-side={t.id}
+                className={`cal2-tab${madTab === t.id ? ' active' : ''}`}
+                onClick={() => setMadTab(t.id)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {isDaily && madTab === 'prepick'
+          ? <PrePickStatus facilityId={facility.id} planDate={planDate} />
+          : warehouseContent}
+      </div>
+    )
+  }
 
   if (isWr) {
     return (
