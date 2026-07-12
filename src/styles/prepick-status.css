@@ -1,0 +1,173 @@
+/* Pre-Picked Order Status — Madison labor planning tab.
+   Scoped stylesheet (mirrors the view-tabs.css pattern used by
+   LaborPlanning.jsx) so this feature's styles are self-contained and easy
+   to review/remove independently of index.css. Uses the same CSS custom
+   properties already defined globally (--bg0/1/2, --border, --text-*,
+   --font-mono) so it matches the rest of the app without duplicating
+   token definitions. */
+
+.pps-section {
+  margin-top: 12px;
+  background: var(--bg0);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.pps-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pps-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pps-sort-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.pps-sort-btn:hover {
+  background: var(--bg2);
+}
+
+.pps-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 8px 0;
+}
+
+.pps-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle, var(--border));
+  background: var(--bg1);
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.pps-time {
+  width: 62px;
+  flex-shrink: 0;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.pps-badge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.pps-badge--good     { color: #1F8A5F; background: rgba(31,138,95,0.14); }
+.pps-badge--warn      { color: #C77D22; background: rgba(199,125,34,0.14); }
+.pps-badge--bad       { color: #B23B3B; background: rgba(178,59,59,0.14); }
+.pps-badge--neutral   { color: var(--text-dim); background: var(--bg2); }
+
+.pps-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.pps-customer {
+  color: var(--text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pps-order {
+  color: var(--text-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pps-difficulty {
+  flex-shrink: 0;
+  width: 96px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: 5px;
+}
+.pps-difficulty--good  { color: #1F8A5F; background: rgba(31,138,95,0.14); }
+.pps-difficulty--warn   { color: #C77D22; background: rgba(199,125,34,0.14); }
+.pps-difficulty--bad    { color: #B23B3B; background: rgba(178,59,59,0.14); }
+.pps-difficulty--neutral{ color: var(--text-dim); background: var(--bg2); }
+
+.pps-progress {
+  flex-shrink: 0;
+  width: 70px;
+  text-align: right;
+  color: var(--text-secondary);
+}
+
+.pps-detail-toggle {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 10px;
+}
+
+.pps-detail {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: -2px 0 6px 0;
+  line-height: 1.5;
+}
+
+.pps-detail-flag {
+  color: #B23B3B;
+  margin-top: 4px;
+}
+
+.pps-footnote {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* Priority row styling (added 2026-07-12) — gold border + star badge for
+   orders matching PRIORITY_CUSTOMERS in constants.js. */
+.pps-row--priority {
+  border-color: #C9A227;
+  border-width: 1.5px;
+}
+
+.pps-priority-star {
+  color: #C9A227;
+  margin-right: 4px;
+  font-size: 11px;
+}
