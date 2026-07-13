@@ -1796,3 +1796,48 @@ export async function triggerDailyDiscussionTest(facility) {
   if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
   return json
 }
+
+// ─── Pre-Pick Status nightly digest settings ────────────────────────────────
+//
+// prepick_notify_settings — one row per facility (Madison-only for now).
+// Stores which Front conversation prepick-digest-run.cjs (scheduled 03:15
+// UTC / 10:15pm CT) posts its nightly summary COMMENT to. Editable from the
+// Pre-Pick Status tab rather than hardcoded in the function, per Dan's
+// request 2026-07-13.
+
+export async function fetchPrepickNotifySettings(facility) {
+  if (!supabase) return null
+  const { data, error } = await supabase
+    .from('prepick_notify_settings')
+    .select('front_conversation_id')
+    .eq('facility', facility)
+    .maybeSingle()
+  if (error) { console.error('fetchPrepickNotifySettings:', error); return null }
+  return data?.front_conversation_id ?? null
+}
+
+export async function upsertPrepickNotifySettings(facility, frontConversationId) {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('prepick_notify_settings')
+    .upsert(
+      { facility, front_conversation_id: frontConversationId, updated_at: new Date().toISOString() },
+      { onConflict: 'facility' }
+    )
+  if (error) { console.error('upsertPrepickNotifySettings:', error); throw error }
+}
+
+// triggerPrepickDigestTest — calls the scheduled function's manual-test path
+// (always targets tomorrow's date — see prepick-digest-run.cjs top comment
+// for why this is safe to leave open, same reasoning as
+// triggerDailyDiscussionTest above).
+export async function triggerPrepickDigestTest() {
+  const res = await fetch('/.netlify/functions/prepick-digest-run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  const json = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
+  return json
+}
