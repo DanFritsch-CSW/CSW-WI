@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import {
   fetchPrePickStatus, STATUS_META, pickDifficultyLabel, pickDifficultyScore,
-  formatArrivalTime, isPriorityAppt,
+  formatArrivalTime,
 } from '../lib/prePickStatus.js'
 import '../styles/prepick-status.css'
 
@@ -18,9 +18,16 @@ import '../styles/prepick-status.css'
  * language bands (Easy grab / Some digging / Heavy digging / Not assigned
  * yet). The underlying numbers still drive sort order.
  *
- * Priority customers/carriers (constants.js PRIORITY_CUSTOMERS, added
- * 2026-07-12) are pinned to the top of the list regardless of sort mode,
- * marked with a gold star + gold row border.
+ * Main row label is the project/customer name (gold.truck_appointments
+ * .project_name, e.g. "Novonesis - Dry - CSW-Madison"), NOT the carrier —
+ * per Dan, 2026-07-13: carrier names like "FORT"/"LESLIE TRANS" aren't
+ * useful to highlight, the customer/project is what matters.
+ *
+ * Priority-customer highlighting (gold star/border, pinned sort, stat
+ * card) was added 2026-07-12 and removed 2026-07-13 per Dan — "not needed
+ * for the time being." The underlying isPriorityAppt/PRIORITY_CUSTOMERS
+ * helper still exists in lib/prePickStatus.js and constants.js if this
+ * needs to come back later; it's just unused here now.
  *
  * Stat strip (added 2026-07-12): white cards deliberately NOT themed to
  * match the site's dark background — per Dan, he wants them to pop the
@@ -49,27 +56,18 @@ export default function PrePickStatus({ facilityId, planDate }) {
     const ready = appointments.filter(a => a.status === 'ready').length
     const needsAttention = appointments.filter(a => a.status === 'not-started' || a.status === 'unresolved').length
     const noOrder = appointments.filter(a => a.status === 'placeholder').length
-    const priority = appointments.filter(a => isPriorityAppt(a)).length
-    return { total, ready, needsAttention, noOrder, priority }
+    return { total, ready, needsAttention, noOrder }
   }, [appointments])
 
   const sorted = useMemo(() => {
     const byTime = [...appointments].sort((a, b) =>
       (a.scheduledArrival || '').localeCompare(b.scheduledArrival || '')
     )
-    const applySort = (list) =>
-      sortMode === 'difficulty'
-        ? [...list].sort((a, b) =>
-            pickDifficultyScore(b.pickLocations, b.rehandleRisk) -
-            pickDifficultyScore(a.pickLocations, a.rehandleRisk)
-          )
-        : list
-
-    // Priority customers/carriers pinned to top regardless of sort mode,
-    // each group sorted internally by the chosen mode.
-    const priorityGroup = byTime.filter((a) => isPriorityAppt(a))
-    const restGroup = byTime.filter((a) => !isPriorityAppt(a))
-    return [...applySort(priorityGroup), ...applySort(restGroup)]
+    if (sortMode !== 'difficulty') return byTime
+    return [...byTime].sort((a, b) =>
+      pickDifficultyScore(b.pickLocations, b.rehandleRisk) -
+      pickDifficultyScore(a.pickLocations, a.rehandleRisk)
+    )
   }, [appointments, sortMode])
 
   const toggleSort = useCallback(() => {
@@ -107,12 +105,6 @@ export default function PrePickStatus({ facilityId, planDate }) {
             <span className="pps-stat-label">No Order</span>
             <span className="pps-stat-value" style={{ color: '#93A1AA' }}>{counts.noOrder}</span>
           </div>
-          {counts.priority > 0 && (
-            <div className="pps-stat-card">
-              <span className="pps-stat-label">Priority</span>
-              <span className="pps-stat-value" style={{ color: '#C9A227' }}>{counts.priority}</span>
-            </div>
-          )}
         </div>
       )}
 
@@ -133,12 +125,12 @@ export default function PrePickStatus({ facilityId, planDate }) {
         const hasDetail = Boolean(appt.warehouseMismatch) ||
           (appt.pickLocations != null && appt.status !== 'ready')
         const expanded = expandedRow === idx
-        const priority = isPriorityAppt(appt)
+        const displayName = appt.projectName || appt.carrierName || appt.lookupCode || 'Unknown'
 
         return (
           <div key={`${appt.lookupCode}-${idx}`}>
             <div
-              className={`pps-row${priority ? ' pps-row--priority' : ''}`}
+              className="pps-row"
               onClick={() => hasDetail && toggleExpand(idx)}
               style={{ cursor: hasDetail ? 'pointer' : 'default' }}
             >
@@ -146,12 +138,10 @@ export default function PrePickStatus({ facilityId, planDate }) {
               <span className={`pps-badge pps-badge--${meta.tone}`}>{meta.label}</span>
 
               <div className="pps-main">
-                <div className="pps-customer">
-                  {priority && <span className="pps-priority-star" title="Priority customer/carrier">★</span>}
-                  {appt.carrierName || appt.lookupCode || 'Unknown'}
-                </div>
+                <div className="pps-customer">{displayName}</div>
                 <div className="pps-order">
                   {appt.orderLookupCode || appt.lookupCode}
+                  {appt.carrierName ? ` · ${appt.carrierName}` : ''}
                   {appt.notes ? ` · ${appt.notes}` : ''}
                 </div>
               </div>
@@ -196,7 +186,7 @@ export default function PrePickStatus({ facilityId, planDate }) {
       })}
 
       <div className="pps-footnote">
-        Pre-picked = 100% of expected cases completed, nothing left to do. Pick difficulty reflects whether a pick location mixes multiple lots — not pallet count. Gold-star orders (priority customers/carriers) are always pinned to the top.
+        Pre-picked = 100% of expected cases completed, nothing left to do. Pick difficulty reflects whether a pick location mixes multiple lots — not pallet count.
       </div>
     </div>
   )
