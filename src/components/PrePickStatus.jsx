@@ -21,6 +21,10 @@ import '../styles/prepick-status.css'
  * Priority customers/carriers (constants.js PRIORITY_CUSTOMERS, added
  * 2026-07-12) are pinned to the top of the list regardless of sort mode,
  * marked with a gold star + gold row border.
+ *
+ * Stat strip (added 2026-07-12): white cards deliberately NOT themed to
+ * match the site's dark background — per Dan, he wants them to pop the
+ * same way they did in the JSX mockup preview, not blend in.
  */
 export default function PrePickStatus({ facilityId, planDate }) {
   const [appointments, setAppointments] = useState([])
@@ -39,6 +43,15 @@ export default function PrePickStatus({ facilityId, planDate }) {
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [facilityId, planDate])
+
+  const counts = useMemo(() => {
+    const total = appointments.length
+    const ready = appointments.filter(a => a.status === 'ready').length
+    const needsAttention = appointments.filter(a => a.status === 'not-started' || a.status === 'unresolved').length
+    const noOrder = appointments.filter(a => a.status === 'placeholder').length
+    const priority = appointments.filter(a => isPriorityAppt(a)).length
+    return { total, ready, needsAttention, noOrder, priority }
+  }, [appointments])
 
   const sorted = useMemo(() => {
     const byTime = [...appointments].sort((a, b) =>
@@ -75,6 +88,33 @@ export default function PrePickStatus({ facilityId, planDate }) {
           Sort: {sortMode === 'time' ? 'Appt time' : 'Pick difficulty'}
         </button>
       </div>
+
+      {!loading && !error && appointments.length > 0 && (
+        <div className="pps-stat-strip">
+          <div className="pps-stat-card">
+            <span className="pps-stat-label">Total Appts</span>
+            <span className="pps-stat-value" style={{ color: '#12232E' }}>{counts.total}</span>
+          </div>
+          <div className="pps-stat-card">
+            <span className="pps-stat-label">Ready</span>
+            <span className="pps-stat-value" style={{ color: '#1F8A5F' }}>{counts.ready}</span>
+          </div>
+          <div className="pps-stat-card">
+            <span className="pps-stat-label">Needs Attention</span>
+            <span className="pps-stat-value" style={{ color: '#C77D22' }}>{counts.needsAttention}</span>
+          </div>
+          <div className="pps-stat-card">
+            <span className="pps-stat-label">No Order</span>
+            <span className="pps-stat-value" style={{ color: '#93A1AA' }}>{counts.noOrder}</span>
+          </div>
+          {counts.priority > 0 && (
+            <div className="pps-stat-card">
+              <span className="pps-stat-label">Priority</span>
+              <span className="pps-stat-value" style={{ color: '#C9A227' }}>{counts.priority}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {loading && <div className="pps-empty">Loading pre-pick status…</div>}
       {!loading && error && <div className="pps-empty">Couldn't load pre-pick status: {error}</div>}
