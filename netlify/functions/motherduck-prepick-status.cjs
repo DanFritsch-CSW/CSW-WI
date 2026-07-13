@@ -3,7 +3,8 @@
 // MotherDuck query for outbound "Pre-Picked Order Status" — Madison labor
 // planning tab. Built 2026-07-11 per Dan. Rewritten 2026-07-13 to use the
 // proper relational join instead of lookup_code text-matching. Case counts
-// corrected 2026-07-13 (later same day) — see notes below.
+// corrected 2026-07-13 (later same day). Pallet estimation added 2026-07-13
+// (later still) — see notes below.
 //
 // For every outbound appointment on a given facility/date, resolves the
 // linked Datex order(s), determines whether it's fully picked with no
@@ -23,6 +24,8 @@
 //       status: 'ready' | 'not-started' | 'unresolved' | 'placeholder',
 //       expectedCases,                 // reliable — sum of orderlines.Amount
 //       actualCases,                   // ONLY set when status='ready' (= expectedCases); null otherwise — see notes
+//       estimatedPallets,              // sum of CEIL(cases / (pallet_tie * pallet_high)) per line; null if no line had tie/high data
+//       casesWithoutPalletData,        // cases from lines missing tie/high — NOT included in estimatedPallets; 0 when full coverage
 //       pickLocations, rehandleRisk,   // summed across all orders; null when no hard allocation yet
 //       warehouseMismatch: { orderWarehouseId, expectedWarehouseId } | null,
 //     }],
@@ -103,34 +106,20 @@
 // surfaces later (Dan may know of a Datex report/field this session didn't
 // check), this is the place to wire it in.
 //
-// ── "Ready" definition ───────────────────────────────────────────────────
-// An appointment is 'ready' when, across ALL of its orders combined, there
-// are zero tasks in Released/Planned status AND at least one Completed
-// task. This is NOT the same as "100% of tasks completed" — tasks
-// frequently get Cancelled and re-batched during picking (confirmed
-// 2026-07-11 on 3 Grassland orders: 20 Cancelled + 20 Completed tasks,
-// full case count covered, zero Released — that's ready). This
-// classification logic (unlike the case-count sums) does not appear to be
-// affected by the re-planning-snapshot issue above — it only checks task
-// STATUS presence/absence, not summed amounts — and has matched known-
-// correct real orders throughout this session.
-//
-// ── Pick difficulty ──────────────────────────────────────────────────────
-// pickLocations = distinct locations hard-allocated across all of this
-//   appointment's orders' tasks.
-// rehandleRisk  = for locations holding MORE THAN ONE LOT, the count of
-//   pallets at that location that are NOT the required lot (i.e. pallets
-//   that may need to be moved aside to reach the correct one). Locations
-//   holding a single lot contribute ZERO rehandle risk regardless of how
-//   many pallets are stacked there — grabbing any pallet off a single-lot
-//   bulk lane is trivial. This directly reflects Dan's 2026-07-11 call:
-//   "if it's all one lot, that's easy — multiple lots is when it's
-//   complicated."
-// pickLocations/rehandleRisk are null when none of the appointment's
-// orders have a hard allocation yet (small each-pick orders often get
-// slotted at release time, not pre-assigned) — surfaced client-side as
-// "Not assigned yet".
-
+// ── Estimated pallets — added 2026-07-13 ────────────────────────────────
+// silver.datex_slv_materialspackagingslookup carries pallet_tie/pallet_high
+// per (material_id, packaging_id) — confirmed populated for ~96% of rows
+// overall, and 92% of order LINES / 86% of CASES on a real live check of
+// Madison's Monday outbound orders. Estimate is CEIL(line.Amount /
+// (pallet_tie * pallet_high)) summed per line, then per order, then across
+// all orders on an appointment — CEIL per line because different SKUs on
+// the same order generally can't share a partial pallet with each other,
+// so partial layers round up independently before summing. Lines missing
+// tie/high data are excluded from the pallet count but their case total is
+// reported separately (casesWithoutPalletData) so the estimate's coverage
+// is visible rather than silently wrong — e.g. Novonesis materials in this
+// session's test data had NO tie/high configured at all, so
+// estimatedPallets is null for those orders specifically, not zero.
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
   'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -323,20 +312,43 @@ exports.handler = async (event) => {
       for (const r of orderRows) orderById.set(Number(r.order_id), r)
     }
 
-    // ── Step 6: reliable expected cases per order (order lines) ───────────
+    // ── Step 6: reliable expected cases + estimated pallets (order lines) ─
     // SUM(orderlines.Amount) — confirmed reliable 2026-07-13, unlike any
-    // task-table-derived sum. See file header for why.
+    // task-table-derived sum. Pallets are CEIL(Amount / (tie*high)) per
+    // line joined to materialspackagingslookup — see file header "Estimated
+    // pallets" for why CEIL-per-line and the coverage caveat.
     const expectedByOrder = new Map()
+    const palletsByOrder = new Map()
+    const casesWithoutPalletDataByOrder = new Map()
     if (resolvedOrderIds.length > 0) {
       const idList = resolvedOrderIds.join(',')
       const linesSql = `
-        SELECT order_id, SUM(Amount) AS expected
-        FROM production_db.silver.datex_slv_orderlines
-        WHERE order_id IN (${idList})
-        GROUP BY order_id
+        SELECT
+          ol.order_id,
+          SUM(ol.Amount) AS expected,
+          SUM(CASE WHEN mpl.pallet_tie IS NOT NULL AND mpl.pallet_high IS NOT NULL
+                    THEN CEIL(ol.Amount / (mpl.pallet_tie * mpl.pallet_high))
+                    ELSE 0 END) AS pallets,
+          SUM(CASE WHEN mpl.pallet_tie IS NULL OR mpl.pallet_high IS NULL
+                    THEN ol.Amount ELSE 0 END) AS cases_without_pallet_data,
+          COUNT(CASE WHEN mpl.pallet_tie IS NOT NULL AND mpl.pallet_high IS NOT NULL THEN 1 END) AS lines_with_data
+        FROM production_db.silver.datex_slv_orderlines ol
+        LEFT JOIN production_db.silver.datex_slv_materialspackagingslookup mpl
+          ON mpl.material_id = ol.material_id AND mpl.packaging_id = ol.packaged_id
+        WHERE ol.order_id IN (${idList})
+        GROUP BY ol.order_id
       `
       const lineRows = await runQuery(linesSql)
-      for (const r of lineRows) expectedByOrder.set(Number(r.order_id), Number(r.expected) || 0)
+      for (const r of lineRows) {
+        const oid = Number(r.order_id)
+        expectedByOrder.set(oid, Number(r.expected) || 0)
+        casesWithoutPalletDataByOrder.set(oid, Number(r.cases_without_pallet_data) || 0)
+        // null (not 0) when NO line on this order had tie/high data at all —
+        // distinguishes "genuinely zero pallets" (impossible) from "no data
+        // to estimate from" (e.g. Novonesis materials in this session's
+        // test data had no tie/high configured anywhere).
+        palletsByOrder.set(oid, Number(r.lines_with_data) > 0 ? Number(r.pallets) || 0 : null)
+      }
     }
 
     // ── Step 7: task STATUS per order (for ready/not-started only) ────────
@@ -433,6 +445,8 @@ exports.handler = async (event) => {
           status: 'unresolved',
           expectedCases: null,
           actualCases: null,
+          estimatedPallets: null,
+          casesWithoutPalletData: null,
           pickLocations: null,
           rehandleRisk: null,
           warehouseMismatch: null,
@@ -440,14 +454,17 @@ exports.handler = async (event) => {
         continue
       }
 
-      // Sum reliable expected cases, task status, and pick difficulty
-      // across ALL orders on this appointment (handles load-container-
-      // consolidated appointments the same way Kenosha's multi-order
-      // appointments are handled).
+      // Sum reliable expected cases, estimated pallets, task status, and
+      // pick difficulty across ALL orders on this appointment (handles
+      // load-container-consolidated appointments the same way Kenosha's
+      // multi-order appointments are handled).
       let released = 0, planned = 0, completed = 0
       let hasAnyTaskData = false
       let expectedTotal = 0
       let hasAnyExpectedData = false
+      let palletsTotal = 0
+      let hasAnyPalletData = false
+      let casesWithoutPalletData = 0
       let pickLocations = 0, rehandleRisk = 0
       let hasAnyComplexityData = false
       const mismatchedWarehouses = new Set()
@@ -463,6 +480,13 @@ exports.handler = async (event) => {
         if (expectedByOrder.has(oid)) {
           hasAnyExpectedData = true
           expectedTotal += expectedByOrder.get(oid)
+        }
+        if (palletsByOrder.has(oid) && palletsByOrder.get(oid) != null) {
+          hasAnyPalletData = true
+          palletsTotal += palletsByOrder.get(oid)
+        }
+        if (casesWithoutPalletDataByOrder.has(oid)) {
+          casesWithoutPalletData += casesWithoutPalletDataByOrder.get(oid)
         }
         const agg = taskAggByOrder.get(oid)
         if (agg) {
@@ -501,6 +525,8 @@ exports.handler = async (event) => {
         // definition). See file header for why this isn't shown for
         // not-started orders.
         actualCases: (status === 'ready' && hasAnyExpectedData) ? expectedTotal : null,
+        estimatedPallets: hasAnyPalletData ? palletsTotal : null,
+        casesWithoutPalletData,
         pickLocations: hasAnyComplexityData ? pickLocations : null,
         rehandleRisk: hasAnyComplexityData ? rehandleRisk : null,
         warehouseMismatch,
@@ -519,6 +545,8 @@ exports.handler = async (event) => {
         status: 'placeholder',
         expectedCases: null,
         actualCases: null,
+        estimatedPallets: null,
+        casesWithoutPalletData: null,
         pickLocations: null,
         rehandleRisk: null,
         warehouseMismatch: null,
