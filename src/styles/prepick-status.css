@@ -43,6 +43,10 @@
 .pps-sort-btn:hover {
   background: var(--bg2);
 }
+.pps-sort-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 
 .pps-empty {
   font-family: var(--font-mono);
@@ -206,4 +210,63 @@
   font-size: 28px;
   font-weight: 800;
   line-height: 1;
+}
+
+/* Notify settings panel (added 2026-07-13) — configures which Front
+   conversation the nightly digest posts to, editable in-app rather than
+   hardcoded. */
+.pps-settings-panel {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.pps-settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.pps-settings-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.pps-settings-input {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg0);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  max-width: 260px;
+}
+
+.pps-settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.pps-settings-msg {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #1F8A5F;
+  margin-bottom: 6px;
+}
+.pps-settings-msg--err {
+  color: #B23B3B;
+}
+
+.pps-settings-note {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  line-height: 1.5;
 }
