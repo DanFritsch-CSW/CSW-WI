@@ -5,27 +5,7 @@
 // and appends a new incident row to the appropriate SharePoint DVRS Excel file.
 //
 // Endpoint: POST /.netlify/functions/sharepoint-dvr-append?facility=cal|ken|mad
-//
-// Zapier field mappings (left = key, right = LoadProof field):
-//   secret          -> CSW-DVR-2026 (typed manually)
-//   date            -> Date
-//   loadproofUrl    -> Load Url
-//   uploadedBy      -> Sitename
-//   customer        -> Customers Madison (or Caledonia / Kenosha)
-//   orderNum        -> Order Number
-//   employee        -> Employee Name Submitting
-//   incidentType    -> Category
-//   reason          -> Problem
-//   licensePlate    -> License Plate
-//   incidentNotes   -> Notes
-//   photos          -> Num
-//   videos          -> Live 2
-//   category        -> Category  (used for DVRS filter check)
-//   cases           -> Carton Count
-//   lotNum          -> Alpha
-//   materialNum     -> AN
-//   damageType      -> (unknown - map to best guess once confirmed)
-//   responsibleParty-> (unknown - map to best guess once confirmed)
+// Debug:    POST ...?facility=mad&debug=true  -> returns field map, no Excel write
 
 const TENANT_ID      = process.env.SHAREPOINT_TENANT_ID
 const CLIENT_ID      = process.env.SHAREPOINT_CLIENT_ID
@@ -152,24 +132,45 @@ exports.handler = async function (event) {
     return { statusCode: 401, headers: cors, body: JSON.stringify({ error: 'Invalid secret' }) }
   }
 
-  // Safety net: only process DVRS category records
-  // Zapier filter handles this too, but this prevents any Inbound/Outbound
-  // records slipping through if the filter is misconfigured.
-  const categoryRaw = str(payload.category || payload.incidentType || '')
-  const isDvrs = categoryRaw.toLowerCase().includes('dvrs') ||
-                 categoryRaw.toLowerCase().includes('inv ctrl')
-  if (!isDvrs && categoryRaw) {
-    console.log(`[sharepoint-dvr-append] Skipping non-DVRS record: category="${categoryRaw}"`)
+  const params    = event.queryStringParameters || {}
+  const facility  = (params.facility || 'mad').toLowerCase()
+  const debugMode = params.debug === 'true'
+  const config    = FACILITY_CONFIG[facility]
+  if (!config) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: `Unknown facility: ${facility}` }) }
+
+  // --- DVRS safety filter ---
+  // Category from LoadProof for DVRS records = "CSW INV CTRL (DVRS)"
+  // NOTE: do NOT use incidentType for this check — it may be mapped to
+  // a different LoadProof field. Use the dedicated `category` key.
+  const categoryRaw = str(payload.category || '')
+  const isDvrs = !categoryRaw || categoryRaw.toLowerCase().includes('dvrs') || categoryRaw.toLowerCase().includes('inv ctrl')
+  if (!isDvrs) {
+    console.log(`[sharepoint-dvr-append] Skipping non-DVRS: category="${categoryRaw}"`)
+    return { statusCode: 200, headers: cors, body: JSON.stringify({ skipped: true, reason: `Non-DVRS category: ${categoryRaw}` }) }
+  }
+
+  // --- Debug mode: return full payload + field map, no Excel write ---
+  // Use this to identify which Zapier field = which LoadProof metadata field.
+  // In Zapier Data section add: debug -> true
+  // Then check "Data out" in the test to see all received field values.
+  if (debugMode) {
+    const nonEmpty = Object.fromEntries(
+      Object.entries(payload)
+        .filter(([k, v]) => k !== 'secret' && v !== '' && v != null)
+        .sort((a, b) => a[0].localeCompare(b[0]))
+    )
+    console.log(`[sharepoint-dvr-append][${facility}] DEBUG payload:`, JSON.stringify(nonEmpty))
     return {
       statusCode: 200,
       headers: cors,
-      body: JSON.stringify({ skipped: true, reason: `Non-DVRS category: ${categoryRaw}` }),
+      body: JSON.stringify({
+        debug: true,
+        facility,
+        received_fields: nonEmpty,
+        note: 'No row was written. Remove debug=true from URL to write for real.',
+      }),
     }
   }
-
-  const facility = ((event.queryStringParameters || {}).facility || 'mad').toLowerCase()
-  const config   = FACILITY_CONFIG[facility]
-  if (!config) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: `Unknown facility: ${facility}` }) }
 
   try {
     const token  = await getToken()
@@ -181,7 +182,6 @@ exports.handler = async function (event) {
     const c = buildColMap(headerRow)
     const totalCols = headerRow.length
 
-    // Column indices
     const i_date      = c.find('filter by this date')
     const i_lpDate    = c.find('loadproof date')
     const i_type      = c.find('csw inv ctrl - shipment type', 'shipment type')
@@ -205,9 +205,12 @@ exports.handler = async function (event) {
     const row = new Array(totalCols).fill('')
     const set = (idx, val) => { if (idx >= 0 && idx < totalCols && val !== '' && val != null) row[idx] = val }
 
-    const dateStr = toExcelDate(payload.date)
-    set(i_date,      dateStr)
-    set(i_lpDate,    dateStr)
+    // Col A: filter date (date only for Excel filtering)
+    set(i_date,      toExcelDate(payload.date))
+    // Col B: full LoadProof datetime string e.g. "Jul 13 2026 02:24 PM CDT"
+    set(i_lpDate,    str(payload.date))
+    // Incident details — NOTE: incidentType should map to the LoadProof
+    // Shipment Type metadata field (NOT Category). See comment above.
     set(i_type,      str(payload.incidentType))
     set(i_respParty, str(payload.responsibleParty))
     set(i_lot,       str(payload.lotNum))
@@ -220,6 +223,7 @@ exports.handler = async function (event) {
     set(i_damage,    str(payload.damageType))
     set(i_emp,       str(payload.employee))
     set(i_customer,  str(payload.customer))
+    // Category col O: always "CSW INV CTRL (DVRS)" for DVRS records
     set(i_category,  str(payload.category))
     set(i_photos,    payload.photos != null ? Number(payload.photos) || '' : '')
     set(i_videos,    payload.videos != null ? Number(payload.videos) || '' : '')
@@ -230,17 +234,10 @@ exports.handler = async function (event) {
     const nextRow = lastRow + 1
     const endCol  = colLetter(totalCols - 1)
 
-    await graph(
-      `${sheetBase}/range(address='A${nextRow}:${endCol}${nextRow}')`,
-      token, 'PATCH', { values: [row] }
-    )
+    await graph(`${sheetBase}/range(address='A${nextRow}:${endCol}${nextRow}')`, token, 'PATCH', { values: [row] })
 
     console.log(`[sharepoint-dvr-append][${facility}] Appended row ${nextRow}`)
-    return {
-      statusCode: 200,
-      headers: cors,
-      body: JSON.stringify({ success: true, facility, row: nextRow }),
-    }
+    return { statusCode: 200, headers: cors, body: JSON.stringify({ success: true, facility, row: nextRow }) }
 
   } catch (err) {
     console.error(`[sharepoint-dvr-append][${facility}]`, err.message)
