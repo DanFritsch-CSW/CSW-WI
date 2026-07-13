@@ -24,7 +24,7 @@ const FACILITY_CONFIG = {
 
 // When usedRange is too large (phantom formatting extends used range),
 // fall back to this explicit bounded range.
-// 80 cols (CB) × 10000 rows = 800k cells — within the 5M Graph API limit.
+// 80 cols × 10000 rows = 800k cells — within the 5M Graph API limit.
 const FALLBACK_RANGE = 'A1:CB10000'
 
 let _token = null, _tokenExpiry = 0
@@ -74,9 +74,6 @@ async function getDriveRef (facility, token) {
   return _driveCache[facility]
 }
 
-// Fetch worksheet values.
-// Tries usedRange first; falls back to bounded range if the sheet has
-// phantom formatting that inflates the used range beyond Graph API limits.
 async function fetchSheetValues (sheetBase, token) {
   try {
     const r = await graph(`${sheetBase}/usedRange`, token)
@@ -86,7 +83,6 @@ async function fetchSheetValues (sheetBase, token) {
     if (!isLimit) throw err
     console.warn('[sharepoint-dvr] usedRange exceeded limit — falling back to', FALLBACK_RANGE)
   }
-  // Fallback: fetch bounded range and strip trailing empty rows
   const r = await graph(`${sheetBase}/range(address='${FALLBACK_RANGE}')`, token)
   const vals = r.values || []
   let last = vals.length - 1
@@ -168,15 +164,25 @@ function parseRows (headerRow, dataRows, prefix) {
     const incDate = parseDate(i_date >= 0 ? row[i_date] : null)
     if (!incDate) { counter++; continue }
 
-    const adjDate = parseDate(i_adjDate >= 0 ? row[i_adjDate] : null)
+    // ── Resolution logic (per Nate Williams feedback, Jul 13 2026) ────────────────────
+    //
+    // Inventory side: "Adjustment Completed By" is the authoritative signal.
+    // Many incidents are resolved without a formal date entry — the ops
+    // person just puts their name in the By field. Checking date alone
+    // produces too many false positives. adjOpen = true only when adjBy is blank.
+    //
+    // Coaching side: coaching is only required when explicitly marked Yes AND
+    // the coaching hasn't been recorded (Date Coaching Completed is blank).
     const adjBy   = str(i_adjBy >= 0 ? row[i_adjBy] : '')
-    const adjOpen = !(adjDate || adjBy)
+    const adjDate = parseDate(i_adjDate >= 0 ? row[i_adjDate] : null)
+    const adjOpen = !adjBy  // ← key change: adjBy alone determines if inventory side is open
 
     const coachRaw     = str(i_coachReq >= 0 ? row[i_coachReq] : '').toLowerCase()
     const coaching     = coachRaw === 'yes' ? 'Yes' : coachRaw === 'no' ? 'No' : ''
     const coachDate    = parseDate(i_coachDate >= 0 ? row[i_coachDate] : null)
     const coachingOpen = coaching === 'Yes' && !coachDate
 
+    // Skip rows where both sides are resolved
     if (!adjOpen && !coachingOpen) { counter++; continue }
 
     const typeRaw = str(i_type >= 0 ? row[i_type] : '').trim()
@@ -237,7 +243,6 @@ exports.handler = async function (event) {
     const { driveId, itemId } = await getDriveRef(facility, token)
     const sheetBase = `/drives/${driveId}/items/${itemId}/workbook/worksheets/${encodeURIComponent(config.sheetName)}`
 
-    // POST: write back to specific cells
     if (event.httpMethod === 'POST') {
       const { rowIndex, updates, colMap } = JSON.parse(event.body || '{}')
       if (!rowIndex || !updates || !colMap) return { statusCode:400, headers:cors, body:JSON.stringify({ error:'rowIndex, updates, colMap required' }) }
@@ -249,7 +254,6 @@ exports.handler = async function (event) {
       return { statusCode:200, headers:cors, body:JSON.stringify({ success:true, updated:Object.keys(updates), rowIndex }) }
     }
 
-    // GET: read all open rows
     const values = await fetchSheetValues(sheetBase, token)
     if (!values || values.length < 2) return { statusCode:200, headers:cors, body:JSON.stringify({ incidents:[], count:0, facility }) }
 
