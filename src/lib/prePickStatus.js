@@ -76,15 +76,28 @@ export function pickDifficultyScore(pickLocations, rehandleRisk) {
   return pickLocations + pickLocations * 2 + rehandleRisk * 3
 }
 
-export function formatArrivalTime(iso) {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    if (isNaN(d.getTime())) return iso
-    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-  } catch {
-    return iso
-  }
+// Reads HH:MM straight out of the raw "YYYY-MM-DD HH:MM:SS" string instead
+// of going through Date/toLocaleTimeString. Fixed 2026-07-13 after Dan
+// caught a double-timezone-shift bug in the Netlify digest function's copy
+// of this same logic (see prepick-digest-run.cjs header for the full
+// story). scheduled_arrival is a naive string with no timezone marker —
+// it's already Central time (Datex's own local clock) — so there is
+// nothing to convert. The old `new Date(iso)` + toLocaleTimeString version
+// happened to display correctly here ONLY because it relied on the
+// viewer's own browser being set to Central time with no explicit
+// timeZone option; anyone opening the app from a different timezone would
+// have seen wrong times. Parsing the string directly removes that
+// dependency entirely — correct regardless of where the viewer is.
+export function formatArrivalTime(raw) {
+  if (!raw) return '—'
+  const m = /(\d{2}):(\d{2})/.exec(raw)
+  if (!m) return raw
+  let hour = parseInt(m[1], 10)
+  const minute = m[2]
+  const period = hour >= 12 ? 'PM' : 'AM'
+  hour = hour % 12
+  if (hour === 0) hour = 12
+  return `${hour}:${minute} ${period}`
 }
 
 // ── Priority weighting (added 2026-07-12) ───────────────────────────────
