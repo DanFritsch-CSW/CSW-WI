@@ -2,8 +2,8 @@
 
 // MotherDuck query for outbound "Pre-Picked Order Status" — Madison labor
 // planning tab. Built 2026-07-11 per Dan. Rewritten 2026-07-13 to use the
-// proper relational join instead of lookup_code text-matching — see notes
-// below for why.
+// proper relational join instead of lookup_code text-matching. Case counts
+// corrected 2026-07-13 (later same day) — see notes below.
 //
 // For every outbound appointment on a given facility/date, resolves the
 // linked Datex order(s), determines whether it's fully picked with no
@@ -21,8 +21,9 @@
 //       lookupCode, projectName, carrierName, scheduledArrival, notes,
 //       orderIds, orderLookupCodes,   // arrays — an appointment can cover multiple orders
 //       status: 'ready' | 'not-started' | 'unresolved' | 'placeholder',
-//       expectedCases, actualCases,   // summed across all orders on this appointment
-//       pickLocations, rehandleRisk,  // summed across all orders; null when no hard allocation yet
+//       expectedCases,                 // reliable — sum of orderlines.Amount
+//       actualCases,                   // ONLY set when status='ready' (= expectedCases); null otherwise — see notes
+//       pickLocations, rehandleRisk,   // summed across all orders; null when no hard allocation yet
 //       warehouseMismatch: { orderWarehouseId, expectedWarehouseId } | null,
 //     }],
 //     fetchedAt,
@@ -69,14 +70,50 @@
 // SAVE") still uses lookup_code tokenizing, since these have no
 // dockappointmentitems rows to join against at all.
 //
+// ── Case counts — corrected 2026-07-13 ──────────────────────────────────
+// Dan flagged that expected/actual case counts (e.g. "800/1257" on the
+// Novonesis 85155270 appointment) didn't match the real order line
+// quantities at all (real order = 501 cases). Root cause: this function
+// was summing expected_inventory_amount/actual_inventory_amount across
+// ALL of an order's tasks — but datex_slv_tasks is an audit-trail-style
+// table, not a clean list of independent task lines. Confirmed on that
+// exact order: a single underlying pick gets re-planned/re-split into
+// NEW task_id rows repeatedly as the system redirects it (observed
+// expected_inventory_amount values 251→201→151→101→51 on 5 different
+// task_ids, each just a snapshot of "amount still remaining" at that
+// re-plan moment, not 5 independent 251/201/151/101/51-unit requirements).
+// Summing blindly triple/quadruple-counted the same physical cases.
+//
+// Fix: expectedCases now comes from SUM(datex_slv_orderlines.Amount) per
+// order — confirmed reliable (matches the known-correct 501 for that
+// order exactly, and matches known order sizes on every other order
+// checked). Two other candidate "actual picked so far" sources were
+// checked and ruled out:
+//   - orderlines.packaged_amount: always exactly equals Amount on every
+//     order checked, including orders confirmed genuinely untouched — it's
+//     a packaging SPEC set at order entry, not a live progress counter.
+//   - orderlines.license_plate_id: null on every order regardless of pick
+//     status — populated at a later shipping stage, not useful here.
+// No reliable source for "cases picked so far" on a PARTIALLY-picked order
+// was found this session. Rather than keep guessing, actualCases is only
+// populated when status='ready' (where, by the ready definition itself,
+// all cases are done — actualCases = expectedCases). For 'not-started'
+// orders, actualCases is null and the frontend shows no progress number
+// rather than a potentially-wrong one. If a real "picked so far" source
+// surfaces later (Dan may know of a Datex report/field this session didn't
+// check), this is the place to wire it in.
+//
 // ── "Ready" definition ───────────────────────────────────────────────────
 // An appointment is 'ready' when, across ALL of its orders combined, there
 // are zero tasks in Released/Planned status AND at least one Completed
 // task. This is NOT the same as "100% of tasks completed" — tasks
 // frequently get Cancelled and re-batched during picking (confirmed
 // 2026-07-11 on 3 Grassland orders: 20 Cancelled + 20 Completed tasks,
-// full case count covered, zero Released — that's ready). Cases are the
-// source of truth for completion; task-count ratios are not.
+// full case count covered, zero Released — that's ready). This
+// classification logic (unlike the case-count sums) does not appear to be
+// affected by the re-planning-snapshot issue above — it only checks task
+// STATUS presence/absence, not summed amounts — and has matched known-
+// correct real orders throughout this session.
 //
 // ── Pick difficulty ──────────────────────────────────────────────────────
 // pickLocations = distinct locations hard-allocated across all of this
@@ -286,10 +323,26 @@ exports.handler = async (event) => {
       for (const r of orderRows) orderById.set(Number(r.order_id), r)
     }
 
-    // ── Step 6: task completion status per order ──────────────────────────
-    // Cases are the source of truth for "done" — task counts are NOT (tasks
-    // routinely get Cancelled + re-batched mid-pick; a lower Completed task
-    // count than total tasks does not mean work remains, see file header).
+    // ── Step 6: reliable expected cases per order (order lines) ───────────
+    // SUM(orderlines.Amount) — confirmed reliable 2026-07-13, unlike any
+    // task-table-derived sum. See file header for why.
+    const expectedByOrder = new Map()
+    if (resolvedOrderIds.length > 0) {
+      const idList = resolvedOrderIds.join(',')
+      const linesSql = `
+        SELECT order_id, SUM(Amount) AS expected
+        FROM production_db.silver.datex_slv_orderlines
+        WHERE order_id IN (${idList})
+        GROUP BY order_id
+      `
+      const lineRows = await runQuery(linesSql)
+      for (const r of lineRows) expectedByOrder.set(Number(r.order_id), Number(r.expected) || 0)
+    }
+
+    // ── Step 7: task STATUS per order (for ready/not-started only) ────────
+    // Only counts task statuses now, not summed amounts — the amount sums
+    // were the unreliable part (see file header). Status presence/absence
+    // has held up as correct all session.
     const taskAggByOrder = new Map()
     if (resolvedOrderIds.length > 0) {
       const idList = resolvedOrderIds.join(',')
@@ -297,9 +350,7 @@ exports.handler = async (event) => {
         SELECT
           t.order_id,
           ts.status_name,
-          COUNT(*) AS task_count,
-          SUM(t.expected_inventory_amount) AS expected,
-          SUM(t.actual_inventory_amount)   AS actual
+          COUNT(*) AS task_count
         FROM production_db.silver.datex_slv_tasks t
         JOIN production_db.silver.datex_slv_taskstatuses ts ON t.status_id = ts.task_status_id
         WHERE t.order_id IN (${idList})
@@ -309,7 +360,7 @@ exports.handler = async (event) => {
       for (const r of taskRows) {
         const oid = Number(r.order_id)
         if (!taskAggByOrder.has(oid)) {
-          taskAggByOrder.set(oid, { released: 0, planned: 0, completed: 0, cancelled: 0, expectedTotal: 0, actualTotal: 0 })
+          taskAggByOrder.set(oid, { released: 0, planned: 0, completed: 0, cancelled: 0 })
         }
         const agg = taskAggByOrder.get(oid)
         const status = (r.status_name || '').toLowerCase()
@@ -318,12 +369,10 @@ exports.handler = async (event) => {
         else if (status === 'planned') agg.planned += count
         else if (status === 'completed') agg.completed += count
         else if (status === 'cancelled') agg.cancelled += count
-        agg.expectedTotal += Number(r.expected) || 0
-        agg.actualTotal   += Number(r.actual) || 0
       }
     }
 
-    // ── Step 7: pick difficulty (hard allocations + lot mix) ──────────────
+    // ── Step 8: pick difficulty (hard allocations + lot mix) ──────────────
     const complexityByOrder = new Map()
     if (resolvedOrderIds.length > 0) {
       const idList = resolvedOrderIds.join(',')
@@ -391,13 +440,14 @@ exports.handler = async (event) => {
         continue
       }
 
-      // Sum case counts, task status, and pick difficulty across ALL
-      // orders on this appointment (handles load-container-consolidated
-      // appointments the same way Kenosha's multi-order appointments are
-      // handled).
+      // Sum reliable expected cases, task status, and pick difficulty
+      // across ALL orders on this appointment (handles load-container-
+      // consolidated appointments the same way Kenosha's multi-order
+      // appointments are handled).
       let released = 0, planned = 0, completed = 0
-      let expectedTotal = 0, actualTotal = 0
       let hasAnyTaskData = false
+      let expectedTotal = 0
+      let hasAnyExpectedData = false
       let pickLocations = 0, rehandleRisk = 0
       let hasAnyComplexityData = false
       const mismatchedWarehouses = new Set()
@@ -410,14 +460,16 @@ exports.handler = async (event) => {
           const owh = order.preferred_warehouse_id != null ? Number(order.preferred_warehouse_id) : null
           if (owh != null && owh !== expectedWarehouseId) mismatchedWarehouses.add(owh)
         }
+        if (expectedByOrder.has(oid)) {
+          hasAnyExpectedData = true
+          expectedTotal += expectedByOrder.get(oid)
+        }
         const agg = taskAggByOrder.get(oid)
         if (agg) {
           hasAnyTaskData = true
           released += agg.released
           planned += agg.planned
           completed += agg.completed
-          expectedTotal += agg.expectedTotal
-          actualTotal += agg.actualTotal
         }
         const complexity = complexityByOrder.get(oid)
         if (complexity) {
@@ -443,8 +495,12 @@ exports.handler = async (event) => {
         orderIds,
         orderLookupCodes,
         status,
-        expectedCases: hasAnyTaskData ? expectedTotal : null,
-        actualCases: hasAnyTaskData ? actualTotal : null,
+        expectedCases: hasAnyExpectedData ? expectedTotal : null,
+        // No reliable "picked so far" source for partial orders — only
+        // populate actualCases when 'ready' (= expectedCases by
+        // definition). See file header for why this isn't shown for
+        // not-started orders.
+        actualCases: (status === 'ready' && hasAnyExpectedData) ? expectedTotal : null,
         pickLocations: hasAnyComplexityData ? pickLocations : null,
         rehandleRisk: hasAnyComplexityData ? rehandleRisk : null,
         warehouseMismatch,
