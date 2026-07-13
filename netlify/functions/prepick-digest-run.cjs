@@ -3,7 +3,7 @@
 // Nightly Pre-Pick Status digest — posts a summary comment to a Front
 // conversation, added 2026-07-13 per Dan. Message formatting tightened
 // 2026-07-13 (later same day) after the first real digest ran too text-
-// heavy — see notes below.
+// heavy. Time display fixed 2026-07-13 (later still) — see notes below.
 //
 // Two invocation paths (same convention as front-daily-discussion-run.cjs):
 //
@@ -51,6 +51,23 @@
 //   - Split "Unresolved" into its own short section (real data problem,
 //     distinct from ordinary not-yet-picked) instead of interleaving it
 //     line-by-line with not-started orders.
+//
+// ── Time display — fixed 2026-07-13 ──────────────────────────────────────
+// scheduled_arrival comes out of MotherDuck as a naive string like
+// "2026-07-13 07:30:00" with NO timezone marker — it's already Central
+// time (Datex's own local clock; confirmed via direct query). The
+// original version did `new Date(raw)` then converted to America/Chicago
+// for display. On Netlify's UTC-runtime servers, `new Date("2026-07-13
+// 07:30:00")` (space-separated, non-ISO format) gets misparsed as 07:30
+// UTC — and then the explicit America/Chicago conversion shifted it BACK
+// another 5 hours on top of that, so a real 7:30am appointment displayed
+// as 2:30am. Dan caught this by comparing the digest's times against the
+// live app tile, which never showed the bug — it runs in the browser
+// (already Central), so the same misparse + no extra shift happened to
+// cancel out by coincidence. Relying on that coincidence was fragile; this
+// function proved it. Fix: skip Date/timezone conversion entirely and read
+// the HH:MM straight out of the raw string — it's already correct Central
+// time, there's nothing to convert.
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -95,15 +112,19 @@ function formatHeaderDate(dateObj) {
   return `${WEEKDAYS[dateObj.getUTCDay()]} ${dateObj.getUTCMonth() + 1}/${dateObj.getUTCDate()}/${dateObj.getUTCFullYear()}`
 }
 
-function formatArrivalTime(iso) {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    if (isNaN(d.getTime())) return iso
-    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Chicago' })
-  } catch {
-    return iso
-  }
+// Reads HH:MM straight out of the raw "YYYY-MM-DD HH:MM:SS" string — see
+// file header "Time display — fixed 2026-07-13" for why this deliberately
+// avoids Date/timezone conversion entirely.
+function formatArrivalTime(raw) {
+  if (!raw) return '—'
+  const m = /(\d{2}):(\d{2})/.exec(raw)
+  if (!m) return raw
+  let hour = parseInt(m[1], 10)
+  const minute = m[2]
+  const period = hour >= 12 ? 'PM' : 'AM'
+  hour = hour % 12
+  if (hour === 0) hour = 12
+  return `${hour}:${minute} ${period}`
 }
 
 const DIFFICULTY_LABEL = (pickLocations, rehandleRisk) => {
