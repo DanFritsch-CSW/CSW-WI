@@ -3,7 +3,8 @@
 // Nightly Pre-Pick Status digest — posts a summary comment to a Front
 // conversation, added 2026-07-13 per Dan. Message formatting tightened
 // 2026-07-13 (later same day) after the first real digest ran too text-
-// heavy. Time display fixed 2026-07-13 (later still) — see notes below.
+// heavy. Time display fixed 2026-07-13 (later still). Pallet estimate
+// added 2026-07-13 (later still) — see notes below.
 //
 // Two invocation paths (same convention as front-daily-discussion-run.cjs):
 //
@@ -68,6 +69,13 @@
 // function proved it. Fix: skip Date/timezone conversion entirely and read
 // the HH:MM straight out of the raw string — it's already correct Central
 // time, there's nothing to convert.
+//
+// ── Estimated pallets — added 2026-07-13 ────────────────────────────────
+// motherduck-prepick-status.cjs now returns estimatedPallets (from
+// material tie/high, see that file's header for the full definition and
+// coverage caveats). Shown per not-started line as "~N pallets" when
+// available; omitted when null (no tie/high data for that order at all)
+// rather than showing a misleading 0.
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -166,8 +174,9 @@ function buildDigestBody(appointments, dateObj) {
       const name = cleanProjectName(a.projectName) || a.carrierName || a.lookupCode || 'Unknown'
       const difficulty = DIFFICULTY_LABEL(a.pickLocations, a.rehandleRisk)
       const cases = a.expectedCases != null ? `${Math.round(a.expectedCases)} cases` : 'cases unknown'
+      const pallets = a.estimatedPallets != null ? `, ~${a.estimatedPallets} pallets` : ''
       const diff = difficulty ? ` · ${difficulty}` : ''
-      lines.push(`- ${time} ${name} — ${cases}${diff}`)
+      lines.push(`- ${time} ${name} — ${cases}${pallets}${diff}`)
     }
   }
 
