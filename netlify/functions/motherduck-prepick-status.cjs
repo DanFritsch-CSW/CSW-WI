@@ -1,18 +1,17 @@
 'use strict'
 
 // MotherDuck query for outbound "Pre-Picked Order Status" — Madison labor
-// planning tab. Built 2026-07-11 per Dan. Matching logic corrected 2026-07-12
-// after production showed everything as "Unresolved" — see notes below.
-// Added project_name 2026-07-13 (Dan wanted the customer/project shown as
-// the main row label, not the carrier).
+// planning tab. Built 2026-07-11 per Dan. Rewritten 2026-07-13 to use the
+// proper relational join instead of lookup_code text-matching — see notes
+// below for why.
 //
 // For every outbound appointment on a given facility/date, resolves the
-// linked Datex order (best-effort match — see matching notes below),
-// determines whether it's fully picked with no outstanding work, and — for
-// orders still being picked — scores pick difficulty based on how many
-// warehouse locations the picker must visit and whether any of those
-// locations mix multiple lots together (the real driver of pick time, not
-// raw pallet count — see 2026-07-11 conversation with Dan).
+// linked Datex order(s), determines whether it's fully picked with no
+// outstanding work, and — for orders still being picked — scores pick
+// difficulty based on how many warehouse locations the picker must visit
+// and whether any of those locations mix multiple lots together (the real
+// driver of pick time, not raw pallet count — see 2026-07-11 conversation
+// with Dan).
 //
 // POST body: { facilityId: 'mad', date: 'YYYY-MM-DD' }
 //
@@ -20,60 +19,68 @@
 //   {
 //     appointments: [{
 //       lookupCode, projectName, carrierName, scheduledArrival, notes,
-//       orderId, orderLookupCode,
+//       orderIds, orderLookupCodes,   // arrays — an appointment can cover multiple orders
 //       status: 'ready' | 'not-started' | 'unresolved' | 'placeholder',
-//       expectedCases, actualCases,
-//       pickLocations, rehandleRisk,   // null when no hard allocation yet (not-yet-released orders)
+//       expectedCases, actualCases,   // summed across all orders on this appointment
+//       pickLocations, rehandleRisk,  // summed across all orders; null when no hard allocation yet
 //       warehouseMismatch: { orderWarehouseId, expectedWarehouseId } | null,
 //     }],
 //     fetchedAt,
 //   }
 //
-// ── Order matching notes (corrected 2026-07-12) ─────────────────────────
-// gold.truck_appointments.lookup_code is NOT a clean order code — it's a
-// noisy compound string like "*(NOVONESIS) - 85155270" or
-// "*(GRASSLAND) - 1150897 (0005153991)". The original 2026-07-11 version of
-// this function assumed Madison's lookup_code was already clean (based on
-// an ad-hoc Omni pull that happened to return a cleaner field) and never
-// re-validated against this actual table — that shipped a real bug where
-// EVERY appointment came back "Unresolved" in production, because the
-// entire noisy string was being used as the match key instead of the real
-// order code embedded inside it.
+// ── Order matching — rewritten 2026-07-13 ───────────────────────────────
+// The 2026-07-11/12 versions of this function tried to match an
+// appointment to an order by parsing the noisy lookup_code text
+// ("*(NOVONESIS) - 85155270") and matching extracted tokens against
+// silver.datex_slv_orders.lookup_code. That approach had two real,
+// confirmed failure modes:
+//   1. Short/ambiguous candidates could substring-match unrelated orders
+//      company-wide (e.g. "64527" matched six different orders that
+//      merely happened to end in the same 5 digits).
+//   2. Some appointments aren't tied to a single order at all — they're
+//      tied to a LOAD CONTAINER holding multiple shipments/orders (e.g.
+//      Rhodes' appointment "64527" is actually load container 22712,
+//      containing 3 separate orders — S/R224668, S/R224669, S/R224750 —
+//      none of which contain "64527" anywhere in their own lookup_code).
+//      Text-matching could never find these; Upper Cut Brands and DPI
+//      were ALSO load-container/direct-order cases that text-matching
+//      incorrectly reported as "no order exists anywhere in Datex."
 //
-// Fix: tokenize the raw lookup_code on anything that isn't a letter/digit/
-// dash, then treat any token containing a digit and at least 4 characters
-// long as a candidate order code (handles "85155270", "1150897" +
-// "0005153991" as two candidates, "M027", "HCI-0190-103616-16", etc. — all
-// confirmed against real Madison orders this session). Each appointment can
-// have multiple candidates (e.g. an order number AND a trailing PO
-// reference in parens); exact match on any candidate wins.
+// The fix: use the actual relational link Datex already provides —
+// silver.datex_slv_dockappointmentitems — which ties
+// gold.truck_appointments.appointment_id directly to either:
+//   - item_entity_type='Order', item_entity_id = order_id directly, or
+//   - item_entity_type='LoadContainer', item_entity_id = load_container_id,
+//     which is expanded via datex_slv_shipments (load_container_id) →
+//     datex_slv_orderlines (shipment_id) → order_id to get ALL orders
+//     riding on that container.
+// This is exact — no text-parsing, no ambiguity, no substring collisions —
+// and was validated against all 24 real Madison Monday appointments before
+// shipping: every previously-"Unresolved" appointment (Rhodes x2, Upper
+// Cut, DPI) resolved correctly, and none of the previously-matched orders
+// changed.
 //
-// Substring fallback is intentionally conservative (candidates >=6 chars,
-// accepted only when exactly one order matches). Validated against real
-// data that short candidates can be genuinely ambiguous — the previously
-// assumed "54-prefix truncation" case (appointment shows "64527", a real
-// order is "5464527") turned out to ALSO substring-match five other,
-// completely unrelated orders company-wide that merely happen to end in
-// the same 5 digits (e.g. "0010264527", "PSH0064527", "SO364527"). Guessing
-// one would be an outright wrong match. Such appointments now correctly
-// surface as 'unresolved' rather than silently picking a possibly-wrong
-// order — a real data gap, surfaced honestly rather than hidden or guessed.
+// An appointment can now legitimately cover MULTIPLE orders (a load
+// container consolidating several shipments) — case counts, task status,
+// and pick-difficulty are summed across all of them, mirroring how this
+// was already handled for Kenosha's multi-order appointments.
 //
-// Placeholder detection (also fixed 2026-07-12): HOLD/SAVE appointments are
-// compound strings too ("(JONES) - HOLD", "GRASSLAND SAVE"), not bare
-// "HOLD"/"SAVE" — the original exact-string regex never matched these
-// either. Fixed by tokenizing and checking for a HOLD/SAVE token anywhere.
+// Placeholder detection (HOLD/SAVE, e.g. "(JONES) - HOLD", "GRASSLAND
+// SAVE") still uses lookup_code tokenizing, since these have no
+// dockappointmentitems rows to join against at all.
 //
 // ── "Ready" definition ───────────────────────────────────────────────────
-// An order is 'ready' when it has zero tasks in Released/Planned status
-// AND at least one Completed task. This is NOT the same as "100% of tasks
-// completed" — tasks frequently get Cancelled and re-batched during
-// picking (confirmed 2026-07-11 on 3 Grassland orders: 20 Cancelled + 20
-// Completed tasks, full case count covered, zero Released — that's ready).
-// Cases are the source of truth for completion; task-count ratios are not.
+// An appointment is 'ready' when, across ALL of its orders combined, there
+// are zero tasks in Released/Planned status AND at least one Completed
+// task. This is NOT the same as "100% of tasks completed" — tasks
+// frequently get Cancelled and re-batched during picking (confirmed
+// 2026-07-11 on 3 Grassland orders: 20 Cancelled + 20 Completed tasks,
+// full case count covered, zero Released — that's ready). Cases are the
+// source of truth for completion; task-count ratios are not.
 //
 // ── Pick difficulty ──────────────────────────────────────────────────────
-// pickLocations = distinct locations hard-allocated for this order's tasks.
+// pickLocations = distinct locations hard-allocated across all of this
+//   appointment's orders' tasks.
 // rehandleRisk  = for locations holding MORE THAN ONE LOT, the count of
 //   pallets at that location that are NOT the required lot (i.e. pallets
 //   that may need to be moved aside to reach the correct one). Locations
@@ -82,9 +89,10 @@
 //   bulk lane is trivial. This directly reflects Dan's 2026-07-11 call:
 //   "if it's all one lot, that's easy — multiple lots is when it's
 //   complicated."
-// pickLocations/rehandleRisk are null when the order has no hard
-// allocation yet (small each-pick orders often get slotted at release
-// time, not pre-assigned) — surfaced client-side as "Not assigned yet".
+// pickLocations/rehandleRisk are null when none of the appointment's
+// orders have a hard allocation yet (small each-pick orders often get
+// slotted at release time, not pre-assigned) — surfaced client-side as
+// "Not assigned yet".
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -109,24 +117,11 @@ function nextDayISO(date) {
   return d.toISOString().slice(0, 10)
 }
 
-function sqlLit(s) {
-  return `'${String(s).replace(/'/g, "''")}'`
-}
-
-// Split a raw lookup_code on anything that isn't a letter/digit/dash.
-// Dashes are kept as token characters (not delimiters) so compound codes
-// like "HCI-0190-103616-16" survive intact as one token.
+// Split a raw lookup_code on anything that isn't a letter/digit/dash, used
+// only for placeholder (HOLD/SAVE) detection now — real order matching
+// goes through the relational join instead.
 function tokenize(raw) {
   return String(raw || '').split(/[^A-Za-z0-9-]+/).filter(Boolean)
-}
-
-// Candidate order/PO codes embedded in a noisy appointment lookup_code.
-// Any token containing at least one digit and >=4 characters is a
-// candidate — customer-name tokens (all letters, e.g. "NOVONESIS",
-// "RHODES") are naturally excluded since they have no digits.
-function extractCandidateCodes(raw) {
-  const tokens = tokenize(raw)
-  return [...new Set(tokens.filter(t => /\d/.test(t) && t.length >= 4))]
 }
 
 function isPlaceholder(raw) {
@@ -190,6 +185,7 @@ exports.handler = async (event) => {
     const nextDate = nextDayISO(date)
     const apptSql = `
       SELECT
+        appointment_id,
         COALESCE(lookup_code, '')                AS lookup_code,
         COALESCE(project_name, '')                AS project_name,
         COALESCE(carrier_name, '')                AS carrier_name,
@@ -206,7 +202,7 @@ exports.handler = async (event) => {
     const apptRows = await runQuery(apptSql)
 
     // Split out placeholder appointments (HOLD/SAVE, no real cargo) before
-    // spending any query effort trying to match them to an order.
+    // spending any query effort trying to resolve them to an order.
     const realAppts = []
     const placeholderAppts = []
     for (const a of apptRows) {
@@ -217,74 +213,80 @@ exports.handler = async (event) => {
       }
     }
 
-    // ── Step 2: extract candidate order codes per appointment ────────────
-    const apptsWithCandidates = realAppts.map(a => ({
-      appt: a,
-      candidates: extractCandidateCodes(a.lookup_code),
-    }))
+    // ── Step 2: dockappointmentitems for these appointments ───────────────
+    // item_entity_type is either 'Order' (item_entity_id = order_id
+    // directly) or 'LoadContainer' (item_entity_id = load_container_id,
+    // expanded below into its constituent orders).
+    const apptIds = realAppts.map(a => a.appointment_id)
+    let itemRows = []
+    if (apptIds.length > 0) {
+      const itemSql = `
+        SELECT dock_appointment_id, item_entity_type, item_entity_id
+        FROM production_db.silver.datex_slv_dockappointmentitems
+        WHERE dock_appointment_id IN (${apptIds.join(',')})
+      `
+      itemRows = await runQuery(itemSql)
+    }
 
-    let matchedOrders = []
-    const allCodes = [...new Set(apptsWithCandidates.flatMap(x => x.candidates))]
-    if (allCodes.length > 0) {
-      const whereClauses = allCodes
-        .map(c => `lookup_code = ${sqlLit(c)} OR lookup_code LIKE ${sqlLit('%' + c + '%')}`)
-        .join(' OR ')
+    const directOrderIdsByAppt = new Map()   // appointment_id -> Set(order_id)
+    const containerIdsByAppt = new Map()     // appointment_id -> Set(load_container_id)
+    for (const r of itemRows) {
+      const apptId = Number(r.dock_appointment_id)
+      if (r.item_entity_type === 'Order') {
+        if (!directOrderIdsByAppt.has(apptId)) directOrderIdsByAppt.set(apptId, new Set())
+        directOrderIdsByAppt.get(apptId).add(Number(r.item_entity_id))
+      } else if (r.item_entity_type === 'LoadContainer') {
+        if (!containerIdsByAppt.has(apptId)) containerIdsByAppt.set(apptId, new Set())
+        containerIdsByAppt.get(apptId).add(Number(r.item_entity_id))
+      }
+    }
+
+    // ── Step 3: expand load containers into their constituent orders ─────
+    const allContainerIds = [...new Set([...containerIdsByAppt.values()].flatMap(s => [...s]))]
+    const orderIdsByContainer = new Map() // load_container_id -> Set(order_id)
+    if (allContainerIds.length > 0) {
+      const containerOrderSql = `
+        SELECT DISTINCT s.load_container_id, ol.order_id
+        FROM production_db.silver.datex_slv_shipments s
+        JOIN production_db.silver.datex_slv_orderlines ol ON ol.shipment_id = s.shipment_id
+        WHERE s.load_container_id IN (${allContainerIds.join(',')})
+      `
+      const containerOrderRows = await runQuery(containerOrderSql)
+      for (const r of containerOrderRows) {
+        const cid = Number(r.load_container_id)
+        if (!orderIdsByContainer.has(cid)) orderIdsByContainer.set(cid, new Set())
+        orderIdsByContainer.get(cid).add(Number(r.order_id))
+      }
+    }
+
+    // ── Step 4: build final order_id set per appointment ──────────────────
+    const orderIdsByAppt = new Map() // appointment_id -> Set(order_id)
+    for (const a of realAppts) {
+      const apptId = Number(a.appointment_id)
+      const set = new Set(directOrderIdsByAppt.get(apptId) || [])
+      for (const cid of (containerIdsByAppt.get(apptId) || [])) {
+        for (const oid of (orderIdsByContainer.get(cid) || [])) set.add(oid)
+      }
+      orderIdsByAppt.set(apptId, set)
+    }
+
+    const resolvedOrderIds = [...new Set(
+      [...orderIdsByAppt.values()].flatMap(s => [...s])
+    )]
+
+    // ── Step 5: order metadata (lookup_code, status, warehouse) ───────────
+    const orderById = new Map()
+    if (resolvedOrderIds.length > 0) {
       const orderSql = `
         SELECT order_id, lookup_code, order_status_id, preferred_warehouse_id
         FROM production_db.silver.datex_slv_orders
-        WHERE ${whereClauses}
+        WHERE order_id IN (${resolvedOrderIds.join(',')})
       `
-      matchedOrders = await runQuery(orderSql)
+      const orderRows = await runQuery(orderSql)
+      for (const r of orderRows) orderById.set(Number(r.order_id), r)
     }
 
-    // Resolve an appointment's candidate codes to (at most) one order.
-    // Exact match on any candidate first, in candidate order (earlier
-    // candidates are typically the primary order number, later ones
-    // trailing PO references). When multiple orders share the exact same
-    // lookup_code (confirmed real case: "M027" exists on 3 separate order
-    // records from different dates), prefer the one currently Processing
-    // (order_status_id=2) over old Completed ones, tie-broken by highest
-    // order_id (most recent).
-    //
-    // Substring fallback is intentionally conservative: only attempted for
-    // candidates >=6 characters, and only accepted when EXACTLY ONE order
-    // contains it. Validated this session that short candidates (e.g. the
-    // confirmed 5-digit truncation case "64527") can substring-match SIX
-    // unrelated orders company-wide that merely happen to end in the same
-    // digits (e.g. "0010264527", "PSH0064527", "SO364527") — silently
-    // picking one of those would be an outright wrong match, worse than
-    // surfacing 'unresolved' honestly.
-    function pickBestAmong(orders) {
-      if (orders.length === 0) return null
-      if (orders.length === 1) return orders[0]
-      const active = orders.filter(o => Number(o.order_status_id) === 2)
-      const pool = active.length > 0 ? active : orders
-      return pool.reduce((best, o) => (Number(o.order_id) > Number(best.order_id) ? o : best), pool[0])
-    }
-
-    function findOrderForCandidates(candidates) {
-      for (const c of candidates) {
-        const exactMatches = matchedOrders.filter(o => o.lookup_code === c)
-        if (exactMatches.length > 0) return pickBestAmong(exactMatches)
-      }
-      for (const c of candidates) {
-        if (c.length < 6) continue
-        const subs = matchedOrders.filter(o => o.lookup_code && o.lookup_code.includes(c))
-        if (subs.length === 1) return subs[0]
-      }
-      return null
-    }
-
-    const apptOrderPairs = apptsWithCandidates.map(({ appt, candidates }) => ({
-      appt,
-      order: findOrderForCandidates(candidates),
-    }))
-
-    const resolvedOrderIds = [...new Set(
-      apptOrderPairs.filter(p => p.order).map(p => Number(p.order.order_id))
-    )]
-
-    // ── Step 3: task completion status per order ──────────────────────────
+    // ── Step 6: task completion status per order ──────────────────────────
     // Cases are the source of truth for "done" — task counts are NOT (tasks
     // routinely get Cancelled + re-batched mid-pick; a lower Completed task
     // count than total tasks does not mean work remains, see file header).
@@ -316,13 +318,12 @@ exports.handler = async (event) => {
         else if (status === 'planned') agg.planned += count
         else if (status === 'completed') agg.completed += count
         else if (status === 'cancelled') agg.cancelled += count
-        // expected/actual across ALL statuses — cases are truth, not task status
         agg.expectedTotal += Number(r.expected) || 0
         agg.actualTotal   += Number(r.actual) || 0
       }
     }
 
-    // ── Step 4: pick difficulty (hard allocations + lot mix) ──────────────
+    // ── Step 7: pick difficulty (hard allocations + lot mix) ──────────────
     const complexityByOrder = new Map()
     if (resolvedOrderIds.length > 0) {
       const idList = resolvedOrderIds.join(',')
@@ -364,20 +365,22 @@ exports.handler = async (event) => {
     const expectedWarehouseId = warehouseId
     const appointments = []
 
-    for (const { appt, order } of apptOrderPairs) {
+    for (const a of realAppts) {
+      const apptId = Number(a.appointment_id)
+      const orderIds = [...(orderIdsByAppt.get(apptId) || [])]
       const base = {
-        lookupCode: appt.lookup_code,
-        projectName: appt.project_name,
-        carrierName: appt.carrier_name,
-        scheduledArrival: appt.scheduled_arrival,
-        notes: appt.notes,
+        lookupCode: a.lookup_code,
+        projectName: a.project_name,
+        carrierName: a.carrier_name,
+        scheduledArrival: a.scheduled_arrival,
+        notes: a.notes,
       }
 
-      if (!order) {
+      if (orderIds.length === 0) {
         appointments.push({
           ...base,
-          orderId: null,
-          orderLookupCode: null,
+          orderIds: [],
+          orderLookupCodes: [],
           status: 'unresolved',
           expectedCases: null,
           actualCases: null,
@@ -388,31 +391,62 @@ exports.handler = async (event) => {
         continue
       }
 
-      const oid = Number(order.order_id)
-      const agg = taskAggByOrder.get(oid)
-      const complexity = complexityByOrder.get(oid) || null
+      // Sum case counts, task status, and pick difficulty across ALL
+      // orders on this appointment (handles load-container-consolidated
+      // appointments the same way Kenosha's multi-order appointments are
+      // handled).
+      let released = 0, planned = 0, completed = 0
+      let expectedTotal = 0, actualTotal = 0
+      let hasAnyTaskData = false
+      let pickLocations = 0, rehandleRisk = 0
+      let hasAnyComplexityData = false
+      const mismatchedWarehouses = new Set()
+      const orderLookupCodes = []
+
+      for (const oid of orderIds) {
+        const order = orderById.get(oid)
+        if (order) {
+          orderLookupCodes.push(order.lookup_code)
+          const owh = order.preferred_warehouse_id != null ? Number(order.preferred_warehouse_id) : null
+          if (owh != null && owh !== expectedWarehouseId) mismatchedWarehouses.add(owh)
+        }
+        const agg = taskAggByOrder.get(oid)
+        if (agg) {
+          hasAnyTaskData = true
+          released += agg.released
+          planned += agg.planned
+          completed += agg.completed
+          expectedTotal += agg.expectedTotal
+          actualTotal += agg.actualTotal
+        }
+        const complexity = complexityByOrder.get(oid)
+        if (complexity) {
+          hasAnyComplexityData = true
+          pickLocations += complexity.pickLocations
+          rehandleRisk += complexity.rehandleRisk
+        }
+      }
 
       let status = 'not-started'
-      if (agg) {
-        const noOpenWork = agg.released === 0 && agg.planned === 0
-        const hasActivity = agg.completed > 0
+      if (hasAnyTaskData) {
+        const noOpenWork = released === 0 && planned === 0
+        const hasActivity = completed > 0
         if (noOpenWork && hasActivity) status = 'ready'
       }
 
-      const orderWarehouseId = order.preferred_warehouse_id != null ? Number(order.preferred_warehouse_id) : null
-      const warehouseMismatch = (orderWarehouseId != null && orderWarehouseId !== expectedWarehouseId)
-        ? { orderWarehouseId, expectedWarehouseId }
+      const warehouseMismatch = mismatchedWarehouses.size > 0
+        ? { orderWarehouseId: [...mismatchedWarehouses][0], expectedWarehouseId }
         : null
 
       appointments.push({
         ...base,
-        orderId: oid,
-        orderLookupCode: order.lookup_code,
+        orderIds,
+        orderLookupCodes,
         status,
-        expectedCases: agg ? agg.expectedTotal : null,
-        actualCases: agg ? agg.actualTotal : null,
-        pickLocations: complexity ? complexity.pickLocations : null,
-        rehandleRisk: complexity ? complexity.rehandleRisk : null,
+        expectedCases: hasAnyTaskData ? expectedTotal : null,
+        actualCases: hasAnyTaskData ? actualTotal : null,
+        pickLocations: hasAnyComplexityData ? pickLocations : null,
+        rehandleRisk: hasAnyComplexityData ? rehandleRisk : null,
         warehouseMismatch,
       })
     }
@@ -424,8 +458,8 @@ exports.handler = async (event) => {
         carrierName: a.carrier_name,
         scheduledArrival: a.scheduled_arrival,
         notes: a.notes,
-        orderId: null,
-        orderLookupCode: null,
+        orderIds: [],
+        orderLookupCodes: [],
         status: 'placeholder',
         expectedCases: null,
         actualCases: null,
