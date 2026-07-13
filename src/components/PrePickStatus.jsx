@@ -47,6 +47,13 @@ import '../styles/prepick-status.css'
  * 03:15 UTC / 10:15pm CT) posts a summary comment to, and fire a test send
  * on demand — without needing a code deploy to change the destination.
  * Stored in prepick_notify_settings (facility='mad' for now).
+ *
+ * Estimated pallets (added 2026-07-13): computed server-side from material
+ * tie/high (silver.datex_slv_materialspackagingslookup), shown as "~N
+ * pallets" next to the order code. Coverage is ~86% of cases on real
+ * Madison data — when some cases on an order lack tie/high data, that's
+ * surfaced in the expandable detail row rather than silently baked into
+ * the number, so the estimate never looks more complete than it is.
  */
 export default function PrePickStatus({ facilityId, planDate }) {
   const [appointments, setAppointments] = useState([])
@@ -239,8 +246,10 @@ export default function PrePickStatus({ facilityId, planDate }) {
           : difficulty === 'Easy grab' ? 'good'
           : 'neutral'
         const hasProgress = appt.expectedCases != null
+        const hasPalletGap = appt.casesWithoutPalletData != null && appt.casesWithoutPalletData > 0
         const hasDetail = Boolean(appt.warehouseMismatch) ||
-          (appt.pickLocations != null && appt.status !== 'ready')
+          (appt.pickLocations != null && appt.status !== 'ready') ||
+          hasPalletGap
         const expanded = expandedRow === idx
         const displayName = appt.projectName || appt.carrierName || appt.lookupCode || 'Unknown'
         const orderCodes = appt.orderLookupCodes && appt.orderLookupCodes.length > 0
@@ -264,6 +273,7 @@ export default function PrePickStatus({ facilityId, planDate }) {
                   {orderCodes}
                   {multiOrder ? ` (${appt.orderLookupCodes.length} orders)` : ''}
                   {appt.carrierName ? ` · ${appt.carrierName}` : ''}
+                  {appt.estimatedPallets != null ? ` · ~${appt.estimatedPallets} pallets` : ''}
                   {appt.notes ? ` · ${appt.notes}` : ''}
                 </div>
               </div>
@@ -296,6 +306,11 @@ export default function PrePickStatus({ facilityId, planDate }) {
                     )}
                   </div>
                 )}
+                {hasPalletGap && (
+                  <div>
+                    Pallet estimate doesn't include {Math.round(appt.casesWithoutPalletData)} cases — those materials don't have a tie/high configured in Datex yet.
+                  </div>
+                )}
                 {appt.warehouseMismatch && (
                   <div className="pps-detail-flag">
                     Order is tagged to a different facility in Datex (warehouse ID {appt.warehouseMismatch.orderWarehouseId} instead of {appt.warehouseMismatch.expectedWarehouseId}) — likely a data-entry error worth checking before it ships.
@@ -308,7 +323,7 @@ export default function PrePickStatus({ facilityId, planDate }) {
       })}
 
       <div className="pps-footnote">
-        Pre-picked = 100% of expected cases completed, nothing left to do. Pick difficulty reflects whether a pick location mixes multiple lots — not pallet count.
+        Pre-picked = 100% of expected cases completed, nothing left to do. Pick difficulty reflects whether a pick location mixes multiple lots — not pallet count. Pallet counts are estimated from each material's tie/high in Datex — some materials may not have this set, so the true count could run higher.
       </div>
     </div>
   )
