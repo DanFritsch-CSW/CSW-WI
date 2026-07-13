@@ -1,10 +1,10 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 
 const PAGE_SIZE = 30
-function fmtDate(d){if(!d)return'—';try{return new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})}catch{return d}}
+function fmtDate(d){if(!d)return'\u2014';try{return new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})}catch{return d}}
 function ageInDays(d){return !d?0:Math.floor((Date.now()-new Date(d+'T12:00:00'))/86400000)}
 function ageColor(d){const a=ageInDays(d);return a>21?'var(--red)':a>14?'#e09a2a':'var(--text-primary)'}
-function preview(s,n=60){return !s?'':s.length>n?s.slice(0,n)+'…':s}
+function preview(s,n=60){return !s?'':s.length>n?s.slice(0,n)+'\u2026':s}
 function sortItems(items,field,dir){
   if(!field)return items
   return [...items].sort((a,b)=>{
@@ -37,8 +37,8 @@ function FacBadge({fac}){
   const[bg,color,label]=map[fac]||map.cal
   return <span style={{fontSize:10,padding:'2px 7px',borderRadius:10,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)'}}>{label}</span>
 }
-function SortTh({label,field,sortField,sortDir,onSort,style{}}){
-  const active=sortField===field,arrow=active?(sortDir==='asc'?' ↑':' ↓'):''
+function SortTh({label, field, sortField, sortDir, onSort, style={}}){
+  const active=sortField===field,arrow=active?(sortDir==='asc'?' \u2191':' \u2193'):''
   return <th onClick={()=>onSort(field)} style={{padding:'9px 12px',textAlign:'left',fontSize:10,fontWeight:600,color:active?'var(--text-primary)':'var(--text-secondary)',borderBottom:'1px solid var(--border)',background:'var(--bg1)',textTransform:'uppercase',letterSpacing:'.3px',whiteSpace:'nowrap',cursor:'pointer',userSelect:'none',...style}}>{label}{arrow}</th>
 }
 
@@ -56,23 +56,23 @@ function InboundDetailModal({record,fac,tab,onClose,onSave}){
             <span style={{fontSize:15,fontWeight:700}}>{record.id}</span>
             <FacBadge fac={fac}/><StatusBadge status={record.status}/>
           </div>
-          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--text-secondary)',fontSize:22,lineHeight:1}}>×</button>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--text-secondary)',fontSize:22,lineHeight:1}}>{String.fromCharCode(215)}</button>
         </div>
         <div style={{padding:20,overflowY:'auto',flex:1}}>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
-            {[['Date',fmtDate(record.date)],['Age',`${ageInDays(record.date)}d`],['Order #',record.orderNum||'—'],['Customer',record.customer||'—'],['Employee',record.employee||'—'],['Photos',record.photos||0]].map(([l,v])=>(
+            {[['Date',fmtDate(record.date)],['Age',`${ageInDays(record.date)}d`],['Order #',record.orderNum||'\u2014'],['Customer',record.customer||'\u2014'],['Employee',record.employee||'\u2014'],['Photos',record.photos||0]].map(([l,v])=>(
               <div key={l} style={{background:'var(--bg1)',borderRadius:7,padding:'8px 12px',border:'1px solid var(--border-subtle)'}}><div style={{fontSize:10,color:'var(--text-secondary)',marginBottom:2}}>{l}</div><div style={{fontSize:13,fontWeight:500}}>{v}</div></div>
             ))}
           </div>
           <div style={{background:'var(--bg1)',borderRadius:7,padding:12,marginBottom:12,border:'1px solid var(--border-subtle)'}}>
             <div style={{fontSize:10,color:'var(--text-secondary)',marginBottom:4}}>Problem / Notes</div>
-            <div style={{fontSize:13,fontWeight:500}}>{record.problem||'—'}</div>
+            <div style={{fontSize:13,fontWeight:500}}>{record.problem||'\u2014'}</div>
             {record.notes&&<div style={{fontSize:12,color:'var(--text-secondary)',marginTop:6}}>{record.notes}</div>}
           </div>
           <div style={{marginBottom:12}}>
             <label style={lbl}>LoadProof URL</label>
             {fields.loadproofUrl
-              ?<div><a href={fields.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:13,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)',wordBreak:'break-all'}}>{fields.loadproofUrl} ↗</a></div>
+              ?<div><a href={fields.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:13,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)',wordBreak:'break-all'}}>{fields.loadproofUrl} \u2197</a></div>
               :<input type="url" style={inp()} value={fields.loadproofUrl||''} onChange={e=>set('loadproofUrl',e.target.value)} placeholder="Paste LoadProof record URL here"/>
             }
           </div>
@@ -189,7 +189,7 @@ export default function LoadProofInboundTracker({type}){
             ))}
           </div>
           {loading
-            ?<span style={{fontSize:11,padding:'2px 9px',borderRadius:20,fontWeight:600,background:'var(--bg3)',color:'var(--text-secondary)',fontFamily:'var(--font-mono)'}}>Loading…</span>
+            ?<span style={{fontSize:11,padding:'2px 9px',borderRadius:20,fontWeight:600,background:'var(--bg3)',color:'var(--text-secondary)',fontFamily:'var(--font-mono)'}}>Loading\u2026</span>
             :<span style={{fontSize:11,padding:'2px 9px',borderRadius:20,fontWeight:600,background:'var(--bg2)',color:'var(--text-secondary)',fontFamily:'var(--font-mono)'}}>{activeData.length} records</span>
           }
           <span style={{fontSize:10,color:'var(--text-secondary)'}}>live from SharePoint</span>
@@ -199,8 +199,8 @@ export default function LoadProofInboundTracker({type}){
         {Object.entries(loadErrors).map(([fac,err])=>(<div key={fac} style={{background:'rgba(220,38,38,0.08)',border:'1px solid rgba(220,38,38,0.2)',borderRadius:8,padding:'10px 14px',marginBottom:10,fontSize:12,color:'var(--red)',fontFamily:'var(--font-mono)'}}>{fac.toUpperCase()}: {err}</div>))}
         <div style={{background:'var(--bg1)',border:'1px solid var(--border)',borderRadius:10,padding:'14px 16px',marginBottom:16}}>
           <div style={{display:'flex',gap:8,marginBottom:10,flexWrap:'wrap'}}>
-            <input type="text" placeholder="🔍  Search by customer, order #, employee, notes..." value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} style={{flex:1,minWidth:240,padding:'8px 12px',fontSize:13,border:'1px solid var(--border)',borderRadius:8,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit',boxSizing:'border-box'}}/>
-            {hasFilters&&<button onClick={()=>{setSearch('');setStatusFilter('all');setPage(1)}} style={{padding:'8px 12px',fontSize:12,border:'1px solid var(--border)',borderRadius:8,background:'var(--bg0)',color:'var(--text-secondary)',cursor:'pointer',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>Clear ×</button>}
+            <input type="text" placeholder="Search by customer, order #, employee, notes..." value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} style={{flex:1,minWidth:240,padding:'8px 12px',fontSize:13,border:'1px solid var(--border)',borderRadius:8,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit',boxSizing:'border-box'}}/>
+            {hasFilters&&<button onClick={()=>{setSearch('');setStatusFilter('all');setPage(1)}} style={{padding:'8px 12px',fontSize:12,border:'1px solid var(--border)',borderRadius:8,background:'var(--bg0)',color:'var(--text-secondary)',cursor:'pointer',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>Clear x</button>}
           </div>
           <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
             <span style={{fontSize:11,color:'var(--text-secondary)',fontFamily:'var(--font-mono)'}}>STATUS:</span>
@@ -227,37 +227,37 @@ export default function LoadProofInboundTracker({type}){
                 <th style={thBase}>LP Link</th>
               </tr></thead>
               <tbody>
-                {loading&&!paged.length?(<tr><td colSpan={colCount} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13,fontFamily:'var(--font-mono)'}}>Loading from SharePoint…</td></tr>)
+                {loading&&!paged.length?(<tr><td colSpan={colCount} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13,fontFamily:'var(--font-mono)'}}>Loading from SharePoint\u2026</td></tr>)
                 :paged.length?paged.map((i,idx)=>(
                   <tr key={i.id} onClick={()=>setDetail({id:i.id,fac:i._fac})} style={{background:idx%2===0?'var(--bg0)':'var(--bg1)',cursor:'pointer'}}
                     onMouseEnter={e=>e.currentTarget.style.background='var(--bg2)'}
                     onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?'var(--bg0)':'var(--bg1)'}>
                     {showFac&&<td style={tdBase}><FacBadge fac={i._fac}/></td>}
                     <td style={{...tdBase,whiteSpace:'nowrap'}}>{fmtDate(i.date)}</td>
-                    <td style={{...tdBase,fontFamily:'var(--font-mono)',fontSize:11}}>{i.orderNum||'—'}</td>
-                    <td style={{...tdBase,maxWidth:140}}><div style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={i.customer}>{i.customer||'—'}</div></td>
+                    <td style={{...tdBase,fontFamily:'var(--font-mono)',fontSize:11}}>{i.orderNum||'\u2014'}</td>
+                    <td style={{...tdBase,maxWidth:140}}><div style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={i.customer}>{i.customer||'\u2014'}</div></td>
                     <td style={{...tdBase,maxWidth:200,fontSize:12,color:'var(--text-secondary)'}}>{preview(i.notes||i.problem||'')}</td>
                     <td style={tdBase}><ProblemBadge problem={i.problem}/></td>
                     {type==='inbound'&&<td style={{...tdBase,fontSize:12,color:i.customerNotified?'var(--text-primary)':'var(--text-secondary)'}}>{i.customerNotified||<span style={{color:'rgba(220,38,38,0.8)',fontSize:11}}>Not sent</span>}</td>}
-                    {type==='inbound'&&<td style={{...tdBase,fontSize:12}}>{i.whoResolved||'—'}</td>}
+                    {type==='inbound'&&<td style={{...tdBase,fontSize:12}}>{i.whoResolved||'\u2014'}</td>}
                     {type==='hold'&&<td style={{...tdBase,fontSize:12,color:i.csrNotified?'var(--text-primary)':'var(--text-secondary)'}}>{i.csrNotified||<span style={{color:'rgba(220,38,38,0.8)',fontSize:11}}>Not sent</span>}</td>}
-                    <td style={{...tdBase,textAlign:'center',fontFamily:'var(--font-mono)'}}>{i.photos||'—'}</td>
+                    <td style={{...tdBase,textAlign:'center',fontFamily:'var(--font-mono)'}}>{i.photos||'\u2014'}</td>
                     <td style={{...tdBase,fontWeight:600,color:ageColor(i.date),fontFamily:'var(--font-mono)'}}>{ageInDays(i.date)}d</td>
                     <td style={tdBase}><StatusBadge status={i.status}/></td>
                     <td style={tdBase} onClick={e=>e.stopPropagation()}>
-                      {i.loadproofUrl?<a href={i.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)'}}>View ↗</a>:<span style={{fontSize:11,color:'var(--text-dim,#aaa)',fontFamily:'var(--font-mono)'}}>—</span>}
+                      {i.loadproofUrl?<a href={i.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)'}}>View \u2197</a>:<span style={{fontSize:11,color:'var(--text-dim,#aaa)',fontFamily:'var(--font-mono)'}}>\u2014</span>}
                     </td>
                   </tr>
-                )):(<tr><td colSpan={colCount} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13}}>No records{hasFilters?' match':''} — <button onClick={()=>{setSearch('');setStatusFilter('all')}} style={{background:'none',border:'none',color:'var(--accent,#3b82f6)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>clear filters</button></td></tr>)}
+                )):(<tr><td colSpan={colCount} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13}}>No records{hasFilters?' match':''} \u2014 <button onClick={()=>{setSearch('');setStatusFilter('all')}} style={{background:'none',border:'none',color:'var(--accent,#3b82f6)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>clear filters</button></td></tr>)}
               </tbody>
             </table>
           </div>
           <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 16px',borderTop:'1px solid var(--border)',fontSize:12,color:'var(--text-secondary)',fontFamily:'var(--font-mono)',background:'var(--bg1)'}}>
-            <span>Showing {Math.min((safePg-1)*PAGE_SIZE+1,filtered.length)}–{Math.min(safePg*PAGE_SIZE,filtered.length)} of {filtered.length}</span>
+            <span>Showing {Math.min((safePg-1)*PAGE_SIZE+1,filtered.length)}\u2013{Math.min(safePg*PAGE_SIZE,filtered.length)} of {filtered.length}</span>
             <div style={{display:'flex',gap:4}}>
-              <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={safePg===1} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:'var(--bg0)',color:'var(--text-primary)',cursor:'pointer',fontSize:12,opacity:safePg===1?0.4:1}}>‹</button>
+              <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={safePg===1} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:'var(--bg0)',color:'var(--text-primary)',cursor:'pointer',fontSize:12,opacity:safePg===1?0.4:1}}>\u2039</button>
               {Array.from({length:Math.min(pages,8)},(_,i)=>i+1).map(p=>(<button key={p} onClick={()=>setPage(p)} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:p===safePg?'var(--text-primary)':'var(--bg0)',color:p===safePg?'var(--bg0)':'var(--text-primary)',cursor:'pointer',fontSize:12}}>{p}</button>))}
-              <button onClick={()=>setPage(p=>Math.min(pages,p+1))} disabled={safePg===pages} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:'var(--bg0)',color:'var(--text-primary)',cursor:'pointer',fontSize:12,opacity:safePg===pages?0.4:1}}>›</button>
+              <button onClick={()=>setPage(p=>Math.min(pages,p+1))} disabled={safePg===pages} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:'var(--bg0)',color:'var(--text-primary)',cursor:'pointer',fontSize:12,opacity:safePg===pages?0.4:1}}>\u203a</button>
             </div>
           </div>
         </div>
