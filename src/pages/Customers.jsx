@@ -1,33 +1,30 @@
 import { useSearchParams } from 'react-router-dom'
 import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 import OnboardingTab from '../components/customers/OnboardingTab.jsx'
+import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import RevisionsTab from '../components/customers/RevisionsTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
-// Customers module — five sub-tabs sharing a common header + tab row.
-// Sub-tab state lives in URL (?tab=space|onboarding|fefo|revisions|pvi) so
-// links are shareable and refresh-safe, matching the rest of the app's
-// URL-as-state pattern (LaborPlanning uses ?fac=&date=).
+// Customers module — sub-tabs sharing a common header + tab row.
+// Sub-tab state lives in URL (?tab=...) so links are shareable and
+// refresh-safe, matching the rest of the app's URL-as-state pattern.
 //
-// When the PVI sub-tab is active, the Palermo's brand mark is displayed
-// in the header (right-aligned) so it's visually clear this section is
-// for a Palermo's-branded feature. Logo asset lives in
-// src/lib/palermos-logo.js as a base64 data URI (same source used by the
-// cswpvi.netlify.app standalone site — one source of truth for the mark).
+// Tab order:
+//   Space Planning → Customer Onboarding → LoadProof / DVRS →
+//   FEFO Rotation → Revisions → PVI At Risk Inventory
+//
+// LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
+// for Caledonia and Kenosha. Seeded with last-30-day open incidents from
+// the INV CTRL DVRS Excel exports. Will switch to a live Supabase query
+// once the LoadProof → Zapier → Supabase pipeline is activated.
 //
 // PVI tab rename (2026-07-07, Hill Slack 9:12 AM): "change the app title
-// to Palermo's At Risk Inventory Manager." Label + subtitle updated here;
-// the browser tab title is set by PviShelfLife.jsx via document.title
-// useEffect so it flips to the new name only while that tab is active.
+// to Palermo's At Risk Inventory Manager."
 //
 // Revisions sub-tab (2026-07-09): tracks Front conversations tagged
-// "Revision"/"Revisions" (order-revision misses), mirrored on a schedule
-// from the separate csw-kb-assistant Supabase project. Placed next to
-// FEFO Rotation — same "verify before it ships" spirit, different failure
-// mode (revision handling vs shelf-life). See RevisionsTab.jsx,
-// src/lib/revisions.js, and netlify/functions/revision-sync.cjs.
+// "Revision"/"Revisions" (order-revision misses).
 const SUB_TABS = [
   {
     id: 'space',
@@ -38,6 +35,11 @@ const SUB_TABS = [
     id: 'onboarding',
     label: 'Customer Onboarding',
     subtitle: 'New-customer onboarding checklist · single source of truth',
+  },
+  {
+    id: 'dvr',
+    label: 'LoadProof / DVRS',
+    subtitle: 'Open DVR incidents · Caledonia & Kenosha · last 30 days',
   },
   {
     id: 'fefo',
@@ -70,9 +72,7 @@ export default function Customers() {
 
   return (
     <div className="page-content">
-      {/* Page header — title + per-sub-tab subtitle. When on the PVI tab,
-          the Palermo's brand mark appears on the right so it's obvious
-          this section is a Palermo's-branded feature. */}
+      {/* Page header */}
       <div style={{ padding: '20px 24px 0', display: 'flex', alignItems: 'flex-start', gap: 16 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <h1 style={{
@@ -101,6 +101,7 @@ export default function Customers() {
       <div style={{
         display: 'flex', gap: 4, padding: '16px 24px 0',
         borderBottom: '1px solid var(--border)',
+        overflowX: 'auto',
       }}>
         {SUB_TABS.map(t => {
           const isActive = t.id === subTab
@@ -121,6 +122,7 @@ export default function Customers() {
                 fontWeight: isActive ? 600 : 500,
                 cursor: 'pointer',
                 marginBottom: -1,
+                whiteSpace: 'nowrap',
                 transition: 'color 0.15s ease, background 0.15s ease',
               }}
             >
@@ -134,6 +136,7 @@ export default function Customers() {
       <div style={{ padding: '24px' }}>
         {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingTab />}
+        {subTab === 'dvr'        && <DvrTab />}
         {subTab === 'fefo'       && <FefoRotationTab />}
         {subTab === 'revisions'  && <RevisionsTab />}
         {subTab === 'pvi'        && <PviShelfLife />}
