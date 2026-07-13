@@ -22,9 +22,6 @@ const FACILITY_CONFIG = {
   },
 }
 
-// When usedRange is too large (phantom formatting extends used range),
-// fall back to this explicit bounded range.
-// 80 cols × 10000 rows = 800k cells — within the 5M Graph API limit.
 const FALLBACK_RANGE = 'A1:CB10000'
 
 let _token = null, _tokenExpiry = 0
@@ -164,26 +161,24 @@ function parseRows (headerRow, dataRows, prefix) {
     const incDate = parseDate(i_date >= 0 ? row[i_date] : null)
     if (!incDate) { counter++; continue }
 
-    // ── Resolution logic (per Nate Williams feedback, Jul 13 2026) ────────────────────
-    //
-    // Inventory side: "Adjustment Completed By" is the authoritative signal.
-    // Many incidents are resolved without a formal date entry — the ops
-    // person just puts their name in the By field. Checking date alone
-    // produces too many false positives. adjOpen = true only when adjBy is blank.
-    //
-    // Coaching side: coaching is only required when explicitly marked Yes AND
-    // the coaching hasn't been recorded (Date Coaching Completed is blank).
+    // Resolution logic:
+    // Inventory: adjBy filled = done (name in field = resolved, regardless of date)
+    // Coaching:  coachingRequired=Yes AND coachDate blank = pending
+    // Investigation: investigationNotes blank = not yet investigated
     const adjBy   = str(i_adjBy >= 0 ? row[i_adjBy] : '')
     const adjDate = parseDate(i_adjDate >= 0 ? row[i_adjDate] : null)
-    const adjOpen = !adjBy  // ← key change: adjBy alone determines if inventory side is open
+    const adjOpen = !adjBy
 
     const coachRaw     = str(i_coachReq >= 0 ? row[i_coachReq] : '').toLowerCase()
     const coaching     = coachRaw === 'yes' ? 'Yes' : coachRaw === 'no' ? 'No' : ''
     const coachDate    = parseDate(i_coachDate >= 0 ? row[i_coachDate] : null)
     const coachingOpen = coaching === 'Yes' && !coachDate
 
-    // Skip rows where both sides are resolved
-    if (!adjOpen && !coachingOpen) { counter++; continue }
+    const invNotes = str(i_invNotes >= 0 ? row[i_invNotes] : '')
+    const invOpen  = !invNotes  // blank = investigation not done
+
+    // Show row if ANY of the three action items is still open
+    if (!adjOpen && !coachingOpen && !invOpen) { counter++; continue }
 
     const typeRaw = str(i_type >= 0 ? row[i_type] : '').trim()
     const incidentType = TYPE_NORM[typeRaw.toLowerCase()] || typeRaw
@@ -202,14 +197,16 @@ function parseRows (headerRow, dataRows, prefix) {
       materialNum:  str(i_mat >= 0 ? row[i_mat] : ''),
       licensePlate: str(i_lp  >= 0 ? row[i_lp]  : ''),
       incidentNotes:      str(i_notes    >= 0 ? row[i_notes]    : ''),
-      investigationNotes: str(i_invNotes >= 0 ? row[i_invNotes] : ''),
+      investigationNotes: invNotes,
       adjDate: adjDate || '', adjBy, adjNotes: str(i_adjNotes >= 0 ? row[i_adjNotes] : ''), adjOpen,
       coachingRequired:    coaching,
       employeeResponsible: str(i_empResp    >= 0 ? row[i_empResp]    : ''),
       coachingDate: coachDate || '',
       coachingBy:   str(i_coachBy    >= 0 ? row[i_coachBy]    : ''),
       coachingNotes: str(i_coachNotes >= 0 ? row[i_coachNotes] : ''),
-      coachingOpen, loadproofUrl: '',
+      coachingOpen,
+      invOpen,
+      loadproofUrl: '',
       _colMap: {
         adjDate:             i_adjDate    >= 0 ? colLetter(i_adjDate)    : null,
         adjBy:               i_adjBy      >= 0 ? colLetter(i_adjBy)      : null,
@@ -219,6 +216,7 @@ function parseRows (headerRow, dataRows, prefix) {
         coachingDate:        i_coachDate  >= 0 ? colLetter(i_coachDate)  : null,
         coachingBy:          i_coachBy    >= 0 ? colLetter(i_coachBy)    : null,
         coachingNotes:       i_coachNotes >= 0 ? colLetter(i_coachNotes) : null,
+        investigationNotes:  i_invNotes   >= 0 ? colLetter(i_invNotes)   : null,
       },
     })
     counter++
