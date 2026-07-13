@@ -3,6 +3,8 @@
 // MotherDuck query for outbound "Pre-Picked Order Status" — Madison labor
 // planning tab. Built 2026-07-11 per Dan. Matching logic corrected 2026-07-12
 // after production showed everything as "Unresolved" — see notes below.
+// Added project_name 2026-07-13 (Dan wanted the customer/project shown as
+// the main row label, not the carrier).
 //
 // For every outbound appointment on a given facility/date, resolves the
 // linked Datex order (best-effort match — see matching notes below),
@@ -17,7 +19,7 @@
 // Response shape:
 //   {
 //     appointments: [{
-//       lookupCode, carrierName, scheduledArrival, notes,
+//       lookupCode, projectName, carrierName, scheduledArrival, notes,
 //       orderId, orderLookupCode,
 //       status: 'ready' | 'not-started' | 'unresolved' | 'placeholder',
 //       expectedCases, actualCases,
@@ -189,6 +191,7 @@ exports.handler = async (event) => {
     const apptSql = `
       SELECT
         COALESCE(lookup_code, '')                AS lookup_code,
+        COALESCE(project_name, '')                AS project_name,
         COALESCE(carrier_name, '')                AS carrier_name,
         scheduled_arrival::VARCHAR                 AS scheduled_arrival,
         COALESCE(Notes, '')                        AS notes
@@ -364,6 +367,7 @@ exports.handler = async (event) => {
     for (const { appt, order } of apptOrderPairs) {
       const base = {
         lookupCode: appt.lookup_code,
+        projectName: appt.project_name,
         carrierName: appt.carrier_name,
         scheduledArrival: appt.scheduled_arrival,
         notes: appt.notes,
@@ -416,6 +420,7 @@ exports.handler = async (event) => {
     for (const a of placeholderAppts) {
       appointments.push({
         lookupCode: a.lookup_code,
+        projectName: a.project_name,
         carrierName: a.carrier_name,
         scheduledArrival: a.scheduled_arrival,
         notes: a.notes,
