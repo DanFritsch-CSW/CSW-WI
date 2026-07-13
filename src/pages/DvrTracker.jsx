@@ -1,10 +1,9 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 
-// ─── Seed data (CAL + KEN) ──────────────────────────────────────────────────────────
-// Madison fetches live from SharePoint via /.netlify/functions/sharepoint-dvr
-const SEED_CAL = [{"id":"DVR-1107","date":"2026-03-08","orderNum":"202340","customer":"PALERMOS FINISHED","employee":"usman","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":60,"lotNum":"wc104255","materialNum":"30358","licensePlate":"mfg0438410","incidentNotes":"extra pallet","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1130","date":"2026-03-09","orderNum":"509847","customer":"PALERMOS FINISHED","employee":"Sergio","responsibleParty":"Customer / Carrier","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":-36,"lotNum":"WC101501","materialNum":"22832","licensePlate":"MFG0197349","incidentNotes":"received as 84 but physically shipped 48 last 36 cs don't exist","investigationNotes":"This was received by icampuzano - needs coaching on receiving properly","adjDate":"2026-03-09","adjBy":"Collin R. Perales","adjNotes":"36 cases did not exist.","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Icampuzano","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1140","date":"2026-03-10","orderNum":"Don't Know","customer":"Palermos Finished","employee":"Joe","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":6,"lotNum":"WC102986","materialNum":"31186","licensePlate":"MFG0315102","incidentNotes":"Missing","investigationNotes":"Mvilla picked this pallet, all the way in the back of the aisle.","adjDate":"2026-03-10","adjBy":"Joe R. Kasdorf","adjNotes":"We can not locate this pallet. Adjusted out 6cs.","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1159","date":"2026-03-12","orderNum":"0","customer":"PALERMOS RAW","employee":"juan s","responsibleParty":"CSW","incidentType":"Outbound","reason":"Damaged","damageType":"Tip","cases":12,"lotNum":"wc103152","materialNum":"15100","licensePlate":"mfg0375001","incidentNotes":"12 damage cases","investigationNotes":"Last picked By E. Lindsey.","adjDate":"2026-03-12","adjBy":"Collin R. Perales","adjNotes":"12 cases adjusted out.","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Ethan Lindsey","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1165","date":"2026-03-12","orderNum":"","customer":"PALERMOS FINISHED","employee":"Collin p","responsibleParty":"Customer / Carrier","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":84,"lotNum":"WC103297","materialNum":"30898","licensePlate":"MFG0406086","incidentNotes":"no scan. located middle x-over BE.","investigationNotes":"INVESTIGATE","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1166","date":"2026-03-12","orderNum":"","customer":"PALERMOS FINISHED","employee":"Berger","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Tip","cases":8,"lotNum":"WC103639","materialNum":"31116","licensePlate":"MFG0426134","incidentNotes":"8cs tossed, adjust qty to 40cs","investigationNotes":"Llanes put the partner pallet in same location.","adjDate":"2026-03-13","adjBy":"Collin R. Perales","adjNotes":"8 cases adjusted out. 40 remain","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Llanes","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1193","date":"2026-03-17","orderNum":"na","customer":"PALERMOS FINISHED","employee":"Francisco","responsibleParty":"Customer / Carrier","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":84,"lotNum":"wc103504","materialNum":"30895","licensePlate":"mfg0419708","incidentNotes":"physically a 30900/WC102594/84CS","investigationNotes":"Franny over shipped 10 cases.","adjDate":"2026-03-18","adjBy":"Collin R. Perales","adjNotes":"Corrected to right Item / Lot.","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Abdallah M. Shehadeh","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1259","date":"2026-03-27","orderNum":"0","customer":"PALERMOS FINISHED","employee":"Tom","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Tip","cases":8,"lotNum":"WC104110","materialNum":"30358","licensePlate":"MFG0476291","incidentNotes":"pallet snapped while putting away","investigationNotes":"E.Mercado left 19 cases on the dock.","adjDate":"2026-03-27","adjBy":"Collin R. Perales","adjNotes":"Adjusted out 8 cases","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"E.Mercado / D.Schlesser","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1272","date":"2026-03-27","orderNum":"10288939","customer":"SARGENTO","employee":"Collin p","responsibleParty":"CSW","incidentType":"Outbound","reason":"Shipping Error","damageType":"No Damage","cases":10,"lotNum":"2370518","materialNum":"10001354","licensePlate":"905408071","incidentNotes":"over shipped 10 cases","investigationNotes":"Campuzano helps Mercado but failed to do a proper case count.","adjDate":"2026-03-31","adjBy":"Collin R. Perales","adjNotes":"10 cases adjusted out. OVERSHIPPED","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"I.Campuzano / E.Mercado","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1315","date":"2026-04-03","orderNum":"511904","customer":"PALERMOS FINISHED","employee":"Collin p","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":17,"lotNum":"wj100607","materialNum":"30898","licensePlate":"mfg0434227","incidentNotes":"received as 84. physically 17.","investigationNotes":"","adjDate":"2026-04-03","adjBy":"Collin R. Perales","adjNotes":"adjusted 67 cases out.","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Raymond Rojas","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"DVR-1320","date":"2026-04-03","orderNum":"na","customer":"PALERMOS RAW","employee":"Collin p","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":0,"lotNum":"34025","materialNum":"1003096","licensePlate":"multi","incidentNotes":"no scan. kept in location AM042A","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""}]
+// ─── Seed data (fallback if SharePoint is unavailable) ────────────────────────────
+const SEED_CAL = [{"id":"DVR-1107","date":"2026-03-08","orderNum":"202340","customer":"PALERMOS FINISHED","employee":"usman","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":60,"lotNum":"wc104255","materialNum":"30358","licensePlate":"mfg0438410","incidentNotes":"extra pallet","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1165","date":"2026-03-12","orderNum":"","customer":"PALERMOS FINISHED","employee":"Collin p","responsibleParty":"Customer / Carrier","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":84,"lotNum":"WC103297","materialNum":"30898","licensePlate":"MFG0406086","incidentNotes":"no scan. located middle x-over BE.","investigationNotes":"INVESTIGATE","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1219","date":"2026-03-20","orderNum":"511058","customer":"PALERMOS FINISHED","employee":"jorge","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":0,"lotNum":"wc103999","materialNum":"38815","licensePlate":"multi","incidentNotes":"missing","investigationNotes":"Not sure what load this came in on since it was not scanned in upon receiving.","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"No","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1246","date":"2026-03-25","orderNum":"0","customer":"PALERMOS FINISHED","employee":"juan","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":48,"lotNum":"wj100571","materialNum":"15101","licensePlate":"mfg0410307","incidentNotes":"missing","investigationNotes":"Received by csw-rguzman","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"No","employeeResponsible":"No Longer Employed","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1314","date":"2026-04-02","orderNum":"na","customer":"PALERMOS FINISHED","employee":"collin p","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Shipping Error","damageType":"No Damage","cases":2,"lotNum":"WC103811","materialNum":"30901","licensePlate":"mfg0445303","incidentNotes":"no scan. placed in BH001A","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"VIDEO REQ","coachingOpen":false,"loadproofUrl":""},{"id":"DVR-1320","date":"2026-04-03","orderNum":"na","customer":"PALERMOS RAW","employee":"Collin p","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":0,"lotNum":"34025","materialNum":"1003096","licensePlate":"multi","incidentNotes":"no scan. kept in location AM042A","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""}]
 
-const SEED_KEN = [{"id":"KEN-1975","date":"2026-03-09","orderNum":"sh 03092026","customer":"Shanty","employee":"JG","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":2,"lotNum":"082725","materialNum":"5512","licensePlate":"na","incidentNotes":"missing","investigationNotes":"Pallet still needs to be located.","adjDate":"","adjBy":"","adjNotes":"Investigating","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"KEN-1979","date":"2026-03-10","orderNum":"pedone","customer":"Pedone","employee":"GF","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Tip","cases":4,"lotNum":"02562260309","materialNum":"wbf-0816-c","licensePlate":"pal2601839","incidentNotes":"too high when putting up","investigationNotes":"Too close to the door to see.","adjDate":"","adjBy":"","adjNotes":"Need to rebox","adjOpen":true,"coachingRequired":"No","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"KEN-1980","date":"2026-03-10","orderNum":"na","customer":"Crown - CSW Kenosha","employee":"NW","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Rubbing","cases":1,"lotNum":"PPW02122026","materialNum":"4250329","licensePlate":"9000565363","incidentNotes":"Case was left on the dock for days","investigationNotes":"Adjustment done - per Nate.","adjDate":"2026-03-09","adjBy":"Nathan T. Williams","adjNotes":"1 case adjusted out","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-1988","date":"2026-03-12","orderNum":"4500409921","customer":"Crown - CSW Kenosha","employee":"joshg","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":1,"lotNum":"PPW02222026","materialNum":"4210314","licensePlate":"9000585385","incidentNotes":"pallet in system as 27 cases but only 26","investigationNotes":"G Franco. He put the case on top and crushed the box.","adjDate":"","adjBy":"","adjNotes":"No inventory to adjust","adjOpen":true,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-1992","date":"2026-03-16","orderNum":"203621200","customer":"Crown - CSW Kenosha","employee":"jc","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Forked While Loading/Unloading","cases":2,"lotNum":"PPW03112026","materialNum":"3050038","licensePlate":"9000625745","incidentNotes":"2 damaged cases","investigationNotes":"Jcabanas had forks too high and stabbed the boxes.","adjDate":"2026-03-19","adjBy":"Nathan T. Williams","adjNotes":"Email sent","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-1997","date":"2026-03-17","orderNum":"Na","customer":"Birchwood","employee":"GF","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":1,"lotNum":"0224121372","materialNum":"015841","licensePlate":"0224121372","incidentNotes":"the case is in AD018a","investigationNotes":"Jsanchez mispicked.","adjDate":"2026-03-20","adjBy":"Nathan T. Williams","adjNotes":"Picking error on order 788459","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-2004","date":"2026-03-19","orderNum":"K530829","customer":"Richelieu - CSW Kenosha","employee":"Alejandro Luna","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Forked While Loading/Unloading","cases":2,"lotNum":"11072026","materialNum":"419207103","licensePlate":"K530829","incidentNotes":"","investigationNotes":"Alejandro Luna backed up too far and crushed the boxes.","adjDate":"2026-03-24","adjBy":"Nathan T. Williams","adjNotes":"2 cases adjusted out","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-2018","date":"2026-03-26","orderNum":"778868","customer":"Birchwood Finished Goods","employee":"kb","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":4,"lotNum":"0309132892","materialNum":"016573","licensePlate":"0100044375165735","incidentNotes":"short 4 cs","investigationNotes":"Juan received as 84 cases but physically 80.","adjDate":"2026-03-27","adjBy":"Nathan T. Williams","adjNotes":"Adjusted to correct qty","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Juan R. Ramirez","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-2020","date":"2026-03-27","orderNum":"791561","customer":"Birchwood Finished Goods","employee":"GF","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":0,"lotNum":"0128097919","materialNum":"015639","licensePlate":"0100044375156399","incidentNotes":"short a layer","investigationNotes":"jjohnson received as 208 but pallet is missing a layer","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-2022","date":"2026-03-27","orderNum":"791006","customer":"Birchwood Finished Goods","employee":"GF","responsibleParty":"CSW","incidentType":"Outbound","reason":"Shipping Error","damageType":"No Damage","cases":1,"lotNum":"0313137797","materialNum":"Bk Woopers","licensePlate":"0313137797","incidentNotes":"one case in ad028a","investigationNotes":"Ramiro picked 33 cases instead of 34.","adjDate":"2026-03-27","adjBy":"Nathan T. Williams","adjNotes":"1 case adjusted in","adjOpen":false,"coachingRequired":"Yes","employeeResponsible":"Ramiro Leon","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-2037","date":"2026-04-03","orderNum":"0","customer":"Crown - CSW Kenosha","employee":"Manny","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Damaged","damageType":"Rubbing","cases":1,"lotNum":"PPW04022026","materialNum":"3050011","licensePlate":"9000678793","incidentNotes":"was sitting in aisle already damaged","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""}]
+const SEED_KEN = [{"id":"KEN-1975","date":"2026-03-09","orderNum":"sh 03092026","customer":"Shanty","employee":"JG","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":2,"lotNum":"082725","materialNum":"5512","licensePlate":"na","incidentNotes":"missing","investigationNotes":"Pallet still needs to be located.","adjDate":"","adjBy":"","adjNotes":"Investigating","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"loadproofUrl":""},{"id":"KEN-1988","date":"2026-03-12","orderNum":"4500409921","customer":"Crown - CSW Kenosha","employee":"joshg","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":1,"lotNum":"PPW02222026","materialNum":"4210314","licensePlate":"9000585385","incidentNotes":"pallet in system as 27 cases but only 26","investigationNotes":"G Franco crushed the box.","adjDate":"","adjBy":"","adjNotes":"No inventory to adjust","adjOpen":true,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""},{"id":"KEN-2020","date":"2026-03-27","orderNum":"791561","customer":"Birchwood Finished Goods","employee":"GF","responsibleParty":"CSW","incidentType":"Outbound","reason":"Receiving Error","damageType":"No Damage","cases":0,"lotNum":"0128097919","materialNum":"015639","licensePlate":"0100044375156399","incidentNotes":"short a layer","investigationNotes":"jjohnson received as 208 but pallet is missing a layer","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"loadproofUrl":""}]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 const PAGE_SIZE = 25
@@ -13,7 +12,6 @@ function ageInDays(d) { return !d?0:Math.floor((Date.now()-new Date(d+'T12:00:00
 function ageColor(d) { const a=ageInDays(d); return a>21?'var(--red)':a>14?'#e09a2a':'var(--text-primary)' }
 function preview(s,n=55) { return !s?'':s.length>n?s.slice(0,n)+'…':s }
 function topN(arr,key,n=6) { const c={}; arr.forEach(i=>{const v=(i[key]||'Unknown').trim()||'Unknown';c[v]=(c[v]||0)+1}); return Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,n) }
-
 function sortItems(items,field,dir) {
   if(!field)return items
   return [...items].sort((a,b)=>{
@@ -22,13 +20,10 @@ function sortItems(items,field,dir) {
     else if(field==='cases'){va=Number(va);vb=Number(vb)}
     else if(field==='age'){va=ageInDays(a.date);vb=ageInDays(b.date)}
     else{va=String(va).toLowerCase();vb=String(vb).toLowerCase()}
-    if(va<vb)return dir==='asc'?-1:1
-    if(va>vb)return dir==='asc'?1:-1
-    return 0
+    if(va<vb)return dir==='asc'?-1:1; if(va>vb)return dir==='asc'?1:-1; return 0
   })
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────
 function TypePill({type}) {
   const t=(type||'').toLowerCase().trim()
   let bg='var(--bg3)',color='var(--text-secondary)'
@@ -37,54 +32,27 @@ function TypePill({type}) {
   if(t.includes('warehouse')){bg='rgba(217,119,6,0.12)';color='#d97706'}
   return <span style={{display:'inline-block',fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{type||'—'}</span>
 }
-
 function Badge({label,variant}) {
   const s={adj:{bg:'rgba(217,119,6,0.12)',color:'#d97706'},coach:{bg:'rgba(220,38,38,0.12)',color:'var(--red)'},done:{bg:'rgba(22,163,74,0.12)',color:'#16a34a'},na:{bg:'var(--bg3)',color:'var(--text-secondary)'}}[variant]||{bg:'var(--bg3)',color:'var(--text-secondary)'}
   return <span style={{display:'inline-block',fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,background:s.bg,color:s.color,fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{label}</span>
 }
-
-function FacBadge({ fac }) {
-  const map = { cal:['rgba(29,78,216,0.1)','#1d4ed8','CAL'], ken:['rgba(21,128,61,0.1)','#15803d','KEN'], mad:['rgba(124,58,237,0.1)','#7c3aed','MAD'] }
-  const [bg,color,label] = map[fac] || map.cal
-  return <span style={{ fontSize:10, padding:'2px 7px', borderRadius:10, fontWeight:600, background:bg, color, fontFamily:'var(--font-mono)' }}>{label}</span>
+function FacBadge({fac}) {
+  const map={cal:['rgba(29,78,216,0.1)','#1d4ed8','CAL'],ken:['rgba(21,128,61,0.1)','#15803d','KEN'],mad:['rgba(124,58,237,0.1)','#7c3aed','MAD']}
+  const [bg,color,label]=map[fac]||map.cal
+  return <span style={{fontSize:10,padding:'2px 7px',borderRadius:10,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)'}}>{label}</span>
 }
-
 function SortTh({label,field,sortField,sortDir,onSort,style={}}) {
-  const active=sortField===field
-  const arrow=active?(sortDir==='asc'?' ↑':' ↓'):''
-  return(
-    <th onClick={()=>onSort(field)} style={{padding:'9px 12px',textAlign:'left',fontSize:10,fontWeight:600,color:active?'var(--text-primary)':'var(--text-secondary)',borderBottom:'1px solid var(--border)',background:'var(--bg1)',textTransform:'uppercase',letterSpacing:'.3px',whiteSpace:'nowrap',cursor:'pointer',userSelect:'none',...style}}>
-      {label}{arrow}
-    </th>
-  )
+  const active=sortField===field; const arrow=active?(sortDir==='asc'?' ↑':' ↓'):''
+  return <th onClick={()=>onSort(field)} style={{padding:'9px 12px',textAlign:'left',fontSize:10,fontWeight:600,color:active?'var(--text-primary)':'var(--text-secondary)',borderBottom:'1px solid var(--border)',background:'var(--bg1)',textTransform:'uppercase',letterSpacing:'.3px',whiteSpace:'nowrap',cursor:'pointer',userSelect:'none',...style}}>{label}{arrow}</th>
 }
-
 function BarChart({entries,color='#3b82f6'}) {
   const max=entries[0]?.[1]||1
-  return(
-    <div>
-      {entries.map(([label,count])=>(
-        <div key={label} style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
-          <div style={{fontSize:12,color:'var(--text-secondary)',width:130,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={label}>{label}</div>
-          <div style={{flex:1,height:7,background:'var(--bg3)',borderRadius:4,overflow:'hidden'}}>
-            <div style={{height:'100%',borderRadius:4,background:color,width:`${Math.round(count/max*100)}%`,transition:'width 0.3s'}}/>
-          </div>
-          <div style={{fontSize:12,color:'var(--text-secondary)',minWidth:28,textAlign:'right'}}>{count}</div>
-        </div>
-      ))}
-    </div>
-  )
+  return <div>{entries.map(([l,n])=>(<div key={l} style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}><div style={{fontSize:12,color:'var(--text-secondary)',width:130,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={l}>{l}</div><div style={{flex:1,height:7,background:'var(--bg3)',borderRadius:4,overflow:'hidden'}}><div style={{height:'100%',borderRadius:4,background:color,width:`${Math.round(n/max*100)}%`,transition:'width 0.3s'}}/></div><div style={{fontSize:12,color:'var(--text-secondary)',minWidth:28,textAlign:'right'}}>{n}</div></div>))}</div>
 }
 
-// ─── Detail Modal ───────────────────────────────────────────────────────
 function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
   const [fields,setFields]=useState({...incident})
-  const set=(k,v)=>{
-    const next={...fields,[k]:v}
-    next.adjOpen=!(next.adjDate||next.adjBy)
-    next.coachingOpen=next.coachingRequired==='Yes'&&!next.coachingDate
-    setFields(next)
-  }
+  const set=(k,v)=>{const next={...fields,[k]:v};next.adjOpen=!(next.adjDate||next.adjBy);next.coachingOpen=next.coachingRequired==='Yes'&&!next.coachingDate;setFields(next)}
   const inp=(ov={})=>({width:'100%',padding:'7px 10px',fontSize:13,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg1)',color:'var(--text-primary)',fontFamily:'inherit',boxSizing:'border-box',...ov})
   const lbl={display:'block',fontSize:11,fontWeight:600,color:'var(--text-secondary)',marginBottom:4,textTransform:'uppercase',letterSpacing:'.4px',fontFamily:'var(--font-mono)'}
   const row=(label,el)=><div style={{marginBottom:12}}><label style={lbl}>{label}</label>{el}</div>
@@ -94,11 +62,7 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:'var(--bg0)',border:'1px solid var(--border)',borderRadius:12,width:660,maxWidth:'95vw',maxHeight:'90vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 20px 60px rgba(0,0,0,.3)'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 20px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <span style={{fontSize:15,fontWeight:700}}>{incident.id}</span>
-            <FacBadge fac={fac}/>
-            <span style={{fontSize:13,color:'var(--text-secondary)'}}>{incident.customer}</span>
-          </div>
+          <div style={{display:'flex',alignItems:'center',gap:10}}><span style={{fontSize:15,fontWeight:700}}>{incident.id}</span><FacBadge fac={fac}/><span style={{fontSize:13,color:'var(--text-secondary)'}}>{incident.customer}</span></div>
           <div style={{display:'flex',alignItems:'center',gap:10}}>
             {incident.loadproofUrl&&<a href={incident.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:12,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)'}}>View in LoadProof ↗</a>}
             <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--text-secondary)',fontSize:22,lineHeight:1}}>×</button>
@@ -106,11 +70,8 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
         </div>
         <div style={{padding:20,overflowY:'auto',flex:1}}>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
-            {[['Date',fmtDate(incident.date)],['Age',`${ageInDays(incident.date)} days open`],['Order #',incident.orderNum||'—'],['Type',incident.incidentType],['Reason',incident.reason],['Cases',incident.cases||'—'],['License plate',incident.licensePlate||'—'],['Material # / Lot',`${incident.materialNum||'—'} / ${incident.lotNum||'—'}`],['Responsible party',incident.responsibleParty||'—']].map(([l,v])=>(
-              <div key={l} style={{background:'var(--bg1)',borderRadius:7,padding:'8px 12px',border:'1px solid var(--border-subtle)'}}>
-                <div style={{fontSize:10,color:'var(--text-secondary)',marginBottom:2}}>{l}</div>
-                <div style={{fontSize:13,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={String(v)}>{v}</div>
-              </div>
+            {[['Date',fmtDate(incident.date)],['Age',`${ageInDays(incident.date)} days`],['Order #',incident.orderNum||'—'],['Type',incident.incidentType],['Reason',incident.reason],['Cases',incident.cases||'—'],['License plate',incident.licensePlate||'—'],['Material # / Lot',`${incident.materialNum||'—'} / ${incident.lotNum||'—'}`],['Responsible party',incident.responsibleParty||'—']].map(([l,v])=>(
+              <div key={l} style={{background:'var(--bg1)',borderRadius:7,padding:'8px 12px',border:'1px solid var(--border-subtle)'}}><div style={{fontSize:10,color:'var(--text-secondary)',marginBottom:2}}>{l}</div><div style={{fontSize:13,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={String(v)}>{v}</div></div>
             ))}
           </div>
           {incident.incidentNotes&&<div style={{background:'var(--bg1)',borderRadius:7,padding:12,marginBottom:12,fontSize:13,color:'var(--text-secondary)',lineHeight:1.5,whiteSpace:'pre-wrap',wordBreak:'break-word',border:'1px solid var(--border-subtle)'}}>{incident.incidentNotes}</div>}
@@ -119,18 +80,12 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
           {sdiv('LoadProof link')}
           {row('Record URL',<input type="url" style={inp()} value={fields.loadproofUrl||''} onChange={e=>set('loadproofUrl',e.target.value)} placeholder="Paste LoadProof record URL here"/>)}
           <div style={{border:'1px solid var(--border)',borderRadius:8,padding:14,marginBottom:12}}>
-            <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}>
-              <span style={{width:7,height:7,borderRadius:'50%',background:fields.adjOpen?'#d97706':'#16a34a',display:'inline-block'}}/>
-              Adjustment — {fields.adjOpen?<span style={{color:'#d97706'}}>Needed</span>:<span style={{color:'#16a34a'}}>Complete</span>}
-            </div>
+            <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}><span style={{width:7,height:7,borderRadius:'50%',background:fields.adjOpen?'#d97706':'#16a34a',display:'inline-block'}}/>Adjustment — {fields.adjOpen?<span style={{color:'#d97706'}}>Needed</span>:<span style={{color:'#16a34a'}}>Complete</span>}</div>
             {two(<>{row('Completed date',<input type="date" style={inp()} value={fields.adjDate||''} onChange={e=>set('adjDate',e.target.value)}/>)}{row('Completed by',<input type="text" style={inp()} value={fields.adjBy||''} onChange={e=>set('adjBy',e.target.value)} placeholder="Name"/>)}</>)}
             {row('Adjustment notes',<input type="text" style={inp()} value={fields.adjNotes||''} onChange={e=>set('adjNotes',e.target.value)} placeholder="LP, Datex ref..."/>)}
           </div>
           <div style={{border:'1px solid var(--border)',borderRadius:8,padding:14,marginBottom:12}}>
-            <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}>
-              <span style={{width:7,height:7,borderRadius:'50%',background:fields.coachingOpen?'var(--red)':'#16a34a',display:'inline-block'}}/>
-              Coaching — {fields.coachingRequired==='Yes'?(fields.coachingOpen?<span style={{color:'var(--red)'}}>Pending</span>:<span style={{color:'#16a34a'}}>Complete</span>):<span style={{color:'var(--text-secondary)'}}>N/A</span>}
-            </div>
+            <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}><span style={{width:7,height:7,borderRadius:'50%',background:fields.coachingOpen?'var(--red)':'#16a34a',display:'inline-block'}}/>Coaching — {fields.coachingRequired==='Yes'?(fields.coachingOpen?<span style={{color:'var(--red)'}}>Pending</span>:<span style={{color:'#16a34a'}}>Complete</span>):<span style={{color:'var(--text-secondary)'}}>N/A</span>}</div>
             {two(<>{row('Required?',<select style={inp()} value={fields.coachingRequired||'No'} onChange={e=>set('coachingRequired',e.target.value)}><option value="No">No</option><option value="Yes">Yes</option></select>)}{row('Employee responsible',<input type="text" style={inp()} value={fields.employeeResponsible||''} onChange={e=>set('employeeResponsible',e.target.value)} placeholder="Name"/>)}</>)}
             {two(<>{row('Coaching completed date',<input type="date" style={inp()} value={fields.coachingDate||''} onChange={e=>set('coachingDate',e.target.value)}/>)}{row('Completed by',<input type="text" style={inp()} value={fields.coachingBy||''} onChange={e=>set('coachingBy',e.target.value)} placeholder="Supervisor"/>)}</>)}
             {row('Coaching notes',<textarea style={{...inp(),minHeight:56,resize:'vertical'}} value={fields.coachingNotes||''} onChange={e=>set('coachingNotes',e.target.value)} placeholder="What was covered, follow-up actions..."/>)}
@@ -148,7 +103,6 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
   )
 }
 
-// ─── Add Modal ──────────────────────────────────────────────────────────
 function AddModal({defaultFac,onClose,onAdd}) {
   const today=new Date().toISOString().split('T')[0]
   const [f,setF]=useState({fac:defaultFac==='ken'?'ken':defaultFac==='mad'?'mad':'cal',date:today,orderNum:'',customer:'',employee:'',responsibleParty:'',incidentType:'Outbound',reason:'Damaged',damageType:'No Damage',cases:'',lotNum:'',materialNum:'',licensePlate:'',incidentNotes:'',investigationNotes:'',loadproofUrl:'',adjDate:'',adjBy:'',adjNotes:'',coachingRequired:'No',employeeResponsible:'',coachingDate:'',coachingBy:'',coachingNotes:''})
@@ -161,10 +115,7 @@ function AddModal({defaultFac,onClose,onAdd}) {
   return(
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}} onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div style={{background:'var(--bg0)',border:'1px solid var(--border)',borderRadius:12,width:660,maxWidth:'95vw',maxHeight:'90vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 20px 60px rgba(0,0,0,.3)'}}>
-        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 20px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
-          <span style={{fontSize:15,fontWeight:700}}>Add new incident</span>
-          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--text-secondary)',fontSize:22,lineHeight:1}}>×</button>
-        </div>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 20px',borderBottom:'1px solid var(--border)',flexShrink:0}}><span style={{fontSize:15,fontWeight:700}}>Add new incident</span><button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--text-secondary)',fontSize:22,lineHeight:1}}>×</button></div>
         <div style={{padding:20,overflowY:'auto',flex:1}}>
           {sdiv('Incident details')}
           {two(<>{row('Facility',<select style={inp} value={f.fac} onChange={e=>set('fac',e.target.value)}><option value="cal">Caledonia</option><option value="ken">Kenosha</option><option value="mad">Madison</option></select>)}{row('Date',<input type="date" style={inp} value={f.date} onChange={e=>set('date',e.target.value)}/>)}</>)}
@@ -193,13 +144,14 @@ function AddModal({defaultFac,onClose,onAdd}) {
   )
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────
 export default function DvrTracker() {
+  // Seed data used as fallback if SharePoint fetch fails
   const [cal,setCal]=useState(SEED_CAL)
   const [ken,setKen]=useState(SEED_KEN)
   const [mad,setMad]=useState([])
-  const [madLoading,setMadLoading]=useState(false)
-  const [madError,setMadError]=useState(null)
+  const [loading,setLoading]=useState(true)
+  const [loadErrors,setLoadErrors]=useState({})
+
   const [facility,setFacility]=useState('all')
   const [tab,setTab]=useState('tracker')
   const [search,setSearch]=useState('')
@@ -212,26 +164,34 @@ export default function DvrTracker() {
   const [detail,setDetail]=useState(null)
   const [showAdd,setShowAdd]=useState(false)
 
+  // Fetch all facilities from SharePoint on mount
+  // Falls back to seed data for CAL/KEN if fetch fails
+  useEffect(()=>{
+    setLoading(true)
+    const load = async (fac) => {
+      try {
+        const r = await fetch(`/.netlify/functions/sharepoint-dvr?facility=${fac}`)
+        const d = await r.json()
+        if (d.error) throw new Error(d.error)
+        return d.incidents?.map(i=>({...i,_fac:fac})) ?? []
+      } catch(e) {
+        console.warn(`[DVR] ${fac} fetch failed:`, e.message)
+        setLoadErrors(prev=>({...prev,[fac]:e.message}))
+        return null // null = keep fallback seed data
+      }
+    }
+    Promise.all([load('cal'),load('ken'),load('mad')]).then(([calData,kenData,madData])=>{
+      if(calData!==null)setCal(calData)
+      if(kenData!==null)setKen(kenData)
+      if(madData!==null)setMad(madData)
+    }).finally(()=>setLoading(false))
+  },[])
+
   const handleSort=(field)=>{
     if(sortField===field){setSortDir(d=>d==='asc'?'desc':'asc')}
     else{setSortField(field);setSortDir('asc')}
     setPage(1)
   }
-
-  // Fetch Madison live from SharePoint
-  useEffect(()=>{
-    if(facility!=='mad'&&facility!=='all')return
-    setMadLoading(true)
-    setMadError(null)
-    fetch('/.netlify/functions/sharepoint-dvr')
-      .then(r=>r.json())
-      .then(d=>{
-        if(d.incidents)setMad(d.incidents.map(i=>({...i,_fac:'mad'})))
-        else setMadError(d.error||'Failed to load Madison data')
-      })
-      .catch(e=>setMadError(e.message))
-      .finally(()=>setMadLoading(false))
-  },[facility])
 
   const activeData=useMemo(()=>{
     if(facility==='cal')return cal.map(i=>({...i,_fac:'cal'}))
@@ -246,22 +206,7 @@ export default function DvrTracker() {
 
   const filtered=useMemo(()=>{
     let items=activeData.slice()
-    if(search){
-      const s=search.toLowerCase()
-      items=items.filter(i=>
-        (i.customer||'').toLowerCase().includes(s)||
-        (i.id||'').toLowerCase().includes(s)||
-        (i.orderNum||'').toLowerCase().includes(s)||
-        (i.reason||'').toLowerCase().includes(s)||
-        (i.licensePlate||'').toLowerCase().includes(s)||
-        (i.lotNum||'').toLowerCase().includes(s)||
-        (i.materialNum||'').toLowerCase().includes(s)||
-        (i.employeeResponsible||'').toLowerCase().includes(s)||
-        (i.employee||'').toLowerCase().includes(s)||
-        (i.incidentNotes||'').toLowerCase().includes(s)||
-        (i.investigationNotes||'').toLowerCase().includes(s)
-      )
-    }
+    if(search){const s=search.toLowerCase();items=items.filter(i=>(i.customer||'').toLowerCase().includes(s)||(i.id||'').toLowerCase().includes(s)||(i.orderNum||'').toLowerCase().includes(s)||(i.reason||'').toLowerCase().includes(s)||(i.licensePlate||'').toLowerCase().includes(s)||(i.lotNum||'').toLowerCase().includes(s)||(i.materialNum||'').toLowerCase().includes(s)||(i.employeeResponsible||'').toLowerCase().includes(s)||(i.employee||'').toLowerCase().includes(s)||(i.incidentNotes||'').toLowerCase().includes(s)||(i.investigationNotes||'').toLowerCase().includes(s))}
     if(typeFilter!=='all')items=items.filter(i=>(i.incidentType||'').toLowerCase().includes(typeFilter.toLowerCase()))
     if(reasonFilter!=='all')items=items.filter(i=>(i.reason||'').toLowerCase()===reasonFilter.toLowerCase())
     if(statusFilter==='adj')items=items.filter(i=>i.adjOpen)
@@ -275,45 +220,38 @@ export default function DvrTracker() {
   const paged=filtered.slice((safePg-1)*PAGE_SIZE,safePg*PAGE_SIZE)
   const reasons=useMemo(()=>[...new Set(activeData.map(i=>i.reason).filter(Boolean))].sort(),[activeData])
 
+  const writeBack = useCallback((id,fac,next)=>{
+    const arr=fac==='cal'?cal:fac==='ken'?ken:mad
+    const incident=arr.find(i=>i.id===id)
+    if(!incident?.rowIndex||!incident?._colMap)return
+    const updates={}
+    const fields=['adjDate','adjBy','adjNotes','coachingRequired','employeeResponsible','coachingDate','coachingBy','coachingNotes']
+    fields.forEach(f=>{if(next[f]!==undefined&&next[f]!==incident[f])updates[f]=next[f]})
+    if(Object.keys(updates).length===0)return
+    fetch(`/.netlify/functions/sharepoint-dvr?facility=${fac}`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rowIndex:incident.rowIndex,updates,colMap:incident._colMap}),
+    }).catch(e=>console.error(`[DVR] ${fac} write-back failed:`,e))
+  },[cal,ken,mad])
+
   const handleUpdate=useCallback((id,fac,next,remove=false)=>{
-    if(fac==='mad'){
-      // Write coaching/adj changes back to SharePoint
-      const incident=mad.find(i=>i.id===id)
-      if(incident?.rowIndex&&incident?._colMap){
-        const updates={}
-        const fields=['adjDate','adjBy','adjNotes','coachingRequired','employeeResponsible','coachingDate','coachingBy','coachingNotes']
-        fields.forEach(f=>{if(next[f]!==undefined&&next[f]!==incident[f])updates[f]=next[f]})
-        if(Object.keys(updates).length>0){
-          fetch('/.netlify/functions/sharepoint-dvr',{
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({rowIndex:incident.rowIndex,updates,colMap:incident._colMap}),
-          }).catch(e=>console.error('[DVR] SharePoint write-back failed:',e))
-        }
-      }
-      if(remove)setMad(prev=>prev.filter(i=>i.id!==id))
-      else setMad(prev=>prev.map(i=>i.id===id?{...i,...next}:i))
-    } else {
-      const setter=fac==='cal'?setCal:setKen
-      setter(prev=>remove?prev.filter(i=>i.id!==id):prev.map(i=>i.id===id?{...i,...next}:i))
-    }
-  },[mad])
+    writeBack(id,fac,next)
+    const setter=fac==='cal'?setCal:fac==='ken'?setKen:setMad
+    setter(prev=>remove?prev.filter(i=>i.id!==id):prev.map(i=>i.id===id?{...i,...next}:i))
+  },[writeBack])
 
   const handleDelete=useCallback((id,fac)=>{
-    if(fac==='mad')setMad(prev=>prev.filter(i=>i.id!==id))
-    else{const setter=fac==='cal'?setCal:setKen;setter(prev=>prev.filter(i=>i.id!==id))}
+    const setter=fac==='cal'?setCal:fac==='ken'?setKen:setMad
+    setter(prev=>prev.filter(i=>i.id!==id))
   },[])
 
   const handleAdd=useCallback((fac,fields)=>{
-    if(fac==='mad'){
-      const maxId=Math.max(1000,...mad.map(i=>parseInt(i.id.replace('MAD-',''))||0))
-      setMad(prev=>[{...fields,id:`MAD-${String(maxId+1).padStart(4,'0')}`,_fac:'mad'},...prev])
-      return
-    }
-    const setter=fac==='cal'?setCal:setKen
-    const arr=fac==='cal'?cal:ken
-    const prefix=fac==='cal'?'DVR':'KEN'
-    const base=fac==='cal'?1321:2037
+    const setter=fac==='cal'?setCal:fac==='ken'?setKen:setMad
+    const arr=fac==='cal'?cal:fac==='ken'?ken:mad
+    const prefixes={cal:'DVR',ken:'KEN',mad:'MAD'}
+    const bases={cal:1321,ken:2037,mad:1000}
+    const prefix=prefixes[fac]||'DVR'
+    const base=bases[fac]||1000
     const maxId=Math.max(base,...arr.map(i=>parseInt(i.id.replace(`${prefix}-`,''))||0))
     setter(prev=>[{...fields,id:`${prefix}-${String(maxId+1).padStart(4,'0')}`,_fac:fac},...prev])
   },[cal,ken,mad])
@@ -325,7 +263,6 @@ export default function DvrTracker() {
 
   return(
     <div style={{padding:0,background:'var(--bg0)'}}>
-
       {/* Topbar */}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
@@ -334,16 +271,17 @@ export default function DvrTracker() {
             {[['all','All','#374151'],['cal','Caledonia','#1d4ed8'],['ken','Kenosha','#15803d'],['mad','Madison','#7c3aed']].map(([id,label,color])=>(
               <button key={id} onClick={()=>{setFacility(id);setPage(1)}} style={{padding:'5px 14px',fontSize:12,fontWeight:600,cursor:'pointer',border:'none',background:facility===id?color:'transparent',color:facility===id?'var(--bg0)':'var(--text-secondary)',fontFamily:'var(--font-mono)',transition:'all .15s',borderRight:id!=='mad'?'1px solid var(--border)':'none',display:'flex',alignItems:'center',gap:5}}>
                 {id!=='all'&&<span style={{width:6,height:6,borderRadius:'50%',background:facility===id?'var(--bg0)':color,display:'inline-block'}}/>}
-                {label}{id==='mad'&&<span style={{fontSize:9,opacity:.8}}> • LIVE</span>}
+                {label}
               </button>
             ))}
           </div>
-          <span style={{fontSize:11,padding:'2px 9px',borderRadius:20,fontWeight:600,background:'rgba(220,38,38,0.12)',color:'var(--red)',fontFamily:'var(--font-mono)'}}>{activeData.length} open</span>
-          <span style={{fontSize:10,color:'var(--text-secondary)'}}>last 30 days</span>
+          {loading
+            ?<span style={{fontSize:11,padding:'2px 9px',borderRadius:20,fontWeight:600,background:'var(--bg3)',color:'var(--text-secondary)',fontFamily:'var(--font-mono)'}}>Loading…</span>
+            :<span style={{fontSize:11,padding:'2px 9px',borderRadius:20,fontWeight:600,background:'rgba(220,38,38,0.12)',color:'var(--red)',fontFamily:'var(--font-mono)'}}>{activeData.length} open</span>
+          }
+          <span style={{fontSize:10,color:'var(--text-secondary)'}}>live from SharePoint</span>
         </div>
-        <button onClick={()=>setShowAdd(true)} style={{background:'var(--text-primary)',border:'none',borderRadius:6,padding:'6px 14px',cursor:'pointer',color:'var(--bg0)',fontSize:12,fontWeight:600,fontFamily:'var(--font-mono)'}}>
-          + Add incident
-        </button>
+        <button onClick={()=>setShowAdd(true)} style={{background:'var(--text-primary)',border:'none',borderRadius:6,padding:'6px 14px',cursor:'pointer',color:'var(--bg0)',fontSize:12,fontWeight:600,fontFamily:'var(--font-mono)'}}>+ Add incident</button>
       </div>
 
       {/* Tab nav */}
@@ -355,14 +293,16 @@ export default function DvrTracker() {
 
       <div style={{padding:20}}>
 
-        {/* ══ TRACKER ══ */}
-        {tab === 'tracker' && (
-          <>
-            {/* Madison live data status */}
-            {(facility==='mad'||facility==='all')&&madLoading&&<div style={{background:'var(--bg1)',border:'1px solid var(--border)',borderRadius:8,padding:'10px 14px',marginBottom:12,fontSize:12,color:'var(--text-secondary)',fontFamily:'var(--font-mono)'}}>Loading Madison data from SharePoint...</div>}
-            {(facility==='mad'||facility==='all')&&madError&&<div style={{background:'rgba(220,38,38,0.08)',border:'1px solid rgba(220,38,38,0.2)',borderRadius:8,padding:'10px 14px',marginBottom:12,fontSize:12,color:'var(--red)',fontFamily:'var(--font-mono)'}}>Madison SharePoint: {madError}</div>}
+        {/* Error banners */}
+        {Object.entries(loadErrors).map(([fac,err])=>(
+          <div key={fac} style={{background:'rgba(220,38,38,0.08)',border:'1px solid rgba(220,38,38,0.2)',borderRadius:8,padding:'10px 14px',marginBottom:10,fontSize:12,color:'var(--red)',fontFamily:'var(--font-mono)'}}>
+            {fac.toUpperCase()} SharePoint: {err} — showing cached data
+          </div>
+        ))}
 
-            {/* Search + filters */}
+        {/* ══ TRACKER ══ */}
+        {tab==='tracker'&&(
+          <>
             <div style={{background:'var(--bg1)',border:'1px solid var(--border)',borderRadius:10,padding:'14px 16px',marginBottom:16}}>
               <div style={{display:'flex',gap:8,marginBottom:10,flexWrap:'wrap'}}>
                 <input type="text" placeholder="🔍  Search by customer, order #, LP, lot, material #, employee, notes..." value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} style={{flex:1,minWidth:240,padding:'8px 12px',fontSize:13,border:'1px solid var(--border)',borderRadius:8,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit',boxSizing:'border-box'}}/>
@@ -370,52 +310,36 @@ export default function DvrTracker() {
               </div>
               <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
                 <span style={{fontSize:11,color:'var(--text-secondary)',fontFamily:'var(--font-mono)',marginRight:4}}>FILTER:</span>
-                <select value={typeFilter} onChange={e=>{setTypeFilter(e.target.value);setPage(1)}} style={{padding:'5px 10px',fontSize:12,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit'}}>
-                  <option value="all">All types</option>
-                  <option value="Outbound">Outbound</option>
-                  <option value="Warehouse">WH Ops Damage</option>
-                  <option value="Inbound">Inbound</option>
-                  <option value="Disposal">Disposal</option>
-                </select>
-                <select value={reasonFilter} onChange={e=>{setReasonFilter(e.target.value);setPage(1)}} style={{padding:'5px 10px',fontSize:12,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit'}}>
-                  <option value="all">All reasons</option>
-                  {reasons.map(r=><option key={r} value={r}>{r}</option>)}
-                </select>
-                <select value={statusFilter} onChange={e=>{setStatusFilter(e.target.value);setPage(1)}} style={{padding:'5px 10px',fontSize:12,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit'}}>
-                  <option value="all">All statuses</option>
-                  <option value="adj">Adj. needed</option>
-                  <option value="coaching">Coaching pending</option>
-                  <option value="both">Both open</option>
-                </select>
+                <select value={typeFilter} onChange={e=>{setTypeFilter(e.target.value);setPage(1)}} style={{padding:'5px 10px',fontSize:12,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit'}}><option value="all">All types</option><option value="Outbound">Outbound</option><option value="Warehouse">WH Ops Damage</option><option value="Inbound">Inbound</option><option value="Disposal">Disposal</option></select>
+                <select value={reasonFilter} onChange={e=>{setReasonFilter(e.target.value);setPage(1)}} style={{padding:'5px 10px',fontSize:12,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit'}}><option value="all">All reasons</option>{reasons.map(r=><option key={r} value={r}>{r}</option>)}</select>
+                <select value={statusFilter} onChange={e=>{setStatusFilter(e.target.value);setPage(1)}} style={{padding:'5px 10px',fontSize:12,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg0)',color:'var(--text-primary)',fontFamily:'inherit'}}><option value="all">All statuses</option><option value="adj">Adj. needed</option><option value="coaching">Coaching pending</option><option value="both">Both open</option></select>
                 <span style={{fontSize:11,color:'var(--text-secondary)',fontFamily:'var(--font-mono)',marginLeft:'auto'}}>{filtered.length} of {activeData.length} records{hasFilters?' (filtered)':''}</span>
               </div>
             </div>
-
-            {/* Table */}
             <div style={{border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
               <div style={{overflowX:'auto'}}>
                 <table style={{width:'100%',borderCollapse:'collapse',fontSize:13,minWidth:1100}}>
-                  <thead>
-                    <tr>
-                      {facility==='all'&&<th style={thBase}>Fac</th>}
-                      <SortTh label="Date"      field="date"          sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <SortTh label="ID"        field="id"            sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <SortTh label="Customer"  field="customer"      sortField={sortField} sortDir={sortDir} onSort={handleSort} style={{minWidth:130}}/>
-                      <SortTh label="Order #"   field="orderNum"      sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <SortTh label="Type"      field="incidentType"  sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <SortTh label="Reason"    field="reason"        sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <th style={thBase}>LP / Lot / Mat#</th>
-                      <SortTh label="Cases"     field="cases"         sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <th style={{...thBase,minWidth:180}}>Notes</th>
-                      <th style={thBase}>Emp. responsible</th>
-                      <SortTh label="Age"       field="age"           sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
-                      <th style={thBase}>Adj.</th>
-                      <th style={thBase}>Coaching</th>
-                      <th style={thBase}>LP Link</th>
-                    </tr>
-                  </thead>
+                  <thead><tr>
+                    {facility==='all'&&<th style={thBase}>Fac</th>}
+                    <SortTh label="Date" field="date" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <SortTh label="ID" field="id" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <SortTh label="Customer" field="customer" sortField={sortField} sortDir={sortDir} onSort={handleSort} style={{minWidth:130}}/>
+                    <SortTh label="Order #" field="orderNum" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <SortTh label="Type" field="incidentType" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <SortTh label="Reason" field="reason" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <th style={thBase}>LP / Lot / Mat#</th>
+                    <SortTh label="Cases" field="cases" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <th style={{...thBase,minWidth:180}}>Notes</th>
+                    <th style={thBase}>Emp. responsible</th>
+                    <SortTh label="Age" field="age" sortField={sortField} sortDir={sortDir} onSort={handleSort}/>
+                    <th style={thBase}>Adj.</th>
+                    <th style={thBase}>Coaching</th>
+                    <th style={thBase}>LP Link</th>
+                  </tr></thead>
                   <tbody>
-                    {paged.length?paged.map((i,idx)=>(
+                    {loading&&!paged.length?(
+                      <tr><td colSpan={facility==='all'?15:14} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13,fontFamily:'var(--font-mono)'}}>Loading from SharePoint…</td></tr>
+                    ):paged.length?paged.map((i,idx)=>(
                       <tr key={i.id} onClick={()=>setDetail({id:i.id,fac:i._fac})} style={{background:idx%2===0?'var(--bg0)':'var(--bg1)',cursor:'pointer'}}
                         onMouseEnter={e=>e.currentTarget.style.background='var(--bg2)'}
                         onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?'var(--bg0)':'var(--bg1)'}>
@@ -440,15 +364,12 @@ export default function DvrTracker() {
                         <td style={tdBase}>{i.adjOpen?<Badge label="Needed" variant="adj"/>:<Badge label="Done" variant="done"/>}</td>
                         <td style={tdBase}>{i.coachingRequired==='Yes'?(i.coachingOpen?<Badge label="Pending" variant="coach"/>:<Badge label="Done" variant="done"/>):<Badge label="N/A" variant="na"/>}</td>
                         <td style={tdBase} onClick={e=>e.stopPropagation()}>
-                          {i.loadproofUrl
-                            ?<a href={i.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>View ↗</a>
-                            :<span style={{fontSize:11,color:'var(--text-dim,#aaa)',fontFamily:'var(--font-mono)'}}>—</span>
-                          }
+                          {i.loadproofUrl?<a href={i.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>View ↗</a>:<span style={{fontSize:11,color:'var(--text-dim,#aaa)',fontFamily:'var(--font-mono)'}}>—</span>}
                         </td>
                       </tr>
-                    )):
+                    )):(
                       <tr><td colSpan={facility==='all'?15:14} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13}}>No records match — <button onClick={()=>{setSearch('');setTypeFilter('all');setReasonFilter('all');setStatusFilter('all')}} style={{background:'none',border:'none',color:'var(--accent,#3b82f6)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>clear filters</button></td></tr>
-                    }
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -456,9 +377,7 @@ export default function DvrTracker() {
                 <span>Showing {(safePg-1)*PAGE_SIZE+1}–{Math.min(safePg*PAGE_SIZE,filtered.length)} of {filtered.length}</span>
                 <div style={{display:'flex',gap:4}}>
                   <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={safePg===1} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:'var(--bg0)',color:'var(--text-primary)',cursor:'pointer',fontSize:12,fontFamily:'var(--font-mono)',opacity:safePg===1?0.4:1}}>‹</button>
-                  {Array.from({length:Math.min(pages,8)},(_,i)=>i+1).map(p=>(
-                    <button key={p} onClick={()=>setPage(p)} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:p===safePg?'var(--text-primary)':'var(--bg0)',color:p===safePg?'var(--bg0)':'var(--text-primary)',cursor:'pointer',fontSize:12,fontFamily:'var(--font-mono)'}}>{p}</button>
-                  ))}
+                  {Array.from({length:Math.min(pages,8)},(_,i)=>i+1).map(p=>(<button key={p} onClick={()=>setPage(p)} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:p===safePg?'var(--text-primary)':'var(--bg0)',color:p===safePg?'var(--bg0)':'var(--text-primary)',cursor:'pointer',fontSize:12,fontFamily:'var(--font-mono)'}}>{p}</button>))}
                   <button onClick={()=>setPage(p=>Math.min(pages,p+1))} disabled={safePg===pages} style={{padding:'3px 9px',border:'1px solid var(--border)',borderRadius:5,background:'var(--bg0)',color:'var(--text-primary)',cursor:'pointer',fontSize:12,fontFamily:'var(--font-mono)',opacity:safePg===pages?0.4:1}}>›</button>
                 </div>
               </div>
@@ -471,7 +390,7 @@ export default function DvrTracker() {
           <>
             <div style={{background:'rgba(217,119,6,0.1)',border:'1px solid rgba(217,119,6,0.3)',borderRadius:8,padding:'10px 16px',marginBottom:18,fontSize:13,color:'#d97706',display:'flex',alignItems:'center',gap:8}}>
               <span style={{width:7,height:7,borderRadius:'50%',background:'#d97706',display:'inline-block',flexShrink:0}}/>
-              <strong>{activeData.length} open incidents</strong> — {facility==='all'?'All facilities (CAL + KEN seed · MAD live)':facility==='cal'?'Caledonia':facility==='ken'?'Kenosha':'Madison — live from SharePoint'}
+              <strong>{loading?'Loading…':activeData.length+' open incidents'}</strong> — {facility==='all'?'Caledonia + Kenosha + Madison • all live from SharePoint':facility==='cal'?'Caledonia':facility==='ken'?'Kenosha':'Madison'}
             </div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:12,marginBottom:20}}>
               {[['Total open',activeData.length,'var(--red)'],['Adj. needed',adjOpen,'#d97706'],['Coaching pending',coachOpen,'var(--red)'],['Oldest open',oldest?`${ageInDays(oldest.date)}d`:'—','#3b82f6']].map(([l,v,c])=>(
@@ -483,7 +402,7 @@ export default function DvrTracker() {
             </div>
             {facility==='all'&&(
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:16,marginBottom:20}}>
-                {[['cal','Caledonia','#1d4ed8',cal],['ken','Kenosha','#15803d',ken],['mad','Madison • LIVE','#7c3aed',mad]].map(([id,name,color,data])=>(
+                {[['cal','Caledonia','#1d4ed8',cal],['ken','Kenosha','#15803d',ken],['mad','Madison','#7c3aed',mad]].map(([id,name,color,data])=>(
                   <div key={id} style={{border:`1px solid var(--border)`,borderTop:`3px solid ${color}`,borderRadius:8,padding:16,background:'var(--bg0)'}}>
                     <div style={{fontSize:13,fontWeight:700,color,marginBottom:12}}>{name}</div>
                     {[['Total open',data.length,'var(--red)'],['Adj. needed',data.filter(i=>i.adjOpen).length,'#d97706'],['Coaching pending',data.filter(i=>i.coachingOpen).length,'var(--red)'],['Top reason',topN(data,'reason',1)[0]?.[0]||'—','var(--text-primary)']].map(([lbl,val,c])=>(
@@ -496,7 +415,7 @@ export default function DvrTracker() {
                 ))}
               </div>
             )}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
               {[['By incident type','incidentType','#3b82f6'],['By reason','reason','#8b5cf6'],['By customer','customer','#7c3aed'],['By responsible party','responsibleParty','#0891b2']].map(([title,key,color])=>(
                 <div key={key} style={{border:'1px solid var(--border)',borderRadius:8,padding:16,background:'var(--bg0)'}}>
                   <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:12,fontFamily:'var(--font-mono)'}}>{title}</div>
