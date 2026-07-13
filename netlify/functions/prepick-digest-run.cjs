@@ -1,7 +1,9 @@
 'use strict'
 
 // Nightly Pre-Pick Status digest — posts a summary comment to a Front
-// conversation, added 2026-07-13 per Dan.
+// conversation, added 2026-07-13 per Dan. Message formatting tightened
+// 2026-07-13 (later same day) after the first real digest ran too text-
+// heavy — see notes below.
 //
 // Two invocation paths (same convention as front-daily-discussion-run.cjs):
 //
@@ -30,6 +32,25 @@
 // call rather than duplicating its ~400 lines of matching/task/complexity
 // logic here. Facility hardcoded to 'mad' for now — this whole feature is
 // Madison-only (see 2026-07-12 conversation on why CAL/KEN aren't ready).
+//
+// ── Message formatting — tightened 2026-07-13 ────────────────────────────
+// First real digest (Monday night, for Tuesday 7/14) came back essentially
+// listing all 17 appointments, since at 10:15pm the night before almost
+// nothing has started picking yet — "not started" the night before is
+// normal, not alarming, but the original format treated every not-started
+// order as equally "needs attention" and repeated "not started" + the
+// project's full name (always ending in the same "- CSW-Madison" suffix)
+// on every single line. Dan explicitly said NOT to add a time-of-day
+// urgency cutoff (he wants every order listed, not just early ones) — the
+// fix requested was purely about noise reduction:
+//   - Strip the repetitive "- CSW-Madison" suffix from every project name
+//     (adds zero information — every order in this digest is Madison by
+//     definition).
+//   - Drop the redundant "— not started" phrase per line; it's now implied
+//     by being under the "Not started:" section header instead.
+//   - Split "Unresolved" into its own short section (real data problem,
+//     distinct from ordinary not-yet-picked) instead of interleaving it
+//     line-by-line with not-started orders.
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -93,11 +114,22 @@ const DIFFICULTY_LABEL = (pickLocations, rehandleRisk) => {
   return 'Easy grab'
 }
 
+// Strips the repetitive "- CSW-Madison" style suffix that
+// gold.truck_appointments.project_name always carries (e.g. "Rhodes -
+// CSW-Madison" -> "Rhodes"). See file header for why this was added.
+function cleanProjectName(name) {
+  if (!name) return name
+  return name.replace(/\s*-\s*CSW-Madison\s*$/i, '').trim()
+}
+
 function buildDigestBody(appointments, dateObj) {
   const real = appointments.filter(a => a.status !== 'placeholder')
   const ready = real.filter(a => a.status === 'ready')
-  const needsAttention = real
-    .filter(a => a.status === 'not-started' || a.status === 'unresolved')
+  const notStarted = real
+    .filter(a => a.status === 'not-started')
+    .sort((a, b) => (a.scheduledArrival || '').localeCompare(b.scheduledArrival || ''))
+  const unresolved = real
+    .filter(a => a.status === 'unresolved')
     .sort((a, b) => (a.scheduledArrival || '').localeCompare(b.scheduledArrival || ''))
 
   const lines = []
@@ -105,22 +137,30 @@ function buildDigestBody(appointments, dateObj) {
   lines.push('')
   lines.push(`${ready.length} of ${real.length} outbound orders ready to load.`)
 
-  if (needsAttention.length > 0) {
+  if (notStarted.length > 0) {
     lines.push('')
-    lines.push('Needs attention:')
-    for (const a of needsAttention) {
+    lines.push('Not started:')
+    for (const a of notStarted) {
       const time = formatArrivalTime(a.scheduledArrival)
-      const name = a.projectName || a.carrierName || a.lookupCode || 'Unknown'
-      if (a.status === 'unresolved') {
-        lines.push(`- ${time} ${name} — no order found in Datex`)
-        continue
-      }
+      const name = cleanProjectName(a.projectName) || a.carrierName || a.lookupCode || 'Unknown'
       const difficulty = DIFFICULTY_LABEL(a.pickLocations, a.rehandleRisk)
-      const cases = a.expectedCases != null ? `, ${Math.round(a.expectedCases)} cases expected` : ''
-      const diff = difficulty ? `, ${difficulty}` : ''
-      lines.push(`- ${time} ${name} — not started${cases}${diff}`)
+      const cases = a.expectedCases != null ? `${Math.round(a.expectedCases)} cases` : 'cases unknown'
+      const diff = difficulty ? ` · ${difficulty}` : ''
+      lines.push(`- ${time} ${name} — ${cases}${diff}`)
     }
-  } else {
+  }
+
+  if (unresolved.length > 0) {
+    lines.push('')
+    lines.push('No order found in Datex:')
+    for (const a of unresolved) {
+      const time = formatArrivalTime(a.scheduledArrival)
+      const name = cleanProjectName(a.projectName) || a.carrierName || a.lookupCode || 'Unknown'
+      lines.push(`- ${time} ${name}`)
+    }
+  }
+
+  if (notStarted.length === 0 && unresolved.length === 0) {
     lines.push('')
     lines.push('Nothing needs attention — everything is ready or already picked.')
   }
