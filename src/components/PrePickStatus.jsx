@@ -23,6 +23,12 @@ import '../styles/prepick-status.css'
  * per Dan, 2026-07-13: carrier names like "FORT"/"LESLIE TRANS" aren't
  * useful to highlight, the customer/project is what matters.
  *
+ * An appointment can cover MULTIPLE orders (2026-07-13 rewrite — some
+ * appointments are actually load containers holding several shipments,
+ * e.g. Rhodes' "64527" covers 3 separate orders). orderLookupCodes is an
+ * array; case/difficulty numbers are already summed across all of them by
+ * the backend.
+ *
  * Priority-customer highlighting (gold star/border, pinned sort, stat
  * card) was added 2026-07-12 and removed 2026-07-13 per Dan — "not needed
  * for the time being." The underlying isPriorityAppt/PRIORITY_CUSTOMERS
@@ -126,6 +132,10 @@ export default function PrePickStatus({ facilityId, planDate }) {
           (appt.pickLocations != null && appt.status !== 'ready')
         const expanded = expandedRow === idx
         const displayName = appt.projectName || appt.carrierName || appt.lookupCode || 'Unknown'
+        const orderCodes = appt.orderLookupCodes && appt.orderLookupCodes.length > 0
+          ? appt.orderLookupCodes.join(', ')
+          : appt.lookupCode
+        const multiOrder = appt.orderLookupCodes && appt.orderLookupCodes.length > 1
 
         return (
           <div key={`${appt.lookupCode}-${idx}`}>
@@ -140,7 +150,8 @@ export default function PrePickStatus({ facilityId, planDate }) {
               <div className="pps-main">
                 <div className="pps-customer">{displayName}</div>
                 <div className="pps-order">
-                  {appt.orderLookupCode || appt.lookupCode}
+                  {orderCodes}
+                  {multiOrder ? ` (${appt.orderLookupCodes.length} orders)` : ''}
                   {appt.carrierName ? ` · ${appt.carrierName}` : ''}
                   {appt.notes ? ` · ${appt.notes}` : ''}
                 </div>
