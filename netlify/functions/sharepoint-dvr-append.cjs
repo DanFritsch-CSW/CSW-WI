@@ -14,12 +14,18 @@
 //   customer        -> Customers Madison (or Caledonia / Kenosha)
 //   orderNum        -> Order Number
 //   employee        -> Employee Name Submitting
-//   incidentType    -> Category  (writes to Shipment Type column)
+//   incidentType    -> Category
 //   reason          -> Problem
 //   licensePlate    -> License Plate
 //   incidentNotes   -> Notes
-//   photos          -> Num  (photo count)
-//   videos          -> Live 2 (or Videos field)
+//   photos          -> Num
+//   videos          -> Live 2
+//   category        -> Category  (used for DVRS filter check)
+//   cases           -> Carton Count
+//   lotNum          -> Alpha
+//   materialNum     -> AN
+//   damageType      -> (unknown - map to best guess once confirmed)
+//   responsibleParty-> (unknown - map to best guess once confirmed)
 
 const TENANT_ID      = process.env.SHAREPOINT_TENANT_ID
 const CLIENT_ID      = process.env.SHAREPOINT_CLIENT_ID
@@ -100,9 +106,7 @@ function buildColMap (headerRow) {
   return {
     find (...terms) {
       for (const t of terms) {
-        // Exact match first
         if (col[t.toLowerCase()] !== undefined) return col[t.toLowerCase()]
-        // Then partial match
         const k = Object.keys(col).find(k => k.includes(t.toLowerCase()))
         if (k !== undefined) return col[k]
       }
@@ -115,19 +119,14 @@ async function findLastDataRow (sheetBase, token) {
   const r = await graph(`${sheetBase}/range(address='A1:A10000')`, token)
   const vals = r.values || []
   for (let i = vals.length - 1; i >= 0; i--) {
-    if (vals[i][0] !== null && vals[i][0] !== '' && vals[i][0] !== 0) {
-      return i + 1
-    }
+    if (vals[i][0] !== null && vals[i][0] !== '' && vals[i][0] !== 0) return i + 1
   }
   return 1
 }
 
 function toExcelDate (raw) {
   if (!raw) return new Date().toLocaleDateString('en-US')
-  try {
-    const d = new Date(raw)
-    if (!isNaN(d.getTime())) return d.toLocaleDateString('en-US')
-  } catch {}
+  try { const d = new Date(raw); if (!isNaN(d.getTime())) return d.toLocaleDateString('en-US') } catch {}
   return raw
 }
 
@@ -153,6 +152,21 @@ exports.handler = async function (event) {
     return { statusCode: 401, headers: cors, body: JSON.stringify({ error: 'Invalid secret' }) }
   }
 
+  // Safety net: only process DVRS category records
+  // Zapier filter handles this too, but this prevents any Inbound/Outbound
+  // records slipping through if the filter is misconfigured.
+  const categoryRaw = str(payload.category || payload.incidentType || '')
+  const isDvrs = categoryRaw.toLowerCase().includes('dvrs') ||
+                 categoryRaw.toLowerCase().includes('inv ctrl')
+  if (!isDvrs && categoryRaw) {
+    console.log(`[sharepoint-dvr-append] Skipping non-DVRS record: category="${categoryRaw}"`)
+    return {
+      statusCode: 200,
+      headers: cors,
+      body: JSON.stringify({ skipped: true, reason: `Non-DVRS category: ${categoryRaw}` }),
+    }
+  }
+
   const facility = ((event.queryStringParameters || {}).facility || 'mad').toLowerCase()
   const config   = FACILITY_CONFIG[facility]
   if (!config) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: `Unknown facility: ${facility}` }) }
@@ -162,50 +176,38 @@ exports.handler = async function (event) {
     const { driveId, itemId } = await getDriveRef(facility, token)
     const sheetBase = `/drives/${driveId}/items/${itemId}/workbook/worksheets/${encodeURIComponent(config.sheetName)}`
 
-    // Get header row to build column map dynamically
     const headerRange = await graph(`${sheetBase}/range(address='1:1')`, token)
     const headerRow   = headerRange.values?.[0] || []
     const c = buildColMap(headerRow)
     const totalCols = headerRow.length
 
-    // --- Column index resolution ---
-    // All searches use partial matching as fallback, so slight header
-    // variations between facilities are handled automatically.
+    // Column indices
+    const i_date      = c.find('filter by this date')
+    const i_lpDate    = c.find('loadproof date')
+    const i_type      = c.find('csw inv ctrl - shipment type', 'shipment type')
+    const i_respParty = c.find('csw inv ctrl - responsible party', 'responsible party')
+    const i_lot       = c.find('csw inv ctrl - lot #', 'lot #')
+    const i_mat       = c.find('csw inv ctrl - material #', 'material #')
+    const i_reason    = c.find('csw inv ctrl - reason', 'reason')
+    const i_lp        = c.find('csw inv ctrl - license plate', 'license plate')
+    const i_cases     = c.find('csw inv ctrl - # of cases', '# of cases')
+    const i_notes     = c.find('csw inv ctrl - notes', 'notes')
+    const i_order     = c.find('csw inv ctrl - order #', 'csw inv ctrl - order', 'order')
+    const i_damage    = c.find('csw inv ctrl - damage type', 'damage type')
+    const i_emp       = c.find('csw inv ctrl - employee', 'employee')
+    const i_customer  = c.find('customer madison', 'customer caledonia', 'customer kenosha', 'customer')
+    const i_category  = c.find('category')
+    const i_photos    = c.find('photos')
+    const i_videos    = c.find('videos')
+    const i_link      = c.find('link to load proof', 'load proof url', 'loadproof')
+    const i_uploadBy  = c.find('uploaded by')
 
-    // Date columns
-    const i_date         = c.find('filter by this date')
-    const i_lpDate       = c.find('loadproof date')           // col B in MAD: "Loadproof Date (Copy here)"
-
-    // Incident details
-    const i_type         = c.find('csw inv ctrl - shipment type', 'shipment type')
-    const i_respParty    = c.find('csw inv ctrl - responsible party', 'responsible party')
-    const i_lot          = c.find('csw inv ctrl - lot #', 'lot #')
-    const i_mat          = c.find('csw inv ctrl - material #', 'material #')
-    const i_reason       = c.find('csw inv ctrl - reason', 'reason')
-    const i_lp           = c.find('csw inv ctrl - license plate', 'license plate')
-    const i_cases        = c.find('csw inv ctrl - # of cases', '# of cases')
-    const i_notes        = c.find('csw inv ctrl - notes', 'notes')
-    // Order: MAD header is "CSW INV CTRL - Order" (no #), KEN/CAL may differ
-    const i_order        = c.find('csw inv ctrl - order #', 'csw inv ctrl - order', 'order')
-    const i_damage       = c.find('csw inv ctrl - damage type', 'damage type')
-    const i_emp          = c.find('csw inv ctrl - employee', 'employee')
-    const i_customer     = c.find('customer madison', 'customer caledonia', 'customer kenosha', 'customer')
-    const i_category     = c.find('category')                 // col O in MAD: LoadProof category
-    const i_photos       = c.find('photos')
-    const i_videos       = c.find('videos')
-
-    // LoadProof link + uploader
-    const i_link         = c.find('link to load proof', 'load proof url', 'loadproof')
-    const i_uploadBy     = c.find('uploaded by')
-
-    // Build the row array
     const row = new Array(totalCols).fill('')
     const set = (idx, val) => { if (idx >= 0 && idx < totalCols && val !== '' && val != null) row[idx] = val }
 
     const dateStr = toExcelDate(payload.date)
-
     set(i_date,      dateStr)
-    set(i_lpDate,    dateStr)                                  // copy date to Loadproof Date column too
+    set(i_lpDate,    dateStr)
     set(i_type,      str(payload.incidentType))
     set(i_respParty, str(payload.responsibleParty))
     set(i_lot,       str(payload.lotNum))
@@ -218,21 +220,19 @@ exports.handler = async function (event) {
     set(i_damage,    str(payload.damageType))
     set(i_emp,       str(payload.employee))
     set(i_customer,  str(payload.customer))
-    set(i_category,  str(payload.category))                   // LoadProof category field
+    set(i_category,  str(payload.category))
     set(i_photos,    payload.photos != null ? Number(payload.photos) || '' : '')
     set(i_videos,    payload.videos != null ? Number(payload.videos) || '' : '')
     set(i_link,      str(payload.loadproofUrl))
     set(i_uploadBy,  str(payload.uploadedBy))
 
-    // Find the next empty row and write
     const lastRow = await findLastDataRow(sheetBase, token)
     const nextRow = lastRow + 1
     const endCol  = colLetter(totalCols - 1)
 
     await graph(
       `${sheetBase}/range(address='A${nextRow}:${endCol}${nextRow}')`,
-      token, 'PATCH',
-      { values: [row] }
+      token, 'PATCH', { values: [row] }
     )
 
     console.log(`[sharepoint-dvr-append][${facility}] Appended row ${nextRow}`)
