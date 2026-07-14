@@ -6,12 +6,40 @@
 // heavy. Time display fixed 2026-07-13 (later still). Pallet estimate
 // added 2026-07-13 (later still) — see notes below.
 //
+// ── Configurable send time — added 2026-07-14 ────────────────────────────
+// Dan asked for the ability to change what time this fires from the UI,
+// for both this digest and the new WR Cases To Pick digest
+// (wr-cases-digest-run.cjs, same pattern). Netlify's cron schedule is
+// fixed at deploy time — it can't read a per-row DB setting to decide
+// when to fire — so the redesign moves the schedule check INSIDE the
+// function instead of relying on netlify.toml's cron to be the single
+// source of truth for the exact minute:
+//   - netlify.toml now fires this function every 15 minutes
+//     (`*/15 * * * *`), same cadence as revision-sync.cjs.
+//   - On each tick, the function reads notify_hour/notify_minute/active
+//     from prepick_notify_settings (facility='mad', dashboard_type=
+//     'prepick') and compares against the CURRENT America/Chicago local
+//     time (computed via Intl, not a fixed UTC offset — this is actually
+//     more DST-correct than the old fixed-cron design, which drifted an
+//     hour with US DST like every other scheduled function in this app).
+//   - Minutes are bucketed to the nearest 15 (0/15/30/45) since the check
+//     only runs every 15 min anyway.
+//   - `last_sent_date` (Central-time date) guards against double-sending
+//     if the tick and the target time land in the same bucket more than
+//     once, or if Netlify's scheduler fires slightly early/late.
+//   - The MANUAL TEST path (button in the UI) bypasses all of this and
+//     always sends immediately for tomorrow's date, exactly as before —
+//     it does not read or write last_sent_date, so a test send doesn't
+//     interfere with the scheduled send happening later that day.
+//
 // Two invocation paths (same convention as front-daily-discussion-run.cjs):
 //
-// 1. SCHEDULED (netlify.toml: schedule = "15 3 * * *", i.e. 03:15 UTC =
-//    10:15pm CDT / 9:15pm CST — DST-unadjusted, same caveat as every other
-//    scheduled function in this app). Fires the evening before, summarizing
-//    TOMORROW's Madison outbound schedule.
+// 1. SCHEDULED (netlify.toml: schedule = "*/15 * * * *" as of 2026-07-14,
+//    was a fixed "15 3 * * *" before the configurable-time redesign above).
+//    Only actually sends when the current Central time matches the
+//    configured notify_hour/notify_minute AND it hasn't already sent
+//    today — otherwise it's a fast no-op. Fires the evening before,
+//    summarizing TOMORROW's Madison outbound schedule.
 //
 // 2. MANUAL TEST (plain POST, no body needed — always targets tomorrow).
 //    Called from the "Send test digest now" button on the Pre-Pick Status
@@ -23,11 +51,12 @@
 //    conversation.
 //
 // Where it posts: prepick_notify_settings.front_conversation_id for
-// facility='mad', editable from the Pre-Pick Status tab (not hardcoded)
-// per Dan's request. Posts as a COMMENT on that existing conversation
-// (POST /conversations/{id}/comments) — NOT a new discussion, unlike
-// front-post-discussion.cjs/front-daily-discussion-run.cjs which both
-// create fresh discussions each time.
+// facility='mad'/dashboard_type='prepick', editable from the Pre-Pick
+// Status tab (not hardcoded) per Dan's request. Posts as a COMMENT on
+// that existing conversation (POST /conversations/{id}/comments) — NOT a
+// new discussion, unlike front-post-discussion.cjs/
+// front-daily-discussion-run.cjs which both create fresh discussions
+// each time.
 //
 // Data source: proxies to motherduck-prepick-status.cjs via internal HTTP
 // call rather than duplicating its ~400 lines of matching/task/complexity
@@ -95,6 +124,45 @@ async function sbFetch(path) {
   try { json = text ? JSON.parse(text) : null } catch { json = text }
   if (!res.ok) throw new Error(typeof json === 'string' ? json : JSON.stringify(json))
   return json
+}
+
+async function sbPatch(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: 'PATCH',
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) { const t = await res.text(); throw new Error(t) }
+}
+
+// Current America/Chicago local time, computed fresh via Intl rather than
+// a fixed UTC offset — correctly tracks CDT/CST without a DST-adjustment
+// bug (see file header "Configurable send time").
+function centralNowParts() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date())
+  const get = t => Number(parts.find(p => p.type === t).value)
+  return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour') % 24, minute: get('minute') }
+}
+
+function centralTodayISO() {
+  const { year, month, day } = centralNowParts()
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+// Bucketed to 15 min since the scheduled tick only runs every 15 minutes.
+function isNotifyTimeMatch(notifyHour, notifyMinute) {
+  const { hour, minute } = centralNowParts()
+  const bucket = Math.floor(minute / 15) * 15
+  const targetBucket = Math.floor(notifyMinute / 15) * 15
+  return hour === notifyHour && bucket === targetBucket
 }
 
 // "Tomorrow" in US Central time regardless of the function's own runtime TZ
@@ -198,15 +266,35 @@ function buildDigestBody(appointments, dateObj) {
   return lines.join('\n')
 }
 
-async function runDigest() {
+async function runDigest({ isManualTest }) {
   if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase env not configured')
   if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
-  const settingsRows = await sbFetch(`prepick_notify_settings?facility=eq.mad&select=front_conversation_id`)
-  const conversationId = settingsRows?.[0]?.front_conversation_id
+  const settingsRows = await sbFetch(
+    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick&select=front_conversation_id,notify_hour,notify_minute,active,last_sent_date`
+  )
+  const settings = settingsRows?.[0]
+  const conversationId = settings?.front_conversation_id
   if (!conversationId) {
     return { ok: false, reason: 'No front_conversation_id configured for Madison in prepick_notify_settings' }
+  }
+
+  // Scheduled ticks fire every 15 min (see file header "Configurable send
+  // time") — only actually send when this tick matches the configured
+  // time and hasn't already fired today. Manual test always sends
+  // immediately and never touches last_sent_date.
+  if (!isManualTest) {
+    if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
+    const notifyHour = settings.notify_hour ?? 22
+    const notifyMinute = settings.notify_minute ?? 15
+    if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
+      return { ok: true, skipped: true, reason: 'Not the configured send time yet' }
+    }
+    const todayCentral = centralTodayISO()
+    if (settings.last_sent_date === todayCentral) {
+      return { ok: true, skipped: true, reason: 'Already sent today' }
+    }
   }
 
   const dateObj = tomorrowCentral()
@@ -243,6 +331,10 @@ async function runDigest() {
     return { ok: false, reason: 'Front API error posting comment', detail: frontJson }
   }
 
+  if (!isManualTest) {
+    await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick`, { last_sent_date: centralTodayISO() })
+  }
+
   return { ok: true, date, conversationId, commentId: frontJson.id, appointmentCount: (statusJson.appointments || []).length }
 }
 
@@ -255,7 +347,7 @@ exports.handler = async function (event) {
   }
 
   try {
-    const result = await runDigest()
+    const result = await runDigest({ isManualTest })
     return { statusCode: result.ok ? 200 : 500, headers: NO_CACHE_HEADERS, body: JSON.stringify({ success: result.ok, ...result }) }
   } catch (err) {
     return { statusCode: 502, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: err.message }) }
