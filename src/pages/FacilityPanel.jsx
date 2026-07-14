@@ -7,6 +7,7 @@ import RosterBoard from '../components/RosterBoard.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
 import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
+import WrCasesToPick from '../components/WrCasesToPick.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
@@ -45,6 +46,7 @@ const CAL2_TABS = [
 ]
 const WR_TABS = [
   { id: 'warehouse', label: 'Warehouse' }, { id: 'pickline', label: 'Pickline' },
+  { id: 'cases', label: 'Cases To Pick' },
 ]
 // Madison-only sub-tab row (added 2026-07-12) — sits below the global
 // Daily/Weekly toggle, same pattern as WR_TABS above. "Pre-Pick Status"
@@ -1006,41 +1008,42 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
             </button>
           ))}
         </div>
-        {wrTab === 'warehouse'
-          ? warehouseContent
-          : <Suspense fallback={<div style={{ padding: 20, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>Loading Pickline…</div>}>
-              <PicklinePanel
-                snapshot={picklineSnapshot}
-                hourOverrides={picklineOverrides}
-                loading={picklineLoading}
-                onSnapshot={snap => {
-                  // A new snapshot (Pull-from-Omni or Excel upload) becomes
-                  // the shared brief for everyone until someone explicitly
-                  // re-pulls or loads a new file. hour_overrides get reset
-                  // by upsertPicklineSnapshot because the new snapshot's
-                  // route counts invalidate any prior per-hour tweaks.
-                  setPicklineSnapshot(snap)
-                  setPicklineOverrides({})
-                  upsertPicklineSnapshot(facility.id, planDate, snap, snap?.source)
-                }}
-                onOverridesChange={next => {
-                  // Support both direct-object and updater-function styles;
-                  // PicklinePanel's setHourOverride uses the updater form.
-                  setPicklineOverrides(prev => {
-                    const resolved = typeof next === 'function' ? next(prev) : next
-                    updatePicklineOverrides(facility.id, planDate, resolved)
-                    return resolved
-                  })
-                }}
-                onClear={() => {
-                  setPicklineSnapshot(null)
-                  setPicklineOverrides({})
-                  deletePicklineSnapshot(facility.id, planDate)
-                }}
-                planDate={planDate}
-              />
-            </Suspense>
-        }
+        {wrTab === 'warehouse' && warehouseContent}
+        {wrTab === 'pickline' && (
+          <Suspense fallback={<div style={{ padding: 20, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>Loading Pickline…</div>}>
+            <PicklinePanel
+              snapshot={picklineSnapshot}
+              hourOverrides={picklineOverrides}
+              loading={picklineLoading}
+              onSnapshot={snap => {
+                // A new snapshot (Pull-from-Omni or Excel upload) becomes
+                // the shared brief for everyone until someone explicitly
+                // re-pulls or loads a new file. hour_overrides get reset
+                // by upsertPicklineSnapshot because the new snapshot's
+                // route counts invalidate any prior per-hour tweaks.
+                setPicklineSnapshot(snap)
+                setPicklineOverrides({})
+                upsertPicklineSnapshot(facility.id, planDate, snap, snap?.source)
+              }}
+              onOverridesChange={next => {
+                // Support both direct-object and updater-function styles;
+                // PicklinePanel's setHourOverride uses the updater form.
+                setPicklineOverrides(prev => {
+                  const resolved = typeof next === 'function' ? next(prev) : next
+                  updatePicklineOverrides(facility.id, planDate, resolved)
+                  return resolved
+                })
+              }}
+              onClear={() => {
+                setPicklineSnapshot(null)
+                setPicklineOverrides({})
+                deletePicklineSnapshot(facility.id, planDate)
+              }}
+              planDate={planDate}
+            />
+          </Suspense>
+        )}
+        {wrTab === 'cases' && <WrCasesToPick planDate={planDate} />}
       </div>
     )
   }
