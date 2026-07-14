@@ -69,7 +69,25 @@ function resolvedTimeLabel(h, m) {
   return `${twelve}:${String(bucket).padStart(2, '0')} ${period}`
 }
 
-export default function NotifySettingsPanel({ facility, dashboardType, functionName, digestDescription }) {
+// contentDateLabel (added 2026-07-14, FEFO digests) — the appointment-based
+// digests (Pre-Pick, Cases, Daily Ops) summarize TOMORROW since they fire
+// the night before a shift. FEFO summarizes TODAY (rotation compliance
+// right now, no lead-time reason to look ahead) — see fefo-digest-run.cjs
+// header. Defaults to 'tomorrow' so existing callers are unaffected.
+//
+// manualTestBody (added 2026-07-14, FEFO per-project digests) — optional
+// extra POST body merged into the manual-test call. Needed when
+// functionName backs multiple settings rows sharing one Netlify function
+// (fefo-digest-run.cjs backs one row per FEFO project) so the manual test
+// can say which row to run, e.g. { dashboardType: 'fefo_faioa5' }. Omit for
+// single-row digests (Pre-Pick, Cases To Pick, Daily Ops) — defaults to {}.
+//
+// showSkipToNextValidDay (added 2026-07-14, FEFO digests) — hides the
+// lookahead checkbox for digests where content date === fire date (FEFO),
+// since "skip to next valid day" only makes sense when content date is
+// offset from the fire date (the appointment-based digests). Defaults to
+// true so existing callers are unaffected.
+export default function NotifySettingsPanel({ facility, dashboardType, functionName, digestDescription, manualTestBody = {}, contentDateLabel = 'tomorrow', showSkipToNextValidDay = true }) {
   const [open, setOpen] = useState(false)
   const [conversationId, setConversationId] = useState('')
   const [conversationIdSaved, setConversationIdSaved] = useState('')
@@ -133,7 +151,7 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
     setSendingTest(true)
     setMsg(null)
     try {
-      const result = await triggerDigestTest(functionName)
+      const result = await triggerDigestTest(functionName, manualTestBody)
       if (result?.success) {
         setMsg({ err: false, text: `Sent — comment posted for ${result.date}.` })
       } else {
@@ -144,7 +162,7 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
     } finally {
       setSendingTest(false)
     }
-  }, [functionName])
+  }, [functionName, manualTestBody])
 
   const dirty = conversationId.trim() !== conversationIdSaved
     || notifyHour !== saved.notifyHour
@@ -226,15 +244,17 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
             })}
           </div>
 
-          <div style={{ marginBottom: 10 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', cursor: 'pointer' }}>
-              <input type="checkbox" checked={skipToNextValidDay} onChange={e => setSkipToNextValidDay(e.target.checked)} />
-              Look ahead to next valid day (e.g. Fri → Mon for Mon-Fri operations)
-            </label>
-            <div style={{ marginTop: 4, marginLeft: 22, color: 'var(--text-dim)', fontSize: 10, lineHeight: 1.4 }}>
-              Off (default): a night whose content date isn't checked above just skips — nothing posts. On: instead of skipping, advances to the next checked day and sends that day's numbers. Leave unchecked for facilities that run every day of the week.
+          {showSkipToNextValidDay && (
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={skipToNextValidDay} onChange={e => setSkipToNextValidDay(e.target.checked)} />
+                Look ahead to next valid day (e.g. Fri → Mon for Mon-Fri operations)
+              </label>
+              <div style={{ marginTop: 4, marginLeft: 22, color: 'var(--text-dim)', fontSize: 10, lineHeight: 1.4 }}>
+                Off (default): a night whose content date isn't checked above just skips — nothing posts. On: instead of skipping, advances to the next checked day and sends that day's numbers. Leave unchecked for facilities that run every day of the week.
+              </div>
             </div>
-          </div>
+          )}
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button type="button" style={btnStyle} onClick={save} disabled={saving || !dirty}>
@@ -258,7 +278,7 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
           )}
 
           <div style={{ marginTop: 8, color: 'var(--text-dim)', lineHeight: 1.5 }}>
-            {digestDescription} Fires automatically at the time above (Central) on the checked days, when Enabled is checked — the day checked is the date being summarized (tomorrow), not the night it sends. "Send test digest now" fires immediately for tomorrow's date regardless of the time/day/enabled settings.
+            {digestDescription} Fires automatically at the time above (Central) on the checked days, when Enabled is checked — the day checked is the date being summarized ({contentDateLabel}), not the night it sends. "Send test digest now" fires immediately for {contentDateLabel}'s date regardless of the time/day/enabled settings.
           </div>
         </div>
       )}
