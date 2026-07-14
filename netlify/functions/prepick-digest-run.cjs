@@ -44,6 +44,30 @@
 // this backwards. Manual test bypasses this filter too, same as the
 // time/active checks above.
 //
+// ── Skip-to-next-valid-day lookahead — added 2026-07-14 (still later) ────
+// Dan's follow-up question: for a Mon-Fri operation, what happens Friday
+// night? Answer at the time: nothing — Friday night computes Saturday as
+// the content date, Saturday isn't a configured day, so it just skips,
+// and the crew gets no digest again until Sunday night (which covers
+// Monday). Two dead nights. Dan asked for an opt-in fix, thinking ahead
+// to facilities that run 7 days/week vs Mon-Fri ones — so this needed to
+// be a per-row setting, not a hardcoded behavior change.
+// New `skip_to_next_valid_day` boolean (default false, unchecked by
+// default so existing behavior is unchanged unless someone opts in).
+// When true: instead of skipping when tomorrow isn't a configured day,
+// advance forward day-by-day (capped at +7) to the next configured day
+// and summarize THAT date instead. A Friday-night run then sends
+// Monday's numbers rather than nothing.
+// This required changing what `last_sent_date` dedupes against: it used
+// to compare the FIRE date (the day the function ran) against today,
+// which was fine when content-date always changed daily 1:1 with fire-
+// date. With lookahead enabled, Friday/Saturday/Sunday nights could all
+// compute the same Monday content date — comparing against the fire date
+// would let all three post duplicate copies. `last_sent_date` now stores
+// and compares against the CONTENT date instead, so once Friday night
+// sends Monday's digest, Saturday and Sunday's runs see
+// `last_sent_date === date` and skip as already-sent.
+//
 // Two invocation paths (same convention as front-daily-discussion-run.cjs):
 //
 // 1. SCHEDULED (netlify.toml: schedule = "*/15 * * * *" as of 2026-07-14,
@@ -290,7 +314,7 @@ async function runDigest({ isManualTest }) {
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
+    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date,skip_to_next_valid_day`
   )
   const settings = settingsRows?.[0]
   const conversationId = settings?.front_conversation_id
@@ -298,27 +322,48 @@ async function runDigest({ isManualTest }) {
     return { ok: false, reason: 'No front_conversation_id configured for Madison in prepick_notify_settings' }
   }
 
-  const dateObj = tomorrowCentral()
+  let dateObj = tomorrowCentral()
+  const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
+  const skipToNextValidDay = settings.skip_to_next_valid_day === true
+
+  // Weekday filter + optional lookahead (2026-07-14). If tomorrow isn't a
+  // configured notify day: default is skip entirely (no post that
+  // night). When skip_to_next_valid_day is enabled instead, advance
+  // forward day-by-day to the next configured day and summarize THAT
+  // date — this is what lets a Mon-Fri facility's Friday-night run send
+  // Monday's numbers instead of going silent Fri/Sat/Sun. Capped at +7
+  // days so a misconfigured empty notify_days can't loop forever.
+  if (!isManualTest && !notifyDays.includes(isoWeekday(dateObj))) {
+    if (!skipToNextValidDay) {
+      return { ok: true, skipped: true, reason: `${isoDate(dateObj)} is not a configured notify day` }
+    }
+    let advanced = 0
+    while (!notifyDays.includes(isoWeekday(dateObj)) && advanced < 7) {
+      dateObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000)
+      advanced++
+    }
+    if (!notifyDays.includes(isoWeekday(dateObj))) {
+      return { ok: true, skipped: true, reason: 'No configured notify day found within 7 days' }
+    }
+  }
   const date = isoDate(dateObj)
 
   // Scheduled ticks fire every 15 min (see file header "Configurable send
   // time") — only actually send when this tick matches the configured
-  // time and hasn't already fired today. Manual test always sends
-  // immediately and never touches last_sent_date.
+  // time and this CONTENT date hasn't already been sent. Content-date
+  // (not fire-date) is the dedupe key so the lookahead case above
+  // doesn't re-send the same Monday digest again on Saturday and Sunday
+  // nights too. Manual test always sends immediately and never touches
+  // last_sent_date.
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
-    const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
-    if (!notifyDays.includes(isoWeekday(dateObj))) {
-      return { ok: true, skipped: true, reason: `${date} is not a configured notify day` }
-    }
     const notifyHour = settings.notify_hour ?? 22
     const notifyMinute = settings.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
       return { ok: true, skipped: true, reason: 'Not the configured send time yet' }
     }
-    const todayCentral = centralTodayISO()
-    if (settings.last_sent_date === todayCentral) {
-      return { ok: true, skipped: true, reason: 'Already sent today' }
+    if (settings.last_sent_date === date) {
+      return { ok: true, skipped: true, reason: 'Already sent for this date' }
     }
   }
 
@@ -354,7 +399,7 @@ async function runDigest({ isManualTest }) {
   }
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick`, { last_sent_date: centralTodayISO() })
+    await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick`, { last_sent_date: date })
   }
 
   return { ok: true, date, conversationId, commentId: frontJson.id, appointmentCount: (statusJson.appointments || []).length }
