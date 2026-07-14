@@ -683,6 +683,16 @@ function renderShiftRoster(rosterRows, dateObj) {
 // next two are short distinguishing labels only ("Projects - Total
 // Appts", "Shift Roster") — the images themselves already carry the
 // facility name and date in their own headers, so nothing is lost.
+//
+// App link added 2026-07-14 (later same day, per Dan) — the first
+// comment's caption also includes a direct link to the live app for the
+// exact facility+date being summarized (https://csw-wi.netlify.app/?fac=
+// mad&date=YYYY-MM-DD), so someone reading the digest in Front can jump
+// straight to the matching live view. Query params match exactly what
+// LaborPlanning.jsx reads via useSearchParams (`fac`, `date`) — confirmed
+// against that file before wiring this up. Only on the first comment
+// (not repeated on the other two), consistent with the just-add-it-once
+// de-duplication above.
 async function postImageComment(conversationId, pngBuffer, filename, caption) {
   const form = new FormData()
   form.set('body', caption)
@@ -763,7 +773,7 @@ async function runDigest({ isManualTest }) {
   const headerDate = formatHeaderDate(dateObj)
   const cardResult = await postImageComment(
     conversationId, cardPng, 'total-appointments.png',
-    `${headerDate}\nLabor Planning`
+    `${headerDate}\nhttps://csw-wi.netlify.app/?fac=${FACILITY_ID}&date=${date}\nLabor Planning`
   )
   const tableResult = await postImageComment(
     conversationId, tablePng, 'projects.png',
