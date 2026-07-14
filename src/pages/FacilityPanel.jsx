@@ -850,7 +850,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
           facility="mad"
           dashboardType="daily_ops"
           functionName="dailyops-digest-run"
-          digestDescription="Posts two images to Front — the Total Appointments card and the Projects table — as separate comments."
+          digestDescription="Posts three images to Front — the Total Appointments card, the Projects table, and the Shift Roster — as separate comments."
         />
       )}
 
