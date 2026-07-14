@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { fetchWrCasesToPick } from '../lib/wrCasesToPick.js'
+import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 
 // WR "Cases To Pick" sub-tab (added 2026-07-14) — recreates the Omni
 // dashboard Dan uses as his benchmark (screenshotted 2026-07-14), sourced
@@ -11,6 +12,14 @@ import { fetchWrCasesToPick } from '../lib/wrCasesToPick.js'
 // Dan's plan: "I'll add more to that tab once we got this recreated" — so
 // this ships the 6-tile benchmark only; further additions are a separate
 // pass once the numbers are confirmed to match Omni.
+//
+// Notify settings panel (added 2026-07-14, per Dan: "just as we did in
+// the Madison PrePick Status") — same shared NotifySettingsPanel component
+// PrePickStatus.jsx uses, backed by prepick_notify_settings
+// (facility='wr', dashboard_type='cases_to_pick'). Posts a nightly digest
+// comment to a configured Front conversation at a configurable time — see
+// netlify/functions/wr-cases-digest-run.cjs and NotifySettingsPanel.jsx
+// for the mechanics.
 
 function fmt(n) {
   if (n == null) return '—'
@@ -52,6 +61,13 @@ export default function WrCasesToPick({ planDate }) {
       <div style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 12 }}>
         {planDate} · Bernatello's - Wisconsin Rapids
       </div>
+
+      <NotifySettingsPanel
+        facility="wr"
+        dashboardType="cases_to_pick"
+        functionName="wr-cases-digest-run"
+        digestDescription="Nightly digest posts as a comment on this Front conversation, summarizing tomorrow's Bernatello's WR Cases To Pick numbers."
+      />
 
       {loading && (
         <div style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
