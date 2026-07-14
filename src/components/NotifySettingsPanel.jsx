@@ -16,13 +16,28 @@ import { fetchNotifySettings, upsertNotifySettings, triggerDigestTest } from '..
 // to hit for a manual test send ('prepick-digest-run' or
 // 'wr-cases-digest-run'). digestDescription is the one-line explainer
 // shown under the controls, customized per caller.
+//
+// Time-picker clarity fix (2026-07-14, later): Dan flagged that "5:00 PM"
+// (hour dropdown) sitting right next to ":15" (minute dropdown) read
+// ambiguously — looked like it might mean "5:00:15" rather than 5:15 PM.
+// Fixed two ways: (1) the hour dropdown now shows just "5 PM" instead of
+// "5:00 PM", removing the stray ":00" that caused the confusion, and
+// (2) added a live "→ 5:15 PM" resolved-time readout next to both
+// dropdowns so the combined result is unambiguous at a glance.
 const HOURS = Array.from({ length: 24 }, (_, h) => h)
 const MINUTE_BUCKETS = [0, 15, 30, 45]
 
 function hourLabel(h) {
   const period = h >= 12 ? 'PM' : 'AM'
   const twelve = h % 12 === 0 ? 12 : h % 12
-  return `${twelve}:00 ${period}`
+  return `${twelve} ${period}`
+}
+
+function resolvedTimeLabel(h, m) {
+  const period = h >= 12 ? 'PM' : 'AM'
+  const twelve = h % 12 === 0 ? 12 : h % 12
+  const bucket = Math.floor(m / 15) * 15
+  return `${twelve}:${String(bucket).padStart(2, '0')} ${period}`
 }
 
 export default function NotifySettingsPanel({ facility, dashboardType, functionName, digestDescription }) {
@@ -138,6 +153,9 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
             <select value={Math.floor(notifyMinute / 15) * 15} onChange={e => setNotifyMinute(Number(e.target.value))} style={selectStyle}>
               {MINUTE_BUCKETS.map(m => <option key={m} value={m}>:{String(m).padStart(2, '0')}</option>)}
             </select>
+            <span style={{ color: 'var(--text-dim)' }}>
+              → {resolvedTimeLabel(notifyHour, notifyMinute)}
+            </span>
             <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)', cursor: 'pointer' }}>
               <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />
               Enabled
