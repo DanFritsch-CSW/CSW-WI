@@ -90,8 +90,16 @@ export function computeDailyKpis(hourly) {
   if (!hourly?.length) return { util: null, delta: null }
   const totalReq   = hourly.reduce((s, r) => s + (r.req   ?? 0), 0)
   const totalAvail = hourly.reduce((s, r) => s + (r.avail ?? 0), 0)
+  // util needs the totalAvail>0 guard (division by zero); delta is just
+  // subtraction and has no such restriction. Fixed 2026-07-14 — this guard
+  // was incorrectly copy-pasted onto delta too, so any facility/date with
+  // a genuinely-zero Total Hrs Avail (e.g. EC with no roster synced yet)
+  // got delta=null instead of the correct negative number. FacilityPanel.jsx
+  // falls back to `delta ?? networkKpi?.delta` when this is null, which
+  // silently substituted an unrelated ALL-tab network-wide delta in its
+  // place — EC showed a leftover number that had nothing to do with EC.
   const util  = totalAvail > 0 ? totalReq / totalAvail : null
-  const delta = totalAvail > 0 ? totalAvail - totalReq  : null
+  const delta = totalAvail - totalReq
   return { util, delta }
 }
 
