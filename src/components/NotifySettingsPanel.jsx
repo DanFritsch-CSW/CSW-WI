@@ -32,6 +32,16 @@ import { fetchNotifySettings, upsertNotifySettings, triggerDigestTest } from '..
 // scheduled function checks this against the CONTENT date (tomorrow), not
 // the date it fires on — see prepick-digest-run.cjs's "Weekday filter"
 // note for why.
+//
+// Skip-to-next-valid-day checkbox (2026-07-14, still later): Dan's
+// follow-up — for a Mon-Fri facility, Friday night computes Saturday as
+// content date, which isn't checked, so nothing sends until Sunday night
+// (covering Monday). Two dead nights. New opt-in checkbox lets the
+// scheduled function advance forward to the next checked day instead of
+// skipping — thinking ahead to facilities that run 7 days/week (where
+// this box should stay unchecked, since every day is already valid) vs
+// Mon-Fri operations (where checking it closes the Fri/Sat/Sun gap). Off
+// by default so nothing changes unless explicitly opted in.
 const HOURS = Array.from({ length: 24 }, (_, h) => h)
 const MINUTE_BUCKETS = [0, 15, 30, 45]
 const DAYS = [
@@ -66,8 +76,9 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
   const [notifyHour, setNotifyHour] = useState(22)
   const [notifyMinute, setNotifyMinute] = useState(15)
   const [notifyDays, setNotifyDays] = useState(DEFAULT_DAYS)
+  const [skipToNextValidDay, setSkipToNextValidDay] = useState(false)
   const [active, setActive] = useState(true)
-  const [saved, setSaved] = useState({ notifyHour: 22, notifyMinute: 15, notifyDays: DEFAULT_DAYS, active: true })
+  const [saved, setSaved] = useState({ notifyHour: 22, notifyMinute: 15, notifyDays: DEFAULT_DAYS, active: true, skipToNextValidDay: false })
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
   const [sendingTest, setSendingTest] = useState(false)
@@ -82,13 +93,15 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
         const minute = row?.notify_minute ?? 15
         const days = row?.notify_days ?? DEFAULT_DAYS
         const isActive = row?.active ?? true
+        const skipNext = row?.skip_to_next_valid_day ?? false
         setConversationId(id)
         setConversationIdSaved(id)
         setNotifyHour(hour)
         setNotifyMinute(minute)
         setNotifyDays(days)
         setActive(isActive)
-        setSaved({ notifyHour: hour, notifyMinute: minute, notifyDays: days, active: isActive })
+        setSkipToNextValidDay(skipNext)
+        setSaved({ notifyHour: hour, notifyMinute: minute, notifyDays: days, active: isActive, skipToNextValidDay: skipNext })
       })
       .catch(() => {})
     return () => { cancelled = true }
@@ -104,17 +117,17 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
     try {
       await upsertNotifySettings(facility, dashboardType, {
         frontConversationId: conversationId.trim(),
-        notifyHour, notifyMinute, notifyDays, active,
+        notifyHour, notifyMinute, notifyDays, active, skipToNextValidDay,
       })
       setConversationIdSaved(conversationId.trim())
-      setSaved({ notifyHour, notifyMinute, notifyDays, active })
+      setSaved({ notifyHour, notifyMinute, notifyDays, active, skipToNextValidDay })
       setMsg({ err: false, text: 'Saved.' })
     } catch (e) {
       setMsg({ err: true, text: e.message || 'Save failed.' })
     } finally {
       setSaving(false)
     }
-  }, [facility, dashboardType, conversationId, notifyHour, notifyMinute, notifyDays, active])
+  }, [facility, dashboardType, conversationId, notifyHour, notifyMinute, notifyDays, active, skipToNextValidDay])
 
   const sendTest = useCallback(async () => {
     setSendingTest(true)
@@ -138,6 +151,7 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
     || notifyMinute !== saved.notifyMinute
     || !sameDays(notifyDays, saved.notifyDays)
     || active !== saved.active
+    || skipToNextValidDay !== saved.skipToNextValidDay
 
   const btnStyle = {
     background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 4,
@@ -210,6 +224,16 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
                 </button>
               )
             })}
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={skipToNextValidDay} onChange={e => setSkipToNextValidDay(e.target.checked)} />
+              Look ahead to next valid day (e.g. Fri → Mon for Mon-Fri operations)
+            </label>
+            <div style={{ marginTop: 4, marginLeft: 22, color: 'var(--text-dim)', fontSize: 10, lineHeight: 1.4 }}>
+              Off (default): a night whose content date isn't checked above just skips — nothing posts. On: instead of skipping, advances to the next checked day and sends that day's numbers. Leave unchecked for facilities that run every day of the week.
+            </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
