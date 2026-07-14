@@ -3,9 +3,7 @@ import {
   fetchPrePickStatus, STATUS_META, pickDifficultyLabel, pickDifficultyScore,
   formatArrivalTime,
 } from '../lib/prePickStatus.js'
-import {
-  fetchPrepickNotifySettings, upsertPrepickNotifySettings, triggerPrepickDigestTest,
-} from '../lib/supabase.js'
+import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 import '../styles/prepick-status.css'
 
 /**
@@ -42,11 +40,14 @@ import '../styles/prepick-status.css'
  * match the site's dark background — per Dan, he wants them to pop the
  * same way they did in the JSX mockup preview, not blend in.
  *
- * Notify settings panel (added 2026-07-13): lets Dan view/edit which Front
- * conversation the nightly digest (prepick-digest-run.cjs, scheduled
- * 03:15 UTC / 10:15pm CT) posts a summary comment to, and fire a test send
- * on demand — without needing a code deploy to change the destination.
- * Stored in prepick_notify_settings (facility='mad' for now).
+ * Notify settings panel (added 2026-07-13, extracted into the shared
+ * NotifySettingsPanel component 2026-07-14 so the same UI backs WR's
+ * Cases To Pick digest too): lets Dan view/edit which Front conversation
+ * the nightly digest (prepick-digest-run.cjs) posts a summary comment to,
+ * configure what time it fires (added 2026-07-14 — see that file's header
+ * for how a per-row DB time setting works with Netlify's fixed cron), and
+ * fire a test send on demand. Stored in prepick_notify_settings
+ * (facility='mad', dashboard_type='prepick').
  *
  * Estimated pallets (added 2026-07-13): computed server-side from material
  * tie/high (silver.datex_slv_materialspackagingslookup), shown as "~N
@@ -62,13 +63,6 @@ export default function PrePickStatus({ facilityId, planDate }) {
   const [sortMode, setSortMode] = useState('time') // 'time' | 'difficulty'
   const [expandedRow, setExpandedRow] = useState(null)
 
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [conversationId, setConversationId] = useState('')
-  const [conversationIdSaved, setConversationIdSaved] = useState('')
-  const [savingSettings, setSavingSettings] = useState(false)
-  const [settingsMsg, setSettingsMsg] = useState(null)
-  const [sendingTest, setSendingTest] = useState(false)
-
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -79,49 +73,6 @@ export default function PrePickStatus({ facilityId, planDate }) {
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [facilityId, planDate])
-
-  useEffect(() => {
-    let cancelled = false
-    fetchPrepickNotifySettings(facilityId)
-      .then(id => {
-        if (cancelled) return
-        setConversationId(id || '')
-        setConversationIdSaved(id || '')
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [facilityId])
-
-  const saveConversationId = useCallback(async () => {
-    setSavingSettings(true)
-    setSettingsMsg(null)
-    try {
-      await upsertPrepickNotifySettings(facilityId, conversationId.trim())
-      setConversationIdSaved(conversationId.trim())
-      setSettingsMsg({ err: false, text: 'Saved.' })
-    } catch (e) {
-      setSettingsMsg({ err: true, text: e.message || 'Save failed.' })
-    } finally {
-      setSavingSettings(false)
-    }
-  }, [facilityId, conversationId])
-
-  const sendTestDigest = useCallback(async () => {
-    setSendingTest(true)
-    setSettingsMsg(null)
-    try {
-      const result = await triggerPrepickDigestTest()
-      if (result?.success) {
-        setSettingsMsg({ err: false, text: `Sent — comment posted for ${result.date}.` })
-      } else {
-        setSettingsMsg({ err: true, text: result?.reason || 'Digest did not send.' })
-      }
-    } catch (e) {
-      setSettingsMsg({ err: true, text: e.message || 'Send failed.' })
-    } finally {
-      setSendingTest(false)
-    }
-  }, [])
 
   const counts = useMemo(() => {
     const total = appointments.length
@@ -150,66 +101,21 @@ export default function PrePickStatus({ facilityId, planDate }) {
     setExpandedRow(prev => (prev === idx ? null : idx))
   }, [])
 
-  const conversationDirty = conversationId.trim() !== conversationIdSaved
-
   return (
     <div className="pps-section">
       <div className="pps-header">
         <span className="pps-title">Pre-Picked Order Status ({sorted.length})</span>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" className="pps-sort-btn" onClick={() => setSettingsOpen(o => !o)}>
-            {settingsOpen ? 'Hide notify settings' : 'Notify settings'}
-          </button>
-          <button type="button" className="pps-sort-btn" onClick={toggleSort}>
-            Sort: {sortMode === 'time' ? 'Appt time' : 'Pick difficulty'}
-          </button>
-        </div>
+        <button type="button" className="pps-sort-btn" onClick={toggleSort}>
+          Sort: {sortMode === 'time' ? 'Appt time' : 'Pick difficulty'}
+        </button>
       </div>
 
-      {settingsOpen && (
-        <div className="pps-settings-panel">
-          <div className="pps-settings-row">
-            <label className="pps-settings-label" htmlFor="pps-conv-id">
-              Front conversation ID for nightly digest
-            </label>
-            <input
-              id="pps-conv-id"
-              type="text"
-              className="pps-settings-input"
-              placeholder="cnv_xxxxxxxx"
-              value={conversationId}
-              onChange={e => setConversationId(e.target.value)}
-            />
-          </div>
-          <div className="pps-settings-actions">
-            <button
-              type="button"
-              className="pps-sort-btn"
-              onClick={saveConversationId}
-              disabled={savingSettings || !conversationDirty}
-            >
-              {savingSettings ? 'Saving…' : 'Save'}
-            </button>
-            <button
-              type="button"
-              className="pps-sort-btn"
-              onClick={sendTestDigest}
-              disabled={sendingTest || !conversationIdSaved}
-              title={!conversationIdSaved ? 'Save a conversation ID first' : ''}
-            >
-              {sendingTest ? 'Sending…' : 'Send test digest now'}
-            </button>
-          </div>
-          {settingsMsg && (
-            <div className={settingsMsg.err ? 'pps-settings-msg pps-settings-msg--err' : 'pps-settings-msg'}>
-              {settingsMsg.text}
-            </div>
-          )}
-          <div className="pps-settings-note">
-            Nightly digest posts as a comment on this Front conversation automatically at 10:15pm CT, summarizing tomorrow's Madison outbound status. "Send test digest now" fires the same job immediately for tomorrow's date.
-          </div>
-        </div>
-      )}
+      <NotifySettingsPanel
+        facility={facilityId}
+        dashboardType="prepick"
+        functionName="prepick-digest-run"
+        digestDescription="Nightly digest posts as a comment on this Front conversation, summarizing tomorrow's Madison outbound status."
+      />
 
       {!loading && !error && appointments.length > 0 && (
         <div className="pps-stat-strip">
