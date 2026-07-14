@@ -269,10 +269,37 @@ async function fetchSnapshotData(date) {
 }
 
 // ── Image rendering (@napi-rs/canvas) ────────────────────────────────────
+// Font registration — REQUIRED. Netlify's Lambda runtime has zero system
+// fonts installed (confirmed via a real test run: shapes/rects rendered
+// fine, every fillText call silently drew nothing — a known @napi-rs/canvas-
+// on-serverless gotcha, not a code bug). Skia (the renderer behind this
+// library) needs an explicit font file registered via GlobalFonts before
+// any text will render at all. Bundles the `dejavu-fonts-ttf` npm package
+// (regular + bold TTF files) and registers both under explicit family
+// names, referenced directly in every font string below — no reliance on
+// numeric font-weight matching within a single family, since only two
+// faces are registered.
+const path = require('path')
 let createCanvas
+let fontsRegistered = false
 function loadCanvasLib() {
-  if (!createCanvas) createCanvas = require('@napi-rs/canvas').createCanvas
+  const canvasLib = require('@napi-rs/canvas')
+  if (!fontsRegistered) {
+    const fontsDir = path.join(path.dirname(require.resolve('dejavu-fonts-ttf/package.json')), 'ttf')
+    canvasLib.GlobalFonts.registerFromPath(path.join(fontsDir, 'DejaVuSans.ttf'), 'DejaVu Sans')
+    canvasLib.GlobalFonts.registerFromPath(path.join(fontsDir, 'DejaVuSans-Bold.ttf'), 'DejaVu Sans Bold')
+    fontsRegistered = true
+  }
+  createCanvas = canvasLib.createCanvas
   return createCanvas
+}
+
+// FONT(px, bold) → font-string using the correct registered family —
+// avoids numeric font-weight tokens (e.g. '600 15px ...') since only a
+// regular and a bold face are registered; anything semi-bold-ish just
+// maps to the bold face.
+function FONT(px, bold) {
+  return `${px}px "DejaVu Sans${bold ? ' Bold' : ''}"`
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -306,9 +333,9 @@ function renderTotalAppointmentsCard(data, dateObj) {
   ctx.stroke()
 
   ctx.fillStyle = THEME.textSecondary
-  ctx.font = '600 15px "DejaVu Sans"'
+  ctx.font = FONT(15, true)
   ctx.fillText(`${FACILITY_LABEL} — Daily Ops`, 32, 44)
-  ctx.font = '13px "DejaVu Sans"'
+  ctx.font = FONT(13, false)
   ctx.fillStyle = THEME.textDim
   ctx.fillText(formatHeaderDate(dateObj), 32, 64)
 
@@ -320,10 +347,10 @@ function renderTotalAppointmentsCard(data, dateObj) {
   ctx.lineWidth = 2
   ctx.stroke()
   ctx.fillStyle = THEME.textSecondary
-  ctx.font = '600 13px "DejaVu Sans"'
+  ctx.font = FONT(13, true)
   ctx.fillText('TOTAL APPOINTMENTS', 52, 112)
   ctx.fillStyle = FACILITY_COLOR
-  ctx.font = '700 48px "DejaVu Sans"'
+  ctx.font = FONT(48, true)
   ctx.fillText(String(data.totalAppts), 52, 165)
 
   const pill = (x, y, w, h, label, value, color) => {
@@ -334,10 +361,10 @@ function renderTotalAppointmentsCard(data, dateObj) {
     ctx.lineWidth = 1
     ctx.stroke()
     ctx.fillStyle = THEME.textDim
-    ctx.font = '600 10px "DejaVu Sans"'
+    ctx.font = FONT(10, true)
     ctx.fillText(label.toUpperCase(), x + 12, y + 20)
     ctx.fillStyle = color
-    ctx.font = '700 22px "DejaVu Sans"'
+    ctx.font = FONT(22, true)
     ctx.fillText(String(value), x + 12, y + 46)
   }
 
@@ -382,15 +409,15 @@ function renderProjectsTable(data, dateObj) {
   ctx.stroke()
 
   ctx.fillStyle = THEME.textSecondary
-  ctx.font = '600 15px "DejaVu Sans"'
+  ctx.font = FONT(15, true)
   ctx.fillText(`${FACILITY_LABEL} — Projects`, 32, 44)
-  ctx.font = '13px "DejaVu Sans"'
+  ctx.font = FONT(13, false)
   ctx.fillStyle = THEME.textDim
   ctx.fillText(formatHeaderDate(dateObj), 32, 64)
 
   const colX = { name: 32, dr: W - 300, inb: W - 220, out: W - 140, tot: W - 70 }
   let y = HEADER_H
-  ctx.font = '600 11px "DejaVu Sans"'
+  ctx.font = FONT(11, true)
   ctx.fillStyle = THEME.textDim
   ctx.fillText('PROJECT', colX.name, y)
   ctx.fillText('DROPS', colX.dr, y)
@@ -402,7 +429,7 @@ function renderProjectsTable(data, dateObj) {
   ctx.beginPath(); ctx.moveTo(32, y); ctx.lineTo(W - 32, y); ctx.stroke()
 
   if (!rows.length) {
-    ctx.font = '13px "DejaVu Sans"'
+    ctx.font = FONT(13, false)
     ctx.fillStyle = THEME.textDim
     ctx.fillText('No projects scheduled.', 32, y + 24)
   }
@@ -413,7 +440,7 @@ function renderProjectsTable(data, dateObj) {
       ctx.fillStyle = THEME.bg2
       ctx.fillRect(20, y + i * ROW_H, W - 40, ROW_H)
     }
-    ctx.font = '13px "DejaVu Sans"'
+    ctx.font = FONT(13, false)
     ctx.fillStyle = THEME.textPrimary
     const name = r.name.length > 34 ? r.name.slice(0, 34) + '…' : r.name
     ctx.fillText(name, colX.name, rowY + 4)
@@ -421,7 +448,7 @@ function renderProjectsTable(data, dateObj) {
     ctx.fillText(r.dr || '—', colX.dr, rowY + 4)
     ctx.fillText(r.inb || '—', colX.inb, rowY + 4)
     ctx.fillText(r.out || '—', colX.out, rowY + 4)
-    ctx.font = '700 13px "DejaVu Sans"'
+    ctx.font = FONT(13, true)
     ctx.fillStyle = FACILITY_COLOR
     ctx.fillText(String(r.total || '—'), colX.tot, rowY + 4)
   })
