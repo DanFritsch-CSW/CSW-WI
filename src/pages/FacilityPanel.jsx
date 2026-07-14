@@ -8,6 +8,7 @@ import AppointmentList from '../components/AppointmentList.jsx'
 import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
+import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
@@ -842,6 +843,15 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
             </div>
           </div>
         </div>
+      )}
+
+      {isDaily && isMad && (
+        <NotifySettingsPanel
+          facility="mad"
+          dashboardType="daily_ops"
+          functionName="dailyops-digest-run"
+          digestDescription="Posts two images to Front — the Total Appointments card and the Projects table — as separate comments."
+        />
       )}
 
       {isDaily && (
