@@ -351,12 +351,12 @@ const B2E_LOCATION = {
   wr:   '023 - Wisconsin Rapids',
 }
 
-// Madison-only: Shift Supervisors (209) count toward labor hours at MAD
-// per Dan, 2026-07-10 (see Notion for context). All other facilities keep
+// Shift Supervisors (209) count toward labor hours at MAD (Dan, 2026-07-10)
+// and EC (Dan, 2026-07-14 — Ritchie Hazleton). All other facilities keep
 // excluding 209s exactly as before (ALLOWED_JOB_CODES was '205' only,
 // fixed 2026-04-28).
 function getAllowedJobCodes(facilityId) {
-  return facilityId === 'mad' ? new Set(['205', '209']) : new Set(['205'])
+  return (facilityId === 'mad' || facilityId === 'ec') ? new Set(['205', '209']) : new Set(['205'])
 }
 
 const CAL2_DOCK_NAMES_35 = new Set([
@@ -1212,7 +1212,7 @@ export async function fetchB2eTimeOff(facilityId, date) {
       ],
       filters: {
         [`${TIME_OFF}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: facilityId === 'mad' ? ['205', '209'] : ['205'] }, // Madison-only: include Shift Supervisors (209) per Dan, 2026-07-10
+        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: (facilityId === 'mad' || facilityId === 'ec') ? ['205', '209'] : ['205'] }, // MAD + EC: include Shift Supervisors (209) — Dan, 2026-07-10 / 2026-07-14
         [`${TIME_OFF}.date`]: {
           kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
           isFiscal: false, left_side: date, is_negative: false,
