@@ -178,6 +178,10 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   // Daily view so the panel reads less cluttered. Click the header to expand.
   // State is per-FacilityPanel-mount; switching facilities resets to collapsed.
   const [hourlyChartOpen, setHourlyChartOpen] = useState(false)
+  // 2026-07-14: Hourly Breakdown gets the same always-collapsed-initially
+  // treatment as Hourly Chart above, per Dan's request. Same per-mount reset
+  // behavior — switching facilities/dates re-collapses it.
+  const [hourlyBreakdownOpen, setHourlyBreakdownOpen] = useState(false)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -870,88 +874,113 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
             )}
           </div>
 
-          <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span>Hourly Breakdown</span>
-            {seedingDrops
-              ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
-              : hasDropData && (
-                <>
-                  <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    {copyProjectNames.map(name => (
-                      <button
-                        key={name}
-                        className="est-reset-btn"
-                        style={{ opacity: refreshingProject === name ? 0.6 : 1 }}
-                        disabled={refreshingProject !== null}
-                        onClick={() => handleRefreshProject(name)}
-                        title={`Refresh L4W average for ${name}`}
-                      >
-                        {refreshingProject === name ? '...' : '↺'} {name.length > 22 ? name.slice(0, 22) + '…' : name}
-                      </button>
-                    ))}
+          <div className="collapsible-section">
+            <button
+              type="button"
+              className="collapsible-header"
+              onClick={() => setHourlyBreakdownOpen(o => !o)}
+              aria-expanded={hourlyBreakdownOpen}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                width: '100%', padding: '8px 10px', marginTop: 8,
+                background: 'var(--bg0)', border: '1px solid var(--border)', borderRadius: 4,
+                cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 12,
+                color: 'var(--text-primary)', textAlign: 'left',
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>Hourly Breakdown</span>
+              <span style={{
+                fontSize: 10, color: 'var(--text-secondary)',
+                transform: hourlyBreakdownOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                transition: 'transform 0.15s ease',
+              }}>▶</span>
+            </button>
+            {hourlyBreakdownOpen && (
+              <div style={{ marginTop: 6 }}>
+                <div className="section-label" style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  {seedingDrops
+                    ? <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading forecast...</span>
+                    : hasDropData && (
+                      <>
+                        <button className="est-reset-btn" onClick={openCopy}>Copy to dates...</button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {copyProjectNames.map(name => (
+                            <button
+                              key={name}
+                              className="est-reset-btn"
+                              style={{ opacity: refreshingProject === name ? 0.6 : 1 }}
+                              disabled={refreshingProject !== null}
+                              onClick={() => handleRefreshProject(name)}
+                              title={`Refresh L4W average for ${name}`}
+                            >
+                              {refreshingProject === name ? '...' : '↺'} {name.length > 22 ? name.slice(0, 22) + '…' : name}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )
+                  }
+                </div>
+
+                {copyOpen && (
+                  <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                      <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Copy EST drops from {planDate} to:</span>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>From<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyFrom} onChange={e => setCopyFrom(e.target.value)} /></label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>To<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyTo} onChange={e => setCopyTo(e.target.value)} /></label>
+                    </div>
+                    <div style={{ marginBottom: 8, padding: '6px 10px', background: 'var(--bg1)', border: '1px solid var(--border-subtle)', borderRadius: 6, color: 'var(--text-secondary)', fontSize: 10, lineHeight: 1.5 }}>
+                      All 24 hours of each selected project will be marked as manually edited on the destination dates (entire column bolds). This locks those columns from L4W auto-reseed until you edit them again or click the ↺ refresh button.
+                    </div>
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span>Projects to copy:</span>
+                        <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
+                        <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set())}>Clear</button>
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px' }}>
+                        {copyProjectNames.map(name => (
+                          <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                            <input type="checkbox" checked={copyProjects.has(name)} onChange={() => toggleCopyProject(name)} />
+                            <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>{name.length > 28 ? name.slice(0, 28) + '...' : name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>{copying ? 'Copying...' : 'Copy'}</button>
+                      <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
+                      {copyMsg && <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>}
+                    </div>
                   </div>
-                </>
-              )
-            }
+                )}
+
+                {hourlyErr
+                  ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
+                  : <HourlyTable
+                      hourlyData={hourly} estDrops={estDrops}
+                      projectHourlyDrops={visibleProjectHourlyDropsFlat}
+                      manuallyEdited={manuallyEdited}
+                      hourlyAdjustments={hourlyAdjustments}
+                      staffedHourly={rosterStaffed?.hourly}
+                      staffedByHour={rosterStaffed?.byHour}
+                      onProjectHourlyChange={(projectName, h, val) => {
+                        setProjectHourlyDrops(prev => ({
+                          ...prev,
+                          [projectName]: { ...(prev[projectName] ?? {}), [h]: { est_drops: val, manually_edited: true } },
+                        }))
+                        upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
+                      }}
+                      onAdjustmentChange={(h, val) => {
+                        setHourlyAdjustments(prev => ({ ...prev, [h]: val }))
+                        upsertHourlyAdjustment(facility.id, planDate, h, val)
+                      }}
+                      color={facility.color}
+                    />
+                }
+              </div>
+            )}
           </div>
-
-          {copyOpen && (
-            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 11, fontFamily: 'var(--font-mono)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-                <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Copy EST drops from {planDate} to:</span>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>From<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyFrom} onChange={e => setCopyFrom(e.target.value)} /></label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>To<input type="date" className="settings-field-input" style={{ width: 130, padding: '2px 6px' }} value={copyTo} onChange={e => setCopyTo(e.target.value)} /></label>
-              </div>
-              <div style={{ marginBottom: 8, padding: '6px 10px', background: 'var(--bg1)', border: '1px solid var(--border-subtle)', borderRadius: 6, color: 'var(--text-secondary)', fontSize: 10, lineHeight: 1.5 }}>
-                All 24 hours of each selected project will be marked as manually edited on the destination dates (entire column bolds). This locks those columns from L4W auto-reseed until you edit them again or click the ↺ refresh button.
-              </div>
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ color: 'var(--text-secondary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span>Projects to copy:</span>
-                  <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set(copyProjectNames))}>Select all</button>
-                  <button style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: 0 }} onClick={() => setCopyProjects(new Set())}>Clear</button>
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px' }}>
-                  {copyProjectNames.map(name => (
-                    <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                      <input type="checkbox" checked={copyProjects.has(name)} onChange={() => toggleCopyProject(name)} />
-                      <span style={{ color: copyProjects.has(name) ? 'var(--text-primary)' : 'var(--text-dim)' }}>{name.length > 28 ? name.slice(0, 28) + '...' : name}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <button className="est-reset-btn" onClick={handleCopy} disabled={copying}>{copying ? 'Copying...' : 'Copy'}</button>
-                <button className="est-reset-btn" onClick={() => { setCopyOpen(false); setCopyMsg(null) }}>Cancel</button>
-                {copyMsg && <span style={{ color: copyMsg.err ? '#e05a5a' : 'var(--text-secondary)' }}>{copyMsg.text}</span>}
-              </div>
-            </div>
-          )}
-
-          {hourlyErr
-            ? <div style={{ padding: '8px 12px', color: '#e05a5a', fontSize: 11, fontFamily: 'var(--font-mono)', background: 'var(--bg2)', borderRadius: 8, marginBottom: 12 }}>{hourlyErr}</div>
-            : <HourlyTable
-                hourlyData={hourly} estDrops={estDrops}
-                projectHourlyDrops={visibleProjectHourlyDropsFlat}
-                manuallyEdited={manuallyEdited}
-                hourlyAdjustments={hourlyAdjustments}
-                staffedHourly={rosterStaffed?.hourly}
-                staffedByHour={rosterStaffed?.byHour}
-                onProjectHourlyChange={(projectName, h, val) => {
-                  setProjectHourlyDrops(prev => ({
-                    ...prev,
-                    [projectName]: { ...(prev[projectName] ?? {}), [h]: { est_drops: val, manually_edited: true } },
-                  }))
-                  upsertProjectHourlyDrops(facility.id, planDate, [{ project_name: projectName, h, est_drops: val }])
-                }}
-                onAdjustmentChange={(h, val) => {
-                  setHourlyAdjustments(prev => ({ ...prev, [h]: val }))
-                  upsertHourlyAdjustment(facility.id, planDate, h, val)
-                }}
-                color={facility.color}
-              />
-          }
 
           <RosterBoard facility={facility.id} planDate={planDate} settings={settings}
             onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} />
