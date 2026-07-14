@@ -20,13 +20,21 @@
   #   same class of native module — prebuilt binaries per platform, no
   #   build step, but esbuild/zip-it-and-ship-it still needs to be told to
   #   leave it alone and actually ship the binary, same as duckdb above.
-  external_node_modules = ["duckdb", "@napi-rs/canvas"]
+  #   dejavu-fonts-ttf ships the font files @napi-rs/canvas registers at
+  #   runtime (see dailyops-digest-run.cjs "Font registration" comment —
+  #   Netlify's Lambda has zero system fonts, so text draws as nothing
+  #   without an explicitly-registered font file). Only the two specific
+  #   TTF files actually used are included, not the whole ~12MB package.
+  external_node_modules = ["duckdb", "@napi-rs/canvas", "dejavu-fonts-ttf"]
   included_files = [
     "node_modules/duckdb/**",
     "node_modules/@mapbox/node-pre-gyp/**",
     "node_modules/node-addon-api/**",
     "node_modules/@napi-rs/canvas/**",
     "node_modules/@napi-rs/canvas-linux-x64-gnu/**",
+    "node_modules/dejavu-fonts-ttf/package.json",
+    "node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf",
+    "node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf",
   ]
 
 # Bump omni-query timeout from default 10s to 26s (Netlify max for synchronous functions).
