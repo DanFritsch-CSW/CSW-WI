@@ -51,14 +51,14 @@ const FACILITIES = ['cal', 'mad', 'ec', 'ken', 'wr']
 // timeout even at the wider window.
 const FORWARD_DAYS = 21
 
-// Madison-only: Shift Supervisors (209) count toward labor hours at MAD per
-// Dan, 2026-07-10 (see Notion for context). All other facilities keep
+// Shift Supervisors (209) count toward labor hours at MAD (Dan, 2026-07-10)
+// and EC (Dan, 2026-07-14 — Ritchie Hazleton). All other facilities keep
 // excluding 209s exactly as before (this was '205' only, fixed 2026-04-28).
 // This is a self-contained port of the client-side logic in src/lib/omni.js
 // (see getAllowedJobCodes there) — kept faithful per the file's own
 // "Self-contained port" convention so the nightly cron matches manual sync.
 function getAllowedJobCodes(facilityId) {
-  return facilityId === 'mad' ? new Set(['205', '209']) : new Set(['205'])
+  return (facilityId === 'mad' || facilityId === 'ec') ? new Set(['205', '209']) : new Set(['205'])
 }
 
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
@@ -284,9 +284,10 @@ async function fetchActiveB2eEmployees(baseUrl, facilityId) {
     filters: {
       [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
       [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      // Madison-only: also allow 209 (Shift Supervisors) per Dan, 2026-07-10
-      // (see Notion for context). All other facilities stay '205' only.
-      [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: facilityId === 'mad' ? ['205', '209'] : ['205'] },
+      // MAD + EC also allow 209 (Shift Supervisors) — Dan, 2026-07-10 (MAD)
+      // and 2026-07-14 (EC, Ritchie Hazleton). All other facilities stay
+      // '205' only.
+      [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: (facilityId === 'mad' || facilityId === 'ec') ? ['205', '209'] : ['205'] },
     },
     sorts: [],
     limit: 500,
