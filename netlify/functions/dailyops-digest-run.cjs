@@ -25,7 +25,7 @@
 // KpiPills.jsx / dailyProjectRows would show, using the underlying data
 // sources directly (Omni project appointments via motherduck-appointments.cjs,
 // Supabase roster/settings/drops/adjustments) rather than screenshotting
-// the rendered DOM. Two separate Front comments, per Dan's choice.
+// the rendered DOM. Three separate Front comments, per Dan's choice.
 //
 // ── Known simplification — labor req uses facility-default HPA only ─────
 // The live app supports optional per-project hours-per-appt overrides
@@ -696,7 +696,7 @@ async function runDigest({ isManualTest }) {
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
+    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date,skip_to_next_valid_day`
   )
   const settings = settingsRows?.[0]
   const conversationId = settings?.front_conversation_id
@@ -704,23 +704,45 @@ async function runDigest({ isManualTest }) {
     return { ok: false, reason: 'No front_conversation_id configured for Madison Daily Ops in prepick_notify_settings' }
   }
 
-  const dateObj = tomorrowCentral()
+  let dateObj = tomorrowCentral()
+  const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
+  const skipToNextValidDay = settings.skip_to_next_valid_day === true
+
+  // Weekday filter + optional lookahead (2026-07-14, per Dan — "thinking
+  // ahead to other facilities" running 7 days/week vs Mon-Fri). Default:
+  // if tomorrow isn't a configured notify day, skip entirely (no post
+  // that night). skip_to_next_valid_day enabled: advance forward
+  // day-by-day to the next configured day and summarize THAT date
+  // instead — lets a Mon-Fri facility's Friday-night run send Monday's
+  // numbers rather than going silent Fri/Sat/Sun. Capped at +7 days so a
+  // misconfigured empty notify_days can't loop forever.
+  if (!isManualTest && !notifyDays.includes(isoWeekday(dateObj))) {
+    if (!skipToNextValidDay) {
+      return { ok: true, skipped: true, reason: `${isoDate(dateObj)} is not a configured notify day` }
+    }
+    let advanced = 0
+    while (!notifyDays.includes(isoWeekday(dateObj)) && advanced < 7) {
+      dateObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000)
+      advanced++
+    }
+    if (!notifyDays.includes(isoWeekday(dateObj))) {
+      return { ok: true, skipped: true, reason: 'No configured notify day found within 7 days' }
+    }
+  }
   const date = isoDate(dateObj)
 
+  // Content-date (not fire-date) is the dedupe key so the lookahead case
+  // above doesn't re-send the same Monday digest again on Saturday and
+  // Sunday nights too.
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
-    const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
-    if (!notifyDays.includes(isoWeekday(dateObj))) {
-      return { ok: true, skipped: true, reason: `${date} is not a configured notify day` }
-    }
     const notifyHour = settings.notify_hour ?? 22
     const notifyMinute = settings.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
       return { ok: true, skipped: true, reason: 'Not the configured send time yet' }
     }
-    const todayCentral = centralTodayISO()
-    if (settings.last_sent_date === todayCentral) {
-      return { ok: true, skipped: true, reason: 'Already sent today' }
+    if (settings.last_sent_date === date) {
+      return { ok: true, skipped: true, reason: 'Already sent for this date' }
     }
   }
 
@@ -744,7 +766,7 @@ async function runDigest({ isManualTest }) {
   )
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops`, { last_sent_date: centralTodayISO() })
+    await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops`, { last_sent_date: date })
   }
 
   return {
