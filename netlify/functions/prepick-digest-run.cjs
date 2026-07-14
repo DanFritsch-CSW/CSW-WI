@@ -32,6 +32,18 @@
 //     it does not read or write last_sent_date, so a test send doesn't
 //     interfere with the scheduled send happening later that day.
 //
+// ── Weekday filter — added 2026-07-14 (later) ────────────────────────────
+// Dan: no weekend sends. `notify_days` (SMALLINT[], ISO weekday numbers
+// 1=Mon..7=Sun, DEFAULT '{1,2,3,4,5}') is checked against the WEEKDAY OF
+// THE CONTENT DATE — i.e. "tomorrow", the day being summarized — not the
+// weekday the digest actually fires on. This matters because the digest
+// always fires the evening before: a Sunday-night tick summarizes Monday
+// (a workday, so it should send), while a Friday-night tick summarizes
+// Saturday (a non-workday, so it should skip) even though Friday itself
+// is a configured day. Checking the fire-date's weekday instead would get
+// this backwards. Manual test bypasses this filter too, same as the
+// time/active checks above.
+//
 // Two invocation paths (same convention as front-daily-discussion-run.cjs):
 //
 // 1. SCHEDULED (netlify.toml: schedule = "*/15 * * * *" as of 2026-07-14,
@@ -179,6 +191,12 @@ function tomorrowCentral() {
   return todayCentral
 }
 
+// ISO weekday: 1=Mon .. 7=Sun (JS getUTCDay() is 0=Sun..6=Sat).
+function isoWeekday(dateObj) {
+  const dow = dateObj.getUTCDay()
+  return dow === 0 ? 7 : dow
+}
+
 function isoDate(dateObj) {
   return dateObj.toISOString().slice(0, 10)
 }
@@ -272,7 +290,7 @@ async function runDigest({ isManualTest }) {
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick&select=front_conversation_id,notify_hour,notify_minute,active,last_sent_date`
+    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.prepick&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
   const settings = settingsRows?.[0]
   const conversationId = settings?.front_conversation_id
@@ -280,12 +298,19 @@ async function runDigest({ isManualTest }) {
     return { ok: false, reason: 'No front_conversation_id configured for Madison in prepick_notify_settings' }
   }
 
+  const dateObj = tomorrowCentral()
+  const date = isoDate(dateObj)
+
   // Scheduled ticks fire every 15 min (see file header "Configurable send
   // time") — only actually send when this tick matches the configured
   // time and hasn't already fired today. Manual test always sends
   // immediately and never touches last_sent_date.
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
+    const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
+    if (!notifyDays.includes(isoWeekday(dateObj))) {
+      return { ok: true, skipped: true, reason: `${date} is not a configured notify day` }
+    }
     const notifyHour = settings.notify_hour ?? 22
     const notifyMinute = settings.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
@@ -296,9 +321,6 @@ async function runDigest({ isManualTest }) {
       return { ok: true, skipped: true, reason: 'Already sent today' }
     }
   }
-
-  const dateObj = tomorrowCentral()
-  const date = isoDate(dateObj)
 
   const statusRes = await fetch(`${SITE_URL}/.netlify/functions/motherduck-prepick-status`, {
     method: 'POST',
