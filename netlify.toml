@@ -23,8 +23,12 @@
   #   dejavu-fonts-ttf ships the font files @napi-rs/canvas registers at
   #   runtime (see dailyops-digest-run.cjs "Font registration" comment —
   #   Netlify's Lambda has zero system fonts, so text draws as nothing
-  #   without an explicitly-registered font file). Only the two specific
-  #   TTF files actually used are included, not the whole ~12MB package.
+  #   without an explicitly-registered font file). First attempt listed
+  #   only the 2 specific TTF files + package.json in included_files —
+  #   that silently failed to ship at runtime ("Cannot find module
+  #   'dejavu-fonts-ttf/package.json'"). Switched to the same glob
+  #   pattern already proven working for duckdb/@napi-rs/canvas above
+  #   (whole-package `**` glob) rather than exact file paths.
   external_node_modules = ["duckdb", "@napi-rs/canvas", "dejavu-fonts-ttf"]
   included_files = [
     "node_modules/duckdb/**",
@@ -32,9 +36,7 @@
     "node_modules/node-addon-api/**",
     "node_modules/@napi-rs/canvas/**",
     "node_modules/@napi-rs/canvas-linux-x64-gnu/**",
-    "node_modules/dejavu-fonts-ttf/package.json",
-    "node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf",
-    "node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf",
+    "node_modules/dejavu-fonts-ttf/**",
   ]
 
 # Bump omni-query timeout from default 10s to 26s (Netlify max for synchronous functions).
