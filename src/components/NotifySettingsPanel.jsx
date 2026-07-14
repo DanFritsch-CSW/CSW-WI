@@ -24,8 +24,27 @@ import { fetchNotifySettings, upsertNotifySettings, triggerDigestTest } from '..
 // "5:00 PM", removing the stray ":00" that caused the confusion, and
 // (2) added a live "→ 5:15 PM" resolved-time readout next to both
 // dropdowns so the combined result is unambiguous at a glance.
+//
+// Day-of-week filter (2026-07-14, even later): Dan wants Mon-Fri only, no
+// weekend sends, with a visible day indicator rather than a hidden
+// default. Seven toggle buttons (Mon-first display order, ISO weekday
+// numbers 1-7 stored in the DB), defaulting to Mon-Fri selected. The
+// scheduled function checks this against the CONTENT date (tomorrow), not
+// the date it fires on — see prepick-digest-run.cjs's "Weekday filter"
+// note for why.
 const HOURS = Array.from({ length: 24 }, (_, h) => h)
 const MINUTE_BUCKETS = [0, 15, 30, 45]
+const DAYS = [
+  { n: 1, label: 'Mon' }, { n: 2, label: 'Tue' }, { n: 3, label: 'Wed' },
+  { n: 4, label: 'Thu' }, { n: 5, label: 'Fri' }, { n: 6, label: 'Sat' }, { n: 7, label: 'Sun' },
+]
+const DEFAULT_DAYS = [1, 2, 3, 4, 5]
+
+function sameDays(a, b) {
+  if (a.length !== b.length) return false
+  const setB = new Set(b)
+  return a.every(d => setB.has(d))
+}
 
 function hourLabel(h) {
   const period = h >= 12 ? 'PM' : 'AM'
@@ -46,8 +65,9 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
   const [conversationIdSaved, setConversationIdSaved] = useState('')
   const [notifyHour, setNotifyHour] = useState(22)
   const [notifyMinute, setNotifyMinute] = useState(15)
+  const [notifyDays, setNotifyDays] = useState(DEFAULT_DAYS)
   const [active, setActive] = useState(true)
-  const [saved, setSaved] = useState({ notifyHour: 22, notifyMinute: 15, active: true })
+  const [saved, setSaved] = useState({ notifyHour: 22, notifyMinute: 15, notifyDays: DEFAULT_DAYS, active: true })
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
   const [sendingTest, setSendingTest] = useState(false)
@@ -60,17 +80,23 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
         const id = row?.front_conversation_id || ''
         const hour = row?.notify_hour ?? 22
         const minute = row?.notify_minute ?? 15
+        const days = row?.notify_days ?? DEFAULT_DAYS
         const isActive = row?.active ?? true
         setConversationId(id)
         setConversationIdSaved(id)
         setNotifyHour(hour)
         setNotifyMinute(minute)
+        setNotifyDays(days)
         setActive(isActive)
-        setSaved({ notifyHour: hour, notifyMinute: minute, active: isActive })
+        setSaved({ notifyHour: hour, notifyMinute: minute, notifyDays: days, active: isActive })
       })
       .catch(() => {})
     return () => { cancelled = true }
   }, [facility, dashboardType])
+
+  const toggleDay = useCallback((n) => {
+    setNotifyDays(prev => prev.includes(n) ? prev.filter(d => d !== n) : [...prev, n].sort())
+  }, [])
 
   const save = useCallback(async () => {
     setSaving(true)
@@ -78,17 +104,17 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
     try {
       await upsertNotifySettings(facility, dashboardType, {
         frontConversationId: conversationId.trim(),
-        notifyHour, notifyMinute, active,
+        notifyHour, notifyMinute, notifyDays, active,
       })
       setConversationIdSaved(conversationId.trim())
-      setSaved({ notifyHour, notifyMinute, active })
+      setSaved({ notifyHour, notifyMinute, notifyDays, active })
       setMsg({ err: false, text: 'Saved.' })
     } catch (e) {
       setMsg({ err: true, text: e.message || 'Save failed.' })
     } finally {
       setSaving(false)
     }
-  }, [facility, dashboardType, conversationId, notifyHour, notifyMinute, active])
+  }, [facility, dashboardType, conversationId, notifyHour, notifyMinute, notifyDays, active])
 
   const sendTest = useCallback(async () => {
     setSendingTest(true)
@@ -110,6 +136,7 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
   const dirty = conversationId.trim() !== conversationIdSaved
     || notifyHour !== saved.notifyHour
     || notifyMinute !== saved.notifyMinute
+    || !sameDays(notifyDays, saved.notifyDays)
     || active !== saved.active
 
   const btnStyle = {
@@ -162,6 +189,29 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
             </label>
           </div>
 
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, flexWrap: 'wrap' }}>
+            <label style={{ color: 'var(--text-secondary)' }}>Send on:</label>
+            {DAYS.map(d => {
+              const isOn = notifyDays.includes(d.n)
+              return (
+                <button
+                  key={d.n}
+                  type="button"
+                  onClick={() => toggleDay(d.n)}
+                  style={{
+                    ...btnStyle,
+                    padding: '3px 8px',
+                    background: isOn ? 'var(--accent, #4a7)' : 'var(--bg0)',
+                    color: isOn ? '#fff' : 'var(--text-dim)',
+                    borderColor: isOn ? 'var(--accent, #4a7)' : 'var(--border)',
+                  }}
+                >
+                  {d.label}
+                </button>
+              )
+            })}
+          </div>
+
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button type="button" style={btnStyle} onClick={save} disabled={saving || !dirty}>
               {saving ? 'Saving…' : 'Save'}
@@ -184,7 +234,7 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
           )}
 
           <div style={{ marginTop: 8, color: 'var(--text-dim)', lineHeight: 1.5 }}>
-            {digestDescription} Fires automatically at the time above (Central) when Enabled is checked. "Send test digest now" fires immediately for tomorrow's date regardless of the time/enabled setting.
+            {digestDescription} Fires automatically at the time above (Central) on the checked days, when Enabled is checked — the day checked is the date being summarized (tomorrow), not the night it sends. "Send test digest now" fires immediately for tomorrow's date regardless of the time/day/enabled settings.
           </div>
         </div>
       )}
