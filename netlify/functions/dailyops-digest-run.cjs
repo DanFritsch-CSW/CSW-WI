@@ -1,8 +1,10 @@
 'use strict'
 
-// Nightly Daily Ops snapshot digest — posts TWO images (Total Appointments
-// card + Projects table) as separate Front comments, added 2026-07-14 per
-// Dan. Mirrors the prepick-digest-run.cjs / wr-cases-digest-run.cjs
+// Nightly Daily Ops snapshot digest — posts THREE images (Total
+// Appointments card + Projects table + Shift Roster) as separate Front
+// comments, added 2026-07-14 per Dan. Shift Roster (1st/Mid/2nd/3rd/PTO
+// lanes only — no Call-In, per Dan's explicit list) added same day as a
+// follow-up request. Mirrors the prepick-digest-run.cjs / wr-cases-digest-run.cjs
 // configurable-time + Mon-Fri-day-filter + manual-test pattern exactly —
 // see that file's header for the full mechanism (netlify.toml ticks this
 // every 15 min; the function checks current America/Chicago time against
@@ -224,7 +226,7 @@ function computeRosterTotals(rosterRows, settings) {
 async function fetchSnapshotData(date) {
   const [settingsRows, rosterRows, dropsRows, adjRows, projResp] = await Promise.all([
     sbFetch(`facility_settings?facility=eq.${FACILITY_ID}&select=*`),
-    sbFetch(`roster_assignments?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=lane,shift_start,shift_hours,on_loan_to`),
+    sbFetch(`roster_assignments?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=employee_name,lane,shift_start,shift_hours,on_loan_to,from_facility,is_temp`),
     sbFetch(`project_hourly_drops_forecast?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=project_name,est_drops`),
     sbFetch(`hourly_labor_adjustments?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=adjustment`),
     fetch(`${SITE_URL}/.netlify/functions/motherduck-appointments`, {
@@ -289,7 +291,7 @@ async function fetchSnapshotData(date) {
   return {
     date, totalAppts, drops: totalDrops, inb: totalInb, out: totalOut,
     warehousemen: headcount, totalHours, delta, laborReq: totalLaborReq,
-    laborAfterAdj, dailyProjectRows,
+    laborAfterAdj, dailyProjectRows, rosterRows: rosterRows || [],
   }
 }
 
@@ -481,6 +483,196 @@ function renderProjectsTable(data, dateObj) {
   return canvas.toBuffer('image/png')
 }
 
+// ── Shift Roster image (added 2026-07-14) ────────────────────────────────
+// Third snapshot, per Dan: 1st/Mid/2nd/3rd/PTO lanes only — explicitly no
+// Call-In. Mirrors EmployeeTile.jsx's time formatting (fmtHour/fmtShift)
+// and avatarColor/initials exactly, so names/times/colors match the live
+// roster board. on_loan_to employees (leaving this facility) are excluded,
+// matching the Warehousemen headcount elsewhere in this digest; FROM-loan
+// (incoming) employees ARE included, badged "FROM: {code}", also matching
+// the live board.
+const LANE_COLUMNS = [
+  { key: 'shift1', label: '1st Shift' },
+  { key: 'mid', label: 'Mid Shift' },
+  { key: 'shift2', label: '2nd Shift' },
+  { key: 'shift3', label: '3rd Shift' },
+  { key: 'pto', label: 'PTO' },
+]
+
+const AVATAR_PALETTE = ['#e07b4d', '#4d9de0', '#3dba7e', '#d4b84a', '#c084fc', '#e05c5c', '#4dc9e0']
+function avatarColor(name) {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff
+  return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length]
+}
+function initials(name) {
+  return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
+}
+function fmtHour(h) {
+  const n = ((h % 24) + 24) % 24
+  const hr = Math.floor(n)
+  const mins = Math.round((n - hr) * 60)
+  const disp = hr === 0 || hr === 12 ? 12 : hr % 12
+  const suf = hr < 12 ? 'am' : 'pm'
+  return `${disp}:${String(mins).padStart(2, '0')}${suf}`
+}
+function fmtShift(start, hours) {
+  if (start == null) return null
+  const end = (start + (hours ?? 8)) % 24
+  return `${fmtHour(start)} – ${fmtHour(end)}`
+}
+
+const FACILITY_CODE_MAP = { cal: 'CAL', mad: 'MAD', ken: 'KEN', wr: 'WR', ec: 'EC' }
+
+function groupRosterByLane(rosterRows) {
+  const groups = { shift1: [], mid: [], shift2: [], shift3: [], pto: [] }
+  for (const row of rosterRows) {
+    if (row.on_loan_to) continue // leaving this facility — excluded, matches headcount KPI elsewhere
+    if (!groups[row.lane]) continue // excludes callin + any unrecognized lane
+    groups[row.lane].push(row)
+  }
+  for (const key of Object.keys(groups)) {
+    groups[key].sort((a, b) => {
+      const as = a.shift_start ?? 999
+      const bs = b.shift_start ?? 999
+      return as - bs
+    })
+  }
+  return groups
+}
+
+function renderShiftRoster(rosterRows, dateObj) {
+  const create = loadCanvasLib()
+  const groups = groupRosterByLane(rosterRows)
+
+  const COL_W = 246
+  const COL_GAP = 12
+  const CARD_H = 58
+  const CARD_GAP = 8
+  const HEADER_H = 96
+  const COL_HEADER_H = 40
+  const PAD = 20
+
+  const maxRows = Math.max(1, ...LANE_COLUMNS.map(c => groups[c.key].length))
+  const W = PAD * 2 + LANE_COLUMNS.length * COL_W + (LANE_COLUMNS.length - 1) * COL_GAP
+  const H = HEADER_H + COL_HEADER_H + maxRows * (CARD_H + CARD_GAP) + PAD
+
+  const canvas = create(W, H)
+  const ctx = canvas.getContext('2d')
+
+  ctx.fillStyle = THEME.bg0
+  ctx.fillRect(0, 0, W, H)
+
+  ctx.fillStyle = THEME.textSecondary
+  ctx.font = FONT(15, true)
+  ctx.fillText(`${FACILITY_LABEL} — Shift Roster`, PAD, 32)
+  ctx.font = FONT(13, false)
+  ctx.fillStyle = THEME.textDim
+  ctx.fillText(formatHeaderDate(dateObj), PAD, 52)
+
+  LANE_COLUMNS.forEach((col, colIdx) => {
+    const x = PAD + colIdx * (COL_W + COL_GAP)
+    const rows = groups[col.key]
+    const colTop = HEADER_H
+    const colH = COL_HEADER_H + Math.max(rows.length, 1) * (CARD_H + CARD_GAP)
+
+    roundRect(ctx, x, colTop, COL_W, colH, 8)
+    ctx.fillStyle = THEME.bg1
+    ctx.fill()
+    ctx.strokeStyle = THEME.border
+    ctx.lineWidth = 1
+    ctx.stroke()
+
+    ctx.fillStyle = THEME.textSecondary
+    ctx.font = FONT(12, true)
+    ctx.fillText(col.label.toUpperCase(), x + 14, colTop + 25)
+    // count badge
+    ctx.beginPath()
+    ctx.arc(x + COL_W - 22, colTop + 20, 12, 0, Math.PI * 2)
+    ctx.fillStyle = THEME.bg2
+    ctx.fill()
+    ctx.strokeStyle = THEME.border
+    ctx.stroke()
+    ctx.fillStyle = THEME.textPrimary
+    ctx.font = FONT(11, true)
+    const countStr = String(rows.length)
+    const countW = ctx.measureText(countStr).width
+    ctx.fillText(countStr, x + COL_W - 22 - countW / 2, colTop + 24)
+
+    if (rows.length === 0) {
+      ctx.font = FONT(11, false)
+      ctx.fillStyle = THEME.textDim
+      ctx.fillText('No one scheduled', x + 14, colTop + COL_HEADER_H + 22)
+    }
+
+    rows.forEach((row, i) => {
+      const cardY = colTop + COL_HEADER_H + i * (CARD_H + CARD_GAP)
+      const cardX = x + 6
+      const cardW = COL_W - 12
+
+      // Left accent strip color: PTO lane green, FROM-loan blue, TEMP yellow, else facility color
+      let accent = FACILITY_COLOR
+      if (col.key === 'pto') accent = THEME.green
+      else if (row.from_facility) accent = '#4d9de0'
+      else if (row.is_temp) accent = '#d4b84a'
+
+      roundRect(ctx, cardX, cardY, cardW, CARD_H, 6)
+      ctx.fillStyle = THEME.bg2
+      ctx.fill()
+      ctx.strokeStyle = THEME.borderSubtle
+      ctx.lineWidth = 1
+      ctx.stroke()
+      ctx.fillStyle = accent
+      ctx.fillRect(cardX, cardY, 4, CARD_H)
+
+      // Avatar circle
+      const name = row.employee_name || '?'
+      const avX = cardX + 24
+      const avY = cardY + CARD_H / 2
+      ctx.beginPath()
+      ctx.arc(avX, avY, 14, 0, Math.PI * 2)
+      ctx.fillStyle = avatarColor(name)
+      ctx.fill()
+      ctx.fillStyle = '#ffffff'
+      ctx.font = FONT(10, true)
+      const inits = initials(name)
+      const initsW = ctx.measureText(inits).width
+      ctx.fillText(inits, avX - initsW / 2, avY + 4)
+
+      // Name
+      const textX = cardX + 48
+      ctx.fillStyle = THEME.textPrimary
+      ctx.font = FONT(12, true)
+      const displayName = name.length > 20 ? name.slice(0, 20) + '…' : name
+      ctx.fillText(displayName, textX, cardY + 20)
+
+      // Badge (one of: PTO / FROM: X / TEMP) + shift time on the same line below
+      let badgeText = null
+      let badgeColor = null
+      if (col.key === 'pto') { badgeText = 'PTO'; badgeColor = THEME.green }
+      else if (row.from_facility) { badgeText = `FROM: ${FACILITY_CODE_MAP[row.from_facility] ?? row.from_facility.toUpperCase()}`; badgeColor = '#4d9de0' }
+      else if (row.is_temp) { badgeText = 'TEMP'; badgeColor = '#d4b84a' }
+
+      let lineY = cardY + 36
+      if (badgeText) {
+        ctx.font = FONT(9, true)
+        ctx.fillStyle = badgeColor
+        ctx.fillText(badgeText, textX, lineY)
+        lineY += 14
+      }
+
+      const shiftLabel = fmtShift(row.shift_start, row.shift_hours)
+      if (shiftLabel) {
+        ctx.font = FONT(10, false)
+        ctx.fillStyle = THEME.textSecondary
+        ctx.fillText(shiftLabel, textX, lineY)
+      }
+    })
+  })
+
+  return canvas.toBuffer('image/png')
+}
+
 // ── Front posting ─────────────────────────────────────────────────────────
 async function postImageComment(conversationId, pngBuffer, filename, caption) {
   const form = new FormData()
@@ -535,6 +727,7 @@ async function runDigest({ isManualTest }) {
   const data = await fetchSnapshotData(date)
   const cardPng = renderTotalAppointmentsCard(data, dateObj)
   const tablePng = renderProjectsTable(data, dateObj)
+  const rosterPng = renderShiftRoster(data.rosterRows, dateObj)
 
   const headerDate = formatHeaderDate(dateObj)
   const cardResult = await postImageComment(
@@ -545,6 +738,10 @@ async function runDigest({ isManualTest }) {
     conversationId, tablePng, 'projects.png',
     `${FACILITY_LABEL} Daily Ops — Projects — ${headerDate}`
   )
+  const rosterResult = await postImageComment(
+    conversationId, rosterPng, 'shift-roster.png',
+    `${FACILITY_LABEL} Daily Ops — Shift Roster — ${headerDate}`
+  )
 
   if (!isManualTest) {
     await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops`, { last_sent_date: centralTodayISO() })
@@ -552,7 +749,7 @@ async function runDigest({ isManualTest }) {
 
   return {
     ok: true, date, conversationId,
-    cardCommentId: cardResult.id, tableCommentId: tableResult.id,
+    cardCommentId: cardResult.id, tableCommentId: tableResult.id, rosterCommentId: rosterResult.id,
     totalAppts: data.totalAppts, projectCount: data.dailyProjectRows.length,
   }
 }
