@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import NotifySettingsPanel from '../NotifySettingsPanel.jsx'
 import {
   FEFO_PROJECTS, getProject, dateVerb,
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
@@ -101,6 +102,7 @@ export default function FefoRotationTab() {
         liveResult={liveResult}
         onRefresh={refetch}
       />
+      <FefoNotifySettings />
       <Banners banners={banners} />
       <UndatedLotsBanner lots={undatedLots} />
       <KpiRow kpis={kpis} />
@@ -115,6 +117,61 @@ export default function FefoRotationTab() {
         loading={loading && visible.length === 0}
         onRefetch={refetch}
       />
+    </div>
+  )
+}
+
+// FefoNotifySettings — per-project nightly digest configs, added 2026-07-14
+// per Dan's request. Unlike Pre-Pick/Cases/Daily Ops (one settings row per
+// facility), FEFO gets ONE ROW PER PROJECT — each of the 5 KEN FEFO
+// customers has its own Front conversation, send time, and Enabled toggle,
+// since Dan wants full control over which customers' rotation status goes
+// where and when. All 5 rows live in the same prepick_notify_settings table
+// (facility='ken', dashboard_type='fefo_<projectId>') and are served by one
+// shared Netlify function (fefo-digest-run.cjs) — see that file's header
+// for why a shared function backs 5 rows instead of 5 separate files.
+//
+// Content date is TODAY (not tomorrow) since FEFO is "is rotation compliant
+// right now", not an appointment-staffing forecast — see fefo-digest-run.cjs
+// header for the full reasoning. Content scope is full status per project
+// (order count + every non-clean category + undated lots), confirmed with
+// Dan rather than violations-only.
+function FefoNotifySettings() {
+  const [open, setOpen] = useState(false)
+  const btnStyle = {
+    background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 4,
+    color: 'var(--text-primary)', fontSize: 11, fontFamily: 'var(--font-mono)',
+    padding: '4px 10px', cursor: 'pointer',
+  }
+  return (
+    <div>
+      <button type="button" style={btnStyle} onClick={() => setOpen(o => !o)}>
+        {open ? 'Hide FEFO notify settings' : 'FEFO notify settings (per customer)'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {FEFO_PROJECTS.map(p => (
+            <div key={p.id} style={{
+              border: '1px solid var(--border)', borderLeft: `3px solid ${p.color}`,
+              borderRadius: 'var(--r-md, 8px)', padding: '8px 12px',
+            }}>
+              <div style={{
+                fontSize: 11, fontWeight: 600, color: p.color,
+                fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginBottom: 4,
+              }}>{p.code} · {p.name}</div>
+              <NotifySettingsPanel
+                facility="ken"
+                dashboardType={`fefo_${p.id}`}
+                functionName="fefo-digest-run"
+                manualTestBody={{ dashboardType: `fefo_${p.id}` }}
+                contentDateLabel="today"
+                showSkipToNextValidDay={false}
+                digestDescription={`Posts a full rotation-status summary for ${p.name} (order count, violations w/ severity, holds, stale, undated lots) to the configured Front conversation.`}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
