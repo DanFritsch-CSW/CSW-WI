@@ -1815,13 +1815,19 @@ export async function triggerDailyDiscussionTest(facility) {
 // 2026-07-14, default Mon-Fri) restricts which content-date weekdays the
 // digest fires for — see prepick-digest-run.cjs's "Weekday filter" note
 // for why this checks the day being summarized, not the day the digest
-// actually sends on.
+// actually sends on. `skip_to_next_valid_day` (boolean, default false,
+// added 2026-07-14 later same day) opts a facility into looking ahead to
+// the next configured day instead of skipping when the content date isn't
+// valid — e.g. a Mon-Fri facility's Friday-night run sends Monday's
+// numbers instead of nothing. Off by default; per-row so 7-day-a-week
+// facilities are unaffected. See prepick-digest-run.cjs's
+// "Skip-to-next-valid-day lookahead" note for the full mechanism.
 
 export async function fetchNotifySettings(facility, dashboardType) {
   if (!supabase) return null
   const { data, error } = await supabase
     .from('prepick_notify_settings')
-    .select('front_conversation_id, notify_hour, notify_minute, notify_days, active')
+    .select('front_conversation_id, notify_hour, notify_minute, notify_days, active, skip_to_next_valid_day')
     .eq('facility', facility)
     .eq('dashboard_type', dashboardType)
     .maybeSingle()
@@ -1829,7 +1835,7 @@ export async function fetchNotifySettings(facility, dashboardType) {
   return data
 }
 
-export async function upsertNotifySettings(facility, dashboardType, { frontConversationId, notifyHour, notifyMinute, notifyDays, active }) {
+export async function upsertNotifySettings(facility, dashboardType, { frontConversationId, notifyHour, notifyMinute, notifyDays, active, skipToNextValidDay }) {
   if (!supabase) return
   const { error } = await supabase
     .from('prepick_notify_settings')
@@ -1838,6 +1844,7 @@ export async function upsertNotifySettings(facility, dashboardType, { frontConve
         facility, dashboard_type: dashboardType,
         front_conversation_id: frontConversationId,
         notify_hour: notifyHour, notify_minute: notifyMinute, notify_days: notifyDays, active,
+        skip_to_next_valid_day: skipToNextValidDay,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'facility,dashboard_type' }
