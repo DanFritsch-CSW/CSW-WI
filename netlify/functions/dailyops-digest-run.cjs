@@ -674,6 +674,13 @@ function renderShiftRoster(rosterRows, dateObj) {
 }
 
 // ── Front posting ─────────────────────────────────────────────────────────
+// Caption wording trimmed 2026-07-14 (per Dan) — the original captions
+// repeated "Madison Daily Ops — {label} — {date}" on all three comments,
+// which read as redundant stacked one after another in Front. Now: the
+// date is stated once (first comment: date + "Labor Planning"), and the
+// next two are short distinguishing labels only ("Projects - Total
+// Appts", "Shift Roster") — the images themselves already carry the
+// facility name and date in their own headers, so nothing is lost.
 async function postImageComment(conversationId, pngBuffer, filename, caption) {
   const form = new FormData()
   form.set('body', caption)
@@ -754,15 +761,15 @@ async function runDigest({ isManualTest }) {
   const headerDate = formatHeaderDate(dateObj)
   const cardResult = await postImageComment(
     conversationId, cardPng, 'total-appointments.png',
-    `${FACILITY_LABEL} Daily Ops — Total Appointments — ${headerDate}`
+    `${headerDate}\nLabor Planning`
   )
   const tableResult = await postImageComment(
     conversationId, tablePng, 'projects.png',
-    `${FACILITY_LABEL} Daily Ops — Projects — ${headerDate}`
+    `Projects - Total Appts`
   )
   const rosterResult = await postImageComment(
     conversationId, rosterPng, 'shift-roster.png',
-    `${FACILITY_LABEL} Daily Ops — Shift Roster — ${headerDate}`
+    `Shift Roster`
   )
 
   if (!isManualTest) {
