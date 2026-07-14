@@ -36,6 +36,14 @@
 // selected in the app per Dan's 2026-07-14 answer — the digest's whole
 // purpose is a heads-up for the next day, so it stays "tomorrow" the same
 // way the original Omni email dashboard did.
+//
+// ── Weekday filter — added 2026-07-14 (later) ────────────────────────────
+// No weekend sends, mirrors prepick-digest-run.cjs's identical addition.
+// `notify_days` (ISO weekday numbers 1=Mon..7=Sun, default Mon-Fri) is
+// checked against tomorrow's weekday (the content date), not the weekday
+// the digest fires on — a Sunday-night tick summarizes Monday (a workday,
+// sends) while a Friday-night tick summarizes Saturday (skips). Manual
+// test bypasses this filter.
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -104,6 +112,13 @@ function tomorrowCentral() {
   return todayCentral
 }
 
+// ISO weekday: 1=Mon .. 7=Sun (JS getUTCDay() is 0=Sun..6=Sat). Checked
+// against the CONTENT date (tomorrow) — see file header "Weekday filter".
+function isoWeekday(dateObj) {
+  const dow = dateObj.getUTCDay()
+  return dow === 0 ? 7 : dow
+}
+
 function isoDate(dateObj) {
   return dateObj.toISOString().slice(0, 10)
 }
@@ -160,7 +175,7 @@ async function runDigest({ isManualTest }) {
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.wr&dashboard_type=eq.cases_to_pick&select=front_conversation_id,notify_hour,notify_minute,active,last_sent_date`
+    `prepick_notify_settings?facility=eq.wr&dashboard_type=eq.cases_to_pick&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
   const settings = settingsRows?.[0]
   const conversationId = settings?.front_conversation_id
@@ -168,8 +183,15 @@ async function runDigest({ isManualTest }) {
     return { ok: false, reason: 'No front_conversation_id configured for WR Cases To Pick in prepick_notify_settings' }
   }
 
+  const dateObj = tomorrowCentral()
+  const date = isoDate(dateObj)
+
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
+    const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
+    if (!notifyDays.includes(isoWeekday(dateObj))) {
+      return { ok: true, skipped: true, reason: `${date} is not a configured notify day` }
+    }
     const notifyHour = settings.notify_hour ?? 22
     const notifyMinute = settings.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
@@ -180,9 +202,6 @@ async function runDigest({ isManualTest }) {
       return { ok: true, skipped: true, reason: 'Already sent today' }
     }
   }
-
-  const dateObj = tomorrowCentral()
-  const date = isoDate(dateObj)
 
   const casesRes = await fetch(`${SITE_URL}/.netlify/functions/motherduck-wr-cases`, {
     method: 'POST',
