@@ -118,17 +118,39 @@ function fmt(n) {
   return Math.round(n).toLocaleString()
 }
 
+// ── Message format — revised 2026-07-14 (later same day) per Dan ────────
+// Restructured to match his exact draft, plus one fix and one enhancement:
+//   - Fix: the original "  # of Full Pallets: 31" line rendered in Front
+//     as "of Full Pallets: 31" — the "#" silently disappeared. Front
+//     comments run through a Markdown parser (confirmed via Front's own
+//     help docs: **bold**, *italic*, ~~strikethrough~~, `code` are all
+//     supported), and CommonMark treats a "#" preceded by up to 3 spaces
+//     as an ATX heading marker — it gets stripped even though it wasn't
+//     meant as a heading. Fix: no line starts with "#" anymore.
+//   - Enhancement: Dan wants Total Pickline Volume to visually stand out
+//     as the headline number. Front's comment API only reliably supports
+//     the four Markdown styles above — no font-size or highlight-color
+//     control. **Bold** plus isolating the line on its own paragraph
+//     between plain unicode divider rules is the strongest emphasis
+//     available without relying on untested/undocumented rendering.
 function buildDigestBody(data, dateObj) {
   const lines = []
-  lines.push(`Bernatello's - Wisconsin Rapids: Cases To Pick — ${formatHeaderDate(dateObj)}`)
+  lines.push(`Bernatello's - Wisconsin Rapids:`)
+  lines.push(`Cases To Pick — ${formatHeaderDate(dateObj)}`)
   lines.push('')
-  lines.push(`Total DSD Cases (Pickline & Outside): ${fmt(data.totalDsdCases)}`)
-  lines.push(`  Pickline Volume: ${fmt(data.picklineVolume)}`)
-  lines.push(`  Cases To Pick Outside Pickline: ${fmt(data.casesOutsidePickline)} (Full pallet pick: ${fmt(data.fullPalletPickCount)} · Case pick: ${fmt(data.casePickCases)})`)
+  lines.push(`Total DSD Cases (Pickline & Outside): ${fmt(data.totalDsdCases)} Cases`)
+  lines.push(`• To Pick Outside Pickline: ${fmt(data.casesOutsidePickline)}`)
+  lines.push(`• Full pallet pick: ${fmt(data.fullPalletPickCount)}`)
+  lines.push(`• Warehouse Case pick: ${fmt(data.casePickCases)}`)
   lines.push('')
+  lines.push('━━━━━━━━━━━━━━━━━━━━')
+  lines.push(`**TOTAL PICKLINE VOLUME: ${fmt(data.picklineVolume)}**`)
+  lines.push('━━━━━━━━━━━━━━━━━━━━')
+  lines.push('')
+  lines.push(`Total NON-DSD Orders Tomorrow:`)
   lines.push(`NON-DSD Cases: ${fmt(data.nonDsdCases)}`)
-  lines.push(`  # of Full Pallets: ${fmt(data.fullPalletsSo)}`)
-  lines.push(`  Case Picking on SO Orders: ${fmt(data.casePickingOnSoOrders)}`)
+  lines.push(`Full Pallets: ${fmt(data.fullPalletsSo)}`)
+  lines.push(`Case Picking on SO Orders: ${fmt(data.casePickingOnSoOrders)}`)
   return lines.join('\n')
 }
 
