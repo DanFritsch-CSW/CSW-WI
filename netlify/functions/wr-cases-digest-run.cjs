@@ -44,6 +44,16 @@
 // the digest fires on — a Sunday-night tick summarizes Monday (a workday,
 // sends) while a Friday-night tick summarizes Saturday (skips). Manual
 // test bypasses this filter.
+//
+// ── Skip-to-next-valid-day lookahead — added 2026-07-14 (still later) ────
+// Same optional per-row behavior as prepick-digest-run.cjs and
+// dailyops-digest-run.cjs — see prepick-digest-run.cjs's header for the
+// full rationale. `skip_to_next_valid_day` (default false) lets a
+// Friday-night run advance forward to the next configured day (e.g.
+// Monday) and summarize THAT date instead of just skipping the weekend
+// silently. `last_sent_date` now dedupes against the CONTENT date rather
+// than the fire date, so the lookahead case can't post the same Monday
+// digest three times (Fri/Sat/Sun nights all landing on Monday).
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -175,7 +185,7 @@ async function runDigest({ isManualTest }) {
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.wr&dashboard_type=eq.cases_to_pick&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
+    `prepick_notify_settings?facility=eq.wr&dashboard_type=eq.cases_to_pick&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date,skip_to_next_valid_day`
   )
   const settings = settingsRows?.[0]
   const conversationId = settings?.front_conversation_id
@@ -183,23 +193,40 @@ async function runDigest({ isManualTest }) {
     return { ok: false, reason: 'No front_conversation_id configured for WR Cases To Pick in prepick_notify_settings' }
   }
 
-  const dateObj = tomorrowCentral()
+  let dateObj = tomorrowCentral()
+  const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
+  const skipToNextValidDay = settings.skip_to_next_valid_day === true
+
+  // Weekday filter + optional lookahead (2026-07-14) — see
+  // dailyops-digest-run.cjs / prepick-digest-run.cjs for the full
+  // rationale (same shared prepick_notify_settings mechanism). Default
+  // is skip entirely when tomorrow isn't a configured day; enabling
+  // skip_to_next_valid_day advances forward to the next configured day
+  // instead, capped at +7.
+  if (!isManualTest && !notifyDays.includes(isoWeekday(dateObj))) {
+    if (!skipToNextValidDay) {
+      return { ok: true, skipped: true, reason: `${isoDate(dateObj)} is not a configured notify day` }
+    }
+    let advanced = 0
+    while (!notifyDays.includes(isoWeekday(dateObj)) && advanced < 7) {
+      dateObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000)
+      advanced++
+    }
+    if (!notifyDays.includes(isoWeekday(dateObj))) {
+      return { ok: true, skipped: true, reason: 'No configured notify day found within 7 days' }
+    }
+  }
   const date = isoDate(dateObj)
 
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
-    const notifyDays = settings.notify_days ?? [1, 2, 3, 4, 5]
-    if (!notifyDays.includes(isoWeekday(dateObj))) {
-      return { ok: true, skipped: true, reason: `${date} is not a configured notify day` }
-    }
     const notifyHour = settings.notify_hour ?? 22
     const notifyMinute = settings.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
       return { ok: true, skipped: true, reason: 'Not the configured send time yet' }
     }
-    const todayCentral = centralTodayISO()
-    if (settings.last_sent_date === todayCentral) {
-      return { ok: true, skipped: true, reason: 'Already sent today' }
+    if (settings.last_sent_date === date) {
+      return { ok: true, skipped: true, reason: 'Already sent for this date' }
     }
   }
 
@@ -235,7 +262,7 @@ async function runDigest({ isManualTest }) {
   }
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.wr&dashboard_type=eq.cases_to_pick`, { last_sent_date: centralTodayISO() })
+    await sbPatch(`prepick_notify_settings?facility=eq.wr&dashboard_type=eq.cases_to_pick`, { last_sent_date: date })
   }
 
   return { ok: true, date, conversationId, commentId: frontJson.id }
