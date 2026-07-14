@@ -1811,12 +1811,17 @@ export async function triggerDailyDiscussionTest(facility) {
 // prepick-digest-run.cjs's file header for why the schedule check moved
 // inside the function instead of netlify.toml. `active` lets a digest be
 // paused without clearing its conversation ID or configured time.
+// `notify_days` (SMALLINT[], ISO weekday numbers 1=Mon..7=Sun, added
+// 2026-07-14, default Mon-Fri) restricts which content-date weekdays the
+// digest fires for — see prepick-digest-run.cjs's "Weekday filter" note
+// for why this checks the day being summarized, not the day the digest
+// actually sends on.
 
 export async function fetchNotifySettings(facility, dashboardType) {
   if (!supabase) return null
   const { data, error } = await supabase
     .from('prepick_notify_settings')
-    .select('front_conversation_id, notify_hour, notify_minute, active')
+    .select('front_conversation_id, notify_hour, notify_minute, notify_days, active')
     .eq('facility', facility)
     .eq('dashboard_type', dashboardType)
     .maybeSingle()
@@ -1824,7 +1829,7 @@ export async function fetchNotifySettings(facility, dashboardType) {
   return data
 }
 
-export async function upsertNotifySettings(facility, dashboardType, { frontConversationId, notifyHour, notifyMinute, active }) {
+export async function upsertNotifySettings(facility, dashboardType, { frontConversationId, notifyHour, notifyMinute, notifyDays, active }) {
   if (!supabase) return
   const { error } = await supabase
     .from('prepick_notify_settings')
@@ -1832,7 +1837,7 @@ export async function upsertNotifySettings(facility, dashboardType, { frontConve
       {
         facility, dashboard_type: dashboardType,
         front_conversation_id: frontConversationId,
-        notify_hour: notifyHour, notify_minute: notifyMinute, active,
+        notify_hour: notifyHour, notify_minute: notifyMinute, notify_days: notifyDays, active,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'facility,dashboard_type' }
