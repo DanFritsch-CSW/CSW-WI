@@ -16,11 +16,17 @@
   #      finds nothing at runtime and throws "Connection Error: Connection
   #      was never established" within a few ms — misleading error coming
   #      from duckdb's constructor when the native binding fails to load.
-  external_node_modules = ["duckdb"]
+  #   @napi-rs/canvas (added 2026-07-14, dailyops-digest-run.cjs) is the
+  #   same class of native module — prebuilt binaries per platform, no
+  #   build step, but esbuild/zip-it-and-ship-it still needs to be told to
+  #   leave it alone and actually ship the binary, same as duckdb above.
+  external_node_modules = ["duckdb", "@napi-rs/canvas"]
   included_files = [
     "node_modules/duckdb/**",
     "node_modules/@mapbox/node-pre-gyp/**",
     "node_modules/node-addon-api/**",
+    "node_modules/@napi-rs/canvas/**",
+    "node_modules/@napi-rs/canvas-linux-x64-gnu/**",
   ]
 
 # Bump omni-query timeout from default 10s to 26s (Netlify max for synchronous functions).
@@ -89,6 +95,19 @@
 # 'cases_to_pick' in prepick_notify_settings). Posts a comment summarizing
 # TOMORROW's Bernatello's - Wisconsin Rapids Cases To Pick numbers.
 [functions."wr-cases-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# Madison Daily Ops nightly snapshot digest — added 2026-07-14, same
+# every-15-min tick + configurable notify_hour/notify_minute/notify_days
+# pattern as prepick-digest-run.cjs (facility='mad', dashboard_type=
+# 'daily_ops' in prepick_notify_settings). Renders two PNGs (Total
+# Appointments card + Projects table) via @napi-rs/canvas and posts them
+# as two separate Front comments — see dailyops-digest-run.cjs file
+# header for why images instead of text, and the documented calculation
+# simplifications (facility-default HPA only, no per-employee break
+# overrides, no carryover tail employees).
+[functions."dailyops-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
