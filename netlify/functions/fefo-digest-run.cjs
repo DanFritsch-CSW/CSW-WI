@@ -61,6 +61,14 @@
 // document — see wr-cases-digest-run.cjs's discovery of this), so emphasis
 // here uses bold + plain unicode divider rules (─), not "#".
 //
+// ── Link back to the app (2026-07-14, still later) ──────────────────────────
+// Dan asked for a link to the live FEFO Rotation tab, formatted like a
+// Markdown link (`[CSW Operations Hub](url)`) — same request shape as the
+// Daily Ops digest's link-back. Same fix applies: Front's comment API does
+// NOT render `[text](url)` as clickable (shows the literal brackets), so
+// this uses a bare URL instead (Front auto-linkifies it), with the label
+// as a separate plain-text line rather than the link text itself.
+//
 // Data source: proxies to fefo-orders.cjs (the same MotherDuck-backed
 // function the live FEFO Rotation tab uses). dayCount is sized dynamically
 // to cover however many days out the resolved content date lands (capped at
@@ -99,6 +107,11 @@ const FEFO_PROJECTS = [
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_${p.id}`, p]))
 const DEFAULT_NOTIFY_DAYS = [1, 2, 3, 4, 5]
+// APP_URL — added 2026-07-14 (later, per Dan's request), same link-back-to-
+// the-app treatment as the other digests. Not scoped to a specific project
+// (FefoRotationTab.jsx has no per-project URL param today), so every
+// project's digest links to the same FEFO Rotation tab.
+const APP_URL = 'https://csw-wi.netlify.app/customers?tab=fefo'
 
 async function sbFetch(path) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -272,6 +285,11 @@ function undatedLotCount(orders) {
 function buildDigestBody(orders, project, dateObj) {
   const lines = []
   lines.push(`FEFO Rotation — ${project.name} (${project.code})`)
+  // Bare URL (not a Markdown link) — Front's comment API doesn't render
+  // [text](url) as clickable, it shows the literal brackets. A bare URL is
+  // what Front auto-linkifies. See file header "Link back to the app".
+  lines.push(APP_URL)
+  lines.push('CSW Operations Hub')
   lines.push(`Next business day: ${formatHeaderDate(dateObj)}`)
   lines.push('')
 
