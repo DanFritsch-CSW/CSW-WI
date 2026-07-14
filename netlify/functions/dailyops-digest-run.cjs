@@ -147,6 +147,17 @@ function stripSuffix(name) {
   return name
 }
 
+// Mirrors classifyApptType in src/lib/omni.js — motherduck-appointments.cjs
+// returns raw project x direction rows (dock_appointment_type_name +
+// count), not pre-aggregated {name, inb, out}. This has to do the same
+// classification the client normally does.
+function classifyApptType(typeName) {
+  const t = (typeName || '').toLowerCase()
+  if (t.startsWith('inbound')) return 'inbound'
+  if (t.startsWith('outbound')) return 'outbound'
+  return null
+}
+
 function r1(n) { return Math.round(n * 10) / 10 }
 
 // ── Labor calc port (subset of src/lib/laborCalc.js needed here — no
@@ -228,16 +239,18 @@ async function fetchSnapshotData(date) {
   }
   totalDrops = Math.round(totalDrops)
 
-  const apptProjects = (projResp?.projects ?? [])
+  const apptRows = (projResp?.projects ?? [])
   const projectRowsMap = new Map()
-  for (const p of apptProjects) {
-    const name = stripSuffix(p.name || p.project_name)
-    if (!name) continue
-    const inb = Number(p.inb) || 0
-    const out = Number(p.out) || 0
+  for (const row of apptRows) {
+    const rawName = row.project_name
+    if (!rawName) continue
+    const name = stripSuffix(rawName)
+    const dir = classifyApptType(row.dock_appointment_type_name)
+    const count = Number(row.count) || 0
     if (!projectRowsMap.has(name)) projectRowsMap.set(name, { name, inb: 0, out: 0 })
-    const r = projectRowsMap.get(name)
-    r.inb += inb; r.out += out
+    const p = projectRowsMap.get(name)
+    if (dir === 'inbound') p.inb += count
+    if (dir === 'outbound') p.out += count
   }
   const dailyProjectRows = [...projectRowsMap.values()].map(p => {
     const dr = Math.round(projectDrops[p.name] ?? 0)
