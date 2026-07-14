@@ -121,6 +121,19 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# FEFO Rotation nightly digest — added 2026-07-14, per-project (not
+# per-facility) — one prepick_notify_settings row per FEFO customer
+# (facility='ken', dashboard_type='fefo_<projectId>'), all served by this
+# one shared function. Same every-15-min tick pattern as the other digests,
+# but content date is TODAY not tomorrow (FEFO is "is rotation compliant
+# right now", no appointment lead-time to look ahead across) — see
+# fefo-digest-run.cjs file header for the full reasoning. Posts a full
+# rotation-status summary (order count, violations w/ severity, holds,
+# stale, undated lots) as a Front comment per project.
+[functions."fefo-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
 # Revision Tracker sync — runs every 15 min (unlike the daily/nightly jobs
 # above, this covers time-sensitive customer-facing issues — SLA breach/
 # warning tags need to show up in-app well before end of day). Pulls
