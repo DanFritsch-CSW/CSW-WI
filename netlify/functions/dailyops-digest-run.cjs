@@ -183,10 +183,16 @@ function resolveEmployeeShift(row) {
   return { resolvedStart: realStart, resolvedHours: realHours }
 }
 
-// Returns { totalHours, headcount } — break-adjusted total hours + active headcount.
+// Returns { totalHours, headcount } — break-adjusted total hours + active
+// headcount. Builds a 24-hour array and rounds EACH HOUR to 1 decimal
+// before summing (matches buildRosterAvailability + FacilityPanel's
+// totalHoursAvail exactly) — rounding only the final scalar total (the
+// original version of this function) can drift ~0.1h from the live app
+// when multiple employees' fractional break multipliers accumulate
+// differently depending on rounding order.
 function computeRosterTotals(rosterRows, settings) {
   const facilityBreakMuls = getBreakMultipliers(settings)
-  let totalHours = 0
+  const hourlyAvail = new Array(24).fill(0)
   let headcount = 0
   for (const row of rosterRows) {
     const shift = resolveEmployeeShift(row)
@@ -198,14 +204,20 @@ function computeRosterTotals(rosterRows, settings) {
     for (let i = 0; i < fullHours; i++) {
       const hLinear = resolvedStart + i
       if (hLinear >= OP_DAY_END_LINEAR) break
-      totalHours += facilityBreakMuls[i] ?? 1
+      const hMod = hLinear % 24
+      hourlyAvail[hMod] += facilityBreakMuls[i] ?? 1
     }
     if (frac > 0) {
       const hLinear = resolvedStart + fullHours
-      if (hLinear < OP_DAY_END_LINEAR) totalHours += frac * (facilityBreakMuls[fullHours] ?? 1)
+      if (hLinear < OP_DAY_END_LINEAR) {
+        const hMod = hLinear % 24
+        hourlyAvail[hMod] += frac * (facilityBreakMuls[fullHours] ?? 1)
+      }
     }
   }
-  return { totalHours: r1(totalHours), headcount }
+  const roundedHourly = hourlyAvail.map(v => Math.round(v * 10) / 10)
+  const totalHours = r1(roundedHourly.reduce((s, v) => s + v, 0))
+  return { totalHours, headcount }
 }
 
 // ── Data assembly ─────────────────────────────────────────────────────────
