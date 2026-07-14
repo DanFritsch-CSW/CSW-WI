@@ -66,15 +66,30 @@
 [functions."front-daily-discussion-run"]
   schedule = "0 23 * * *"
 
-# Pre-Pick Status nightly digest — runs at 03:15 UTC = 10:15pm CDT / 9:15pm
-# CST (DST-unadjusted, same caveat as every scheduled function above).
-# Posts a comment summarizing TOMORROW's Madison outbound pre-pick status
-# to the Front conversation configured in prepick_notify_settings (editable
-# from the Pre-Pick Status tab). See prepick-digest-run.cjs header for why
-# this posts a COMMENT on an existing conversation rather than creating a
-# new discussion like front-daily-discussion-run.cjs does.
+# Pre-Pick Status nightly digest — as of 2026-07-14, ticks every 15
+# minutes (was a fixed "15 3 * * *" = 10:15pm CDT before Dan asked for a
+# configurable send time). The function itself checks the current
+# America/Chicago local time against prepick_notify_settings.notify_hour/
+# notify_minute (facility='mad', dashboard_type='prepick') and only
+# actually sends when they match and it hasn't already sent today — see
+# prepick-digest-run.cjs's file header "Configurable send time" for the
+# full mechanism. Posts a comment summarizing TOMORROW's Madison outbound
+# pre-pick status to the Front conversation configured in
+# prepick_notify_settings (editable from the Pre-Pick Status tab). See
+# prepick-digest-run.cjs header for why this posts a COMMENT on an
+# existing conversation rather than creating a new discussion like
+# front-daily-discussion-run.cjs does.
 [functions."prepick-digest-run"]
-  schedule = "15 3 * * *"
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# WR Cases To Pick nightly digest — added 2026-07-14, mirrors
+# prepick-digest-run.cjs exactly (same every-15-min tick + configurable
+# notify_hour/notify_minute check, facility='wr'/dashboard_type=
+# 'cases_to_pick' in prepick_notify_settings). Posts a comment summarizing
+# TOMORROW's Bernatello's - Wisconsin Rapids Cases To Pick numbers.
+[functions."wr-cases-digest-run"]
+  schedule = "*/15 * * * *"
   timeout = 26
 
 # Revision Tracker sync — runs every 15 min (unlike the daily/nightly jobs
