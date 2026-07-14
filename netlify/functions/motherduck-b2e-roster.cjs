@@ -89,13 +89,13 @@ exports.handler = async (event) => {
     // Mirrors fetchActiveB2eEmployees in omni.js: Active + job_code 205 only.
     // Used by purge paths to identify the current live roster.
     //
-    // Madison-only: also include job_code 209 (Shift Supervisors) here —
-    // Dan, 2026-07-10 (see Notion for context). Without this, MAD's 209s
-    // would be silently purged from the roster board on every sync as
-    // "terminated" once they're allowed onto the board elsewhere. All
-    // other facilities are untouched.
+    // Madison + EC: also include job_code 209 (Shift Supervisors) here —
+    // Dan, 2026-07-10 (MAD) and 2026-07-14 (EC, Ritchie Hazleton). Without
+    // this, their 209s would be silently purged from the roster board on
+    // every sync as "terminated" once they're allowed onto the board
+    // elsewhere. All other facilities are untouched.
     scopeTable = ROSTER
-    const jobCodeFilter = facilityId === 'mad'
+    const jobCodeFilter = (facilityId === 'mad' || facilityId === 'ec')
       ? "default_job_code IN ('205', '209')"
       : "default_job_code = '205'"
     sql = `
