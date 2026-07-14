@@ -409,9 +409,11 @@ function renderTotalAppointmentsCard(data, dateObj) {
   pill(32 + (colW + gap) * 2, rowY[1], colW, 56, 'Daily +/-', fmtDelta(data.delta), deltaColor)
 
   const adjColor = data.laborAfterAdj >= data.laborReq ? THEME.green : THEME.red
-  const wideColW = (W - 64 - gap) / 2
-  pill(32, rowY[2], wideColW, 56, 'Labor Req Total', data.laborReq, THEME.textPrimary)
-  pill(32 + wideColW + gap, rowY[2], wideColW, 56, 'Labor After Adj', data.laborAfterAdj, adjColor)
+  const deltaAfterAdj = fmtDelta(r1(data.laborAfterAdj - data.laborReq))
+  const deltaAfterAdjColor = (data.laborAfterAdj - data.laborReq) >= 0 ? THEME.green : THEME.red
+  pill(32, rowY[2], colW, 56, 'Labor Req Total', data.laborReq, THEME.textPrimary)
+  pill(32 + colW + gap, rowY[2], colW, 56, 'Labor After Adj', data.laborAfterAdj, adjColor)
+  pill(32 + (colW + gap) * 2, rowY[2], colW, 56, 'Daily +/- After Adj', deltaAfterAdj, deltaAfterAdjColor)
 
   return canvas.toBuffer('image/png')
 }
