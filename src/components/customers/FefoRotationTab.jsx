@@ -131,8 +131,11 @@ export default function FefoRotationTab() {
 // shared Netlify function (fefo-digest-run.cjs) — see that file's header
 // for why a shared function backs 5 rows instead of 5 separate files.
 //
-// Content date is TODAY (not tomorrow) since FEFO is "is rotation compliant
-// right now", not an appointment-staffing forecast — see fefo-digest-run.cjs
+// Content date is the NEXT BUSINESS DAY, always (2026-07-14, later) — same
+// semantics as Pre-Pick/Cases/Daily Ops, per Dan's follow-up feedback after
+// the first live test. "Business day" is defined per-project by the same
+// "Send on:" day toggles already in NotifySettingsPanel (notify_days) — no
+// separate M-F-vs-7-days-a-week control needed. See fefo-digest-run.cjs
 // header for the full reasoning. Content scope is full status per project
 // (order count + every non-clean category + undated lots), confirmed with
 // Dan rather than violations-only.
@@ -164,7 +167,7 @@ function FefoNotifySettings() {
                 dashboardType={`fefo_${p.id}`}
                 functionName="fefo-digest-run"
                 manualTestBody={{ dashboardType: `fefo_${p.id}` }}
-                contentDateLabel="today"
+                contentDateLabel="the next business day"
                 showSkipToNextValidDay={false}
                 digestDescription={`Posts a full rotation-status summary for ${p.name} (order count, violations w/ severity, holds, stale, undated lots) to the configured Front conversation.`}
               />
