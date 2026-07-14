@@ -43,6 +43,20 @@ export default function KpiPills({ data, color }) {
     ? (laborAfterAdj >= data.laborReq ? '#3dba7e' : '#e05a5a')
     : color
 
+  // Daily +/- After Adj (added 2026-07-14, per Dan) — same delta concept as
+  // "Daily +/-" above, but against Labor After Adj instead of the raw
+  // Total Hrs Avail. Matters most for facilities that lean on hourly
+  // adjustments more heavily (Dan named KEN/CAL) — "Daily +/-" alone can
+  // look off if a chunk of the day's coverage comes from adjustments
+  // rather than the base roster. deltaAfterAdj = laborAfterAdj - laborReq
+  // (equivalently: (totalHours + totalAdj) - laborReq).
+  const deltaAfterAdj = (laborAfterAdj != null && data.laborReq != null)
+    ? r1(laborAfterAdj - data.laborReq)
+    : null
+  const deltaAfterAdjColor = deltaAfterAdj != null
+    ? (deltaAfterAdj >= 0 ? '#3dba7e' : '#e05a5a')
+    : color
+
   const timeLabel = fmtTime(data.fetchedAt)
 
   // Total appointments is always an integer — fractions of appointments don't exist.
@@ -73,10 +87,11 @@ export default function KpiPills({ data, color }) {
         <Pill label="Daily +/-"           value={fmtDelta(data.delta)}    color={deltaColor} />
       </div>
 
-      {/* Row 4 — Labor Req Total · Labor After Adj */}
+      {/* Row 4 — Labor Req Total · Labor After Adj · Daily +/- After Adj */}
       <div className="kpi-row">
         <Pill label="Labor Req Total"    value={data.laborReq     != null ? r1(data.laborReq)  : '--'} color={color} />
         <Pill label="Labor After Adj"    value={laborAfterAdj     != null ? laborAfterAdj      : '--'} color={adjColor} />
+        <Pill label="Daily +/- After Adj" value={fmtDelta(deltaAfterAdj)} color={deltaAfterAdjColor} />
       </div>
 
     </div>
