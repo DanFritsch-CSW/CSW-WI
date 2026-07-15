@@ -1,0 +1,58 @@
+/* Print stylesheet for the Inventory tab (cycle-count sheet), added 2026-07-15.
+   Pattern mirrors src/styles/wr-secondary-repl.css: classNames scoped to this
+   component rather than a body-level rule, since this tab shares the app
+   shell's <body> with every other facility tab.
+
+   The print output is a dedicated compact worksheet, not a printed copy of
+   the interactive on-screen table: 2-up columns to keep page count down,
+   and blank "Actual Ct" / "Notes" fields for cycle counters to write
+   physical counts/discrepancies on while walking the floor. Respects
+   whatever facility/mode/search filter is active on screen, so printing
+   after filtering to Occupied (or searching a location prefix) prints a
+   much shorter sheet. */
+
+.inv-print-only { display: none; }
+
+.inv-no-print { display: initial; }
+
+@media print {
+  .inv-no-print { display: none !important; }
+
+  .inv-print-only { display: block !important; }
+
+  @page { size: landscape; margin: 0.5in; }
+
+  .inv-print-header { margin-bottom: 10px; }
+  .inv-print-header .title { font-size: 15px; font-weight: 700; color: #000; margin-bottom: 2px; }
+  .inv-print-header .meta { font-size: 11px; color: #333; margin-bottom: 1px; }
+
+  .inv-print-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+
+  .inv-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10.5px;
+  }
+  .inv-print-table th {
+    text-align: left;
+    border-bottom: 1px solid #000;
+    padding: 3px 4px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #000;
+  }
+  .inv-print-table td {
+    border-bottom: 1px solid #ccc;
+    padding: 3px 4px;
+    color: #000;
+  }
+  .inv-print-table tr { break-inside: avoid; }
+  .inv-print-table .loc { font-family: monospace; font-weight: 700; white-space: nowrap; }
+  .inv-print-table .flag { color: #b91c1c; font-weight: 700; }
+  .inv-print-table .blank-col { width: 22%; }
+}
