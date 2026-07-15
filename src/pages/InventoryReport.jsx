@@ -285,6 +285,17 @@ export default function InventoryReport() {
 
   const toggleExpand = useCallback((id) => { setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n }) }, [])
 
+  // Toggles a body class (rather than a permanent global rule) so the shared
+  // TopNav/utility-bar chrome is hidden only for this print action — see the
+  // guarded @media print rules in inventory-report.css. Cleaned up via the
+  // 'afterprint' event so it doesn't linger and affect prints of other tabs.
+  const handlePrintSheet = useCallback(() => {
+    document.body.classList.add('inv-printing')
+    const cleanup = () => document.body.classList.remove('inv-printing')
+    window.addEventListener('afterprint', cleanup, { once: true })
+    window.print()
+  }, [])
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return data.filter(loc => {
@@ -298,14 +309,36 @@ export default function InventoryReport() {
   // not a printed copy of the interactive table (see src/styles/inventory-report.css).
   // Respects the current facility/mode/search filter so narrowing the on-screen
   // view before printing produces a shorter sheet.
+  //
+  // Pagination: rather than splitting the whole filtered list into one "left
+  // half" / "right half" (which reads oddly — column 2 of page 1 would jump to
+  // the halfway point of the ENTIRE list instead of continuing where column 1
+  // left off) we chunk the list into per-page groups up front and force a page
+  // break between groups. Reading order is then sequential: page 1 col 1, page
+  // 1 col 2, page 2 col 1, page 2 col 2, etc. Row-per-column counts below are
+  // estimates for the 10.5px print font / landscape / 0.5in margins — nudge
+  // these two constants if a page runs short or a row spills onto the next
+  // page on your printer/browser.
+  const ROWS_FIRST_PAGE_COL = 30 // page 1 has less room — the header block above eats into it
+  const ROWS_OTHER_PAGE_COL = 36
   const printDateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
   const printOccCount = filtered.filter(l => l.palletCount > 0).length
   const printEmpCount = filtered.filter(l => l.palletCount === 0).length
-  const printHalf = Math.ceil(filtered.length / 2)
-  const printCol1 = filtered.slice(0, printHalf)
-  const printCol2 = filtered.slice(printHalf)
   const printFilterLabel = mode === 'All' ? 'All locations' : mode
   const printSearchLabel = search.trim() ? `starting with "${search.trim()}"` : ''
+  const printPages = useMemo(() => {
+    const pages = []
+    let idx = 0
+    let isFirst = true
+    while (idx < filtered.length) {
+      const perCol = isFirst ? ROWS_FIRST_PAGE_COL : ROWS_OTHER_PAGE_COL
+      const chunk = filtered.slice(idx, idx + perCol * 2)
+      pages.push([chunk.slice(0, perCol), chunk.slice(perCol)])
+      idx += perCol * 2
+      isFirst = false
+    }
+    return pages
+  }, [filtered])
 
   const S = {
     page:        { padding: '1.5rem', maxWidth: 1200, margin: '0 auto' },
@@ -346,7 +379,7 @@ export default function InventoryReport() {
           </div>
           <div style={S.btnRow}>
             {discrepancies.size > 0 && <button style={S.btnDanger} onClick={() => setShowLog(true)}>⚑ {discrepancies.size} Discrepanc{discrepancies.size > 1 ? 'ies' : 'y'}</button>}
-            <button style={S.btn} onClick={() => window.print()} title="Prints the currently filtered location list as a compact 2-column cycle-count sheet with blank Actual Count / Notes columns. Filter to Occupied or search a location prefix first to keep it short.">🖨 Print count sheet</button>
+            <button style={S.btn} onClick={handlePrintSheet} title="Prints the currently filtered location list as a compact 2-column cycle-count sheet with Pallets/Cases columns plus blank Actual Ct / Notes for hand-written counts. Filter to Occupied or search a location prefix first to keep it short.">🖨 Print count sheet</button>
             <button style={S.btn} onClick={handleRefresh} disabled={loading}>{loading ? 'Loading…' : '↻ Refresh'}</button>
           </div>
         </div>
@@ -469,40 +502,48 @@ export default function InventoryReport() {
       </div>
 
       {/* Print-only cycle-count worksheet — hidden on screen, rendered only via
-          @media print in inventory-report.css. Two-column compact table with
-          blank Actual Ct / Notes fields for a counter to fill in by hand while
-          walking the floor. Mirrors whatever facility/mode/search filter is
-          active above, so a narrower on-screen filter -> a shorter printout. */}
+          @media print in inventory-report.css. Rendered as discrete "pages"
+          (see printPages above) so column 2 continues where column 1 left
+          off and page breaks land at a clean boundary, instead of the
+          browser auto-fragmenting one giant table wherever it happens to
+          run out of room. */}
       <div className="inv-print-only">
         <div className="inv-print-header">
           <div className="title">Central Storage &amp; Warehouse — Cycle Count Sheet</div>
           <div className="meta">{currentFacility?.label} ({currentFacility?.whName}) · {printFilterLabel}{printSearchLabel ? `, ${printSearchLabel}` : ''}</div>
           <div className="meta">Printed {printDateStr} · {filtered.length} location{filtered.length !== 1 ? 's' : ''} · {printOccCount} occupied · {printEmpCount} empty{discrepancies.size > 0 ? ` · ${discrepancies.size} already flagged (⚑)` : ''}</div>
+          <div className="meta small">Pallets = LP count in system · Cases = total packaged qty (same figure shown on-screen as "Total Qty" — flag if this isn't the case-level number you need)</div>
         </div>
-        <div className="inv-print-columns">
-          {[printCol1, printCol2].map((col, ci) => (
-            <table className="inv-print-table" key={ci}>
-              <thead>
-                <tr>
-                  <th>Location</th>
-                  <th>Sys Ct</th>
-                  <th className="blank-col">Actual Ct</th>
-                  <th className="blank-col">Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {col.map(loc => (
-                  <tr key={loc.id}>
-                    <td className="loc">{loc.id}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</td>
-                    <td>{loc.palletCount || '—'}</td>
-                    <td></td>
-                    <td></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ))}
-        </div>
+        {printPages.map((cols, pi) => (
+          <div className="inv-print-page" key={pi}>
+            <div className="inv-print-columns">
+              {cols.map((col, ci) => (
+                <table className="inv-print-table" key={ci}>
+                  <thead>
+                    <tr>
+                      <th className="loc-col">Location</th>
+                      <th className="num-col">Pallets</th>
+                      <th className="num-col">Cases</th>
+                      <th className="blank-col-sm">Actual Ct</th>
+                      <th className="blank-col-lg">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {col.map(loc => (
+                      <tr key={loc.id}>
+                        <td className="loc">{loc.id}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</td>
+                        <td>{loc.palletCount || '—'}</td>
+                        <td>{loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}</td>
+                        <td></td>
+                        <td></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )
