@@ -14,16 +14,25 @@
 // call, same pattern as every other digest proxying its own live-data
 // function rather than duplicating the MotherDuck query here.
 //
-// Message format follows the same "make the most important number
-// impossible to miss" convention as wr-cases-digest-run.cjs /
-// fefo-digest-run.cjs — bold + divider rules around the Warehouse count
-// (the real problem number: oldest lot genuinely out of position), since
-// Front's Markdown subset doesn't reliably render "#" as a heading (gets
-// silently eaten even mid-document). Full status always shown (not
-// violations-only) — Primary/Secondary/Warehouse counts every time, plus
-// the aging breakdown for customer-communication purposes, plus a bare
-// URL back to the live tab (Front doesn't render [text](url) as
-// clickable, only auto-linkifies bare URLs).
+// ── Message format — simplified 2026-07-15 per Dan's feedback on the
+// first live test ────────────────────────────────────────────────────────
+// Original version led with a summary line (total/primary/secondary
+// counts) then one combined Warehouse+Aging section. Dan wanted it
+// simpler: drop the summary line entirely, three flat call-out sections
+// in a fixed order — same "make the number impossible to miss" bold +
+// divider convention as the Cases To Pick digest's Total Pickline Volume
+// treatment, just applied 3 times:
+//   1. Secondary  — staged in the overhead rack, ready to pull down
+//   2. Warehouse  — genuinely out of position (the real problem number)
+//   3. Aging      — <120d to expiration, for customer communication
+// Warehouse list shows ALL materials now (no "...and N more" cap) — Dan
+// wants this to be the main actionable section, unabridged.
+// Aging list only shows materials NOT already listed under Warehouse —
+// if a material is aging AND out in the warehouse, it only appears once
+// (under Warehouse), since re-listing it under Aging is redundant. The
+// Aging section's headline count still reflects the TOTAL aging count
+// (including ones already shown above); the list beneath is the
+// remainder only, with a note when everything aging is already covered.
 //
 // Two invocation paths (same convention as every other digest):
 //   1. SCHEDULED (netlify.toml: "*/15 * * * *") — fires when current
@@ -96,60 +105,66 @@ function formatHeaderDate(dateObj) {
 
 function fmt(n) { return n == null ? '—' : Math.round(n).toLocaleString() }
 
+function callOutBlock(lines, label) {
+  const divider = '─'.repeat(28)
+  lines.push(divider)
+  lines.push(`**${label}**`)
+  lines.push(divider)
+  lines.push('')
+}
+
 function buildDigestBody(data, dateObj) {
   const s = data.summary
+  const materials = data.materials || []
   const lines = []
   lines.push(`Pick Location Lot Check — Bernatello's - Wisconsin Rapids`)
   lines.push(APP_URL)
   lines.push('CSW Operations Hub')
   lines.push(`As of: ${formatHeaderDate(dateObj)}`)
   lines.push('')
-  lines.push(`${fmt(s.total)} materials checked · ${fmt(s.primary)} in primary · ${fmt(s.secondary)} staged in secondary`)
-  lines.push('')
 
-  const divider = '─'.repeat(28)
-  lines.push(divider)
-  if (s.warehouse > 0) {
-    lines.push(`**⚠ ${fmt(s.warehouse)} OLDEST LOT OUT IN WAREHOUSE**`)
+  // ── 1. Secondary — staged in the overhead rack, ready to pull down ──
+  const secondaryMaterials = materials.filter(m => m.status === 'secondary')
+  callOutBlock(lines, `${fmt(s.secondary)} MATERIAL${s.secondary === 1 ? '' : 'S'} IN SECONDARY`)
+  if (secondaryMaterials.length) {
+    for (const m of secondaryMaterials) {
+      lines.push(`• ${m.materialName} (${m.materialCode}) — lot ${m.oldestLotCode ?? '—'}, staged at ${m.secondaryLocations ?? '—'}, ready to pull down`)
+    }
   } else {
-    lines.push('**✓ 0 OUT OF POSITION**')
+    lines.push('None right now.')
   }
-  lines.push(divider)
   lines.push('')
 
-  if (s.secondary > 0) {
-    lines.push(`${fmt(s.secondary)} material${s.secondary === 1 ? '' : 's'} staged in the overhead rack, ready to pull down.`)
-    lines.push('')
+  // ── 2. Warehouse — genuinely out of position, the main actionable list ──
+  const warehouseMaterials = materials
+    .filter(m => m.status === 'warehouse')
+    .sort((a, b) => (a.daysRemaining ?? 9999) - (b.daysRemaining ?? 9999))
+  callOutBlock(lines, `${fmt(s.warehouse)} MATERIAL${s.warehouse === 1 ? '' : 'S'} OUT IN WAREHOUSE`)
+  if (warehouseMaterials.length) {
+    for (const m of warehouseMaterials) {
+      lines.push(`• ${m.materialName} (${m.materialCode}) — lot ${m.oldestLotCode ?? '—'}, ${m.daysRemaining ?? '—'}d to exp`)
+    }
+  } else {
+    lines.push('None right now.')
   }
+  lines.push('')
 
+  // ── 3. Aging — <120d to exp, for customer communication. Only lists
+  // materials not already shown under Warehouse above (avoid repeating
+  // the same line twice); headline count is still the TOTAL aging count.
   const agingTotal = (s.agingCritical || 0) + (s.agingWarning || 0) + (s.agingWatch || 0)
-  if (agingTotal > 0) {
-    const bits = []
-    if (s.agingCritical) bits.push(`${s.agingCritical} critical (<30d)`)
-    if (s.agingWarning) bits.push(`${s.agingWarning} warning (30-59d)`)
-    if (s.agingWatch) bits.push(`${s.agingWatch} watch (60-119d)`)
-    lines.push(`Aging flags for customer communication: ${fmt(agingTotal)} total — ${bits.join(' · ')}`)
-    lines.push('')
+  const warehouseCodes = new Set(warehouseMaterials.map(m => m.materialCode))
+  const agingRemainder = materials
+    .filter(m => m.aging && !warehouseCodes.has(m.materialCode))
+    .sort((a, b) => (a.daysRemaining ?? 9999) - (b.daysRemaining ?? 9999))
+  callOutBlock(lines, `${fmt(agingTotal)} MATERIAL${agingTotal === 1 ? '' : 'S'} AGING (<120d)`)
+  if (agingTotal === 0) {
+    lines.push('None right now.')
+  } else if (agingRemainder.length === 0) {
+    lines.push('All aging materials are already listed under Warehouse above.')
   } else {
-    lines.push('No materials within the 120-day aging window.')
-    lines.push('')
-  }
-
-  if (s.warehouse > 0) {
-    const worst = (data.materials || [])
-      .filter(m => m.status === 'warehouse')
-      .sort((a, b) => (a.daysRemaining ?? 9999) - (b.daysRemaining ?? 9999))
-      .slice(0, 8)
-    if (worst.length) {
-      lines.push('Out of position (oldest expiration first):')
-      lines.push('')
-      for (const m of worst) {
-        lines.push(`• ${m.materialName} (${m.materialCode}) — lot ${m.oldestLotCode ?? '—'}, ${m.daysRemaining ?? '—'}d to exp`)
-      }
-      if (data.materials.filter(m => m.status === 'warehouse').length > worst.length) {
-        lines.push(`...and ${data.materials.filter(m => m.status === 'warehouse').length - worst.length} more — see the app for the full list.`)
-      }
-      lines.push('')
+    for (const m of agingRemainder) {
+      lines.push(`• ${m.materialName} (${m.materialCode}) — ${m.status}, lot ${m.oldestLotCode ?? '—'}, ${m.daysRemaining ?? '—'}d to exp`)
     }
   }
 
