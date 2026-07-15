@@ -3,12 +3,13 @@ import { NavLink } from 'react-router-dom'
 import { CSW_BEAR_LOGO } from '../lib/csw-logo.js'
 
 const links = [
-  { to: '/',          label: 'Labor Planning' },
-  { to: '/inventory', label: 'Inventory'      },
-  { to: '/customers', label: 'Customers'      },
+  { to: '/',                    label: 'Labor Planning'     },
+  { to: '/inventory',           label: 'Inventory'          },
+  { to: '/customers',           label: 'Customers'          },
+  { to: '/employee-onboarding', label: 'Employee Onboarding'},
   // DVR Tracker suppressed — pending LoadProof Zapier API activation
   // Re-enable by adding: { to: '/dvr', label: 'DVR Tracker' }
-  { to: '/settings',  label: 'Settings'       },
+  { to: '/settings',            label: 'Settings'           },
 ]
 
 function useClock() {
