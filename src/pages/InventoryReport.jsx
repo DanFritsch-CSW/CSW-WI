@@ -6,6 +6,7 @@ import {
   deleteInventoryDiscrepancy,
   purgeExpiredInventoryDiscrepancies,
 } from '../lib/supabase.js'
+import '../styles/inventory-report.css'
 
 const FACILITY_LIST = [
   { id: 'cal', label: 'Caledonia',       whName: 'CSW-Franksville' },
@@ -293,6 +294,19 @@ export default function InventoryReport() {
     })
   }, [data, mode, search])
 
+  // Print worksheet data — a dedicated compact 2-column cycle-count sheet,
+  // not a printed copy of the interactive table (see src/styles/inventory-report.css).
+  // Respects the current facility/mode/search filter so narrowing the on-screen
+  // view before printing produces a shorter sheet.
+  const printDateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+  const printOccCount = filtered.filter(l => l.palletCount > 0).length
+  const printEmpCount = filtered.filter(l => l.palletCount === 0).length
+  const printHalf = Math.ceil(filtered.length / 2)
+  const printCol1 = filtered.slice(0, printHalf)
+  const printCol2 = filtered.slice(printHalf)
+  const printFilterLabel = mode === 'All' ? 'All locations' : mode
+  const printSearchLabel = search.trim() ? `starting with "${search.trim()}"` : ''
+
   const S = {
     page:        { padding: '1.5rem', maxWidth: 1200, margin: '0 auto' },
     pageHeader:  { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1.25rem', gap: 12, flexWrap: 'wrap' },
@@ -319,7 +333,7 @@ export default function InventoryReport() {
 
   return (
     <div className="page-content">
-      <div style={S.page}>
+      <div style={S.page} className="inv-no-print">
 
         <div style={S.pageHeader}>
           <div>
@@ -332,6 +346,7 @@ export default function InventoryReport() {
           </div>
           <div style={S.btnRow}>
             {discrepancies.size > 0 && <button style={S.btnDanger} onClick={() => setShowLog(true)}>⚑ {discrepancies.size} Discrepanc{discrepancies.size > 1 ? 'ies' : 'y'}</button>}
+            <button style={S.btn} onClick={() => window.print()} title="Prints the currently filtered location list as a compact 2-column cycle-count sheet with blank Actual Count / Notes columns. Filter to Occupied or search a location prefix first to keep it short.">🖨 Print count sheet</button>
             <button style={S.btn} onClick={handleRefresh} disabled={loading}>{loading ? 'Loading…' : '↻ Refresh'}</button>
           </div>
         </div>
@@ -451,6 +466,43 @@ export default function InventoryReport() {
         {flagModal && <FlagFormModal loc={flagModal} existing={discrepancies.get(flagModal.id) ?? null} onSave={note => saveFlag(flagModal.id, note)} onRemove={() => removeFlag(flagModal.id)} onClose={() => setFlagModal(null)} />}
         {showLog   && <DiscrepancyLogModal discrepancies={discrepancies} allData={data} onClose={() => setShowLog(false)} />}
 
+      </div>
+
+      {/* Print-only cycle-count worksheet — hidden on screen, rendered only via
+          @media print in inventory-report.css. Two-column compact table with
+          blank Actual Ct / Notes fields for a counter to fill in by hand while
+          walking the floor. Mirrors whatever facility/mode/search filter is
+          active above, so a narrower on-screen filter -> a shorter printout. */}
+      <div className="inv-print-only">
+        <div className="inv-print-header">
+          <div className="title">Central Storage &amp; Warehouse — Cycle Count Sheet</div>
+          <div className="meta">{currentFacility?.label} ({currentFacility?.whName}) · {printFilterLabel}{printSearchLabel ? `, ${printSearchLabel}` : ''}</div>
+          <div className="meta">Printed {printDateStr} · {filtered.length} location{filtered.length !== 1 ? 's' : ''} · {printOccCount} occupied · {printEmpCount} empty{discrepancies.size > 0 ? ` · ${discrepancies.size} already flagged (⚑)` : ''}</div>
+        </div>
+        <div className="inv-print-columns">
+          {[printCol1, printCol2].map((col, ci) => (
+            <table className="inv-print-table" key={ci}>
+              <thead>
+                <tr>
+                  <th>Location</th>
+                  <th>Sys Ct</th>
+                  <th className="blank-col">Actual Ct</th>
+                  <th className="blank-col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {col.map(loc => (
+                  <tr key={loc.id}>
+                    <td className="loc">{loc.id}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</td>
+                    <td>{loc.palletCount || '—'}</td>
+                    <td></td>
+                    <td></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ))}
+        </div>
       </div>
     </div>
   )
