@@ -134,6 +134,17 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# WR Pick Location Lot Check nightly digest — added same day as the tab
+# itself, same every-15-min tick + configurable notify_hour/notify_minute/
+# notify_days pattern as the other digests (facility='wr', dashboard_type=
+# 'pick_check' in prepick_notify_settings). Content date is TODAY, not
+# tomorrow — see wr-pickcheck-digest-run.cjs file header (same reasoning
+# as fefo-digest-run.cjs: this is a live "right now" check, no appointment
+# lead-time to look ahead across).
+[functions."wr-pickcheck-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
 # Revision Tracker sync — runs every 15 min (unlike the daily/nightly jobs
 # above, this covers time-sensitive customer-facing issues — SLA breach/
 # warning tags need to show up in-app well before end of day). Pulls
