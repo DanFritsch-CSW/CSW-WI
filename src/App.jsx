@@ -11,6 +11,7 @@ const APP_MODE = import.meta.env.VITE_APP_MODE || 'csw'
 const LaborPlanning      = lazy(() => import('./pages/LaborPlanning.jsx'))
 const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
 const Customers          = lazy(() => import('./pages/Customers.jsx'))
+const EmployeeOnboarding = lazy(() => import('./pages/EmployeeOnboarding.jsx'))
 const OrderCreator       = lazy(() => import('./pages/OrderCreator.jsx'))
 const Analytics          = lazy(() => import('./pages/Analytics.jsx'))
 const Settings           = lazy(() => import('./pages/Settings.jsx'))
@@ -92,13 +93,14 @@ export default function App() {
         <PageErrorBoundary>
           <Suspense fallback={<PageLoading />}>
             <Routes>
-              <Route path="/"          element={<LaborPlanning />}    />
-              <Route path="/inventory" element={<InventoryReport />}  />
-              <Route path="/customers" element={<Customers />}        />
-              <Route path="/orders"    element={<OrderCreator />}     />
-              <Route path="/analytics" element={<Analytics />}        />
-              <Route path="/settings"  element={<Settings />}         />
-              <Route path="/dvr"       element={<DvrTracker />}       />
+              <Route path="/"                    element={<LaborPlanning />}      />
+              <Route path="/inventory"            element={<InventoryReport />}    />
+              <Route path="/customers"            element={<Customers />}         />
+              <Route path="/employee-onboarding"  element={<EmployeeOnboarding />} />
+              <Route path="/orders"               element={<OrderCreator />}      />
+              <Route path="/analytics"            element={<Analytics />}         />
+              <Route path="/settings"             element={<Settings />}          />
+              <Route path="/dvr"                  element={<DvrTracker />}        />
             </Routes>
           </Suspense>
         </PageErrorBoundary>
