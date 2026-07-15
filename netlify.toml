@@ -145,6 +145,26 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# WR Secondary Replenishments backend — rewritten 2026-07-15 to query
+# MotherDuck directly (3 combined queries, one connection) instead of
+# proxying 6 separate Omni round-trips through omni-query.cjs, per Dan's
+# ask for faster collective results. Bumped to 26s alongside the other
+# MotherDuck-backed functions above as a safety margin, though 3 queries
+# over one connection should typically complete well under that.
+[functions."wr-secondary-repl"]
+  timeout = 26
+
+# WR Secondary Replenishments nightly digest — added 2026-07-15 alongside
+# the MotherDuck rewrite, same every-15-min tick + configurable
+# notify_hour/notify_minute/notify_days pattern as the other digests
+# (facility='wr', dashboard_type='secondary_repl' in
+# prepick_notify_settings). Content date is TODAY, not tomorrow — same
+# "live right now" reasoning as wr-pickcheck-digest-run.cjs. Proxies to
+# wr-secondary-repl.cjs and posts its server-computed bay-stats summary.
+[functions."wr-secondary-repl-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
 # Revision Tracker sync — runs every 15 min (unlike the daily/nightly jobs
 # above, this covers time-sensitive customer-facing issues — SLA breach/
 # warning tags need to show up in-app well before end of day). Pulls
