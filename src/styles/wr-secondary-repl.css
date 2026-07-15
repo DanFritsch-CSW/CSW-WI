@@ -1,0 +1,41 @@
+/* Print stylesheet for the WR Secondary Replenishments tab (added 2026-07-15).
+   Ported from the original csw-secondary-replenishment repo's index.css
+   @media print block -- side-by-side 2-column bay grid instead of a single
+   stacked column, with header controls hidden. Scoped to this component's
+   own classNames rather than a `body::before` pseudo-element (the original
+   repo's approach) since this tab is one of several sharing the app shell's
+   <body> -- a body-level rule would leak into prints of unrelated tabs. */
+
+.secondary-repl-no-print {
+  display: initial;
+}
+
+@media print {
+  .secondary-repl-no-print {
+    display: none !important;
+  }
+
+  .secondary-repl-print-title {
+    display: block !important;
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 12px;
+    color: #000;
+  }
+
+  .secondary-repl-bay-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 0 !important;
+  }
+
+  .secondary-repl-bay-card {
+    break-inside: avoid;
+    margin-bottom: 0 !important;
+  }
+}
+
+.secondary-repl-print-title {
+  display: none;
+}
