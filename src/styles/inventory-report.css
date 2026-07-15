@@ -1,15 +1,17 @@
-/* Print stylesheet for the Inventory tab (cycle-count sheet), added 2026-07-15.
-   Pattern mirrors src/styles/wr-secondary-repl.css: classNames scoped to this
-   component rather than a body-level rule, since this tab shares the app
-   shell's <body> with every other facility tab.
+/* Print stylesheet for the Inventory tab (cycle-count sheet), added 2026-07-15,
+   revised same day per Dan's feedback (chrome hidden, deterministic per-page
+   chunking, Cases column). Pattern mirrors src/styles/wr-secondary-repl.css:
+   classNames scoped to this component rather than a body-level rule, since
+   this tab shares the app shell's <body> with every other facility tab.
 
    The print output is a dedicated compact worksheet, not a printed copy of
-   the interactive on-screen table: 2-up columns to keep page count down,
-   and blank "Actual Ct" / "Notes" fields for cycle counters to write
-   physical counts/discrepancies on while walking the floor. Respects
-   whatever facility/mode/search filter is active on screen, so printing
-   after filtering to Occupied (or searching a location prefix) prints a
-   much shorter sheet. */
+   the interactive on-screen table: pages are pre-chunked in JS (see
+   printPages in InventoryReport.jsx) into 2 columns each, so the reading
+   order is sequential (page 1 col 1 -> page 1 col 2 -> page 2 col 1 -> ...)
+   instead of the browser auto-fragmenting one giant table wherever it runs
+   out of room on the page. Blank "Actual Ct" / "Notes" fields let cycle
+   counters write physical counts/discrepancies on while walking the floor.
+   Respects whatever facility/mode/search filter is active on screen. */
 
 .inv-print-only { display: none; }
 
@@ -22,9 +24,32 @@
 
   @page { size: landscape; margin: 0.5in; }
 
+  /* Hide the shared TopNav/utility-bar chrome for this print action only.
+     Guarded behind body.inv-printing (toggled in InventoryReport.jsx right
+     before window.print() and removed on 'afterprint') rather than a bare
+     rule, so this stylesheet staying loaded in the SPA doesn't affect
+     printing from any other tab. */
+  body.inv-printing .util-bar,
+  body.inv-printing .top-nav {
+    display: none !important;
+  }
+  body.inv-printing .page-content {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+  }
+
   .inv-print-header { margin-bottom: 10px; }
   .inv-print-header .title { font-size: 15px; font-weight: 700; color: #000; margin-bottom: 2px; }
   .inv-print-header .meta { font-size: 11px; color: #333; margin-bottom: 1px; }
+  .inv-print-header .meta.small { font-size: 9.5px; color: #666; margin-top: 4px; font-style: italic; }
+
+  /* Each .inv-print-page is a pre-sized chunk (see printPages) — force a
+     clean break between them instead of letting content flow/fragment
+     wherever it happens to run out of vertical room. */
+  .inv-print-page:not(:last-child) {
+    page-break-after: always;
+    break-after: page;
+  }
 
   .inv-print-columns {
     display: grid;
@@ -36,6 +61,7 @@
     width: 100%;
     border-collapse: collapse;
     font-size: 10.5px;
+    table-layout: fixed;
   }
   .inv-print-table th {
     text-align: left;
@@ -51,8 +77,15 @@
     padding: 3px 4px;
     color: #000;
   }
+  /* Safety net only — printPages is sized to avoid mid-row splits in the
+     first place, but a row is never allowed to break across a page either
+     way if the estimate runs a little short on a given printer. */
   .inv-print-table tr { break-inside: avoid; }
   .inv-print-table .loc { font-family: monospace; font-weight: 700; white-space: nowrap; }
   .inv-print-table .flag { color: #b91c1c; font-weight: 700; }
-  .inv-print-table .blank-col { width: 22%; }
+
+  .inv-print-table .loc-col { width: 26%; }
+  .inv-print-table .num-col { width: 12%; }
+  .inv-print-table .blank-col-sm { width: 16%; }
+  .inv-print-table .blank-col-lg { width: 34%; }
 }
