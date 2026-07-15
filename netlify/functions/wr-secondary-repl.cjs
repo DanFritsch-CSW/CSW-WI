@@ -254,7 +254,26 @@ exports.handler = async () => {
   // Combine pull-from candidates (A-E + F-G), attach LP counts from the
   // F+G map (aisles A-E have no LP-count query in the original design and
   // default to 1, matching csw-secondary-replenishment's client logic).
-  const rawPull = [...ok(pullABCDER), ...ok(pullFGR)]
+  //
+  // BUG FIXED 2026-07-15 (same-day follow-up): these rows come straight
+  // from internalOmniQuery(), which returns RAW rows keyed by Omni's
+  // dot-notation field names (e.g. 'silver__datex_slv_locationcontainers.
+  // location_container_name') — NOT {loc, mat}. This block was combining
+  // the raw rows directly, so every allInv entry had loc:undefined and
+  // mat:undefined. The client's buildPullMap sort comparator then called
+  // aisleRank(undefined) -> undefined.charAt(0), crashing the whole
+  // Secondary Replenishments tab with "Cannot read properties of
+  // undefined (reading 'charAt')" the moment a bay had any empty
+  // positions (i.e. the moment getPullLocations actually ran the sort).
+  // gInv/fInv below were mapped correctly; this pull-from block was the
+  // one spot that got missed. Fix: map+filter to {loc, mat} same as gInv.
+  const mapPullRows = rows => rows
+    .map(r => ({
+      loc: r['silver__datex_slv_locationcontainers.location_container_name'],
+      mat: r['silver__datex_slv_materials.lookup_code'],
+    }))
+    .filter(r => r.loc != null && r.mat != null && r.mat !== '')
+  const rawPull = [...mapPullRows(ok(pullABCDER)), ...mapPullRows(ok(pullFGR))]
   const allInv = rawPull.map(r => ({ ...r, lp: lpMap[r.loc] || 1 }))
 
   return {
