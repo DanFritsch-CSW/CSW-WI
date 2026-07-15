@@ -1,9 +1,12 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { fetchWrSecondaryRepl } from '../lib/wrSecondaryRepl.js'
 import { SECONDARY_REPL_BUFFER_LOCS as BUFFER_LOCS } from '../lib/wrSecondaryReplConstants.js'
+import NotifySettingsPanel from './NotifySettingsPanel.jsx'
+import '../styles/wr-secondary-repl.css'
 
-// WR "Secondary Replenishments" sub-tab (added 2026-07-15) — recreated from
-// the standalone csw-secondary-replenishment repo/site
+// WR "Secondary Replenishments" sub-tab (added 2026-07-15, rewritten to
+// MotherDuck + print layout + Notify panel same day) — recreated from the
+// standalone csw-secondary-replenishment repo/site
 // (csw-secondary-replenishment.netlify.app) as a WR sub-tab next to
 // Pick Location Lot Check. Bernatello's - Wisconsin Rapids only.
 //
@@ -13,11 +16,24 @@ import { SECONDARY_REPL_BUFFER_LOCS as BUFFER_LOCS } from '../lib/wrSecondaryRep
 // picked, and — when a tier is short — which warehouse locations have that
 // material available to pull down, furthest-aisle-first (A first, G last).
 // See netlify/functions/wr-secondary-repl.cjs for the full live-query design
-// (6 Omni reads proxied through omni-query, combined server-side).
+// — now a direct MotherDuck query (3 SQL queries, one connection) instead
+// of proxying through Omni, per Dan's ask for faster collective results.
 //
 // Bay-building and pull-suggestion algorithms below are ported verbatim
 // from the original repo's src/App.jsx — same aisle-rank/furthest-first
 // logic, same split-bay / buffer-slot handling.
+//
+// Print layout: side-by-side 2-column grid instead of a single stacked
+// column, controls hidden — see src/styles/wr-secondary-repl.css (ported
+// from the original repo's @media print block, scoped to this component's
+// own classNames rather than a body-level rule since this tab shares the
+// app shell's <body> with every other facility tab).
+//
+// Notify panel: same shared NotifySettingsPanel used by WrPickCheck/
+// WrCasesToPick/PrePickStatus/FEFO — facility='wr', dashboardType=
+// 'secondary_repl', contentDateLabel="today" (live snapshot, not a
+// forecast), showSkipToNextValidDay={false} (no lookahead concept for a
+// live check). See netlify/functions/wr-secondary-repl-digest-run.cjs.
 
 const AISLE_ORDER = { A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6 }
 function aisleRank(loc) {
@@ -326,7 +342,7 @@ function BayCard({ bay, pullMap, claimedLocs, pslotLotsMap }) {
 
   if (bay.isSplit) {
     return (
-      <div style={cardStyle}>
+      <div className="secondary-repl-bay-card" style={cardStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{bay.secPrefix}</span>
@@ -348,7 +364,7 @@ function BayCard({ bay, pullMap, claimedLocs, pslotLotsMap }) {
     const bufferEmpty = bay.bufferTierData.reduce((s, td) => s + td.empty, 0)
     const urg2 = urgencyColor(bufferEmpty)
     return (
-      <div style={cardStyle}>
+      <div className="secondary-repl-bay-card" style={cardStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{bay.secPrefix}</span>
@@ -366,7 +382,7 @@ function BayCard({ bay, pullMap, claimedLocs, pslotLotsMap }) {
   const regPull = getPullLocations(bay.mats, pullMap, bay.tierData.length * 3, 3, claimedLocs)
 
   return (
-    <div style={cardStyle}>
+    <div className="secondary-repl-bay-card" style={cardStyle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{bay.secPrefix}</span>
@@ -393,6 +409,13 @@ function BayCard({ bay, pullMap, claimedLocs, pslotLotsMap }) {
       )}
     </div>
   )
+}
+
+const FILTER_LABELS = {
+  all: 'All Bays',
+  empty: 'Has Empty Positions',
+  critical: 'Critical (5+)',
+  noinv: 'No Matching Inv.',
 }
 
 export default function WrSecondaryRepl() {
@@ -453,19 +476,34 @@ export default function WrSecondaryRepl() {
 
   return (
     <div style={{ padding: '16px 4px', fontSize: 13 }}>
-      <div style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
+      <div className="secondary-repl-print-title">
+        Secondary Replenishment — {aisle === 'G' ? 'G Aisle · even' : 'F Aisle · odd'} — {FILTER_LABELS[filter]}
+      </div>
+
+      <div className="secondary-repl-no-print" style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
         Bernatello's - Wisconsin Rapids · data {refreshLabel}
       </div>
-      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14, maxWidth: 680 }}>
+      <div className="secondary-repl-no-print" style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14, maxWidth: 680 }}>
         Secondary-storage tiers (B/C/D) above each F/G-aisle primary pick face — empty positions and, when short,
         which warehouse locations have that material to pull down, furthest aisle first.
       </div>
 
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 }}>
+      <div className="secondary-repl-no-print">
+        <NotifySettingsPanel
+          facility="wr"
+          dashboardType="secondary_repl"
+          functionName="wr-secondary-repl-digest-run"
+          digestDescription="Posts a comment on this Front conversation summarizing current bay status (empty positions, critical bays, split bays)."
+          contentDateLabel="today"
+          showSkipToNextValidDay={false}
+        />
+      </div>
+
+      <div className="secondary-repl-no-print" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 }}>
         <button
           onClick={load}
           disabled={loading}
-          title="Re-fetch live data from Omni"
+          title="Re-fetch live data"
           style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, cursor: loading ? 'default' : 'pointer', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', opacity: loading ? 0.5 : 1 }}
         >
           {loading ? '⟳ Loading…' : '↻ Refresh data'}
@@ -516,7 +554,7 @@ export default function WrSecondaryRepl() {
       </div>
 
       {error && (
-        <div style={{ marginBottom: 14, padding: '10px 14px', borderRadius: 6, background: 'var(--bg2)', border: '1px solid #e05a5a', color: '#e05a5a', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
+        <div className="secondary-repl-no-print" style={{ marginBottom: 14, padding: '10px 14px', borderRadius: 6, background: 'var(--bg2)', border: '1px solid #e05a5a', color: '#e05a5a', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
           <strong>Failed to load data:</strong> {error}
           <button onClick={load} style={{ marginLeft: 12, fontSize: 11, padding: '2px 10px', borderRadius: 4, cursor: 'pointer', border: '1px solid #e05a5a', background: 'transparent', color: '#e05a5a' }}>
             Retry
@@ -524,9 +562,9 @@ export default function WrSecondaryRepl() {
         </div>
       )}
 
-      <div>
+      <div className="secondary-repl-bay-grid">
         {loading && !lastRefresh ? (
-          <p style={{ color: 'var(--text-secondary)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>Loading live data from Omni…</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>Loading live data…</p>
         ) : sorted.length === 0 ? (
           <p style={{ color: 'var(--text-secondary)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>No bays match the current filter.</p>
         ) : (
@@ -540,7 +578,7 @@ export default function WrSecondaryRepl() {
       </div>
 
       {lastRefresh && (
-        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 10, fontFamily: 'var(--font-mono)' }}>
+        <div className="secondary-repl-no-print" style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 10, fontFamily: 'var(--font-mono)' }}>
           fetched {lastRefresh.toLocaleTimeString()} {data?.elapsedMs != null ? `· ${data.elapsedMs}ms` : ''}
         </div>
       )}
