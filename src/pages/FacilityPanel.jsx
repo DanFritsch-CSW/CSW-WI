@@ -9,6 +9,7 @@ import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
 import WrPickCheck from '../components/WrPickCheck.jsx'
+import WrSecondaryRepl from '../components/WrSecondaryRepl.jsx'
 import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
@@ -49,6 +50,7 @@ const CAL2_TABS = [
 const WR_TABS = [
   { id: 'warehouse', label: 'Warehouse' }, { id: 'pickline', label: 'Pickline' },
   { id: 'cases', label: 'Cases To Pick' }, { id: 'pickcheck', label: 'Pick Location Lot Check' },
+  { id: 'secondary', label: 'Secondary Replenishments' },
 ]
 // Madison-only sub-tab row (added 2026-07-12) — sits below the global
 // Daily/Weekly toggle, same pattern as WR_TABS above. "Pre-Pick Status"
@@ -1085,6 +1087,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         )}
         {wrTab === 'cases' && <WrCasesToPick planDate={planDate} />}
         {wrTab === 'pickcheck' && <WrPickCheck />}
+        {wrTab === 'secondary' && <WrSecondaryRepl />}
       </div>
     )
   }
