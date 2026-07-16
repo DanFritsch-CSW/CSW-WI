@@ -14,6 +14,7 @@ import {
 import { useDroppable } from '@dnd-kit/core'
 import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
+import OtModal from './OtModal.jsx'
 import BreakOverrideModal from './BreakOverrideModal.jsx'
 import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, FACILITIES, FACILITY_LIST } from '../lib/constants.js'
 import {
@@ -25,6 +26,7 @@ import {
   checkRosterStaleness, markRosterRowsAsSynced,
   fetchEmployeeBreaks, upsertEmployeeBreak, deleteEmployeeBreak,
 } from '../lib/supabase.js'
+import { applyFacilityOt, revertFacilityOt } from '../lib/ot.js'
 import { fetchB2eRoster, fetchB2eRosterForRange, fetchB2eTimeOff, fetchActiveB2eEmployees } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
@@ -342,6 +344,7 @@ const STUB_EMPLOYEES = [
 
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange, onBusyChange }) {
   const isCal          = facility === 'cal'
+  const isMad          = facility === 'mad'
   const activeLaneSet  = isCal ? LANES_CAL2     : LANES
   const activeLaneIds  = isCal ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
   const activeLaneSet_ = isCal ? CAL_ACTIVE_LANES : STANDARD_ACTIVE_LANES
@@ -360,6 +363,9 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   // instead of a static "Syncing…" for the full ~2-4s foreground.
   const [syncStage, setSyncStage]         = useState(null)
   const [showAddTemp, setShowAddTemp]     = useState(false)
+  const [showOtModal, setShowOtModal]     = useState(false)
+  const [otSubmitting, setOtSubmitting]   = useState(false)
+  const [otError, setOtError]             = useState(null)
   const [pendingWrites, setPendingWrites] = useState(0)
   const [sortOrder, setSortOrder]         = useState('default')
   const [breaksMap, setBreaksMap]         = useState(new Map())
@@ -731,6 +737,36 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     setShowAddTemp(false)
   }, [facility, planDate])
 
+  // ── Facility-wide OT (Madison) ──────────────────────────────────────
+  // See applyFacilityOt/revertFacilityOt in lib/ot.js for the direction
+  // rules and B2E-sync interaction. Both reload the full roster via load()
+  // afterward rather than patching local state row-by-row — simplest way
+  // to guarantee every tile (including ones not currently rendered due to
+  // grouping) reflects the new times, and it's a single deliberate click,
+  // not a hot path that needs to avoid a refetch.
+  const otActive = Object.values(assignmentMap).some(a => a?.ot_hours != null)
+
+  const handleApplyOt = useCallback(async (hours) => {
+    setOtSubmitting(true)
+    setOtError(null)
+    const date = planDate || todayISO()
+    const { error, count } = await applyFacilityOt(facility, date, hours)
+    setOtSubmitting(false)
+    if (error) { setOtError(error); return }
+    setShowOtModal(false)
+    if (count > 0) await load(facility, date)
+  }, [facility, planDate])
+
+  const handleRevertOt = useCallback(async () => {
+    setOtSubmitting(true)
+    setOtError(null)
+    const date = planDate || todayISO()
+    const { error, count } = await revertFacilityOt(facility, date)
+    setOtSubmitting(false)
+    if (error) { setOtError(error); return }
+    if (count > 0) await load(facility, date)
+  }, [facility, planDate])
+
   const handleDeleteTemp = useCallback(async (emp) => {
     const date = planDate || todayISO()
     await deleteAssignment(facility, emp.id, date)
@@ -1043,10 +1079,20 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           {pendingWrites > 0 && <span className="roster-saving">Saving…</span>}
           <button className={`b2e-sync-btn${sortOrder !== 'default' ? ' roster-sort-active' : ''}`} onClick={nextSort} title="Cycle sort">{currentSort.label}</button>
           <button className="b2e-sync-btn" onClick={() => setShowAddTemp(true)}>+ Add Temp</button>
+          {isMad && (
+            otActive
+              ? <button className="b2e-sync-btn" onClick={handleRevertOt} disabled={otSubmitting} title="Revert everyone back to their standard B2E shift times for today">
+                  {otSubmitting ? 'Reverting…' : 'Revert OT'}
+                </button>
+              : <button className="b2e-sync-btn" onClick={() => setShowOtModal(true)} title="Add extra hours to every active shift today (1st/Mid stay later, 2nd/3rd come in earlier)">
+                  + Apply OT
+                </button>
+          )}
           <button className="b2e-sync-btn" onClick={handleB2eSync} disabled={syncState === 'loading'} title="Pull latest shift schedules from B2E. Manual lane/shift changes you've made are preserved.">
             {syncState === 'loading' ? (syncStage || 'Syncing…') : syncState === 'ok' ? 'Synced ✓' : 'Sync from B2E'}
           </button>
           {syncState && syncState !== 'loading' && syncState !== 'ok' && <span className="b2e-sync-err">{syncState}</span>}
+          {otError && <span className="b2e-sync-err">{otError}</span>}
         </div>
       </div>
 
@@ -1096,6 +1142,14 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           planDate={planDate || todayISO()}
           onAdd={handleAddTemp}
           onClose={() => setShowAddTemp(false)}
+        />
+      )}
+
+      {showOtModal && (
+        <OtModal
+          submitting={otSubmitting}
+          onConfirm={handleApplyOt}
+          onClose={() => { setShowOtModal(false); setOtError(null) }}
         />
       )}
 
