@@ -66,3 +66,22 @@ export const CAL2_DOCK_MAP = {
 // the top of the list regardless of sort mode. Edit freely — no other
 // code changes needed to add/remove names.
 export const PRIORITY_CUSTOMERS = ['Walmart']
+
+// Facility-wide OT button (Madison, added 2026-07-16). When OT is called
+// for the day, every active-lane employee gets an extra N hours added to
+// their shift — but which side of the shift it's added to depends on the
+// lane, so shifts extend AWAY from the changeover gap instead of everyone
+// just clocking in later:
+//   shift1 (1st) / mid  → extend the END   (stay later)
+//   shift2 (2nd) / shift3 (3rd) → extend the START (come in earlier)
+// Matches Dan's examples: 1st 6:00–2:30 → 6:00–3:30 (end +1h), 2nd
+// 1:30–10:00 → 12:30–10:00 (start −1h). Mid follows the 1st-shift pattern
+// per Dan (8:00–4:30 → 8:00–5:30, once Mid launches at MAD) — MAD doesn't
+// have a 3rd shift yet, so the 'start' direction for shift3 is inferred
+// from the 2nd-shift pattern and should be confirmed once one exists.
+export const OT_LANE_DIRECTION = {
+  shift1: 'end',
+  mid:    'end',
+  shift2: 'start',
+  shift3: 'start',
+}
