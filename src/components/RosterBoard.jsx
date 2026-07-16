@@ -340,7 +340,7 @@ const STUB_EMPLOYEES = [
   { id: 'e9', name: 'Quinn Adams',    role: 'Associate',  default_lane: 'callin' },
 ]
 
-export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange }) {
+export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange, onBusyChange }) {
   const isCal          = facility === 'cal'
   const activeLaneSet  = isCal ? LANES_CAL2     : LANES
   const activeLaneIds  = isCal ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
@@ -428,7 +428,15 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     })()
   }, [])
 
-  async function load(facId, date) {
+  // ── Cancellation-aware load ──────────────────────────────────────────
+  // `isCancelled()` is checked before every setState call that follows an
+  // await. Without this, rapid date-switching (D1 -> D2 -> D1) could run
+  // two load() calls concurrently, and whichever resolved LAST — not
+  // whichever matched the currently-selected date — would win and
+  // silently overwrite the roster board. Found 2026-07-16 while
+  // investigating Kay/Josh's "changes get lost" report: this function had
+  // no cancellation guard at all, unlike FacilityPanel's equivalent effect.
+  async function load(facId, date, isCancelled = () => false) {
     setIsLoading(true)
 
     const [assignments, timeOffMap, b2eRosterFull, breaksMapResult] = await Promise.all([
@@ -437,6 +445,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       fetchB2eRoster(facId, date).catch(() => []),
       fetchEmployeeBreaks(facId).catch(() => new Map()),
     ])
+    if (isCancelled()) return
 
     setBreaksMap(breaksMapResult)
 
@@ -463,6 +472,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         await replaceEmployees(facId, empRows)
         await seedRosterAssignments(withTimeOff, date)
         const seeded = await fetchTodayAssignments(facId, date)
+        if (isCancelled()) return
         _buildState(facId, seeded, timeOffMap, carryovers)
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
         scheduleBackgroundHorizonSync(facId, date, withTimeOff.map(e => e.id))
@@ -483,6 +493,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
           }
           const overrideMap = new Map(toUpdate.map(r => [r.employee_id, r]))
           const merged = assignments.map(a => overrideMap.get(a.employee_id) ?? a)
+          if (isCancelled()) return
           _buildState(facId, merged, timeOffMap, carryovers)
           maybeAutoResync(facId, date)
           return
@@ -490,6 +501,7 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       }
     }
 
+    if (isCancelled()) return
     _buildState(facId, assignments, timeOffMap, carryovers)
     maybeAutoResync(facId, date)
   }
@@ -568,10 +580,21 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   }
 
   useEffect(() => {
+    let cancelled = false
     const date = planDate || todayISO()
     loadRef.current = () => load(facility, date)
-    load(facility, date)
+    load(facility, date, () => cancelled)
+    return () => { cancelled = true }
   }, [facility, planDate])
+
+  // ── Busy signal, bubbled up to FacilityPanel / LaborPlanning ────────────
+  // Covers: initial/date-change roster load, any in-flight drag-drop write,
+  // and a foreground "Sync from B2E" click. Used to disable date navigation
+  // until the currently-viewed date has actually finished loading AND any
+  // pending writes have landed in Supabase — see LaborPlanning.jsx.
+  useEffect(() => {
+    onBusyChange?.(isLoading || pendingWrites > 0 || syncState === 'loading')
+  }, [isLoading, pendingWrites, syncState, onBusyChange])
 
   const trackedUpsert = useCallback(async (assignment) => {
     setPendingWrites(n => n + 1)
