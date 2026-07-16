@@ -64,6 +64,16 @@ const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
 const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000
 
+// Hard cap on how long the "date navigation is busy" signal can stay true
+// for the main load-phases pipeline (hourly, appointments, project list,
+// EST-drop seeding). Persistent Omni retries can legitimately run up to
+// ~3 min on a bad day (see fetchWithPersistentRetry below) — we don't want
+// a genuine outage to permanently trap the user on one date. After this
+// cap, LaborPlanning's date controls re-enable even if fetches are still
+// quietly retrying in the background; nothing about the retry behavior
+// itself changes. Added 2026-07-16 alongside the busy-signal plumbing.
+const BUSY_TIMEOUT_MS = 12000
+
 function r1(n) { return Math.round(n * 10) / 10 }
 
 function dateRange(from, to) {
@@ -152,7 +162,7 @@ async function fetchWithPersistentRetry(fetchFn, label, isCancelled) {
   throw new Error(`${label} exhausted retries`)
 }
 
-export default function FacilityPanel({ facility, planDate, view, networkKpi, onDeltaComputed, onKpiComputed }) {
+export default function FacilityPanel({ facility, planDate, view, networkKpi, onDeltaComputed, onKpiComputed, onBusyChange }) {
   const [rawHourly, setRawHourly]           = useState([])
   const [hourlyAppts, setHourlyAppts]       = useState({})
   const [hourlyErr, setHourlyErr]           = useState(null)
@@ -186,6 +196,15 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   // treatment as Hourly Chart above, per Dan's request. Same per-mount reset
   // behavior — switching facilities/dates re-collapses it.
   const [hourlyBreakdownOpen, setHourlyBreakdownOpen] = useState(false)
+  // ── Busy tracking (2026-07-16) ──────────────────────────────────────────
+  // `phasesBusy` covers the main loadData effect below (hourly, appts,
+  // adjustments, project list, and EST-drop seeding when it runs).
+  // `rosterBusy` mirrors RosterBoard's own busy signal (initial/date load,
+  // pending drag-drop writes, foreground B2E sync). Combined and bubbled
+  // up via onBusyChange so LaborPlanning can disable date navigation until
+  // the currently-viewed date has actually finished loading and saving.
+  const [phasesBusy, setPhasesBusy] = useState(true)
+  const [rosterBusy, setRosterBusy] = useState(true)
 
   const isCal2 = facility.id === 'cal'
   const isMad  = facility.id === 'mad'
@@ -204,6 +223,17 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   const { settings, loading: settingsLoading, projectHpa } = useSettings(facility.id)
 
   const lastRefreshRef = useRef(0)
+
+  // Whether RosterBoard is actually mounted/usable in the currently-visible
+  // sub-view (it only appears inside `warehouseContent`, so it's absent on
+  // WR's non-warehouse tabs and MAD's Pre-Pick Status tab). Gating on this
+  // keeps a stale rosterBusy reading from permanently blocking date
+  // navigation on those sub-views.
+  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && madTab === 'prepick')
+
+  useEffect(() => {
+    onBusyChange?.(phasesBusy || (rosterBoardVisible && rosterBusy))
+  }, [phasesBusy, rosterBusy, rosterBoardVisible, onBusyChange])
 
   // ── Weekly projects table data — current Mon–Sun window ──
   // Refetches only when the week changes, not on every planDate within the
@@ -348,6 +378,25 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
     setProjectHourlyDrops({}); setHourlyAdjustments({}); setSideHourlyAppts({})
     setFetchedAt(null)
 
+    // ── Busy tracking for the "don't switch dates mid-load" guard ──────────
+    // Counts the 4 always-running phases below (hourly, appointments,
+    // adjustments, project list). Phase 3 (EST-drop seeding) adds itself to
+    // the count only when it actually decides to run (known only after
+    // Phase 2's project list resolves). phasesBusy flips false once every
+    // counted phase has settled — success, failure, or cancellation all
+    // count as "settled". Hard-capped at BUSY_TIMEOUT_MS so a genuine Omni
+    // outage (persistent retry can run up to ~3 min) never permanently
+    // locks date navigation; the retries keep going quietly in the
+    // background past the cap exactly as before, we just stop blocking
+    // the UI on them.
+    let pendingPhases = 4
+    setPhasesBusy(true)
+    const busyTimeout = setTimeout(() => { if (!cancelled) setPhasesBusy(false) }, BUSY_TIMEOUT_MS)
+    function phaseDone() {
+      pendingPhases -= 1
+      if (pendingPhases <= 0 && !cancelled) setPhasesBusy(false)
+    }
+
     async function loadData() {
       // Clear manually edited rows from before the current week (fire-and-forget)
       const { from: weekStartISO } = weekOf(new Date().toISOString().slice(0, 10))
@@ -367,6 +416,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         () => cancelled
       ).then(value => { if (!cancelled) setRawHourly(value) })
        .catch(() => { /* cancelled or exhausted — already logged */ })
+       .finally(phaseDone)
 
       // ── Phase 1b: appointments — fires independently in parallel ──
       fetchWithPersistentRetry(
@@ -379,11 +429,13 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         setFetchedAt(new Date())
         lastRefreshRef.current = Date.now()
       }).catch(() => { /* cancelled or exhausted */ })
+        .finally(phaseDone)
 
       // Hourly adjustments (Supabase, no retry layer needed)
       fetchHourlyAdjustments(facility.id, planDate)
         .then(d => { if (!cancelled) setHourlyAdjustments(d) })
         .catch(() => {})
+        .finally(phaseDone)
 
       // ── Phase 2: project list (drives Phase 3 EST drops seeding) ──
       // Awaited because Phase 3 needs the project list. If this exhausts
@@ -398,6 +450,8 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         if (!cancelled) setProjects(fetchedProjects)
       } catch {
         /* cancelled or exhausted — Phase 3 handles fallback */
+      } finally {
+        phaseDone()
       }
       if (cancelled) return
 
@@ -406,6 +460,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
       const shouldSeed = isKen || hasCustom || fetchedProjects.length > 0
       if (!shouldSeed) return
 
+      pendingPhases += 1
       setSeedingDrops(true)
       try {
         const [existing, historical] = await Promise.all([
@@ -469,11 +524,12 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         } catch { /* nothing to do */ }
       } finally {
         if (!cancelled) setSeedingDrops(false)
+        phaseDone()
       }
     }
 
     loadData()
-    return () => { cancelled = true }
+    return () => { cancelled = true; clearTimeout(busyTimeout) }
   }, [facility.id, planDate, isMad, isKen])
 
   async function handleRefreshProject(projectName) {
@@ -792,13 +848,23 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
     ? Object.entries(rosterState.laneMap).filter(([, l]) => laneFilter?.has(l)).length
     : laborCount
 
+  // ── KPI display values ──────────────────────────────────────────────
+  // util/delta previously fell back to `networkKpi?.util` / `networkKpi?.delta`
+  // (the ALL-tab, network-wide aggregate) whenever this facility's own
+  // hourly data was momentarily empty — e.g. right after a date click,
+  // before rawHourly had arrived. That fallback substituted an unrelated
+  // facility's number in place of "no data yet", and on screen it looked
+  // exactly like a real (if surprising) reading. Removed 2026-07-16 per
+  // Kay/Josh's report of KPI numbers jumping around unpredictably.
+  // KpiPills already renders '--' for null, which is the honest state to
+  // show while this facility's own numbers are still loading.
   const kpiData = {
     appts: totalInb + totalOut + totalDrops, drops: totalDrops,
     inb: totalInb, out: totalOut, labor: sideHeadcount,
     totalHours: totalHoursAvail,
     laborReq: totalLaborReq,
     totalAdj,
-    util: util ?? networkKpi?.util, delta: delta ?? networkKpi?.delta,
+    util, delta,
     fetchedAt,
   }
 
@@ -996,7 +1062,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
           </div>
 
           <RosterBoard facility={facility.id} planDate={planDate} settings={settings}
-            onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} />
+            onLaborCount={handleLaborCount} onRosterChange={handleRosterChange} onBusyChange={setRosterBusy} />
 
           <AppointmentList
             appointments={appointmentList}
