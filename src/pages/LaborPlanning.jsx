@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchNetworkKpis } from '../lib/omni.js'
@@ -36,7 +36,6 @@ export default function LaborPlanning() {
   function setActiveTab(tab) { setSearchParams(prev => { prev.set('fac', tab); return prev }, { replace: true }) }
   function setPlanDate(date) { setSearchParams(prev => { prev.set('date', date); return prev }, { replace: true }) }
   function setView(v) { setSearchParams(prev => { prev.set('view', v); return prev }, { replace: true }) }
-  function stepDay(n) { setPlanDate(addDays(planDate, n)) }
 
   const [networkData, setNetworkData]                 = useState(null)
   const [facilityEstDrops, setFacilityEstDrops]       = useState({})
@@ -46,6 +45,15 @@ export default function LaborPlanning() {
   const [facilityKpis, setFacilityKpis]               = useState({})
   const [snapLabel, setSnapLabel]                     = useState('Snapshot')
   const [mountedTabs, setMountedTabs]                 = useState(() => new Set())
+  // ── Per-facility "still loading/saving this date" signal (2026-07-16) ──
+  // Fed by each FacilityPanel's onBusyChange (which itself combines its own
+  // load phases with RosterBoard's busy state). Used below to disable date
+  // navigation (week arrows, day tabs, date input) until the ACTIVE
+  // facility's currently-viewed date has actually finished loading and any
+  // roster writes have landed in Supabase. Added per Dan's report that
+  // switching dates before the previous date settled was contributing to
+  // both the KPI-flicker and roster "lost changes" complaints.
+  const [facilityBusy, setFacilityBusy]                = useState({})
 
   const pageRef = useRef(null)
 
@@ -67,6 +75,28 @@ export default function LaborPlanning() {
   const handleKpiComputed = useCallback((facilityId, kpi) => {
     setFacilityKpis(prev => ({ ...prev, [facilityId]: kpi }))
   }, [])
+
+  const handleBusyChange = useCallback((facilityId, busy) => {
+    setFacilityBusy(prev => (prev[facilityId] === busy ? prev : { ...prev, [facilityId]: busy }))
+  }, [])
+
+  // Stable per-facility onBusyChange callbacks so FacilityPanel's busy
+  // effect doesn't re-fire on every LaborPlanning render (handleBusyChange
+  // itself is stable — this just avoids handing each FacilityPanel a new
+  // function identity every time).
+  const busyHandlers = useMemo(
+    () => Object.fromEntries(FACILITY_LIST.map(f => [f.id, (busy) => handleBusyChange(f.id, busy)])),
+    [handleBusyChange]
+  )
+
+  // Only the currently-active facility tab's busy state gates date
+  // navigation — a background-mounted tab still finishing its own load
+  // doesn't block the user from moving around on the tab they're
+  // actually looking at.
+  const isDateNavBusy = activeTab !== 'all' && !!facilityBusy[activeTab]
+
+  function stepDay(n) { if (isDateNavBusy) return; setPlanDate(addDays(planDate, n)) }
+  function selectDate(date) { if (isDateNavBusy) return; setPlanDate(date) }
 
   const handleSnapshot = useCallback(async () => {
     if (!pageRef.current) return
@@ -112,8 +142,9 @@ export default function LaborPlanning() {
           <button
             className="day-btn"
             onClick={() => stepDay(-7)}
-            title="Previous week"
-            style={{ padding: '6px 10px', fontSize: 14 }}
+            disabled={isDateNavBusy}
+            title={isDateNavBusy ? "Finishing this date's update…" : 'Previous week'}
+            style={{ padding: '6px 10px', fontSize: 14, ...(isDateNavBusy ? { opacity: 0.45, cursor: 'not-allowed' } : {}) }}
           >‹</button>
           <div style={{ display: 'flex', gap: 4 }}>
             {weekDays.map((iso, idx) => {
@@ -123,7 +154,9 @@ export default function LaborPlanning() {
                 <button
                   key={iso}
                   className="day-btn"
-                  onClick={() => setPlanDate(iso)}
+                  onClick={() => selectDate(iso)}
+                  disabled={isDateNavBusy}
+                  title={isDateNavBusy ? "Finishing this date's update…" : undefined}
                   style={{
                     display: 'flex', flexDirection: 'column', alignItems: 'center',
                     gap: 1, padding: '4px 10px', minWidth: 50, position: 'relative',
@@ -132,6 +165,7 @@ export default function LaborPlanning() {
                       color: 'var(--brand)',
                       fontWeight: 600,
                     } : { color: 'var(--text-secondary)' }),
+                    ...(isDateNavBusy ? { opacity: 0.45, cursor: 'not-allowed' } : {}),
                   }}
                 >
                   <span style={{ fontSize: 10, opacity: 0.7 }}>{DAY_LABELS[idx]}</span>
@@ -152,10 +186,23 @@ export default function LaborPlanning() {
           <button
             className="day-btn"
             onClick={() => stepDay(7)}
-            title="Next week"
-            style={{ padding: '6px 10px', fontSize: 14 }}
+            disabled={isDateNavBusy}
+            title={isDateNavBusy ? "Finishing this date's update…" : 'Next week'}
+            style={{ padding: '6px 10px', fontSize: 14, ...(isDateNavBusy ? { opacity: 0.45, cursor: 'not-allowed' } : {}) }}
           >›</button>
-          <input type="date" className="day-input" value={planDate} onChange={e => setPlanDate(e.target.value)} />
+          <input
+            type="date"
+            className="day-input"
+            value={planDate}
+            onChange={e => selectDate(e.target.value)}
+            disabled={isDateNavBusy}
+            style={isDateNavBusy ? { opacity: 0.45, cursor: 'not-allowed' } : {}}
+          />
+          {isDateNavBusy && (
+            <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+              Finishing this date's update…
+            </span>
+          )}
           {activeTab !== 'all' && (
             <button className="snapshot-btn" onClick={handleSnapshot}>{snapLabel}</button>
           )}
@@ -223,6 +270,7 @@ export default function LaborPlanning() {
               networkKpi={networkData?.[fac.id]}
               onDeltaComputed={handleDeltaComputed}
               onKpiComputed={handleKpiComputed}
+              onBusyChange={busyHandlers[fac.id]}
             />
           </div>
         )
