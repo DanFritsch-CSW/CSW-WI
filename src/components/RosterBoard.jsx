@@ -711,10 +711,25 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
   }, [showSyncToast, performB2eSync])
 
   const handleAddTemp = useCallback((tempEmp) => {
+    const date = planDate || todayISO()
     setEmployees(prev => [...prev, tempEmp])
     setLaneMap(prev => ({ ...prev, [tempEmp.id]: tempEmp.default_lane || 'shift1' }))
+    setAssignmentMap(prev => ({
+      ...prev,
+      [tempEmp.id]: {
+        facility,
+        employee_id:   tempEmp.id,
+        employee_name: tempEmp.name,
+        role:          tempEmp.role,
+        lane:          tempEmp.default_lane || 'shift1',
+        plan_date:     date,
+        is_temp:       true,
+        shift_start:   tempEmp.shift_start,
+        shift_hours:   tempEmp.shift_hours,
+      },
+    }))
     setShowAddTemp(false)
-  }, [])
+  }, [facility, planDate])
 
   const handleDeleteTemp = useCallback(async (emp) => {
     const date = planDate || todayISO()
