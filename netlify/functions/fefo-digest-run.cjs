@@ -7,13 +7,15 @@
 // facility.
 //
 // ── Why one settings row per project instead of one combined digest ───────
-// Dan's call: each of the 5 FEFO projects (Fair Oaks, Fair Oaks West,
-// Richelieu, Crown Bakeries, Birchwood) gets its OWN prepick_notify_settings
-// row — facility='ken', dashboard_type='fefo_<projectId>' (e.g.
-// 'fefo_faioa5') — with its own Front conversation, its own send time, and
-// its own Enabled toggle. No schema change was needed: the table's existing
-// composite key (facility, dashboard_type) already supports this, we're
-// just seeding 5 new dashboard_type values instead of 1.
+// Dan's call: each FEFO project (Fair Oaks, Fair Oaks West, Richelieu,
+// Crown Bakeries, Birchwood — all KEN — plus Palermo's Caledonia at CAL,
+// added 2026-07-17) gets its OWN prepick_notify_settings row —
+// (facility, dashboard_type)=('ken'|'cal', 'fefo_<projectId>') — with its
+// own Front conversation, its own send time, and its own Enabled toggle.
+// No schema change was needed: the table's existing composite key
+// (facility, dashboard_type) already supports this, we're just seeding a
+// new dashboard_type value per project, in whichever facility that
+// project actually lives at.
 //
 // This one Netlify function is SHARED across all 5 rows (one file, one
 // cron tick every 15 min) rather than 5 separate function files — the only
@@ -81,10 +83,10 @@
 // verdict engine here too.
 //
 // Two invocation paths (same convention as the other digests):
-//   1. SCHEDULED (netlify.toml: "*/15 * * * *") — loops every
-//      facility='ken' AND dashboard_type LIKE 'fefo_%' row, fires whichever
-//      one(s) match the current America/Chicago time, resolving each row's
-//      own next business day from its own notify_days.
+//   1. SCHEDULED (netlify.toml: "*/15 * * * *") — loops every fefo_*
+//      dashboard_type row across ALL facilities, fires whichever one(s)
+//      match the current America/Chicago time, resolving each row's own
+//      next business day from its own notify_days.
 //   2. MANUAL TEST — POST { dashboardType: 'fefo_<projectId>' }. Unlike the
 //      single-row digests, this one MUST be told which project's settings
 //      row to use, since one function backs 5 rows. Always sends
@@ -99,11 +101,18 @@ const FRONT_TOKEN = process.env.FRONT_API_TOKEN
 const SITE_URL = process.env.URL || process.env.DEPLOY_URL
 
 const FEFO_PROJECTS = [
-  { id: 'faioa5', code: 'FAIOA5', name: 'Fair Oaks Farms' },
-  { id: 'fofwe5', code: 'FOFWE5', name: 'Fair Oaks Farms West' },
-  { id: 'riche5', code: 'RICHE5', name: 'Richelieu Foods' },
-  { id: 'golst5', code: 'GOLST5', name: 'Crown Bakeries' },
-  { id: 'birch5', code: 'BIRCH5', name: 'Birchwood Foods' },
+  { id: 'faioa5', code: 'FAIOA5', name: 'Fair Oaks Farms', facility: 'ken' },
+  { id: 'fofwe5', code: 'FOFWE5', name: 'Fair Oaks Farms West', facility: 'ken' },
+  { id: 'riche5', code: 'RICHE5', name: 'Richelieu Foods', facility: 'ken' },
+  { id: 'golst5', code: 'GOLST5', name: 'Crown Bakeries', facility: 'ken' },
+  { id: 'birch5', code: 'BIRCH5', name: 'Birchwood Foods', facility: 'ken' },
+  // Added 2026-07-17 — first FEFO project outside KEN (see src/lib/fefo.js
+  // for the full "why CAL" writeup). facility here MUST match the actual
+  // stored facility column on this project's prepick_notify_settings row
+  // (facility='cal') — it's used both to build the fefo-orders request and
+  // as a WHERE-clause value when updating last_sent_date; a mismatch there
+  // would silently update 0 rows rather than error.
+  { id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia", facility: 'cal' },
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_${p.id}`, p]))
 const DEFAULT_NOTIFY_DAYS = [1, 2, 3, 4, 5]
@@ -390,7 +399,7 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   const ordersRes = await fetch(`${SITE_URL}/.netlify/functions/fefo-orders`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ facility: 'ken', projectIds: [project.id], dayCount }),
+    body: JSON.stringify({ facility: project.facility, projectIds: [project.id], dayCount }),
   })
   const ordersText = await ordersRes.text()
   let ordersJson
@@ -417,7 +426,7 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   }
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.ken&dashboard_type=eq.fefo_${project.id}`, { last_sent_date: date })
+    await sbPatch(`prepick_notify_settings?facility=eq.${project.facility}&dashboard_type=eq.fefo_${project.id}`, { last_sent_date: date })
   }
 
   return { ok: true, date, project: project.code, conversationId, commentId: frontJson.id, orderCount: targetOrders.length }
@@ -432,7 +441,7 @@ async function runDigest({ isManualTest, dashboardType }) {
     const project = PROJECT_BY_DASHBOARD_TYPE.get(dashboardType)
     if (!project) return { ok: false, reason: `Unknown dashboardType '${dashboardType}'` }
     const rows = await sbFetch(
-      `prepick_notify_settings?facility=eq.ken&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
+      `prepick_notify_settings?facility=eq.${project.facility}&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
     )
     const settingsRow = rows?.[0]
     const dateObj = nextBusinessDayDateObj(settingsRow?.notify_days)
@@ -440,12 +449,14 @@ async function runDigest({ isManualTest, dashboardType }) {
     return result
   }
 
-  // Scheduled tick — loop every fefo_* row for ken. Each row resolves its
-  // OWN next business day from its own notify_days, then fires if this
-  // tick matches the configured send time and it hasn't already sent for
-  // that resolved date.
+  // Scheduled tick — loop every fefo_* row (across ALL facilities, not just
+  // ken, now that Palermo's Caledonia/CAL exists — dashboard_type already
+  // uniquely identifies the project, so facility isn't needed as a filter
+  // here). Each row resolves its OWN next business day from its own
+  // notify_days, then fires if this tick matches the configured send time
+  // and it hasn't already sent for that resolved date.
   const rows = await sbFetch(
-    `prepick_notify_settings?facility=eq.ken&dashboard_type=like.fefo_*&select=dashboard_type,front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
+    `prepick_notify_settings?dashboard_type=like.fefo_*&select=facility,dashboard_type,front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
   const results = []
   for (const row of (rows || [])) {
