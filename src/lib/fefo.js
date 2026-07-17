@@ -52,6 +52,21 @@ export const FEFO_PROJECTS = [
     color: '#8b5a3c', facility: 'ken',
     datexProjectName: 'BIRCHWOOD FOODS  KENOSHA',
   },
+  {
+    // Added 2026-07-17 per Dan's request. First FEFO project OUTSIDE Kenosha
+    // — this is CSW's own Caledonia finished-goods project (Palermo Villa,
+    // Inc.), not a KEN customer, hence facility: 'cal'. Confirmed via
+    // MotherDuck (silver.datex_slv_projects: project_id=5, lookup_code=
+    // 'PALVI9', 195 orders currently Processing). Lot codes (WC106515,
+    // WJ101444, plain numeric codes like "19626") don't encode a date at
+    // all — same situation as Birchwood — so this uses receiveDate/received
+    // too. Left out PALMA9 (materials bulk) and PALDSD9 (DSD) per Dan's
+    // call — only the finished-goods project for now.
+    id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia",
+    proj: 5, dateFormat: 'receiveDate', dateSemantic: 'received',
+    color: '#1f7a8c', facility: 'cal',
+    datexProjectName: 'Palermos CALEDONIA finished',
+  },
 ]
 
 export function getProject(projId) {
@@ -492,22 +507,19 @@ export async function fetchLiveFefoOrders(projectId, { dayCount = 5 } = {}) {
 }
 
 // ─── Live fetcher (batch — multi-project in one Lambda call) ────────────────
+//
+// Facility grouping (2026-07-17, Palermo's Caledonia/CAL added) — the
+// backend function (fefo-orders.cjs) only accepts ONE warehouse per
+// request. Until now every FEFO project was KEN, so a single batch request
+// covering "All Projects" always happened to be single-facility. Adding a
+// CAL project means "All Projects" now spans two facilities, so this groups
+// projectIds by their configured facility and fires one request per group
+// in parallel, merging the results. Transparent to callers — the exported
+// signature and return shape are unchanged; FefoRotationTab.jsx still calls
+// this with all project IDs and doesn't need to know facilities exist.
 
-export async function fetchLiveFefoOrdersBatch(projectIds, { dayCount = 5 } = {}) {
+async function fetchOneFacilityBatch(projectIds, facility, dayCount) {
   const now = () => new Date().toISOString()
-  if (!Array.isArray(projectIds) || projectIds.length === 0) {
-    return { ordersByProject: {}, errorsByProject: {}, fetchedAt: now(), source: 'mock', error: 'projectIds required' }
-  }
-  const projects = projectIds.map(getProject)
-  const unknown = projectIds.filter((pid, i) => !projects[i])
-  if (unknown.length > 0) {
-    return { ordersByProject: {}, errorsByProject: {}, fetchedAt: now(), source: 'mock', error: `unknown projectId(s): ${unknown.join(', ')}` }
-  }
-  const facility = projects[0].facility
-  const mixed = projects.some(p => p.facility !== facility)
-  if (mixed) {
-    return { ordersByProject: {}, errorsByProject: {}, fetchedAt: now(), source: 'mock', error: 'batch requires all projects in same facility' }
-  }
   try {
     const res = await fetch('/.netlify/functions/fefo-orders', {
       method: 'POST',
@@ -521,7 +533,6 @@ export async function fetchLiveFefoOrdersBatch(projectIds, { dayCount = 5 } = {}
       return {
         ordersByProject: body.ordersByProject || fallback,
         errorsByProject: errs,
-        fetchedAt: now(),
         source: 'mock',
         elapsedMs: body.elapsedMs,
         error: body.error || `HTTP ${res.status}`,
@@ -530,19 +541,61 @@ export async function fetchLiveFefoOrdersBatch(projectIds, { dayCount = 5 } = {}
     return {
       ordersByProject: body.ordersByProject || {},
       errorsByProject: body.errorsByProject || {},
-      fetchedAt: body.fetchedAt || now(),
       source: 'live',
       elapsedMs: body.elapsedMs,
     }
   } catch (e) {
-    console.warn('fetchLiveFefoOrdersBatch failed:', e.message)
+    console.warn('fetchOneFacilityBatch failed:', e.message)
     return {
       ordersByProject: Object.fromEntries(projectIds.map(pid => [pid, []])),
       errorsByProject: Object.fromEntries(projectIds.map(pid => [pid, e.message || 'unknown'])),
-      fetchedAt: now(),
       source: 'mock',
       error: e.message,
     }
+  }
+}
+
+export async function fetchLiveFefoOrdersBatch(projectIds, { dayCount = 5 } = {}) {
+  const now = () => new Date().toISOString()
+  if (!Array.isArray(projectIds) || projectIds.length === 0) {
+    return { ordersByProject: {}, errorsByProject: {}, fetchedAt: now(), source: 'mock', error: 'projectIds required' }
+  }
+  const projects = projectIds.map(getProject)
+  const unknown = projectIds.filter((pid, i) => !projects[i])
+  if (unknown.length > 0) {
+    return { ordersByProject: {}, errorsByProject: {}, fetchedAt: now(), source: 'mock', error: `unknown projectId(s): ${unknown.join(', ')}` }
+  }
+
+  const byFacility = new Map()
+  for (const p of projects) {
+    if (!byFacility.has(p.facility)) byFacility.set(p.facility, [])
+    byFacility.get(p.facility).push(p.id)
+  }
+
+  const groupResults = await Promise.all(
+    [...byFacility.entries()].map(([facility, ids]) => fetchOneFacilityBatch(ids, facility, dayCount))
+  )
+
+  const ordersByProject = {}
+  const errorsByProject = {}
+  let anyLive = false
+  let firstError = null
+  let maxElapsed = 0
+  for (const r of groupResults) {
+    Object.assign(ordersByProject, r.ordersByProject)
+    Object.assign(errorsByProject, r.errorsByProject)
+    if (r.source === 'live') anyLive = true
+    if (r.error && !firstError) firstError = r.error
+    if (r.elapsedMs) maxElapsed = Math.max(maxElapsed, r.elapsedMs)
+  }
+
+  return {
+    ordersByProject,
+    errorsByProject,
+    fetchedAt: now(),
+    source: anyLive ? 'live' : 'mock',
+    elapsedMs: maxElapsed || undefined,
+    ...(anyLive ? {} : { error: firstError || 'all facility batches failed' }),
   }
 }
 
