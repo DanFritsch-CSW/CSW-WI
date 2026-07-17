@@ -1,11 +1,21 @@
 /* Print stylesheet for the Inventory tab (cycle-count sheet), added 2026-07-15,
-   revised twice same day per Dan's feedback:
-   - rev 1: chrome hidden, deterministic per-page chunking, Cases column
-   - rev 2: JS row-chunking (fixed rows-per-column estimate) replaced with
-     native CSS multi-column flow, because the estimate didn't match actual
-     rendered row height on Dan's printer and column 1 overflowed into the
-     next physical page ahead of column 2's own content, breaking reading
-     order (see .inv-print-flow below).
+   revised three times same day per Dan's feedback:
+   - rev 1: chrome hidden, deterministic per-page chunking, Cases column.
+     Bug: rows-per-column estimate (30/36) didn't match actual rendered row
+     height (~26 actually fit) -- column 1 overflowed into the next physical
+     page ahead of column 2's own content, breaking reading order.
+   - rev 2: replaced JS row-chunking with native CSS multi-column flow
+     (columns:2 + column-fill:auto) to avoid needing a row estimate at all.
+     This was WORSE: nesting CSS Grid rows inside a multicol container is a
+     known-unreliable combination in Chromium's print engine -- text
+     overlapped on page 2 and the browser's height miscalculation produced
+     two extra blank trailing pages.
+   - rev 3 (current): reverted to rev 1's plain-<table> structure (which
+     rendered cleanly, just with the wrong row budget) but with a much more
+     conservative rows-per-column count -- see ROWS_FIRST_PAGE_COL /
+     ROWS_OTHER_PAGE_COL in InventoryReport.jsx. Leaves some blank space at
+     the bottom of most pages in exchange for guaranteed no-overflow, no
+     text-overlap, no blank trailing pages.
    Pattern mirrors src/styles/wr-secondary-repl.css: classNames scoped to
    this component rather than a body-level rule, since this tab shares the
    app shell's <body> with every other facility tab. */
@@ -25,7 +35,7 @@
      Guarded behind body.inv-printing (toggled in InventoryReport.jsx right
      before window.print() and removed on 'afterprint') rather than a bare
      rule, so this stylesheet staying loaded in the SPA doesn't affect
-     printing from any other tab. */
+     printing from any other tab. Confirmed working in Dan's rev-2 test. */
   body.inv-printing .util-bar,
   body.inv-printing .top-nav {
     display: none !important;
@@ -35,53 +45,56 @@
     margin-top: 0 !important;
   }
 
-  .inv-print-header { margin-bottom: 6px; }
+  .inv-print-header { margin-bottom: 10px; }
   .inv-print-header .title { font-size: 15px; font-weight: 700; color: #000; margin-bottom: 2px; }
   .inv-print-header .meta { font-size: 11px; color: #333; margin-bottom: 1px; }
   .inv-print-header .meta.small { font-size: 9.5px; color: #666; margin-top: 4px; font-style: italic; }
 
-  /* Single legend row stating field order — shown once at the top rather
-     than repeating as a header per column/page, since plain CSS multicol
-     has no mechanism to repeat a header per fragment (unlike an HTML table
-     thead, which is itself unreliable across print page breaks anyway). */
-  .inv-print-legend {
+  /* Each .inv-print-page is a pre-sized chunk (see printPages) — force a
+     clean break between them instead of letting content flow/fragment
+     wherever it happens to run out of vertical room. Deliberately
+     conservative row budgets (see JSX) mean a page may end with some blank
+     space rather than risk overflow. */
+  .inv-print-page:not(:last-child) {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .inv-print-columns {
     display: grid;
-    grid-template-columns: 26% 12% 12% 16% 34%;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+
+  .inv-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10.5px;
+    table-layout: fixed;
+  }
+  .inv-print-table th {
+    text-align: left;
+    border-bottom: 1px solid #000;
+    padding: 3px 4px;
     font-size: 9px;
-    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: #000;
-    border-bottom: 1px solid #000;
-    padding: 3px 4px;
-    margin-bottom: 4px;
   }
-
-  /* The core fix: native CSS multi-column flow instead of JS-computed
-     "pages". column-fill:auto forces sequential top-to-bottom filling
-     (fill column 1 completely before starting column 2) rather than the
-     "balance" default. Browsers fragment multicol content at page
-     boundaries automatically based on ACTUAL rendered height, so column 2
-     of a page always continues exactly where column 1 of that same page
-     left off, and column 1 of the next page always continues exactly
-     where column 2 of the previous page left off — no row-count estimate
-     needed anywhere. */
-  .inv-print-flow {
-    columns: 2;
-    column-gap: 28px;
-    column-fill: auto;
-  }
-
-  .inv-print-row {
-    display: grid;
-    grid-template-columns: 26% 12% 12% 16% 34%;
-    font-size: 10.5px;
-    color: #000;
-    padding: 3px 4px;
+  .inv-print-table td {
     border-bottom: 1px solid #ccc;
-    break-inside: avoid;
+    padding: 3px 4px;
+    color: #000;
   }
-  .inv-print-row .loc { font-family: monospace; font-weight: 700; white-space: nowrap; }
-  .inv-print-row .flag { color: #b91c1c; font-weight: 700; }
-  .inv-print-row .blank { border-left: 1px dotted #ddd; }
+  /* Safety net only — printPages is sized to avoid mid-row splits in the
+     first place, but a row is never allowed to break across a page either
+     way if the estimate runs a little short on a given printer. */
+  .inv-print-table tr { break-inside: avoid; }
+  .inv-print-table .loc { font-family: monospace; font-weight: 700; white-space: nowrap; }
+  .inv-print-table .flag { color: #b91c1c; font-weight: 700; }
+
+  .inv-print-table .loc-col { width: 26%; }
+  .inv-print-table .num-col { width: 12%; }
+  .inv-print-table .blank-col-sm { width: 16%; }
+  .inv-print-table .blank-col-lg { width: 34%; }
 }
