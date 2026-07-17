@@ -5,7 +5,11 @@
 // POST input: { facility, projectIds, dayCount = 5 }
 //   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
 //   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
-//                 'riche5', 'golst5', 'birch5').
+//                 'riche5', 'golst5', 'birch5', 'palvi9'). Not all facilities
+//                 in one call — 'facility' is a single warehouse per request
+//                 (see src/lib/fefo.js's fetchLiveFefoOrdersBatch for how the
+//                 client splits a mixed-facility batch into per-facility
+//                 calls to this function).
 //   - dayCount:   optional, 1..7 (default 5)
 //
 // ── Date formats per project ────────────────────────────────────────────────
@@ -66,6 +70,9 @@ const PROJECTS = {
   riche5: { datexName: 'RICHELIEU KENOSHA',       dateFormat: 'MMDDYYYY',     dateSemantic: 'expiration' },
   golst5: { datexName: 'CROWN BAKERIES',          dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack' },
   birch5: { datexName: 'BIRCHWOOD FOODS  KENOSHA', dateFormat: 'receiveDate', dateSemantic: 'received' },
+  // Added 2026-07-17 — Palermo's Caledonia finished goods (facility CAL,
+  // warehouse_id 1). Lot codes don't encode a date, same as Birchwood.
+  palvi9: { datexName: 'Palermos CALEDONIA finished', dateFormat: 'receiveDate', dateSemantic: 'received' },
 }
 
 const FACILITY_WAREHOUSE_ID = {
