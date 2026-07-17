@@ -123,13 +123,13 @@ export default function FefoRotationTab() {
 
 // FefoNotifySettings — per-project nightly digest configs, added 2026-07-14
 // per Dan's request. Unlike Pre-Pick/Cases/Daily Ops (one settings row per
-// facility), FEFO gets ONE ROW PER PROJECT — each of the 5 KEN FEFO
-// customers has its own Front conversation, send time, and Enabled toggle,
+// facility), FEFO gets ONE ROW PER PROJECT — each FEFO project (originally
+// all 5 KEN customers; Palermo's Caledonia at CAL added 2026-07-17) has its own Front conversation, send time, and Enabled toggle,
 // since Dan wants full control over which customers' rotation status goes
-// where and when. All 5 rows live in the same prepick_notify_settings table
-// (facility='ken', dashboard_type='fefo_<projectId>') and are served by one
-// shared Netlify function (fefo-digest-run.cjs) — see that file's header
-// for why a shared function backs 5 rows instead of 5 separate files.
+// where and when. All rows live in the same prepick_notify_settings table
+// (facility='ken'|'cal', dashboard_type='fefo_<projectId>') and are served
+// by one shared Netlify function (fefo-digest-run.cjs) — see that file's
+// header for why a shared function backs 5 rows instead of 5 separate files.
 //
 // Content date is the NEXT BUSINESS DAY, always (2026-07-14, later) — same
 // semantics as Pre-Pick/Cases/Daily Ops, per Dan's follow-up feedback after
@@ -163,7 +163,7 @@ function FefoNotifySettings() {
                 fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginBottom: 4,
               }}>{p.code} · {p.name}</div>
               <NotifySettingsPanel
-                facility="ken"
+                facility={p.facility}
                 dashboardType={`fefo_${p.id}`}
                 functionName="fefo-digest-run"
                 manualTestBody={{ dashboardType: `fefo_${p.id}` }}
