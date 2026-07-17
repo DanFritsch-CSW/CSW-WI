@@ -7,6 +7,7 @@ import RosterBoard from '../components/RosterBoard.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
 import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
+import JdfPutaways from '../components/JdfPutaways.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
 import WrPickCheck from '../components/WrPickCheck.jsx'
 import WrSecondaryRepl from '../components/WrSecondaryRepl.jsx'
@@ -58,7 +59,7 @@ const WR_TABS = [
 // appointments), so this row is only rendered when isDaily — see render
 // logic in the isMad branch below.
 const MAD_TABS = [
-  { id: 'ops', label: 'Daily Ops' }, { id: 'prepick', label: 'Pre-Pick Status' },
+  { id: 'ops', label: 'Daily Ops' }, { id: 'prepick', label: 'Pre-Pick Status' }, { id: 'putaways', label: 'JDF Putaways' },
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
@@ -229,7 +230,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   // WR's non-warehouse tabs and MAD's Pre-Pick Status tab). Gating on this
   // keeps a stale rosterBusy reading from permanently blocking date
   // navigation on those sub-views.
-  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && madTab === 'prepick')
+  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && (madTab === 'prepick' || madTab === 'putaways'))
 
   useEffect(() => {
     onBusyChange?.(phasesBusy || (rosterBoardVisible && rosterBusy))
@@ -1099,6 +1100,8 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         )}
         {isDaily && madTab === 'prepick'
           ? <PrePickStatus facilityId={facility.id} planDate={planDate} />
+          : isDaily && madTab === 'putaways'
+          ? <JdfPutaways />
           : warehouseContent}
       </div>
     )
