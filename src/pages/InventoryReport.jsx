@@ -322,16 +322,24 @@ export default function InventoryReport() {
   //   a known-unreliable combination in Chromium's print engine: text
   //   overlapped/ran together on page 2, and the total-height miscalculation
   //   produced two extra blank pages at the end.
-  // - rev 3 (current): back to plain <table> markup per column (proven to
-  //   render cleanly with no overlap in rev 1's actual output), still
-  //   JS-chunked into pages with a forced page-break between chunks, but
-  //   with a deliberately conservative rows-per-column budget — well below
+  // - rev 3: back to plain <table> markup per column (proven to render
+  //   cleanly with no overlap in rev 1's actual output), still JS-chunked
+  //   into pages with a forced page-break between chunks, but with a
+  //   deliberately conservative rows-per-column budget (20/24) — well below
   //   the ~26 rows/column that rev 1 showed actually fit — so there's a
-  //   safety cushion (a bit of blank space at the bottom of most pages)
-  //   instead of any risk of overflow. Nudge these up only after confirming
-  //   a specific printer/browser has more headroom than assumed here.
-  const ROWS_FIRST_PAGE_COL = 20 // page 1 has less room — the header block above eats into it
-  const ROWS_OTHER_PAGE_COL = 24
+  //   safety cushion instead of any risk of overflow.
+  // - rev 4 (current): Dan's rev-3 test (112 locations, WR) printed cleanly
+  //   with pages 1-2 fully packed at 20/24 rows and noticeable blank space
+  //   at the bottom of each. Nudged up to 24/28 — still a couple rows under
+  //   the confirmed ~26 capacity for page 1's layout, and a similarly
+  //   cautious step up for later pages (never directly confirmed, only
+  //   inferred) — to shrink that dead space without re-risking overflow.
+  //   Note: some blank space on the LAST page of any print is normal/
+  //   expected whenever the location count doesn't divide evenly into full
+  //   pages — that's not fixable by this constant, it's just how many
+  //   locations were left over.
+  const ROWS_FIRST_PAGE_COL = 24 // page 1 has less room — the header block above eats into it
+  const ROWS_OTHER_PAGE_COL = 28
   const printDateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
   const printOccCount = filtered.filter(l => l.palletCount > 0).length
   const printEmpCount = filtered.filter(l => l.palletCount === 0).length
