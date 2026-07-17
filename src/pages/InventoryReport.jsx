@@ -310,35 +310,22 @@ export default function InventoryReport() {
   // Respects the current facility/mode/search filter so narrowing the on-screen
   // view before printing produces a shorter sheet.
   //
-  // Pagination: rather than splitting the whole filtered list into one "left
-  // half" / "right half" (which reads oddly — column 2 of page 1 would jump to
-  // the halfway point of the ENTIRE list instead of continuing where column 1
-  // left off) we chunk the list into per-page groups up front and force a page
-  // break between groups. Reading order is then sequential: page 1 col 1, page
-  // 1 col 2, page 2 col 1, page 2 col 2, etc. Row-per-column counts below are
-  // estimates for the 10.5px print font / landscape / 0.5in margins — nudge
-  // these two constants if a page runs short or a row spills onto the next
-  // page on your printer/browser.
-  const ROWS_FIRST_PAGE_COL = 30 // page 1 has less room — the header block above eats into it
-  const ROWS_OTHER_PAGE_COL = 36
+  // Pagination: this used to pre-chunk rows into JS-computed "pages" sized by
+  // an estimated rows-per-column constant, but that estimate didn't match
+  // actual rendered row height on Dan's printer — column 1 overflowed past
+  // its intended page, spilling leftover rows onto the next physical page
+  // ahead of column 2's own content, which broke the reading order. Fixed by
+  // switching to native CSS multi-column flow (see .inv-print-flow in
+  // inventory-report.css: `columns: 2; column-fill: auto`) — the browser
+  // fills column 1 top-to-bottom for exactly as much as fits the physical
+  // page, then continues in column 2, then automatically wraps to column 1
+  // of the next page, based on the ACTUAL rendered height rather than a
+  // guessed row count. No JS-side chunking needed any more.
   const printDateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
   const printOccCount = filtered.filter(l => l.palletCount > 0).length
   const printEmpCount = filtered.filter(l => l.palletCount === 0).length
   const printFilterLabel = mode === 'All' ? 'All locations' : mode
   const printSearchLabel = search.trim() ? `starting with "${search.trim()}"` : ''
-  const printPages = useMemo(() => {
-    const pages = []
-    let idx = 0
-    let isFirst = true
-    while (idx < filtered.length) {
-      const perCol = isFirst ? ROWS_FIRST_PAGE_COL : ROWS_OTHER_PAGE_COL
-      const chunk = filtered.slice(idx, idx + perCol * 2)
-      pages.push([chunk.slice(0, perCol), chunk.slice(perCol)])
-      idx += perCol * 2
-      isFirst = false
-    }
-    return pages
-  }, [filtered])
 
   const S = {
     page:        { padding: '1.5rem', maxWidth: 1200, margin: '0 auto' },
@@ -502,11 +489,16 @@ export default function InventoryReport() {
       </div>
 
       {/* Print-only cycle-count worksheet — hidden on screen, rendered only via
-          @media print in inventory-report.css. Rendered as discrete "pages"
-          (see printPages above) so column 2 continues where column 1 left
-          off and page breaks land at a clean boundary, instead of the
-          browser auto-fragmenting one giant table wherever it happens to
-          run out of room. */}
+          @media print in inventory-report.css. .inv-print-flow is a native
+          CSS multi-column container (columns:2, column-fill:auto) rather
+          than JS-chunked tables — the browser fills column 1 of the current
+          page based on actual rendered row height, then column 2, then wraps
+          to column 1 of the next page automatically, so the reading order is
+          always sequential regardless of font/printer/row-height differences.
+          Trade-off: the column headers below (loc/pallets/cases/etc.) show
+          once at the top rather than repeating per column — plain CSS can't
+          repeat a header per multicol fragment, so the field order is stated
+          once as a legend instead. */}
       <div className="inv-print-only">
         <div className="inv-print-header">
           <div className="title">Central Storage &amp; Warehouse — Cycle Count Sheet</div>
@@ -514,36 +506,24 @@ export default function InventoryReport() {
           <div className="meta">Printed {printDateStr} · {filtered.length} location{filtered.length !== 1 ? 's' : ''} · {printOccCount} occupied · {printEmpCount} empty{discrepancies.size > 0 ? ` · ${discrepancies.size} already flagged (⚑)` : ''}</div>
           <div className="meta small">Pallets = LP count in system · Cases = total packaged qty (same figure shown on-screen as "Total Qty" — flag if this isn't the case-level number you need)</div>
         </div>
-        {printPages.map((cols, pi) => (
-          <div className="inv-print-page" key={pi}>
-            <div className="inv-print-columns">
-              {cols.map((col, ci) => (
-                <table className="inv-print-table" key={ci}>
-                  <thead>
-                    <tr>
-                      <th className="loc-col">Location</th>
-                      <th className="num-col">Pallets</th>
-                      <th className="num-col">Cases</th>
-                      <th className="blank-col-sm">Actual Ct</th>
-                      <th className="blank-col-lg">Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {col.map(loc => (
-                      <tr key={loc.id}>
-                        <td className="loc">{loc.id}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</td>
-                        <td>{loc.palletCount || '—'}</td>
-                        <td>{loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}</td>
-                        <td></td>
-                        <td></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ))}
+        <div className="inv-print-legend">
+          <span>Location</span>
+          <span>Pallets</span>
+          <span>Cases</span>
+          <span>Actual Ct</span>
+          <span>Notes</span>
+        </div>
+        <div className="inv-print-flow">
+          {filtered.map(loc => (
+            <div className="inv-print-row" key={loc.id}>
+              <span className="loc">{loc.id}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</span>
+              <span>{loc.palletCount || '—'}</span>
+              <span>{loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}</span>
+              <span className="blank"></span>
+              <span className="blank"></span>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   )
