@@ -92,7 +92,8 @@ export const FEFO_PROJECTS = [
     //
     // `closedOrders: true` and `lazy: true` are both load-bearing flags:
     //   - closedOrders tells fefo-orders.cjs to query status='Completed'
-    //     with a BACKWARD date window (last N days, ending yesterday)
+    //     with a BACKWARD date window (last N days, including today — see
+    //     that file's "closedOrders window now includes TODAY" note)
     //     instead of status='Processing' with a forward window, and to
     //     force past:false on every order (the "stale — past appointment"
     //     verdict doesn't apply to something that already shipped).
@@ -539,21 +540,29 @@ export function daySubLabel(dayOffset) {
 }
 
 // closedDayLabel/closedDaySubLabel — day-stepper helpers for closedOrders
-// projects (e.g. JDF), added 2026-07-18 per Dan's follow-up ("I want the day
-// selector like the other customers, just closed orders rather than open").
-// Mirror dayLabel/daySubLabel exactly, but count BACKWARD: offset 0 =
-// yesterday (the most recent day that can have closed orders), offset 1 =
-// two days ago, etc. Paired with the day-bucket fefo-orders.cjs now computes
-// for closedOrders orders (see that file's loadOrdersForProject comment).
+// projects (e.g. JDF). Mirror dayLabel/daySubLabel, but count BACKWARD:
+// offset 0 = TODAY, offset 1 = yesterday, offset 2 = two days ago, etc. —
+// same "0 = today" convention as the open-order dayLabel/daySubLabel, just
+// running in the opposite time direction. Paired with the day-bucket
+// fefo-orders.cjs computes for closedOrders orders (see that file's
+// loadOrdersForProject comment).
+//
+// Renumbered 2026-07-18 (same day, later): originally offset 0 meant
+// "yesterday" (today's closed orders weren't fetchable at all — the window
+// stopped at yesterday). Dan's follow-up: "allow me to select today's date,
+// not just historical." Now 0 = Today, matching every other stepper in the
+// app, with 1 = Yesterday and beyond for the historical browsing that
+// prompted the original ask.
 export function closedDayLabel(dayOffset, today = new Date()) {
   const d = new Date(today)
-  d.setDate(d.getDate() - (dayOffset + 1))
+  d.setDate(d.getDate() - dayOffset)
   return `${DAY_NAMES[d.getDay()]}, ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`
 }
 
 export function closedDaySubLabel(dayOffset) {
-  if (dayOffset === 0) return 'Yesterday'
-  return `-${dayOffset + 1} days`
+  if (dayOffset === 0) return 'Today'
+  if (dayOffset === 1) return 'Yesterday'
+  return `-${dayOffset} days`
 }
 
 // ─── Verdict styling tokens ─────────────────────────────────────────────────
