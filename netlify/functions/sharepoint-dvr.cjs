@@ -21,7 +21,8 @@ const FACILITY_CONFIG = {
     prefix: { dvrs:'DVR', inbound:'CAL-IN', outbound:'CAL-OUT', hold:'CAL-HLD' },
   },
 }
-const FALLBACK_RANGE = 'A1:CB10000'
+// Bounded fallback — avoids usedRange timeouts from phantom formatting
+const FALLBACK_RANGE = 'A1:CB500'
 
 let _token=null, _tokenExpiry=0
 async function getToken() {
@@ -48,11 +49,14 @@ async function getDriveRef(facility,token) {
   return _driveCache[facility]
 }
 async function fetchSheetValues(sheetBase,token) {
+  // Try usedRange first; fall back to bounded range on ANY error
+  // (catches RangeExceedsLimit, 504 MaxRequestDurationExceeded, phantom-format timeouts)
   try {
     const r=await graph(`${sheetBase}/usedRange`,token)
     if(r.values&&r.values.length>0) return r.values
   } catch(err) {
-    if(!err.message.toLowerCase().includes('rangeexceedslimit')) throw err
+    // Fall through on ANY error - usedRange is an optimisation only
+    console.warn(`[fetchSheetValues] usedRange failed, using bounded fallback: ${err.message.slice(0,80)}`)
   }
   const r=await graph(`${sheetBase}/range(address='${FALLBACK_RANGE}')`,token)
   const vals=r.values||[]; let last=vals.length-1
