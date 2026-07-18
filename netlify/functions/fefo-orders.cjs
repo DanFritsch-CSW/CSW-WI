@@ -40,6 +40,23 @@
 //                      orders forward, per Dan's request for a "did we
 //                      actually ship FEFO" retrospective check.
 //
+// ── Outbound-only filter (2026-07-18, Dan's screenshot report) ─────────────
+//
+// CRITICAL BUG FOUND AND FIXED: the order query never filtered on order
+// DIRECTION. Datex distinguishes "Inbound ASN" (receiving) from "Sales
+// Order" (Outbound/shipping) via orders.order_class_id ->
+// datex_slv_orderclasses.order_type_id -> datex_slv_ordertypes.order_type_name.
+// Without a filter here, every FEFO project — not just JDF — was pulling
+// BOTH directions into what's supposed to be a shipping-only rotation
+// check. Confirmed via MotherDuck: Palermo's Caledonia alone had 59 inbound
+// orders mixed into 129 outbound in its "Processing" pool. Dan caught this
+// on JDF specifically (screenshot showed inbound receipts counted as FEFO
+// "violations" — nonsensical, since an inbound receipt was never "shipped
+// ahead of" anything). Fixed by joining orderclasses/ordertypes and adding
+// `AND ot.order_type_name = 'Outbound'` to orderSql's WHERE clause, applied
+// universally (all 7 projects share this query path, both closedOrders and
+// open-orders branches) rather than as a JDF-only patch.
+
 // ── Undated lots (2026-07-10, Dean/Bry FEFO feedback) ───────────────────────
 //
 // parseLotDateKey falls back to { k: 0, kDay: 0, error } when a lot's code
@@ -382,7 +399,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     JOIN production_db.silver.datex_slv_orderstatuses os       ON o.order_status_id = os.order_status_id
     JOIN appts a                                               ON a.order_id = o.order_id
     LEFT JOIN production_db.silver.datex_slv_orderaddresses oa ON oa.order_id = o.order_id
+    -- Outbound-only join (added 2026-07-18 — see file header "Outbound-only
+    -- filter"). Without this, Inbound ASN (receiving) orders were mixed
+    -- into every FEFO project's shipping-rotation check.
+    LEFT JOIN production_db.silver.datex_slv_orderclasses oc   ON o.order_class_id = oc.order_class_id
+    LEFT JOIN production_db.silver.datex_slv_ordertypes ot     ON oc.order_type_id = ot.order_type_id
     WHERE os.status_name = '${project.closedOrders ? 'Completed' : 'Processing'}'
+      AND ot.order_type_name = 'Outbound'
     GROUP BY o.order_id, o.lookup_code, o.requested_delivery_date,
              os.status_name, o.modified_sys_user,
              a.scheduled_arrival, a.appt_lookup, a.appt_status
@@ -442,9 +465,9 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const matIdList = materialIds.join(',')
     // scope_lots CTE — ONLY lots with active on-site inventory for our
     // in-scope materials. Filters at lot creation source (licenseplatecontents
-    // + licenseplates.archived=false + packaged_amount>0) so we don't drag
-    // in historical/shipped lots. Cuts row count by 20× vs the earlier
-    // material_id-only scope for high-lot-count projects like Birchwood.
+    // + licenseplates.archived=false + qty>0). Cuts row count by 20× vs the
+    // earlier material_id-only scope for high-lot-count projects like
+    // Birchwood.
     const onhandSql = `
       WITH scope_lots AS (
         SELECT DISTINCT lpc.lot_id
