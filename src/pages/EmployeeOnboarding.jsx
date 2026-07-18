@@ -4,7 +4,7 @@ import {
   fetchOnboardingEmployees, createOnboardingEmployee, updateOnboardingEmployee,
   setEmployeeStatus, deleteOnboardingEmployee,
   fetchCompletions, fetchAllCompletionsGrouped, upsertCompletion, upsertWeeklyEntries,
-  fetchEvaluations, upsertEvaluation, notifyHR,
+  fetchEvaluations, fetchAllEvaluationsGrouped, upsertEvaluation, notifyHR,
 } from '../lib/employeeOnboarding.js'
 import {
   MONTHS, WEEKLY_CONFIG, MAX_LOADS_PER_WEEK, END_EVAL_SECTIONS, FACILITIES,
@@ -12,6 +12,7 @@ import {
 import { fetchCurriculumValues, fetchCurriculumModules } from '../lib/employeeOnboardingTemplate.js'
 import TemplateEditor from '../components/employeeOnboarding/TemplateEditor.jsx'
 import PrintView from '../components/employeeOnboarding/PrintView.jsx'
+import Dashboard from '../components/employeeOnboarding/Dashboard.jsx'
 
 // Employee Onboarding — built 2026-07-15 per Tim Morris' Slack request (via
 // Dan), from Onboarding_Standardization_Notes.docx. Tracks the 3-month
@@ -31,6 +32,12 @@ import PrintView from '../components/employeeOnboarding/PrintView.jsx'
 //   - "Notify HR" posts a Front comment (via eo-notify-hr.cjs) linking to a
 //     print-friendly full record (PrintView.jsx) for the personnel file.
 //     Reached via ?view=print&employee=<id> on this same route.
+//
+// 2026-07-18 round 4 — Dashboard: cross-facility overview for the GM call
+// (all facilities) and the trainer L10 (filtered to one facility), styled
+// after the CSW-Caledonia Personnel Tracker skill-matrix app. New top-level
+// Employees/Dashboard tab row; Dashboard.jsx renders full-width (no
+// sidebar) since it's a table, not a detail view.
 function moduleKeysForMonth(monthKey, curriculumModules) {
   return [`${monthKey}_values`, ...(curriculumModules[monthKey] || []).map(m => m.key)]
 }
@@ -66,17 +73,19 @@ function EmployeeOnboardingApp() {
   const [facilityFilter, setFacilityFilter] = useState('all')
   const [curriculumModules, setCurriculumModules] = useState({ m1: [], m2: [], m3: [] })
   const [curriculumValues, setCurriculumValues] = useState({})
-  const [view, setView] = useState('employee') // 'employee' | 'template'
+  const [allEvaluations, setAllEvaluations] = useState({})
+  const [view, setView] = useState('employee') // 'employee' | 'template' | 'dashboard'
 
   const load = () => {
     setLoading(true)
     Promise.all([
       fetchOnboardingEmployees(), fetchAllCompletionsGrouped(),
-      fetchCurriculumModules(), fetchCurriculumValues(),
+      fetchCurriculumModules(), fetchCurriculumValues(), fetchAllEvaluationsGrouped(),
     ])
-      .then(([rows, grouped, modules, values]) => {
+      .then(([rows, grouped, modules, values, evaluations]) => {
         setEmployees(rows); setAllCompletions(grouped)
         setCurriculumModules(modules); setCurriculumValues(values)
+        setAllEvaluations(evaluations)
         setError(null)
       })
       .catch(err => setError(err?.message || 'Failed to load employees'))
@@ -140,6 +149,25 @@ function EmployeeOnboardingApp() {
         </p>
       </div>
 
+      <div style={{ display: 'flex', gap: 4, padding: '16px 24px 0', borderBottom: '1px solid var(--border)' }}>
+        <PageTab label="Employees" active={view !== 'dashboard'} onClick={() => setView(view === 'dashboard' ? 'employee' : view)} />
+        <PageTab label="📊 Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
+      </div>
+
+      {view === 'dashboard' ? (
+        <div style={{ padding: 24 }}>
+          {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</div>}
+          {!loading && (
+            <Dashboard
+              employees={employees}
+              allCompletions={allCompletions}
+              allEvaluations={allEvaluations}
+              curriculumModules={curriculumModules}
+              onSelectEmployee={selectEmployee}
+            />
+          )}
+        </div>
+      ) : (
       <div style={{ display: 'flex', gap: 20, minHeight: 500, padding: 24 }}>
         <Sidebar
           employees={visibleEmployees}
@@ -196,6 +224,7 @@ function EmployeeOnboardingApp() {
           )}
         </div>
       </div>
+      )}
 
       {showNewForm && (
         <NewHireModal
@@ -260,6 +289,24 @@ function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompl
         })}
       </div>
     </div>
+  )
+}
+
+function PageTab({ label, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: '8px 16px', fontSize: 13, fontWeight: active ? 600 : 500,
+        background: active ? 'var(--brand-bg, #fef9ec)' : 'transparent',
+        border: 'none', borderBottom: active ? '2px solid var(--brand, #a07818)' : '2px solid transparent',
+        color: active ? 'var(--brand, #a07818)' : 'var(--text-secondary)',
+        cursor: 'pointer', marginBottom: -1,
+      }}
+    >
+      {label}
+    </button>
   )
 }
 
