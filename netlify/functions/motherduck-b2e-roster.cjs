@@ -6,6 +6,7 @@
 //
 // Request shape (POST JSON):
 //   { kind: 'active_roster',              facilityId: 'ken' }
+//   { kind: 'active_roster_named',        facilityId: 'ken' }
 //   { kind: 'active_roster_all_jobcodes', facilityId: 'ken' }
 //   { kind: 'schedule_date',              facilityId: 'ken', fromDate: '2026-07-10' }
 //   { kind: 'schedule_range',             facilityId: 'ken', fromDate: '2026-07-10', daysForward: 14 }
@@ -100,6 +101,27 @@ exports.handler = async (event) => {
       : "default_job_code = '205'"
     sql = `
       SELECT DISTINCT employee_id
+      FROM ${ROSTER_TABLE_PATH}
+      WHERE default_location_full_path = '${safeLoc}'
+        AND employee_status = 'Active'
+        AND ${jobCodeFilter}
+    `
+  } else if (kind === 'active_roster_named') {
+    // Added 2026-07-18 — weekend Special Project auto-populate
+    // (RosterBoard.jsx). Same Active + job-code scope as 'active_roster',
+    // but also returns employee_name so the client can seed full roster
+    // rows without a B2E schedule to derive names from (B2E has no
+    // Saturday/Sunday rows in futurescheduleentries at all — weekends
+    // aren't a "stale snapshot", there's simply nothing published).
+    // b2e_slv_employeeroster carries employee_name as a single combined
+    // field (confirmed via schema — no separate first/last columns here,
+    // unlike futurescheduleentries).
+    scopeTable = ROSTER
+    const jobCodeFilter = (facilityId === 'mad' || facilityId === 'ec')
+      ? "default_job_code IN ('205', '209')"
+      : "default_job_code = '205'"
+    sql = `
+      SELECT DISTINCT employee_id, employee_name, default_job_code
       FROM ${ROSTER_TABLE_PATH}
       WHERE default_location_full_path = '${safeLoc}'
         AND employee_status = 'Active'
