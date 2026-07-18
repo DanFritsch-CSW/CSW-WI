@@ -87,13 +87,17 @@ export default function FefoRotationTab() {
     return [...filtered].sort(compareByVerdict)
   }, [allFailed, mockOrders, ordersByProject, scopedProjectIds, day, proj])
 
+  // Rows start COLLAPSED on load and whenever the visible set changes
+  // (day/project filter change, refetch, etc.) — changed 2026-07-18 per
+  // Dan's request. Previously this auto-opened violation/stale orders,
+  // which is also what caused the collapse-doesn't-stick bug fixed earlier
+  // today (see scopedProjectIds comment above) — that fix stopped it from
+  // firing on every render, but it was still forcibly re-expanding rows on
+  // every legitimate filter change or refresh, which Dan didn't want either.
+  // Now it just resets to fully collapsed; expanding is entirely manual via
+  // toggleOrder.
   useEffect(() => {
-    const auto = new Set()
-    for (const o of visible) {
-      const v = orderVerdict(o)
-      if (v === 'violation' || v === 'stale') auto.add(o.id)
-    }
-    setOpenOrders(auto)
+    setOpenOrders(new Set())
   }, [day, proj, visible])
 
   const toggleOrder = (id) => {
