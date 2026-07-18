@@ -179,8 +179,7 @@ export const MODULES = {
         'When stacking, reference existing full pallets for TI-HI configuration to maintain stability and prevent crushing/collapse during storage or transport.',
       ],
       objectives: 'Trainee understands the differences in TI-HI and layering orientations used throughout the warehouse.',
-      // resourceLink: pending — Dan to share "Warehouse Tips and Tricks v1.1.pdf" (hosted or uploaded) so this can point to it.
-      resourceLink: null,
+      resourceLink: 'https://centralstoragewarehouse.sharepoint.com/sites/Employee/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FEmployee%2FShared%20Documents%2FWarehouse%20Tips%20and%20Tricks%20v1%2E1%2Epdf&parent=%2Fsites%2FEmployee%2FShared%20Documents&p=true&ga=1',
       resourceLabel: 'Warehouse Tips and Tricks (v1.1)',
     },
     {
@@ -217,7 +216,7 @@ export const MODULES = {
         'Reference the CSW Tips and Tricks PDF.',
       ],
       objectives: null,
-      resourceLink: null,
+      resourceLink: 'https://centralstoragewarehouse.sharepoint.com/sites/Employee/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FEmployee%2FShared%20Documents%2FWarehouse%20Tips%20and%20Tricks%20v1%2E1%2Epdf&parent=%2Fsites%2FEmployee%2FShared%20Documents&p=true&ga=1',
       resourceLabel: 'Warehouse Tips and Tricks (v1.1)',
     },
     {
