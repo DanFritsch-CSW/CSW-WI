@@ -38,6 +38,11 @@ import Dashboard from '../components/employeeOnboarding/Dashboard.jsx'
 // after the CSW-Caledonia Personnel Tracker skill-matrix app. New top-level
 // Employees/Dashboard tab row; Dashboard.jsx renders full-width (no
 // sidebar) since it's a table, not a detail view.
+//
+// 2026-07-18 (later same day) — Dashboard is now the default landing view
+// (was Employees) per Dan; tab order flipped to match (Dashboard first).
+// A ?employee=<id> link (e.g. shared/bookmarked) still switches to the
+// Employees view so those links keep working.
 function moduleKeysForMonth(monthKey, curriculumModules) {
   return [`${monthKey}_values`, ...(curriculumModules[monthKey] || []).map(m => m.key)]
 }
@@ -74,7 +79,7 @@ function EmployeeOnboardingApp() {
   const [curriculumModules, setCurriculumModules] = useState({ m1: [], m2: [], m3: [] })
   const [curriculumValues, setCurriculumValues] = useState({})
   const [allEvaluations, setAllEvaluations] = useState({})
-  const [view, setView] = useState('employee') // 'employee' | 'template' | 'dashboard'
+  const [view, setView] = useState('dashboard') // 'employee' | 'template' | 'dashboard'
 
   const load = () => {
     setLoading(true)
@@ -101,6 +106,7 @@ function EmployeeOnboardingApp() {
       const match = employees.find(e => e.id === urlId)
       if (match) {
         setSelectedId(urlId)
+        setView('employee')
         if (match.status !== 'active') setShowCompleted(true)
       }
     }
@@ -150,8 +156,8 @@ function EmployeeOnboardingApp() {
       </div>
 
       <div style={{ display: 'flex', gap: 4, padding: '16px 24px 0', borderBottom: '1px solid var(--border)' }}>
-        <PageTab label="Employees" active={view !== 'dashboard'} onClick={() => setView(view === 'dashboard' ? 'employee' : view)} />
         <PageTab label="📊 Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
+        <PageTab label="Employees" active={view !== 'dashboard'} onClick={() => setView(view === 'dashboard' ? 'employee' : view)} />
       </div>
 
       {view === 'dashboard' ? (
