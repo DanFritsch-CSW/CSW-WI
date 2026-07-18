@@ -44,7 +44,26 @@ export default function FefoRotationTab() {
 
   const refetch = () => setRefetchTick(t => t + 1)
 
-  const scopedProjectIds = proj === 'all' ? ALL_PROJECT_IDS : [proj]
+  // scopedProjectIds MUST be memoized. Bug fix (2026-07-18, Dan's video
+  // report — "can't collapse any order rows when filtered to a specific
+  // customer"): this used to be `proj === 'all' ? ALL_PROJECT_IDS : [proj]`
+  // written directly in the render body. `[proj]` is a fresh array literal
+  // on EVERY render, so when a specific project is selected, `scopedProjectIds`
+  // got a new reference every render regardless of whether proj actually
+  // changed. That invalidated the `visible` useMemo below (which lists
+  // scopedProjectIds as a dep) on every render, producing a new `visible`
+  // array every time, which re-triggered the auto-expand-violations effect
+  // (deps: [day, proj, visible]) on every render — including the render
+  // caused by the user's own collapse click. Net effect: any manual
+  // toggle got silently overwritten back to the auto-open set on the very
+  // next render, so collapsing looked like it "didn't work." This never
+  // showed up on "All Projects" because ALL_PROJECT_IDS is a module-level
+  // constant with a permanently stable reference. Fix: memoize on `proj` so
+  // the array only gets a new identity when proj itself actually changes.
+  const scopedProjectIds = useMemo(
+    () => (proj === 'all' ? ALL_PROJECT_IDS : [proj]),
+    [proj]
+  )
   const errorsByProject = liveResult?.errorsByProject || {}
   const ordersByProject = liveResult?.ordersByProject || {}
   const failedScoped = scopedProjectIds.filter(pid => errorsByProject[pid])
