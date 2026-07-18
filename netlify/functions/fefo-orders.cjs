@@ -649,8 +649,28 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   for (const oh of orderRows) {
     const orderId = Number(oh.order_id)
     const arrival = arrivalToDate(oh.scheduled_arrival)
-    const dayOffset = dayOffsetFrom(arrival, today)
-    const day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
+    // day-bucket: closedOrders projects (e.g. JDF) look BACKWARD, so the
+    // forward dayOffsetFrom (which clamps every negative offset to 0) can't
+    // be reused here — that used to collapse every closed order into a
+    // single fake "day 0" bucket regardless of which day it actually
+    // shipped, making a real day-stepper impossible. Fixed 2026-07-18 (Dan
+    // asked for a day-stepper matching the other customers instead of a
+    // fixed "last N days" window): daysAgo counts backward from today
+    // (1 = yesterday, 2 = two days ago, ...), converted to a 0-indexed
+    // `day` where 0 = yesterday (the most recent closed day) up through
+    // dayCount-1 = the oldest day still inside the fetched window. The
+    // client's day-stepper pages through these exactly like the forward
+    // projects page through their day buckets, just running backward.
+    let day
+    if (project.closedOrders) {
+      const daysAgo = arrival
+        ? Math.round((today.getTime() - Date.UTC(arrival.getUTCFullYear(), arrival.getUTCMonth(), arrival.getUTCDate())) / 86400000)
+        : 1
+      day = Math.max(0, Math.min(dayCount - 1, daysAgo - 1))
+    } else {
+      const dayOffset = dayOffsetFrom(arrival, today)
+      day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
+    }
     // closedOrders (e.g. JDF) force past:false — the 'stale' verdict means
     // "past appointment, still holding allocated stock," which doesn't
     // apply to an order that has already shipped and closed. Every
