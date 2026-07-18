@@ -70,6 +70,23 @@
 // counterpart. fefo-digest-run.cjs was updated in lockstep so the nightly
 // digest (which specifically wants "yesterday", not "today") still resolves
 // the right bucket under the new numbering.
+//
+// ── "today" anchored to Central time, not raw server UTC (2026-07-18, later still)
+//
+// CRITICAL BUG FOUND AND FIXED: todayUtcMidnight() built "today" from the
+// server's raw UTC clock. Central Time is UTC-5/UTC-6, so any time after
+// roughly 6-7pm Central, the UTC calendar date has already rolled over to
+// TOMORROW while it's still today for the business. Dan caught this live:
+// at 8:49pm Central on 7/17, the app showed "0 orders" for JDF's "Today"
+// bucket even though 5 outbound orders had shipped that day — because the
+// backend's "today" was already 7/18 (confirmed via MotherDuck `now()`),
+// and nothing had shipped on 7/18 yet. This silently affected the
+// open-order day-stepper too (every other project), just less visibly,
+// since a late-evening query would show tomorrow's (still mostly empty)
+// bucket as "Today" instead of the actual business day. Fixed by rebuilding
+// "today" from America/Chicago calendar components (same pattern
+// fefo-digest-run.cjs's centralTodayDateObj already uses correctly) instead
+// of the server's UTC date — see todayCentralMidnight below.
 
 // ── Undated lots (2026-07-10, Dean/Bry FEFO feedback) ───────────────────────
 //
@@ -329,9 +346,23 @@ function dayOffsetFrom(dateLike, today) {
   return Math.round(diffMs / 86400000)
 }
 
-function todayUtcMidnight() {
-  const n = new Date()
-  return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()))
+// todayCentralMidnight — "today" as a UTC-midnight Date object representing
+// the CURRENT CALENDAR DAY IN AMERICA/CHICAGO, not the server's raw UTC
+// date. Renamed from todayUtcMidnight (2026-07-18) — see file header
+// "'today' anchored to Central time" for why the old UTC-based version was
+// a real bug (day boundary silently rolled over ~5-6 hours before the
+// Central-time business day actually ended). Same pattern
+// fefo-digest-run.cjs's centralTodayDateObj already used correctly; this
+// just brings the live-query path in line with it. All Date arithmetic
+// downstream (dateFrom/dateTo window, dayOffsetFrom comparisons, closedOrders
+// daysAgo) is unaffected in shape — it still operates on a UTC-midnight
+// Date object, just one that's computed from the right wall-clock day.
+function todayCentralMidnight() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const get = t => Number(parts.find(p => p.type === t).value)
+  return new Date(Date.UTC(get('year'), get('month') - 1, get('day')))
 }
 
 function fmtDateISO(d) { return d.toISOString().slice(0, 10) }
@@ -799,7 +830,7 @@ exports.handler = async (event) => {
     }
   }
 
-  const today = todayUtcMidnight()
+  const today = todayCentralMidnight()
   const dateFrom = fmtDateISO(new Date(today.getTime() - 86400000))
   const dateTo   = fmtDateISO(new Date(today.getTime() + (dayCount - 1) * 86400000))
 
