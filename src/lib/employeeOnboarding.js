@@ -158,3 +158,26 @@ export async function upsertEvaluation(onboardingId, categoryKey, patch) {
   if (error) { console.error('upsertEvaluation:', error); throw error }
   return data
 }
+
+// ─── HR Handoff ──────────────────────────────────────────────────────────────
+// notifyHR — posts a comment into the HR-designated Front conversation
+// (eo_hr_settings.front_conversation_id) summarizing this employee's
+// onboarding and linking to the print view, then stamps hr_notified_at.
+// Server-side function does the actual Front call (FRONT_API_TOKEN never
+// touches the client) — mirrors onboarding-complete-task.cjs's pattern of a
+// client-callable function that's safe to leave open (bounded to one
+// Supabase row + one Front comment).
+export async function notifyHR(onboardingId, printUrl) {
+  const res = await fetch('/.netlify/functions/eo-notify-hr', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ onboardingId, printUrl }),
+  })
+  let json
+  try { json = await res.json() } catch { json = null }
+  if (!res.ok) {
+    console.error('notifyHR:', json)
+    throw new Error(json?.error || `Request failed (${res.status})`)
+  }
+  return json
+}
