@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import NotifySettingsPanel from '../NotifySettingsPanel.jsx'
 import {
-  FEFO_PROJECTS, getProject, dateVerb,
+  FEFO_PROJECTS, AUTO_LOAD_PROJECT_IDS, getProject, dateVerb,
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
   bannerCounts, kpiRow, rollupByProject,
   dayLabel, daySubLabel,
@@ -12,8 +12,15 @@ import {
 } from '../../lib/fefo.js'
 
 // FEFO Rotation tab — always live from Datex, batched.
+//
+// JDF (Jones Dairy Farm, added 2026-07-18) is deliberately NOT part of the
+// standard auto-load/day-stepper flow — it's a closed-orders retrospective
+// audit ("did we ship FEFO"), marked `lazy: true` in fefo.js. It only
+// fetches when a user explicitly picks it from the project dropdown (see
+// the lazy-fetch effect below), and its view has no day-stepper since
+// "day N forward" doesn't mean anything for a backward-looking audit.
 
-const ALL_PROJECT_IDS = FEFO_PROJECTS.map(p => p.id)
+const ALL_PROJECT_IDS = AUTO_LOAD_PROJECT_IDS
 
 export default function FefoRotationTab() {
   const [day, setDay] = useState(0)
@@ -26,6 +33,14 @@ export default function FefoRotationTab() {
   // Init to -1 so the initial mount (refetchTick=0) doesn't early-return
   // as "already fetched" and skip the fetch. Bug from PR #66 refetch impl.
   const fetchedRef = useRef(-1)
+
+  // lazyState — per-project fetch state for `lazy: true` projects (e.g.
+  // JDF). Added 2026-07-18. These projects are NOT part of the main
+  // auto-load batch below — they only fetch when the user picks them from
+  // the dropdown (see the effect right after this one), and REFRESH
+  // re-fetches just that project rather than the whole batch.
+  const [lazyState, setLazyState] = useState({})
+  const isLazyProj = proj !== 'all' && !!getProject(proj)?.lazy
 
   useEffect(() => {
     if (fetchedRef.current === refetchTick) return
@@ -41,6 +56,39 @@ export default function FefoRotationTab() {
         setLoading(false)
       })
   }, [refetchTick])
+
+  // Lazy-fetch effect — fires only when a `lazy` project (e.g. JDF) is
+  // selected. Re-fires on `proj` change (picking it from the dropdown) or
+  // `refetchTick` bump (REFRESH button), so REFRESH does the right thing
+  // regardless of which project is currently selected. No caching by
+  // design — always fetches fresh, since this is what someone verifies
+  // right before configuring/testing a notify setting.
+  const CLOSED_ORDERS_DAY_WINDOW = 3 // last 3 days closed, for browsing
+  useEffect(() => {
+    if (!isLazyProj) return
+    let cancelled = false
+    setLazyState(prev => ({ ...prev, [proj]: { ...(prev[proj] || {}), loading: true } }))
+    fetchLiveFefoOrdersBatch([proj], { dayCount: CLOSED_ORDERS_DAY_WINDOW })
+      .then(result => {
+        if (cancelled) return
+        setLazyState(prev => ({
+          ...prev,
+          [proj]: {
+            orders: result.ordersByProject[proj] || [],
+            error: result.errorsByProject?.[proj] || result.error || null,
+            source: result.source,
+            elapsedMs: result.elapsedMs,
+            fetchedAt: result.fetchedAt,
+            loading: false,
+          },
+        }))
+      })
+      .catch(err => {
+        if (cancelled) return
+        setLazyState(prev => ({ ...prev, [proj]: { orders: [], error: err.message, loading: false } }))
+      })
+    return () => { cancelled = true }
+  }, [proj, refetchTick])
 
   const refetch = () => setRefetchTick(t => t + 1)
 
@@ -73,6 +121,14 @@ export default function FefoRotationTab() {
   const mockOrders = useMemo(() => fefoOrderList(), [])
 
   const visible = useMemo(() => {
+    // lazy (closedOrders) projects — e.g. JDF — source from lazyState
+    // instead of the main ordersByProject batch, and skip the day filter
+    // entirely: there's no "day N forward" bucket for a backward-looking
+    // audit, every order returned in the window is in scope.
+    if (isLazyProj) {
+      const orders = lazyState[proj]?.orders || []
+      return [...orders].sort(compareByVerdict)
+    }
     let pool
     if (allFailed) {
       pool = mockOrders.filter(o => proj === 'all' ? true : o.proj === proj)
@@ -85,7 +141,7 @@ export default function FefoRotationTab() {
     }
     const filtered = pool.filter(o => o.day === day)
     return [...filtered].sort(compareByVerdict)
-  }, [allFailed, mockOrders, ordersByProject, scopedProjectIds, day, proj])
+  }, [isLazyProj, lazyState, proj, allFailed, mockOrders, ordersByProject, scopedProjectIds, day])
 
   // Rows start COLLAPSED on load and whenever the visible set changes
   // (day/project filter change, refetch, etc.) — changed 2026-07-18 per
@@ -113,17 +169,28 @@ export default function FefoRotationTab() {
   const rollup      = useMemo(() => rollupByProject(visible), [visible])
   const undatedLots = useMemo(() => undatedLotsInView(visible), [visible])
 
+  // Lazy-project (JDF) status derived here so ControlsRow/OrdersList don't
+  // need to know about lazyState internals — they just get loading/error
+  // values that mean the same thing regardless of which path produced them.
+  const lazyLoading = isLazyProj ? (!lazyState[proj] || !!lazyState[proj].loading) : false
+  const lazyError = isLazyProj ? (lazyState[proj]?.error || null) : null
+  const lazyBadgeResult = isLazyProj
+    ? { error: lazyError, elapsedMs: lazyState[proj]?.elapsedMs, errorsByProject: lazyError ? { [proj]: lazyError } : {} }
+    : liveResult
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <ControlsRow
         day={day}        onDayChange={setDay}
         proj={proj}      onProjChange={setProj}
         orderCount={visible.length}
-        loading={loading}
-        allFailed={allFailed}
-        failedScoped={failedScoped}
-        liveResult={liveResult}
+        loading={isLazyProj ? lazyLoading : loading}
+        allFailed={isLazyProj ? (!lazyLoading && !!lazyError) : allFailed}
+        failedScoped={isLazyProj ? (lazyError ? [proj] : []) : failedScoped}
+        liveResult={lazyBadgeResult}
         onRefresh={refetch}
+        isClosedOrders={isLazyProj}
+        closedOrdersDayWindow={CLOSED_ORDERS_DAY_WINDOW}
       />
       <FefoNotifySettings />
       <Banners banners={banners} />
@@ -137,7 +204,7 @@ export default function FefoRotationTab() {
         openOrders={openOrders}
         onToggle={toggleOrder}
         showProjectChip={proj === 'all'}
-        loading={loading && visible.length === 0}
+        loading={isLazyProj ? lazyLoading && visible.length === 0 : (loading && visible.length === 0)}
         onRefetch={refetch}
       />
     </div>
@@ -147,12 +214,14 @@ export default function FefoRotationTab() {
 // FefoNotifySettings — per-project nightly digest configs, added 2026-07-14
 // per Dan's request. Unlike Pre-Pick/Cases/Daily Ops (one settings row per
 // facility), FEFO gets ONE ROW PER PROJECT — each FEFO project (originally
-// all 5 KEN customers; Palermo's Caledonia at CAL added 2026-07-17) has its own Front conversation, send time, and Enabled toggle,
-// since Dan wants full control over which customers' rotation status goes
-// where and when. All rows live in the same prepick_notify_settings table
-// (facility='ken'|'cal', dashboard_type='fefo_<projectId>') and are served
-// by one shared Netlify function (fefo-digest-run.cjs) — see that file's
-// header for why a shared function backs 5 rows instead of 5 separate files.
+// all 5 KEN customers; Palermo's Caledonia at CAL added 2026-07-17; Jones
+// Dairy Farm at MAD added 2026-07-18) has its own Front conversation, send
+// time, and Enabled toggle, since Dan wants full control over which
+// customers' rotation status goes where and when. All rows live in the
+// same prepick_notify_settings table (facility='ken'|'cal'|'mad',
+// dashboard_type='fefo_<projectId>') and are served by one shared Netlify
+// function (fefo-digest-run.cjs) — see that file's header for why a shared
+// function backs every row instead of one file per project.
 //
 // Content date is the NEXT BUSINESS DAY, always (2026-07-14, later) — same
 // semantics as Pre-Pick/Cases/Daily Ops, per Dan's follow-up feedback after
@@ -162,6 +231,12 @@ export default function FefoRotationTab() {
 // header for the full reasoning. Content scope is full status per project
 // (order count + every non-clean category + undated lots), confirmed with
 // Dan rather than violations-only.
+//
+// EXCEPTION (2026-07-18): JDF (`closedOrders: true`) is backward-looking —
+// its nightly digest reviews yesterday's CLOSED orders instead of an
+// upcoming business day. contentDateLabel/digestDescription are branched
+// per-project below to reflect that; the underlying settings row mechanics
+// (Front conversation, send time, Enabled toggle) are identical either way.
 function FefoNotifySettings() {
   const [open, setOpen] = useState(false)
   const btnStyle = {
@@ -190,9 +265,13 @@ function FefoNotifySettings() {
                 dashboardType={`fefo_${p.id}`}
                 functionName="fefo-digest-run"
                 manualTestBody={{ dashboardType: `fefo_${p.id}` }}
-                contentDateLabel="the next business day"
+                contentDateLabel={p.closedOrders ? 'the most recent closed business day' : 'the next business day'}
                 showSkipToNextValidDay={false}
-                digestDescription={`Posts a full rotation-status summary for ${p.name} (order count, violations w/ severity, holds, stale, undated lots) to the configured Front conversation.`}
+                digestDescription={
+                  p.closedOrders
+                    ? `Posts a retrospective FEFO-compliance summary for ${p.name} — reviews CLOSED orders looking backward (did we actually ship in FEFO order), not upcoming orders.`
+                    : `Posts a full rotation-status summary for ${p.name} (order count, violations w/ severity, holds, stale, undated lots) to the configured Front conversation.`
+                }
               />
             </div>
           ))}
@@ -202,13 +281,15 @@ function FefoNotifySettings() {
   )
 }
 
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh }) {
+function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh, isClosedOrders, closedOrdersDayWindow }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       gap: 16, flexWrap: 'wrap',
     }}>
-      <DayStepper day={day} onChange={onDayChange} />
+      {isClosedOrders
+        ? <ClosedOrdersLabel dayWindow={closedOrdersDayWindow} />
+        : <DayStepper day={day} onChange={onDayChange} />}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <DataSourceBadge
           loading={loading}
@@ -308,6 +389,36 @@ function DayStepper({ day, onChange }) {
         </span>
       </div>
       <StepBtn disabled={day >= 4} onClick={() => onChange(Math.min(4, day + 1))} ariaLabel="Next day">›</StepBtn>
+    </div>
+  )
+}
+
+// ClosedOrdersLabel — replaces the DayStepper for closedOrders projects
+// (e.g. JDF), added 2026-07-18. There's no "day N forward" to step
+// through for a backward-looking audit — every order returned in the
+// window is in scope at once, so this is just a static label instead of
+// an interactive control.
+function ClosedOrdersLabel({ dayWindow }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '4px 12px',
+      background: 'var(--bg2, #f8f9fb)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--r-md, 8px)',
+    }}>
+      <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+          Closed orders
+        </span>
+        <span style={{
+          fontSize: 10, color: 'var(--text-dim)',
+          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          letterSpacing: '0.06em', marginTop: 2,
+        }}>
+          last {dayWindow} days
+        </span>
+      </div>
     </div>
   )
 }
@@ -635,6 +746,13 @@ function OrderCard({ order, open, onToggle, showProjectChip, onRefetch }) {
           }}>{project.code}</span>
         )}
         <span style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', pointerEvents: 'none' }}>{order.dest}</span>
+        {order.shipDateDisplay && (
+          <span style={{
+            fontSize: 11, color: 'var(--text-dim)',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            pointerEvents: 'none',
+          }}>shipped {order.shipDateDisplay}</span>
+        )}
         <span style={{
           fontSize: 11, color: order.past ? VERDICT_TOKENS.stale.color : 'var(--text-secondary)',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
