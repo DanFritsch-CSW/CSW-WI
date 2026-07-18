@@ -410,12 +410,21 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   const date = isoDate(dateObj)
 
   let dayCount
+  let closedDayBucket = 0
   if (project.closedOrders) {
-    // closedOrders (JDF): fefo-orders.cjs computes its own BACKWARD window
-    // for these projects (dateTo=yesterday, dateFrom=today-dayCount) — see
-    // that file's loadOrdersForProject. dayCount=1 covers exactly
-    // "yesterday," matching dateObj (previousCalendarDayDateObj).
-    dayCount = 1
+    // closedOrders (JDF): fefo-orders.cjs's window for these projects now
+    // runs from (today - (dayCount-1)) through TODAY inclusive (changed
+    // 2026-07-18, later — the live tab's day-stepper needed to be able to
+    // select today, not just historical days; see that file's "closedOrders
+    // window now includes TODAY" note). Day buckets renumbered to match:
+    // 0 = today, 1 = yesterday, 2 = two days ago, etc. This digest still
+    // specifically wants YESTERDAY's shipped orders (dateObj =
+    // previousCalendarDayDateObj), so it requests a 2-day window (today +
+    // yesterday) and filters down to bucket 1 rather than taking every
+    // order the window returns — dayCount=1 would now mean "today only"
+    // under the new numbering, which is the wrong day for this digest.
+    dayCount = 2
+    closedDayBucket = 1
   } else {
     // targetDayOffset — number of days between fefo-orders.cjs's own "today"
     // (real UTC date, see todayUtcMidnight above) and our resolved content
@@ -443,10 +452,11 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   }
 
   const allOrders = ordersJson.ordersByProject?.[project.id] || []
-  // closedOrders projects have no day-bucket concept to filter by (see
-  // fefo-orders.cjs's shipDateDisplay/day comments) — every order returned
-  // in the backward window IS the target set.
-  const targetOrders = project.closedOrders ? allOrders : allOrders.filter(o => o.day === dayCount - 1)
+  // closedOrders projects filter to the specific bucket this digest wants
+  // (yesterday = bucket 1, see closedDayBucket above) rather than taking
+  // every order in the fetched window, since that window now also includes
+  // today.
+  const targetOrders = project.closedOrders ? allOrders.filter(o => o.day === closedDayBucket) : allOrders.filter(o => o.day === dayCount - 1)
 
   const body = buildDigestBody(targetOrders, project, dateObj)
 
