@@ -82,6 +82,22 @@
 // run in this CJS function; mirror any future changes made to fefo.js's
 // verdict engine here too.
 //
+// ── "today" anchored to Central time (2026-07-18, later) ────────────────────
+//
+// CRITICAL FIX (paired with fefo-orders.cjs's same-day fix): targetDayOffset
+// below used to be computed against a raw-UTC "today" (todayUtcMidnight),
+// deliberately mirroring what fefo-orders.cjs used at the time. That was a
+// real bug — Central Time is UTC-5/6, so after ~6-7pm Central the UTC
+// calendar date has already rolled to tomorrow, silently shifting every
+// dayCount/bucket calculation here by one full day relative to the actual
+// business day. Caught live via JDF showing 0 orders for "Today" at 8:49pm
+// Central despite 5 outbound orders having shipped. fefo-orders.cjs's own
+// "today" is now Central-anchored (todayCentralMidnight there); this file's
+// duplicate todayUtcMidnight() is removed and targetDayOffset now reuses
+// the Central-anchored centralTodayDateObj() already defined above for
+// nextBusinessDayDateObj/previousCalendarDayDateObj, so both sides of this
+// digest-to-live-query relationship agree on what day it is.
+//
 // Two invocation paths (same convention as the other digests):
 //   1. SCHEDULED (netlify.toml: "*/15 * * * *") — loops every fefo_*
 //      dashboard_type row across ALL facilities, fires whichever one(s)
@@ -211,15 +227,6 @@ function isoDate(dateObj) { return dateObj.toISOString().slice(0, 10) }
 function formatHeaderDate(dateObj) {
   const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
   return `${WEEKDAYS[dateObj.getUTCDay()]} ${dateObj.getUTCMonth() + 1}/${dateObj.getUTCDate()}/${dateObj.getUTCFullYear()}`
-}
-
-// todayUtcMidnight — mirrors fefo-orders.cjs's own "today" definition
-// exactly (real server UTC date, NOT the Central-time date used above) so
-// the day-bucket offset computed here lines up with the bucket fefo-orders
-// assigns to each order. See "targetDayOffset" below for why this matters.
-function todayUtcMidnight() {
-  const n = new Date()
-  return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()))
 }
 
 // ── Verdict engine — ported from src/lib/fefo.js (kept dependency-free) ────
@@ -427,13 +434,16 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
     closedDayBucket = 1
   } else {
     // targetDayOffset — number of days between fefo-orders.cjs's own "today"
-    // (real UTC date, see todayUtcMidnight above) and our resolved content
-    // date. Requesting dayCount = targetDayOffset + 1 means the query window
+    // and our resolved content date. Both sides now anchor "today" to
+    // Central time (centralTodayDateObj — see file header "today anchored
+    // to Central time"), so this stays correct across the UTC/Central day
+    // boundary instead of drifting by a day in the evening. Requesting
+    // dayCount = targetDayOffset + 1 means the query window
     // (today-1 .. today+dayCount-1) ends exactly on our target date, and any
     // order returned with day === dayCount-1 is genuinely on that date (not
     // folded in from further out, since the window itself doesn't extend
     // past it). Clamped to fefo-orders' accepted 1..7 range.
-    let targetDayOffset = Math.round((dateObj.getTime() - todayUtcMidnight().getTime()) / 86400000)
+    let targetDayOffset = Math.round((dateObj.getTime() - centralTodayDateObj().getTime()) / 86400000)
     if (targetDayOffset < 0) targetDayOffset = 0
     if (targetDayOffset > 6) targetDayOffset = 6
     dayCount = targetDayOffset + 1
