@@ -17,9 +17,19 @@
 //   YDDDHHMMSS       — Fair Oaks lot lookup_code (year+DOY+time)
 //   MMDDYYYY         — Richelieu lot lookup_code (expiration date)
 //   PPW+MMDDYYYY     — Crown lot lookup_code (PPW-prefixed pack date)
-//   receiveDate      — Birchwood — no date encoded in lookup_code.
-//                      Use lot.receive_date TIMESTAMP directly. Verb changes
-//                      to "received" on the client since it's not pack date.
+//   receiveDate      — Birchwood — no date encoded in lookup_code, and no
+//                      real expiration data exists anywhere for these lots
+//                      either. Use lot.receive_date TIMESTAMP directly as
+//                      an age proxy. Verb changes to "received" on the
+//                      client since it's not pack date.
+//   vendorLotExpiration — Palermo's Caledonia (added 2026-07-17). Real
+//                      expiration date, sourced from
+//                      datex_slv_vendorlots.expiration_date (joined via
+//                      lot.vendor_lot_id) — NOT from lookup_code and NOT
+//                      from datex_slv_licenseplatecontents.expiration_date
+//                      (that column exists but is ~0% populated here).
+//                      Same source PVI Shelf Life already uses for this
+//                      project (see pvi-shelf-life.cjs).
 //
 // ── Undated lots (2026-07-10, Dean/Bry FEFO feedback) ───────────────────────
 //
@@ -71,8 +81,17 @@ const PROJECTS = {
   golst5: { datexName: 'CROWN BAKERIES',          dateFormat: 'PPW+MMDDYYYY', dateSemantic: 'pack' },
   birch5: { datexName: 'BIRCHWOOD FOODS  KENOSHA', dateFormat: 'receiveDate', dateSemantic: 'received' },
   // Added 2026-07-17 — Palermo's Caledonia finished goods (facility CAL,
-  // warehouse_id 1). Lot codes don't encode a date, same as Birchwood.
-  palvi9: { datexName: 'Palermos CALEDONIA finished', dateFormat: 'receiveDate', dateSemantic: 'received' },
+  // warehouse_id 1). CORRECTED 2026-07-17 (later, same day): initially
+  // shipped as dateFormat 'receiveDate' (assumed no real expiration data
+  // existed, same as Birchwood) — wrong. There IS a real expiration date
+  // for these lots, it's just not on the lot's own lookup_code or on
+  // datex_slv_licenseplatecontents.expiration_date (that column exists but
+  // is 0% populated for this project). It's on datex_slv_vendorlots,
+  // joined via lot.vendor_lot_id — the exact same source PVI Shelf Life
+  // already uses for this same facility/project (see pvi-shelf-life.cjs's
+  // schema-anchor comment, verified 100% coverage). See "vendorLotExpiration"
+  // handling below.
+  palvi9: { datexName: 'Palermos CALEDONIA finished', dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration' },
 }
 
 const FACILITY_WAREHOUSE_ID = {
@@ -201,6 +220,12 @@ function parseLotDateKey(lookupCode, dateFormat, extras) {
   else if (dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
   else if (dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
   else if (dateFormat === 'receiveDate')  parsed = parseReceiveDate(extras?.receiveDate)
+  // vendorLotExpiration (added 2026-07-17) — real expiration date sourced
+  // from datex_slv_vendorlots.expiration_date (see PROJECTS.palvi9 comment
+  // for why this is NOT the same as 'receiveDate'). parseReceiveDate is
+  // fully generic (any timestamp -> {k, kDay, display}) so it's reused
+  // as-is rather than duplicated.
+  else if (dateFormat === 'vendorLotExpiration') parsed = parseReceiveDate(extras?.expirationDate)
   else parsed = null
   if (!parsed) return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${dateFormat}` }
   return parsed
@@ -335,6 +360,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       iu.short_name AS pack_unit_short,
       t.lot_id, l.lookup_code AS lot_code, l.status_name AS lot_status,
       l.receive_date AS lot_receive_date,
+      vl.expiration_date AS lot_expiration_date,
       COUNT(DISTINCT t.task_id) AS lp_count_planned,
       COUNT(DISTINCT t.actual_source_license_plate_id) AS lp_count_actual,
       SUM(t.expected_packaged_amount) AS expected_cases,
@@ -348,13 +374,19 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       AND mp.deprecated_packaging = false
     LEFT JOIN production_db.silver.datex_slv_inventorymeasurementunits iu
       ON iu.inventory_measurement_unit_id = mp.packaging_id
+    -- vendorlots — real expiration date for projects using dateFormat
+    -- 'vendorLotExpiration' (added 2026-07-17, e.g. Palermo's Caledonia).
+    -- vendor_lot_id is 1:1 in datex_slv_vendorlots (verified), so this
+    -- LEFT JOIN can't multiply rows for the other projects that don't use it.
+    LEFT JOIN production_db.silver.datex_slv_vendorlots vl
+      ON vl.vendor_lot_id = l.vendor_lot_id
     WHERE t.order_id IN (${orderIdList})
       AND t.lot_id IS NOT NULL
       AND t.warehouse_id = ${warehouseId}
     GROUP BY t.order_id, t.order_line_number, t.material_id,
              m.lookup_code, m.Description,
              mp.pallet_tie, mp.pallet_high, iu.short_name,
-             t.lot_id, l.lookup_code, l.status_name, l.receive_date
+             t.lot_id, l.lookup_code, l.status_name, l.receive_date, vl.expiration_date
   `
   const allocRows = await runQuery(allocSql)
 
@@ -428,6 +460,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         l.material_id, l.lot_id,
         l.lookup_code AS lot_code, l.status_name AS lot_status,
         MAX(l.receive_date) AS lot_receive_date,
+        MAX(vl.expiration_date) AS lot_expiration_date,
         COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
         SUM(lpc.packaged_amount) AS cases_onhand,
         COALESCE(MAX(c.cases_committed), 0) AS cases_committed,
@@ -441,6 +474,11 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       JOIN production_db.silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
       LEFT JOIN committed c ON c.lot_id = l.lot_id
       LEFT JOIN lot_locations ll ON ll.lot_id = l.lot_id
+      -- vendorlots — same 1:1 real-expiration-date join as allocSql above,
+      -- needed here too since REM candidates come from unallocated on-hand
+      -- lots (added 2026-07-17).
+      LEFT JOIN production_db.silver.datex_slv_vendorlots vl
+        ON vl.vendor_lot_id = l.vendor_lot_id
       WHERE l.material_id IN (${matIdList})
         AND lp.warehouse_id = ${warehouseId}
         AND lp.Archived = false
@@ -470,7 +508,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const allocLots = allocLotsByLine.get(key)
     allocLots.add(Number(r.lot_id))
 
-    const parsed = parseLotDateKey(r.lot_code, project.dateFormat, { receiveDate: r.lot_receive_date })
+    const parsed = parseLotDateKey(r.lot_code, project.dateFormat, { receiveDate: r.lot_receive_date, expirationDate: r.lot_expiration_date })
     const cases = Number(r.actual_cases) > 0 ? Number(r.actual_cases) : Number(r.expected_cases) || 0
     const lps = Number(r.lp_count_actual) > 0
       ? Number(r.lp_count_actual)
@@ -501,7 +539,8 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       lotId:    Number(r.lot_id),
       lotCode:  r.lot_code,
       status:   r.lot_status,
-      receiveDate:   r.lot_receive_date,
+      receiveDate:    r.lot_receive_date,
+      expirationDate: r.lot_expiration_date,
       cases:          Number(r.cases_available) || 0,
       casesGross:     Number(r.cases_onhand) || 0,
       casesCommitted: Number(r.cases_committed) || 0,
@@ -518,7 +557,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       .filter(c => !allocLots.has(c.lotId))
       .filter(c => !dismissedSet || !dismissedSet.has(`${projectId}|${c.lotCode}`))
       .map(c => {
-        const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate })
+        const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate, expirationDate: c.expirationDate })
         return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display, dateUnknown: !!parsed.error }
       })
       .filter(c => c.cases > 0)
