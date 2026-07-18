@@ -113,6 +113,12 @@ const FEFO_PROJECTS = [
   // as a WHERE-clause value when updating last_sent_date; a mismatch there
   // would silently update 0 rows rather than error.
   { id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia", facility: 'cal' },
+  // Added 2026-07-18 — Jones Dairy Farm, facility MAD. Backward-looking
+  // retrospective audit ("did we ship FEFO"), not a forward-looking watch —
+  // see closedOrders branches in nextBusinessDayDateObj/runForProject/
+  // buildDigestBody below, and src/lib/fefo.js's project-entry comment for
+  // the full rationale.
+  { id: 'jdf1', code: 'JDF1', name: 'Jones Dairy Farm', facility: 'mad', closedOrders: true },
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_${p.id}`, p]))
 const DEFAULT_NOTIFY_DAYS = [1, 2, 3, 4, 5]
@@ -176,6 +182,16 @@ function nextBusinessDayDateObj(notifyDays) {
     advanced++
   }
   return d
+}
+
+// previousCalendarDayDateObj — content date for closedOrders projects
+// (e.g. JDF). Simply "yesterday" (Central calendar day), no business-day
+// skipping — Dan's ask was literally "did we ship in FEFO status" for
+// whatever shipped the day before, weekday or not. notify_days still
+// governs which days the SCHEDULED tick fires (see runDigest), this only
+// controls what content date that fire reviews.
+function previousCalendarDayDateObj() {
+  return new Date(centralTodayDateObj().getTime() - 24 * 60 * 60 * 1000)
 }
 
 function isNotifyTimeMatch(notifyHour, notifyMinute) {
@@ -299,11 +315,17 @@ function buildDigestBody(orders, project, dateObj) {
   // what Front auto-linkifies. See file header "Link back to the app".
   lines.push(APP_URL)
   lines.push('CSW Operations Hub')
-  lines.push(`Next business day: ${formatHeaderDate(dateObj)}`)
+  // closedOrders (JDF) is a retrospective audit over yesterday's CLOSED
+  // orders, not a forward-looking watch — header wording branches to match.
+  lines.push(project.closedOrders
+    ? `Reviewing closed orders shipped: ${formatHeaderDate(dateObj)}`
+    : `Next business day: ${formatHeaderDate(dateObj)}`)
   lines.push('')
 
   if (orders.length === 0) {
-    lines.push('No orders in the FEFO window for this project on that date.')
+    lines.push(project.closedOrders
+      ? 'No closed orders shipped on that date.'
+      : 'No orders in the FEFO window for this project on that date.')
     return lines.join('\n')
   }
 
@@ -318,7 +340,9 @@ function buildDigestBody(orders, project, dateObj) {
   if (byVerdict.stale.length) summaryParts.push(`${byVerdict.stale.length} stale`)
   if (byVerdict.hold.length) summaryParts.push(`${byVerdict.hold.length} on hold`)
   if (byVerdict.blocked.length) summaryParts.push(`${byVerdict.blocked.length} in receiving`)
-  lines.push(`${orders.length} order${orders.length === 1 ? '' : 's'} in rotation window · ${byVerdict.clean.length} clean${summaryParts.length ? ' · ' + summaryParts.join(' · ') : ''}`)
+  lines.push(project.closedOrders
+    ? `${orders.length} order${orders.length === 1 ? '' : 's'} shipped · ${byVerdict.clean.length} in FEFO order${summaryParts.length ? ' · ' + summaryParts.join(' · ') : ''}`
+    : `${orders.length} order${orders.length === 1 ? '' : 's'} in rotation window · ${byVerdict.clean.length} clean${summaryParts.length ? ' · ' + summaryParts.join(' · ') : ''}`)
   lines.push('')
 
   // ── Violation count — highlighted block, always shown once orders exist,
@@ -336,12 +360,13 @@ function buildDigestBody(orders, project, dateObj) {
   lines.push('')
 
   if (byVerdict.violation.length) {
-    lines.push('Violations:')
+    lines.push(project.closedOrders ? 'Shipped out of FEFO order:' : 'Violations:')
     lines.push('')
     for (const o of byVerdict.violation) {
       const days = orderMaxDaysOlder(o)
       const sev = orderSeverity(o)
-      lines.push(`• ${o.id} — ${days}d older stock available, unallocated${sev ? ` (${sev.toUpperCase()})` : ''} — ${o.dest || 'dest unknown'}`)
+      const verb = project.closedOrders ? 'shipped ahead of' : 'older stock available, unallocated —'
+      lines.push(`• ${o.id} — ${days}d ${verb}${sev ? ` (${sev.toUpperCase()})` : ''} — ${o.dest || 'dest unknown'}`)
       lines.push('')
     }
   }
@@ -384,17 +409,26 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
 
   const date = isoDate(dateObj)
 
-  // targetDayOffset — number of days between fefo-orders.cjs's own "today"
-  // (real UTC date, see todayUtcMidnight above) and our resolved content
-  // date. Requesting dayCount = targetDayOffset + 1 means the query window
-  // (today-1 .. today+dayCount-1) ends exactly on our target date, and any
-  // order returned with day === dayCount-1 is genuinely on that date (not
-  // folded in from further out, since the window itself doesn't extend
-  // past it). Clamped to fefo-orders' accepted 1..7 range.
-  let targetDayOffset = Math.round((dateObj.getTime() - todayUtcMidnight().getTime()) / 86400000)
-  if (targetDayOffset < 0) targetDayOffset = 0
-  if (targetDayOffset > 6) targetDayOffset = 6
-  const dayCount = targetDayOffset + 1
+  let dayCount
+  if (project.closedOrders) {
+    // closedOrders (JDF): fefo-orders.cjs computes its own BACKWARD window
+    // for these projects (dateTo=yesterday, dateFrom=today-dayCount) — see
+    // that file's loadOrdersForProject. dayCount=1 covers exactly
+    // "yesterday," matching dateObj (previousCalendarDayDateObj).
+    dayCount = 1
+  } else {
+    // targetDayOffset — number of days between fefo-orders.cjs's own "today"
+    // (real UTC date, see todayUtcMidnight above) and our resolved content
+    // date. Requesting dayCount = targetDayOffset + 1 means the query window
+    // (today-1 .. today+dayCount-1) ends exactly on our target date, and any
+    // order returned with day === dayCount-1 is genuinely on that date (not
+    // folded in from further out, since the window itself doesn't extend
+    // past it). Clamped to fefo-orders' accepted 1..7 range.
+    let targetDayOffset = Math.round((dateObj.getTime() - todayUtcMidnight().getTime()) / 86400000)
+    if (targetDayOffset < 0) targetDayOffset = 0
+    if (targetDayOffset > 6) targetDayOffset = 6
+    dayCount = targetDayOffset + 1
+  }
 
   const ordersRes = await fetch(`${SITE_URL}/.netlify/functions/fefo-orders`, {
     method: 'POST',
@@ -409,7 +443,10 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   }
 
   const allOrders = ordersJson.ordersByProject?.[project.id] || []
-  const targetOrders = allOrders.filter(o => o.day === dayCount - 1)
+  // closedOrders projects have no day-bucket concept to filter by (see
+  // fefo-orders.cjs's shipDateDisplay/day comments) — every order returned
+  // in the backward window IS the target set.
+  const targetOrders = project.closedOrders ? allOrders : allOrders.filter(o => o.day === dayCount - 1)
 
   const body = buildDigestBody(targetOrders, project, dateObj)
 
@@ -444,7 +481,7 @@ async function runDigest({ isManualTest, dashboardType }) {
       `prepick_notify_settings?facility=eq.${project.facility}&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
     )
     const settingsRow = rows?.[0]
-    const dateObj = nextBusinessDayDateObj(settingsRow?.notify_days)
+    const dateObj = project.closedOrders ? previousCalendarDayDateObj() : nextBusinessDayDateObj(settingsRow?.notify_days)
     const result = await runForProject({ settingsRow, project, dateObj, isManualTest: true })
     return result
   }
@@ -463,7 +500,7 @@ async function runDigest({ isManualTest, dashboardType }) {
     const project = PROJECT_BY_DASHBOARD_TYPE.get(row.dashboard_type)
     if (!project) continue
     if (row.active === false) { results.push({ ok: true, skipped: true, project: project.code, reason: 'Digest disabled' }); continue }
-    const dateObj = nextBusinessDayDateObj(row.notify_days)
+    const dateObj = project.closedOrders ? previousCalendarDayDateObj() : nextBusinessDayDateObj(row.notify_days)
     const notifyHour = row.notify_hour ?? 22
     const notifyMinute = row.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
