@@ -538,6 +538,24 @@ export function daySubLabel(dayOffset) {
   return `+${dayOffset} days`
 }
 
+// closedDayLabel/closedDaySubLabel — day-stepper helpers for closedOrders
+// projects (e.g. JDF), added 2026-07-18 per Dan's follow-up ("I want the day
+// selector like the other customers, just closed orders rather than open").
+// Mirror dayLabel/daySubLabel exactly, but count BACKWARD: offset 0 =
+// yesterday (the most recent day that can have closed orders), offset 1 =
+// two days ago, etc. Paired with the day-bucket fefo-orders.cjs now computes
+// for closedOrders orders (see that file's loadOrdersForProject comment).
+export function closedDayLabel(dayOffset, today = new Date()) {
+  const d = new Date(today)
+  d.setDate(d.getDate() - (dayOffset + 1))
+  return `${DAY_NAMES[d.getDay()]}, ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`
+}
+
+export function closedDaySubLabel(dayOffset) {
+  if (dayOffset === 0) return 'Yesterday'
+  return `-${dayOffset + 1} days`
+}
+
 // ─── Verdict styling tokens ─────────────────────────────────────────────────
 
 export const VERDICT_TOKENS = {
