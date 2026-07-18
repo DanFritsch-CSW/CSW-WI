@@ -56,6 +56,20 @@
 // `AND ot.order_type_name = 'Outbound'` to orderSql's WHERE clause, applied
 // universally (all 7 projects share this query path, both closedOrders and
 // open-orders branches) rather than as a JDF-only patch.
+//
+// ── closedOrders window now includes TODAY (2026-07-18, later) ─────────────
+//
+// Dan's follow-up on the day-stepper: "allow me to select today's date, not
+// just historical." The window previously ran from dayCount days back
+// through YESTERDAY only (dateTo = yesterday), so today's already-closed
+// (Completed) orders were unreachable no matter how the stepper was paged.
+// Fixed by moving dateTo to TODAY. Day-bucket numbering shifts to match the
+// open-order convention: 0 = Today (was 0 = Yesterday), 1 = Yesterday, 2 =
+// two days ago, etc. — see the day-bucket comment further down and
+// src/lib/fefo.js's closedDayLabel/closedDaySubLabel for the client-side
+// counterpart. fefo-digest-run.cjs was updated in lockstep so the nightly
+// digest (which specifically wants "yesterday", not "today") still resolves
+// the right bucket under the new numbering.
 
 // ── Undated lots (2026-07-10, Dean/Bry FEFO feedback) ───────────────────────
 //
@@ -342,15 +356,16 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   const safeProjectName = project.datexName.replace(/'/g, "''")
 
   // closedOrders projects (e.g. JDF) look BACKWARD — last dayCount days,
-  // ending yesterday — instead of the shared forward window the handler
-  // computes for open-order projects (today-1 .. today+dayCount-1).
-  // Recomputed here per-project rather than in the shared handler since a
-  // batch request could in principle mix closed- and open-order projects
-  // (it doesn't today — JDF is alone on facility MAD — but this keeps the
-  // function correct regardless).
+  // ending TODAY (through today's already-closed orders — see file header
+  // "closedOrders window now includes TODAY") — instead of the shared
+  // forward window the handler computes for open-order projects
+  // (today-1 .. today+dayCount-1). Recomputed here per-project rather than
+  // in the shared handler since a batch request could in principle mix
+  // closed- and open-order projects (it doesn't today — JDF is alone on
+  // facility MAD — but this keeps the function correct regardless).
   if (project.closedOrders) {
-    dateTo = fmtDateISO(new Date(today.getTime() - 86400000))            // yesterday
-    dateFrom = fmtDateISO(new Date(today.getTime() - dayCount * 86400000)) // dayCount days back
+    dateTo = fmtDateISO(today)                                              // today
+    dateFrom = fmtDateISO(new Date(today.getTime() - (dayCount - 1) * 86400000)) // dayCount days back, inclusive of today
   }
 
   const orderSql = `
@@ -674,22 +689,21 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const arrival = arrivalToDate(oh.scheduled_arrival)
     // day-bucket: closedOrders projects (e.g. JDF) look BACKWARD, so the
     // forward dayOffsetFrom (which clamps every negative offset to 0) can't
-    // be reused here — that used to collapse every closed order into a
-    // single fake "day 0" bucket regardless of which day it actually
-    // shipped, making a real day-stepper impossible. Fixed 2026-07-18 (Dan
-    // asked for a day-stepper matching the other customers instead of a
-    // fixed "last N days" window): daysAgo counts backward from today
-    // (1 = yesterday, 2 = two days ago, ...), converted to a 0-indexed
-    // `day` where 0 = yesterday (the most recent closed day) up through
-    // dayCount-1 = the oldest day still inside the fetched window. The
+    // be reused here. Fixed 2026-07-18 (Dan asked for a day-stepper
+    // matching the other customers instead of a fixed "last N days"
+    // window, then asked again the same day to make TODAY selectable too,
+    // not just historical days): daysAgo counts backward from today
+    // (0 = today, 1 = yesterday, 2 = two days ago, ...) — same numbering
+    // convention as the open-order dayOffsetFrom (0 = today), just running
+    // the opposite direction in time. Clamped into [0, dayCount-1]. The
     // client's day-stepper pages through these exactly like the forward
     // projects page through their day buckets, just running backward.
     let day
     if (project.closedOrders) {
       const daysAgo = arrival
         ? Math.round((today.getTime() - Date.UTC(arrival.getUTCFullYear(), arrival.getUTCMonth(), arrival.getUTCDate())) / 86400000)
-        : 1
-      day = Math.max(0, Math.min(dayCount - 1, daysAgo - 1))
+        : 0
+      day = Math.max(0, Math.min(dayCount - 1, daysAgo))
     } else {
       const dayOffset = dayOffsetFrom(arrival, today)
       day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
