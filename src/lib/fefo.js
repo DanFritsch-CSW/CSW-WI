@@ -4,7 +4,8 @@
 //   - Project config with date semantic + facility mapping
 //   - Pure verdict engine (line + order + severity ordering)
 //   - Plain-language verdict copy generator (pack vs expiration vs received)
-//   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY / receiveDate
+//   - Per-project date parsers — YDDDHHMMSS / MMDDYYYY / PPW+MMDDYYYY /
+//     receiveDate / vendorLotExpiration
 //   - Hold status detector — multiple Datex statuses count as "on hold"
 //   - Non-allocatable location detector (receiving, staging, docks, doors, etc.)
 //   - Undated-lot detector (2026-07-10) — lots whose code can't be parsed into
@@ -57,13 +58,20 @@ export const FEFO_PROJECTS = [
     // — this is CSW's own Caledonia finished-goods project (Palermo Villa,
     // Inc.), not a KEN customer, hence facility: 'cal'. Confirmed via
     // MotherDuck (silver.datex_slv_projects: project_id=5, lookup_code=
-    // 'PALVI9', 195 orders currently Processing). Lot codes (WC106515,
-    // WJ101444, plain numeric codes like "19626") don't encode a date at
-    // all — same situation as Birchwood — so this uses receiveDate/received
-    // too. Left out PALMA9 (materials bulk) and PALDSD9 (DSD) per Dan's
-    // call — only the finished-goods project for now.
+    // 'PALVI9', 195 orders currently Processing). Left out PALMA9
+    // (materials bulk) and PALDSD9 (DSD) per Dan's call — only the
+    // finished-goods project for now.
+    //
+    // CORRECTED 2026-07-17 (later, same day): initially shipped as
+    // dateFormat 'receiveDate' — assumed no real expiration data existed
+    // since lot codes (WC106515, WJ101444, plain numeric like "19626")
+    // don't encode one. Wrong: there IS a real expiration date for these
+    // lots, sourced from datex_slv_vendorlots (joined via vendor_lot_id),
+    // NOT the lookup_code — same source PVI Shelf Life already uses for
+    // this exact project (see netlify/functions/pvi-shelf-life.cjs and
+    // fefo-orders.cjs's "vendorLotExpiration" handling).
     id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia",
-    proj: 5, dateFormat: 'receiveDate', dateSemantic: 'received',
+    proj: 5, dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration',
     color: '#1f7a8c', facility: 'cal',
     datexProjectName: 'Palermos CALEDONIA finished',
   },
@@ -157,7 +165,8 @@ export function parseLotDateKey(lookupCode, projId) {
   if (project.dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
   else if (project.dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
   else if (project.dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
-  // 'receiveDate' is only parsed server-side (needs lot.receive_date from DB)
+  // 'receiveDate' and 'vendorLotExpiration' are only parsed server-side
+  // (need a DB timestamp field, not something derivable from lookup_code)
   else parsed = null
   if (!parsed) {
     return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${project.dateFormat}` }
