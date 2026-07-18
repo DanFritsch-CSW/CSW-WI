@@ -80,9 +80,26 @@ export async function fetchCompletions(onboardingId) {
   return byKey
 }
 
+// fetchAllCompletionsGrouped — one query for every onboarding's completions,
+// grouped by onboarding_id. Used by the sidebar to show "X/Y tasks assessed"
+// per employee without an N+1 query per row (2026-07-18, Dean/Tim feedback).
+export async function fetchAllCompletionsGrouped() {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('eo_completions')
+    .select('onboarding_id, module_key, completed, completed_date')
+  if (error) { console.error('fetchAllCompletionsGrouped:', error); return {} }
+  const grouped = {}
+  for (const row of (data ?? [])) {
+    if (!grouped[row.onboarding_id]) grouped[row.onboarding_id] = {}
+    grouped[row.onboarding_id][row.module_key] = row
+  }
+  return grouped
+}
+
 // upsertCompletion — single-entry modules (values, numbered training
 // modules). patch may include completed, completed_date, comments,
-// observer_name.
+// observer_name, retain_flag (30/60-day milestone retain Y/N).
 export async function upsertCompletion(onboardingId, moduleKey, patch) {
   if (!supabase) return null
   const { data, error } = await supabase
