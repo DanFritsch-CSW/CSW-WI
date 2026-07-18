@@ -89,6 +89,7 @@ export default function Dashboard({ employees, allCompletions, allEvaluations, c
           <tr style={{ borderBottom: '2px solid var(--border)', textAlign: 'left' }}>
             <th style={thStyle}>Name</th>
             <th style={thStyle}>Facility</th>
+            <th style={thStyle}>Hire Date</th>
             <th style={thStyle}>Day</th>
             <th style={thStyle}>Month 1</th>
             <th style={thStyle}>Month 2</th>
@@ -123,6 +124,7 @@ export default function Dashboard({ employees, allCompletions, allEvaluations, c
                   {flagged && <span title="Not-Retain recommendation on file" style={{ marginLeft: 6, color: '#dc2626' }}>⚑</span>}
                 </td>
                 <td style={tdStyle}>{e.facility ? e.facility.toUpperCase() : '—'}</td>
+                <td style={tdStyle}>{e.start_date || '—'}</td>
                 <td style={tdStyle}>{daysAt(e) ?? '—'}</td>
                 <td style={tdStyle}><StatusDot state={m1.state} label={`${m1.done}/${m1.total}`} /></td>
                 <td style={tdStyle}><StatusDot state={m2.state} label={`${m2.done}/${m2.total}`} /></td>
@@ -138,7 +140,7 @@ export default function Dashboard({ employees, allCompletions, allEvaluations, c
             )
           })}
           {filtered.length === 0 && (
-            <tr><td colSpan={9} style={{ ...tdStyle, textAlign: 'center', color: 'var(--text-secondary)' }}>No active employees match.</td></tr>
+            <tr><td colSpan={10} style={{ ...tdStyle, textAlign: 'center', color: 'var(--text-secondary)' }}>No active employees match.</td></tr>
           )}
         </tbody>
       </table>
