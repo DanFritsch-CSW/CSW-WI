@@ -1478,6 +1478,32 @@ export async function fetchActiveB2eEmployees(facilityId) {
   }
 }
 
+// fetchActiveB2eEmployeesFull — like fetchActiveB2eEmployees, but returns
+// full {id, name} records instead of just a Set of IDs. Added 2026-07-18
+// for weekend Special Project auto-populate (RosterBoard.jsx): B2E's
+// futurescheduleentries table simply has no Saturday/Sunday rows at all
+// (not a stale-snapshot situation — there's nothing published for those
+// days), so there's no schedule row to derive an employee's name from the
+// way the weekday cold-cache path does. This goes straight to the B2E
+// master roster (employeeroster, which DOES carry employee_name) instead.
+export async function fetchActiveB2eEmployeesFull(facilityId) {
+  const location = B2E_LOCATION[facilityId]
+  if (!location) return []
+  try {
+    const rows = await motherduckB2eQuery({ kind: 'active_roster_named', facilityId })
+    return rows
+      .map(r => ({
+        id:   String(r[`${ROSTER}.employee_id`]),
+        name: r[`${ROSTER}.employee_name`] || '',
+      }))
+      .filter(e => e.id && e.name)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  } catch (e) {
+    console.warn('fetchActiveB2eEmployeesFull failed (non-fatal):', e.message)
+    return []
+  }
+}
+
 export async function fetchWrPickers(date) {
   const location = B2E_LOCATION['wr']
   const refDate  = date || new Date().toISOString().slice(0, 10)
