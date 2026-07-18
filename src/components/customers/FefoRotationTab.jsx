@@ -4,7 +4,7 @@ import {
   FEFO_PROJECTS, AUTO_LOAD_PROJECT_IDS, getProject, dateVerb,
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
   bannerCounts, kpiRow, rollupByProject,
-  dayLabel, daySubLabel,
+  dayLabel, daySubLabel, closedDayLabel, closedDaySubLabel,
   VERDICT_TOKENS, SEVERITY_TOKENS, UNDATED_TOKEN,
   lineSeverity, orderSeverity, orderMaxDaysOlder, lineDaysOlder,
   undatedLotsInView,
@@ -14,11 +14,13 @@ import {
 // FEFO Rotation tab — always live from Datex, batched.
 //
 // JDF (Jones Dairy Farm, added 2026-07-18) is deliberately NOT part of the
-// standard auto-load/day-stepper flow — it's a closed-orders retrospective
-// audit ("did we ship FEFO"), marked `lazy: true` in fefo.js. It only
-// fetches when a user explicitly picks it from the project dropdown (see
-// the lazy-fetch effect below), and its view has no day-stepper since
-// "day N forward" doesn't mean anything for a backward-looking audit.
+// standard auto-load flow — it's a closed-orders retrospective audit
+// ("did we ship FEFO"), marked `lazy: true` in fefo.js. It only fetches
+// when a user explicitly picks it from the project dropdown (see the
+// lazy-fetch effect below). It DOES get a day-stepper like every other
+// project — just a backward-looking one (see ClosedDayStepper) — per
+// Dan's follow-up: the first cut used a fixed "last 3 days" window with no
+// stepper, which he asked to replace with a real day selector.
 
 const ALL_PROJECT_IDS = AUTO_LOAD_PROJECT_IDS
 
@@ -41,6 +43,12 @@ export default function FefoRotationTab() {
   // re-fetches just that project rather than the whole batch.
   const [lazyState, setLazyState] = useState({})
   const isLazyProj = proj !== 'all' && !!getProject(proj)?.lazy
+  // closedDay — the backward day-stepper's current offset for closedOrders
+  // projects (0 = yesterday, 1 = two days ago, ... up to CLOSED_DAY_COUNT-1).
+  // Added 2026-07-18 replacing the original fixed "last 3 days" window, per
+  // Dan's follow-up asking for a real day selector like the other projects.
+  const [closedDay, setClosedDay] = useState(0)
+  useEffect(() => { setClosedDay(0) }, [proj])
 
   useEffect(() => {
     if (fetchedRef.current === refetchTick) return
@@ -63,12 +71,12 @@ export default function FefoRotationTab() {
   // regardless of which project is currently selected. No caching by
   // design — always fetches fresh, since this is what someone verifies
   // right before configuring/testing a notify setting.
-  const CLOSED_ORDERS_DAY_WINDOW = 3 // last 3 days closed, for browsing
+  const CLOSED_DAY_COUNT = 7 // matches fefo-orders.cjs's dayCount max (1..7)
   useEffect(() => {
     if (!isLazyProj) return
     let cancelled = false
     setLazyState(prev => ({ ...prev, [proj]: { ...(prev[proj] || {}), loading: true } }))
-    fetchLiveFefoOrdersBatch([proj], { dayCount: CLOSED_ORDERS_DAY_WINDOW })
+    fetchLiveFefoOrdersBatch([proj], { dayCount: CLOSED_DAY_COUNT })
       .then(result => {
         if (cancelled) return
         setLazyState(prev => ({
@@ -122,11 +130,13 @@ export default function FefoRotationTab() {
 
   const visible = useMemo(() => {
     // lazy (closedOrders) projects — e.g. JDF — source from lazyState
-    // instead of the main ordersByProject batch, and skip the day filter
-    // entirely: there's no "day N forward" bucket for a backward-looking
-    // audit, every order returned in the window is in scope.
+    // instead of the main ordersByProject batch, and filter by closedDay
+    // (the backward day-stepper's current offset) exactly the same way the
+    // forward projects filter by `day` — one fetch covers the whole
+    // CLOSED_DAY_COUNT window, and the stepper just changes which day's
+    // slice is shown.
     if (isLazyProj) {
-      const orders = lazyState[proj]?.orders || []
+      const orders = (lazyState[proj]?.orders || []).filter(o => o.day === closedDay)
       return [...orders].sort(compareByVerdict)
     }
     let pool
@@ -141,7 +151,7 @@ export default function FefoRotationTab() {
     }
     const filtered = pool.filter(o => o.day === day)
     return [...filtered].sort(compareByVerdict)
-  }, [isLazyProj, lazyState, proj, allFailed, mockOrders, ordersByProject, scopedProjectIds, day])
+  }, [isLazyProj, lazyState, proj, closedDay, allFailed, mockOrders, ordersByProject, scopedProjectIds, day])
 
   // Rows start COLLAPSED on load and whenever the visible set changes
   // (day/project filter change, refetch, etc.) — changed 2026-07-18 per
@@ -190,7 +200,9 @@ export default function FefoRotationTab() {
         liveResult={lazyBadgeResult}
         onRefresh={refetch}
         isClosedOrders={isLazyProj}
-        closedOrdersDayWindow={CLOSED_ORDERS_DAY_WINDOW}
+        closedDay={closedDay}
+        onClosedDayChange={setClosedDay}
+        closedDayCount={CLOSED_DAY_COUNT}
       />
       <FefoNotifySettings />
       <Banners banners={banners} />
@@ -281,14 +293,14 @@ function FefoNotifySettings() {
   )
 }
 
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh, isClosedOrders, closedOrdersDayWindow }) {
+function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh, isClosedOrders, closedDay, onClosedDayChange, closedDayCount }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       gap: 16, flexWrap: 'wrap',
     }}>
       {isClosedOrders
-        ? <ClosedOrdersLabel dayWindow={closedOrdersDayWindow} />
+        ? <ClosedDayStepper day={closedDay} dayCount={closedDayCount} onChange={onClosedDayChange} />
         : <DayStepper day={day} onChange={onDayChange} />}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <DataSourceBadge
@@ -393,32 +405,37 @@ function DayStepper({ day, onChange }) {
   )
 }
 
-// ClosedOrdersLabel — replaces the DayStepper for closedOrders projects
-// (e.g. JDF), added 2026-07-18. There's no "day N forward" to step
-// through for a backward-looking audit — every order returned in the
-// window is in scope at once, so this is just a static label instead of
-// an interactive control.
-function ClosedOrdersLabel({ dayWindow }) {
+// ClosedDayStepper — day-stepper for closedOrders projects (e.g. JDF),
+// added 2026-07-18 replacing the original fixed "last N days" window per
+// Dan's follow-up ("I want the day selector like the other customers, just
+// closed orders rather than open"). Mirrors DayStepper's layout/behavior
+// exactly, but counts BACKWARD: day 0 = yesterday (‹ Previous goes further
+// back in time / higher offset, › Next comes forward toward yesterday /
+// lower offset) — the opposite arrow direction from the forward stepper,
+// since "next" here means "more recent," not "further out."
+function ClosedDayStepper({ day, dayCount, onChange }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '4px 12px',
+      padding: '4px 8px',
       background: 'var(--bg2, #f8f9fb)',
       border: '1px solid var(--border)',
       borderRadius: 'var(--r-md, 8px)',
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
+      <StepBtn disabled={day >= dayCount - 1} onClick={() => onChange(Math.min(dayCount - 1, day + 1))} ariaLabel="Further back">‹</StepBtn>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 130, lineHeight: 1.2 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-          Closed orders
+          {closedDayLabel(day)}
         </span>
         <span style={{
           fontSize: 10, color: 'var(--text-dim)',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
           letterSpacing: '0.06em', marginTop: 2,
         }}>
-          last {dayWindow} days
+          {closedDaySubLabel(day)}
         </span>
       </div>
+      <StepBtn disabled={day <= 0} onClick={() => onChange(Math.max(0, day - 1))} ariaLabel="More recent">›</StepBtn>
     </div>
   )
 }
