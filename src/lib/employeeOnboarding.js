@@ -145,6 +145,23 @@ export async function fetchEvaluations(onboardingId) {
   return byKey
 }
 
+// fetchAllEvaluationsGrouped — one query for every onboarding's end-of-
+// onboarding evaluations, grouped by onboarding_id. Used by the Dashboard
+// to show End-Eval completion status per employee (2026-07-18).
+export async function fetchAllEvaluationsGrouped() {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from('eo_evaluations')
+    .select('onboarding_id, category_key, trainer_eval, supervisor_eval')
+  if (error) { console.error('fetchAllEvaluationsGrouped:', error); return {} }
+  const grouped = {}
+  for (const row of (data ?? [])) {
+    if (!grouped[row.onboarding_id]) grouped[row.onboarding_id] = {}
+    grouped[row.onboarding_id][row.category_key] = row
+  }
+  return grouped
+}
+
 export async function upsertEvaluation(onboardingId, categoryKey, patch) {
   if (!supabase) return null
   const { data, error } = await supabase
