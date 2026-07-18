@@ -4,35 +4,56 @@ import {
   fetchOnboardingEmployees, createOnboardingEmployee, updateOnboardingEmployee,
   setEmployeeStatus, deleteOnboardingEmployee,
   fetchCompletions, fetchAllCompletionsGrouped, upsertCompletion, upsertWeeklyEntries,
-  fetchEvaluations, upsertEvaluation,
+  fetchEvaluations, upsertEvaluation, notifyHR,
 } from '../lib/employeeOnboarding.js'
 import {
-  MONTHS, WEEKLY_CONFIG, MAX_LOADS_PER_WEEK, MODULES, END_EVAL_SECTIONS, FACILITIES,
+  MONTHS, WEEKLY_CONFIG, MAX_LOADS_PER_WEEK, END_EVAL_SECTIONS, FACILITIES,
 } from '../lib/employeeOnboardingCurriculum.js'
+import { fetchCurriculumValues, fetchCurriculumModules } from '../lib/employeeOnboardingTemplate.js'
+import TemplateEditor from '../components/employeeOnboarding/TemplateEditor.jsx'
+import PrintView from '../components/employeeOnboarding/PrintView.jsx'
 
 // Employee Onboarding — built 2026-07-15 per Tim Morris' Slack request (via
 // Dan), from Onboarding_Standardization_Notes.docx. Tracks the 3-month
 // warehouse-floor new-hire training program + end-of-onboarding evaluation,
-// per employee. Same curriculum applies at all 5 facilities (per Dan
-// 2026-07-15). New hires added manually — no B2E pull.
+// per employee. Same curriculum applies at all 5 facilities. New hires
+// added manually — no B2E pull.
 //
-// UI mirrors the doc's own black-bullet/white-bullet convention: module
-// title + completion controls are always visible; full description/
-// objectives reveal on click (ModuleRow's expand toggle).
-// moduleKeysForMonth — values key + numbered module keys for one month.
-// Used to compute "X/Y tasks assessed" progress (weekly logs excluded —
-// those are repeatable observation logs, not pass/fail tasks).
-function moduleKeysForMonth(monthKey) {
-  const month = MONTHS.find(m => m.key === monthKey)
-  return [month.value.key, ...MODULES[monthKey].map(m => m.key)]
+// 2026-07-18 round 2 (Tim/Eli/Dean feedback): facility filter, per-employee/
+// per-month task-assessed counts, 30/60/90-day milestone reviews, retain
+// Y/N flags.
+//
+// 2026-07-18 round 3 — Template Editor + HR Handoff:
+//   - Curriculum wording (values-discussion + numbered modules) moved from
+//     static JS to Supabase (eo_curriculum_values / eo_curriculum_modules),
+//     fetched once here and passed down, so Eli/leadership can edit it
+//     in-app via TemplateEditor.jsx without a code change.
+//   - "Notify HR" posts a Front comment (via eo-notify-hr.cjs) linking to a
+//     print-friendly full record (PrintView.jsx) for the personnel file.
+//     Reached via ?view=print&employee=<id> on this same route.
+function moduleKeysForMonth(monthKey, curriculumModules) {
+  return [`${monthKey}_values`, ...(curriculumModules[monthKey] || []).map(m => m.key)]
 }
-const ALL_MODULE_KEYS = MONTHS.flatMap(m => moduleKeysForMonth(m.key))
-
+function allModuleKeys(curriculumModules) {
+  return MONTHS.flatMap(m => moduleKeysForMonth(m.key, curriculumModules))
+}
 function countDone(completionsByKey, keys) {
   return keys.filter(k => completionsByKey[k]?.completed || completionsByKey[k]?.completed_date).length
 }
 
 export default function EmployeeOnboarding() {
+  const [searchParams] = useSearchParams()
+  // Print view is a standalone render — no sidebar, no employee list fetch.
+  // Split into its own component (rather than an early return inside the
+  // main component) so hooks below are never conditionally skipped —
+  // an early return before useState calls would violate Rules of Hooks.
+  if (searchParams.get('view') === 'print') {
+    return <PrintView employeeId={searchParams.get('employee')} />
+  }
+  return <EmployeeOnboardingApp />
+}
+
+function EmployeeOnboardingApp() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [employees, setEmployees] = useState([])
   const [loading, setLoading] = useState(true)
@@ -43,11 +64,21 @@ export default function EmployeeOnboarding() {
   const [urlInitDone, setUrlInitDone] = useState(false)
   const [allCompletions, setAllCompletions] = useState({})
   const [facilityFilter, setFacilityFilter] = useState('all')
+  const [curriculumModules, setCurriculumModules] = useState({ m1: [], m2: [], m3: [] })
+  const [curriculumValues, setCurriculumValues] = useState({})
+  const [view, setView] = useState('employee') // 'employee' | 'template'
 
   const load = () => {
     setLoading(true)
-    Promise.all([fetchOnboardingEmployees(), fetchAllCompletionsGrouped()])
-      .then(([rows, grouped]) => { setEmployees(rows); setAllCompletions(grouped); setError(null) })
+    Promise.all([
+      fetchOnboardingEmployees(), fetchAllCompletionsGrouped(),
+      fetchCurriculumModules(), fetchCurriculumValues(),
+    ])
+      .then(([rows, grouped, modules, values]) => {
+        setEmployees(rows); setAllCompletions(grouped)
+        setCurriculumModules(modules); setCurriculumValues(values)
+        setError(null)
+      })
       .catch(err => setError(err?.message || 'Failed to load employees'))
       .finally(() => setLoading(false))
   }
@@ -79,6 +110,7 @@ export default function EmployeeOnboarding() {
 
   const selectEmployee = (id) => {
     setSelectedId(id)
+    setView('employee')
     const next = new URLSearchParams(searchParams)
     if (id) next.set('employee', String(id))
     else next.delete('employee')
@@ -89,6 +121,7 @@ export default function EmployeeOnboarding() {
     .filter(e => (e.status !== 'active') === showCompleted)
     .filter(e => facilityFilter === 'all' || e.facility === facilityFilter)
   const selected = employees.find(e => e.id === selectedId) || null
+  const allKeys = allModuleKeys(curriculumModules)
 
   return (
     <div className="page-content">
@@ -118,36 +151,48 @@ export default function EmployeeOnboarding() {
           facilityFilter={facilityFilter}
           onFacilityFilterChange={setFacilityFilter}
           allCompletions={allCompletions}
+          allModuleKeys={allKeys}
+          onManageTemplate={() => setView('template')}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</div>}
-          {error && !loading && <div style={{ color: 'var(--danger, #dc2626)', fontSize: 13 }}>{error}</div>}
-          {!loading && !error && !selected && (
-            <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
-              {visibleEmployees.length === 0
-                ? (showCompleted ? 'No completed onboardings yet.' : 'No new hires yet — click "+ New Hire" to start one.')
-                : 'Select an employee.'}
-            </div>
-          )}
-          {!loading && !error && selected && (
-            <EmployeeDetail
-              employee={selected}
-              onStatusChange={(status) => {
-                setEmployeeStatus(selected.id, status)
-                setEmployees(prev => prev.map(e => e.id === selected.id ? { ...e, status } : e))
-              }}
-              onDelete={() => {
-                if (!window.confirm(`Delete ${selected.employee_name}'s onboarding record? This removes all tracked progress too.`)) return
-                deleteOnboardingEmployee(selected.id)
-                setEmployees(prev => prev.filter(e => e.id !== selected.id))
-              }}
-              onProgressChange={(moduleKey, patch) => {
-                setAllCompletions(prev => ({
-                  ...prev,
-                  [selected.id]: { ...(prev[selected.id] || {}), [moduleKey]: { ...(prev[selected.id]?.[moduleKey]), ...patch } },
-                }))
-              }}
+          {view === 'template' ? (
+            <TemplateEditor
+              onClose={() => { setView('employee'); load() }}
             />
+          ) : (
+            <>
+              {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</div>}
+              {error && !loading && <div style={{ color: 'var(--danger, #dc2626)', fontSize: 13 }}>{error}</div>}
+              {!loading && !error && !selected && (
+                <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+                  {visibleEmployees.length === 0
+                    ? (showCompleted ? 'No completed onboardings yet.' : 'No new hires yet — click "+ New Hire" to start one.')
+                    : 'Select an employee.'}
+                </div>
+              )}
+              {!loading && !error && selected && (
+                <EmployeeDetail
+                  employee={selected}
+                  curriculumModules={curriculumModules}
+                  curriculumValues={curriculumValues}
+                  onStatusChange={(status) => {
+                    setEmployeeStatus(selected.id, status)
+                    setEmployees(prev => prev.map(e => e.id === selected.id ? { ...e, status } : e))
+                  }}
+                  onDelete={() => {
+                    if (!window.confirm(`Delete ${selected.employee_name}'s onboarding record? This removes all tracked progress too.`)) return
+                    deleteOnboardingEmployee(selected.id)
+                    setEmployees(prev => prev.filter(e => e.id !== selected.id))
+                  }}
+                  onProgressChange={(moduleKey, patch) => {
+                    setAllCompletions(prev => ({
+                      ...prev,
+                      [selected.id]: { ...(prev[selected.id] || {}), [moduleKey]: { ...(prev[selected.id]?.[moduleKey]), ...patch } },
+                    }))
+                  }}
+                />
+              )}
+            </>
           )}
         </div>
       </div>
@@ -166,10 +211,13 @@ export default function EmployeeOnboarding() {
   )
 }
 
-function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompleted, onNewHire, facilityFilter, onFacilityFilterChange, allCompletions }) {
+function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompleted, onNewHire, facilityFilter, onFacilityFilterChange, allCompletions, allModuleKeys, onManageTemplate }) {
   return (
     <div style={{ width: 240, flexShrink: 0, borderRight: '1px solid var(--border)', paddingRight: 16 }}>
       <button type="button" onClick={onNewHire} style={primaryBtnStyle}>+ New Hire</button>
+      <button type="button" onClick={onManageTemplate} style={{ ...smallBtnStyle, width: '100%', marginTop: 8, marginBottom: 8 }}>
+        ⚙ Manage Template
+      </button>
 
       <div style={{ display: 'flex', gap: 4, marginTop: 10, marginBottom: 10 }}>
         <TabPill label="Active" active={!showCompleted} onClick={() => onToggleCompleted(false)} />
@@ -190,7 +238,7 @@ function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompl
           const days = e.start_date
             ? Math.max(0, Math.floor((Date.now() - new Date(e.start_date + 'T00:00:00')) / 86400000))
             : null
-          const done = countDone(allCompletions[e.id] || {}, ALL_MODULE_KEYS)
+          const done = countDone(allCompletions[e.id] || {}, allModuleKeys)
           return (
             <button
               key={e.id}
@@ -205,7 +253,7 @@ function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompl
             >
               <div style={{ fontSize: 13, fontWeight: 600 }}>{e.employee_name}</div>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
-                {e.facility ? `${e.facility.toUpperCase()} · ` : ''}{days !== null ? `Day ${days} · ` : ''}{done}/{ALL_MODULE_KEYS.length} tasks assessed
+                {e.facility ? `${e.facility.toUpperCase()} · ` : ''}{days !== null ? `Day ${days} · ` : ''}{done}/{allModuleKeys.length} tasks assessed
               </div>
             </button>
           )
@@ -232,12 +280,14 @@ function TabPill({ label, active, onClick }) {
   )
 }
 
-function EmployeeDetail({ employee, onStatusChange, onDelete, onProgressChange }) {
+function EmployeeDetail({ employee, curriculumModules, curriculumValues, onStatusChange, onDelete, onProgressChange }) {
   const [completions, setCompletions] = useState({})
   const [evaluations, setEvaluations] = useState({})
   const [loading, setLoading] = useState(true)
   const [openMonth, setOpenMonth] = useState('m1')
   const [evalOpen, setEvalOpen] = useState(false)
+  const [hrNotice, setHrNotice] = useState(null)
+  const [notifying, setNotifying] = useState(false)
 
   const reload = () => {
     setLoading(true)
@@ -271,8 +321,28 @@ function EmployeeDetail({ employee, onStatusChange, onDelete, onProgressChange }
     await updateOnboardingEmployee(employee.id, patch)
   }
 
-  // Progress: numbered modules + values completed, across all 3 months.
-  const doneCount = countDone(completions, ALL_MODULE_KEYS)
+  const printUrl = `${window.location.origin}/employee-onboarding?view=print&employee=${employee.id}`
+
+  const handleNotifyHR = async () => {
+    setNotifying(true)
+    setHrNotice(null)
+    try {
+      const result = await notifyHR(employee.id, printUrl)
+      if (result.success) {
+        setHrNotice({ text: 'HR notified in Front.', tone: 'ok' })
+        setEmployeeFields(prev => ({ ...prev, hr_notified_at: new Date().toISOString() }))
+      } else {
+        setHrNotice({ text: result.reason || 'Not sent — HR notify may not be configured yet.', tone: 'warn' })
+      }
+    } catch (err) {
+      setHrNotice({ text: `Failed: ${err.message}`, tone: 'warn' })
+    } finally {
+      setNotifying(false)
+    }
+  }
+
+  const allKeys = allModuleKeys(curriculumModules)
+  const doneCount = countDone(completions, allKeys)
 
   return (
     <div>
@@ -282,7 +352,7 @@ function EmployeeDetail({ employee, onStatusChange, onDelete, onProgressChange }
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
             {employee.facility ? `${employee.facility.toUpperCase()} · ` : ''}
             {employee.trainer_name ? `Trainer: ${employee.trainer_name} · ` : ''}
-            {doneCount} / {ALL_MODULE_KEYS.length} tasks assessed
+            {doneCount} / {allKeys.length} tasks assessed
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -301,12 +371,37 @@ function EmployeeDetail({ employee, onStatusChange, onDelete, onProgressChange }
         </div>
       </div>
 
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+        <a href={printUrl} target="_blank" rel="noreferrer" style={{ ...smallBtnStyle, textDecoration: 'none', display: 'inline-block' }}>
+          🖨 Open print view
+        </a>
+        <button type="button" onClick={handleNotifyHR} disabled={notifying} style={smallBtnStyle}>
+          {notifying ? 'Sending…' : '📨 Notify HR'}
+        </button>
+        {employeeFields.hr_notified_at && (
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+            Last notified {new Date(employeeFields.hr_notified_at).toLocaleDateString()}
+          </span>
+        )}
+      </div>
+      {hrNotice && (
+        <div style={{
+          padding: '6px 10px', marginBottom: 12, borderRadius: 6, fontSize: 12,
+          background: hrNotice.tone === 'ok' ? '#ecfdf5' : '#fffbeb',
+          color: hrNotice.tone === 'ok' ? '#059669' : '#b45309',
+        }}>
+          {hrNotice.text}
+        </div>
+      )}
+
       {loading && <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Loading progress…</div>}
 
       {!loading && MONTHS.map(month => (
         <MonthSection
           key={month.key}
           month={month}
+          valueRow={curriculumValues[month.key]}
+          moduleList={curriculumModules[month.key] || []}
           isOpen={openMonth === month.key}
           onToggle={() => setOpenMonth(openMonth === month.key ? null : month.key)}
           completions={completions}
@@ -351,16 +446,13 @@ function SectionHeader({ title, subtitle, isOpen, onToggle }) {
   )
 }
 
-function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, onSaveWeekly, employeeFields, onSaveEmployeeField }) {
-  const modules = MODULES[month.key]
+function MonthSection({ month, valueRow, moduleList, isOpen, onToggle, completions, onSaveCompletion, onSaveWeekly, employeeFields, onSaveEmployeeField }) {
   const weeklyCfg = WEEKLY_CONFIG[month.key]
-  const valueRow = completions[month.value.key] || {}
-  const monthKeys = moduleKeysForMonth(month.key)
+  const completionValueRow = completions[month.value.key] || {}
+  const monthKeys = moduleKeysForMonth(month.key, { [month.key]: moduleList })
   const monthDone = countDone(completions, monthKeys)
 
   // Milestone review — Month 1 gets the 30-day check-in, Month 2 gets 60-day.
-  // (per Tim/Dean feedback, 2026-07-18). Month 3 has no mid-month milestone;
-  // the 90-day review lives on the End-of-Onboarding Evaluation instead.
   const milestone = month.key === 'm1'
     ? { dayLabel: '30', moduleKey: 'm1_day30_review', reviewedField: 'day30_review_conducted', reviewedDateField: 'day30_review_date', retainLabel: 'Recommend retaining into Month 2?' }
     : month.key === 'm2'
@@ -377,27 +469,24 @@ function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, 
       />
       {isOpen && (
         <div style={{ padding: '10px 4px 4px 14px', borderLeft: '2px solid var(--border)', marginLeft: 6 }}>
-          {/* Values discussion */}
-          <ExpandableRow
-            title={`Value: ${month.value.title}`}
-            bullets={month.value.bullets}
-          >
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 6 }}>
-              <input
-                type="checkbox"
-                checked={!!valueRow.completed}
-                onChange={(e) => onSaveCompletion(month.value.key, { completed: e.target.checked })}
-              />
-              <textarea
-                placeholder="How employee demonstrated (or struggled with) these values..."
-                defaultValue={valueRow.comments || ''}
-                onBlur={(e) => onSaveCompletion(month.value.key, { comments: e.target.value })}
-                style={{ ...inputStyle, flex: 1, minHeight: 50, resize: 'vertical' }}
-              />
-            </div>
-          </ExpandableRow>
+          {valueRow && (
+            <ExpandableRow title={`Value: ${valueRow.title}`} bullets={valueRow.bullets}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={!!completionValueRow.completed}
+                  onChange={(e) => onSaveCompletion(month.value.key, { completed: e.target.checked })}
+                />
+                <textarea
+                  placeholder="How employee demonstrated (or struggled with) these values..."
+                  defaultValue={completionValueRow.comments || ''}
+                  onBlur={(e) => onSaveCompletion(month.value.key, { comments: e.target.value })}
+                  style={{ ...inputStyle, flex: 1, minHeight: 50, resize: 'vertical' }}
+                />
+              </div>
+            </ExpandableRow>
+          )}
 
-          {/* Weekly observation logs */}
           {Array.from({ length: weeklyCfg.weeks }, (_, i) => i + 1).map(weekNum => (
             <WeeklyLogRow
               key={weekNum}
@@ -411,8 +500,7 @@ function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, 
             />
           ))}
 
-          {/* Numbered training modules */}
-          {modules.map(mod => (
+          {moduleList.map(mod => (
             <ModuleRow
               key={mod.key}
               module={mod}
@@ -421,7 +509,6 @@ function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, 
             />
           ))}
 
-          {/* 30/60-day milestone review (Month 1 / Month 2 only) */}
           {milestone && (
             <MilestoneReviewRow
               milestone={milestone}
@@ -438,9 +525,6 @@ function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, 
   )
 }
 
-// MilestoneReviewRow — end-of-month trainer write-up + retain-into-next-
-// month Y/N, plus "warehouse leadership review conducted?" Y/N + date.
-// Added 2026-07-18 per Tim/Dean feedback (30-day / 60-day check-ins).
 function MilestoneReviewRow({ milestone, completionRow, onSaveCompletion, reviewed, reviewedDate, onSaveEmployeeField }) {
   return (
     <div style={{ padding: '10px', marginBottom: 6, background: 'var(--surface-2, #f8f8f8)', borderRadius: 6, border: '1px solid var(--border)' }}>
@@ -482,8 +566,6 @@ function MilestoneReviewRow({ milestone, completionRow, onSaveCompletion, review
   )
 }
 
-// YesNoRow — shared Y/N toggle used by milestone reviews + End-of-Onboarding
-// retain recommendations. `value` is boolean|null (null = not yet answered).
 function YesNoRow({ label, value, onChange }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
