@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   fetchOnboardingEmployees, createOnboardingEmployee, updateOnboardingEmployee,
   setEmployeeStatus, deleteOnboardingEmployee,
-  fetchCompletions, upsertCompletion, upsertWeeklyEntries,
+  fetchCompletions, fetchAllCompletionsGrouped, upsertCompletion, upsertWeeklyEntries,
   fetchEvaluations, upsertEvaluation,
 } from '../lib/employeeOnboarding.js'
 import {
@@ -19,6 +19,19 @@ import {
 // UI mirrors the doc's own black-bullet/white-bullet convention: module
 // title + completion controls are always visible; full description/
 // objectives reveal on click (ModuleRow's expand toggle).
+// moduleKeysForMonth — values key + numbered module keys for one month.
+// Used to compute "X/Y tasks assessed" progress (weekly logs excluded —
+// those are repeatable observation logs, not pass/fail tasks).
+function moduleKeysForMonth(monthKey) {
+  const month = MONTHS.find(m => m.key === monthKey)
+  return [month.value.key, ...MODULES[monthKey].map(m => m.key)]
+}
+const ALL_MODULE_KEYS = MONTHS.flatMap(m => moduleKeysForMonth(m.key))
+
+function countDone(completionsByKey, keys) {
+  return keys.filter(k => completionsByKey[k]?.completed || completionsByKey[k]?.completed_date).length
+}
+
 export default function EmployeeOnboarding() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [employees, setEmployees] = useState([])
@@ -28,11 +41,13 @@ export default function EmployeeOnboarding() {
   const [showCompleted, setShowCompleted] = useState(false)
   const [showNewForm, setShowNewForm] = useState(false)
   const [urlInitDone, setUrlInitDone] = useState(false)
+  const [allCompletions, setAllCompletions] = useState({})
+  const [facilityFilter, setFacilityFilter] = useState('all')
 
   const load = () => {
     setLoading(true)
-    fetchOnboardingEmployees()
-      .then(rows => { setEmployees(rows); setError(null) })
+    Promise.all([fetchOnboardingEmployees(), fetchAllCompletionsGrouped()])
+      .then(([rows, grouped]) => { setEmployees(rows); setAllCompletions(grouped); setError(null) })
       .catch(err => setError(err?.message || 'Failed to load employees'))
       .finally(() => setLoading(false))
   }
@@ -54,11 +69,13 @@ export default function EmployeeOnboarding() {
 
   useEffect(() => {
     if (!urlInitDone) return
-    const visible = employees.filter(e => (e.status !== 'active') === showCompleted)
+    const visible = employees
+      .filter(e => (e.status !== 'active') === showCompleted)
+      .filter(e => facilityFilter === 'all' || e.facility === facilityFilter)
     if (!visible.find(e => e.id === selectedId)) {
       setSelectedId(visible[0]?.id ?? null)
     }
-  }, [employees, showCompleted, selectedId, urlInitDone])
+  }, [employees, showCompleted, facilityFilter, selectedId, urlInitDone])
 
   const selectEmployee = (id) => {
     setSelectedId(id)
@@ -68,7 +85,9 @@ export default function EmployeeOnboarding() {
     setSearchParams(next)
   }
 
-  const visibleEmployees = employees.filter(e => (e.status !== 'active') === showCompleted)
+  const visibleEmployees = employees
+    .filter(e => (e.status !== 'active') === showCompleted)
+    .filter(e => facilityFilter === 'all' || e.facility === facilityFilter)
   const selected = employees.find(e => e.id === selectedId) || null
 
   return (
@@ -96,6 +115,9 @@ export default function EmployeeOnboarding() {
           showCompleted={showCompleted}
           onToggleCompleted={setShowCompleted}
           onNewHire={() => setShowNewForm(true)}
+          facilityFilter={facilityFilter}
+          onFacilityFilterChange={setFacilityFilter}
+          allCompletions={allCompletions}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
           {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</div>}
@@ -119,6 +141,12 @@ export default function EmployeeOnboarding() {
                 deleteOnboardingEmployee(selected.id)
                 setEmployees(prev => prev.filter(e => e.id !== selected.id))
               }}
+              onProgressChange={(moduleKey, patch) => {
+                setAllCompletions(prev => ({
+                  ...prev,
+                  [selected.id]: { ...(prev[selected.id] || {}), [moduleKey]: { ...(prev[selected.id]?.[moduleKey]), ...patch } },
+                }))
+              }}
             />
           )}
         </div>
@@ -138,9 +166,9 @@ export default function EmployeeOnboarding() {
   )
 }
 
-function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompleted, onNewHire }) {
+function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompleted, onNewHire, facilityFilter, onFacilityFilterChange, allCompletions }) {
   return (
-    <div style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--border)', paddingRight: 16 }}>
+    <div style={{ width: 240, flexShrink: 0, borderRight: '1px solid var(--border)', paddingRight: 16 }}>
       <button type="button" onClick={onNewHire} style={primaryBtnStyle}>+ New Hire</button>
 
       <div style={{ display: 'flex', gap: 4, marginTop: 10, marginBottom: 10 }}>
@@ -148,11 +176,21 @@ function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompl
         <TabPill label="Completed" active={showCompleted} onClick={() => onToggleCompleted(true)} />
       </div>
 
+      <select
+        value={facilityFilter}
+        onChange={(e) => onFacilityFilterChange(e.target.value)}
+        style={{ ...inputStyle, marginBottom: 10 }}
+      >
+        <option value="all">All facilities</option>
+        {FACILITIES.map(f => <option key={f} value={f}>{f.toUpperCase()}</option>)}
+      </select>
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {employees.map(e => {
           const days = e.start_date
             ? Math.max(0, Math.floor((Date.now() - new Date(e.start_date + 'T00:00:00')) / 86400000))
             : null
+          const done = countDone(allCompletions[e.id] || {}, ALL_MODULE_KEYS)
           return (
             <button
               key={e.id}
@@ -167,7 +205,7 @@ function Sidebar({ employees, selectedId, onSelect, showCompleted, onToggleCompl
             >
               <div style={{ fontSize: 13, fontWeight: 600 }}>{e.employee_name}</div>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
-                {e.facility ? `${e.facility.toUpperCase()} · ` : ''}{days !== null ? `Day ${days}` : 'no start date'}
+                {e.facility ? `${e.facility.toUpperCase()} · ` : ''}{days !== null ? `Day ${days} · ` : ''}{done}/{ALL_MODULE_KEYS.length} tasks assessed
               </div>
             </button>
           )
@@ -194,7 +232,7 @@ function TabPill({ label, active, onClick }) {
   )
 }
 
-function EmployeeDetail({ employee, onStatusChange, onDelete }) {
+function EmployeeDetail({ employee, onStatusChange, onDelete, onProgressChange }) {
   const [completions, setCompletions] = useState({})
   const [evaluations, setEvaluations] = useState({})
   const [loading, setLoading] = useState(true)
@@ -212,6 +250,7 @@ function EmployeeDetail({ employee, onStatusChange, onDelete }) {
 
   const saveCompletion = async (moduleKey, patch) => {
     setCompletions(prev => ({ ...prev, [moduleKey]: { ...prev[moduleKey], module_key: moduleKey, ...patch } }))
+    onProgressChange?.(moduleKey, patch)
     await upsertCompletion(employee.id, moduleKey, patch)
   }
 
@@ -225,9 +264,15 @@ function EmployeeDetail({ employee, onStatusChange, onDelete }) {
     await upsertEvaluation(employee.id, categoryKey, patch)
   }
 
+  const [employeeFields, setEmployeeFields] = useState(employee)
+  useEffect(() => { setEmployeeFields(employee) }, [employee])
+  const saveEmployeeField = async (patch) => {
+    setEmployeeFields(prev => ({ ...prev, ...patch }))
+    await updateOnboardingEmployee(employee.id, patch)
+  }
+
   // Progress: numbered modules + values completed, across all 3 months.
-  const allModuleKeys = MONTHS.flatMap(m => [m.value.key, ...MODULES[m.key].map(mod => mod.key)])
-  const doneCount = allModuleKeys.filter(k => completions[k]?.completed || completions[k]?.completed_date).length
+  const doneCount = countDone(completions, ALL_MODULE_KEYS)
 
   return (
     <div>
@@ -237,7 +282,7 @@ function EmployeeDetail({ employee, onStatusChange, onDelete }) {
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
             {employee.facility ? `${employee.facility.toUpperCase()} · ` : ''}
             {employee.trainer_name ? `Trainer: ${employee.trainer_name} · ` : ''}
-            {doneCount} / {allModuleKeys.length} modules complete
+            {doneCount} / {ALL_MODULE_KEYS.length} tasks assessed
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -267,6 +312,8 @@ function EmployeeDetail({ employee, onStatusChange, onDelete }) {
           completions={completions}
           onSaveCompletion={saveCompletion}
           onSaveWeekly={saveWeekly}
+          employeeFields={employeeFields}
+          onSaveEmployeeField={saveEmployeeField}
         />
       ))}
 
@@ -276,8 +323,8 @@ function EmployeeDetail({ employee, onStatusChange, onDelete }) {
           onToggle={() => setEvalOpen(!evalOpen)}
           evaluations={evaluations}
           onSaveEval={saveEval}
-          employee={employee}
-          onSaveEmployee={(patch) => updateOnboardingEmployee(employee.id, patch)}
+          employee={employeeFields}
+          onSaveEmployee={saveEmployeeField}
         />
       )}
     </div>
@@ -304,14 +351,30 @@ function SectionHeader({ title, subtitle, isOpen, onToggle }) {
   )
 }
 
-function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, onSaveWeekly }) {
+function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, onSaveWeekly, employeeFields, onSaveEmployeeField }) {
   const modules = MODULES[month.key]
   const weeklyCfg = WEEKLY_CONFIG[month.key]
   const valueRow = completions[month.value.key] || {}
+  const monthKeys = moduleKeysForMonth(month.key)
+  const monthDone = countDone(completions, monthKeys)
+
+  // Milestone review — Month 1 gets the 30-day check-in, Month 2 gets 60-day.
+  // (per Tim/Dean feedback, 2026-07-18). Month 3 has no mid-month milestone;
+  // the 90-day review lives on the End-of-Onboarding Evaluation instead.
+  const milestone = month.key === 'm1'
+    ? { dayLabel: '30', moduleKey: 'm1_day30_review', reviewedField: 'day30_review_conducted', reviewedDateField: 'day30_review_date', retainLabel: 'Recommend retaining into Month 2?' }
+    : month.key === 'm2'
+      ? { dayLabel: '60', moduleKey: 'm2_day60_review', reviewedField: 'day60_review_conducted', reviewedDateField: 'day60_review_date', retainLabel: 'Recommend retaining into Month 3?' }
+      : null
 
   return (
     <div>
-      <SectionHeader title={month.label} isOpen={isOpen} onToggle={onToggle} />
+      <SectionHeader
+        title={month.label}
+        subtitle={`${monthDone}/${monthKeys.length} tasks assessed`}
+        isOpen={isOpen}
+        onToggle={onToggle}
+      />
       {isOpen && (
         <div style={{ padding: '10px 4px 4px 14px', borderLeft: '2px solid var(--border)', marginLeft: 6 }}>
           {/* Values discussion */}
@@ -357,8 +420,90 @@ function MonthSection({ month, isOpen, onToggle, completions, onSaveCompletion, 
               onSave={(patch) => onSaveCompletion(mod.key, patch)}
             />
           ))}
+
+          {/* 30/60-day milestone review (Month 1 / Month 2 only) */}
+          {milestone && (
+            <MilestoneReviewRow
+              milestone={milestone}
+              completionRow={completions[milestone.moduleKey] || {}}
+              onSaveCompletion={(patch) => onSaveCompletion(milestone.moduleKey, patch)}
+              reviewed={employeeFields?.[milestone.reviewedField]}
+              reviewedDate={employeeFields?.[milestone.reviewedDateField]}
+              onSaveEmployeeField={onSaveEmployeeField}
+            />
+          )}
         </div>
       )}
+    </div>
+  )
+}
+
+// MilestoneReviewRow — end-of-month trainer write-up + retain-into-next-
+// month Y/N, plus "warehouse leadership review conducted?" Y/N + date.
+// Added 2026-07-18 per Tim/Dean feedback (30-day / 60-day check-ins).
+function MilestoneReviewRow({ milestone, completionRow, onSaveCompletion, reviewed, reviewedDate, onSaveEmployeeField }) {
+  return (
+    <div style={{ padding: '10px', marginBottom: 6, background: 'var(--surface-2, #f8f8f8)', borderRadius: 6, border: '1px solid var(--border)' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{milestone.dayLabel}-Day Check-In</div>
+
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>Trainer {milestone.dayLabel}-day comments</div>
+      <textarea
+        placeholder="Trainer comments..."
+        defaultValue={completionRow.comments || ''}
+        onBlur={(e) => onSaveCompletion({ comments: e.target.value })}
+        style={{ ...inputStyle, width: '100%', minHeight: 50, resize: 'vertical', boxSizing: 'border-box', marginBottom: 8 }}
+      />
+
+      <YesNoRow
+        label={milestone.retainLabel}
+        value={completionRow.retain_flag}
+        onChange={(v) => onSaveCompletion({ retain_flag: v })}
+      />
+
+      <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+        <YesNoRow
+          label={`${milestone.dayLabel}-day review with warehouse leadership conducted?`}
+          value={reviewed}
+          onChange={(v) => onSaveEmployeeField({ [milestone.reviewedField]: v })}
+        />
+        {reviewed && (
+          <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginTop: 6 }}>
+            Date conducted
+            <input
+              type="date"
+              value={reviewedDate || ''}
+              onChange={(e) => onSaveEmployeeField({ [milestone.reviewedDateField]: e.target.value || null })}
+              style={{ ...inputStyle, marginLeft: 6, width: 140 }}
+            />
+          </label>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// YesNoRow — shared Y/N toggle used by milestone reviews + End-of-Onboarding
+// retain recommendations. `value` is boolean|null (null = not yet answered).
+function YesNoRow({ label, value, onChange }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12 }}>{label}</span>
+      <div style={{ display: 'flex', gap: 4 }}>
+        <button
+          type="button"
+          onClick={() => onChange(true)}
+          style={{ ...smallBtnStyle, background: value === true ? 'var(--brand, #a07818)' : 'transparent', color: value === true ? '#fff' : 'inherit' }}
+        >
+          Yes
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange(false)}
+          style={{ ...smallBtnStyle, background: value === false ? 'var(--danger, #dc2626)' : 'transparent', color: value === false ? '#fff' : 'inherit' }}
+        >
+          No
+        </button>
+      </div>
     </div>
   )
 }
@@ -418,6 +563,11 @@ function ModuleRow({ module, row, onSave }) {
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6, fontStyle: 'italic' }}>
               Training objective: {module.objectives}
             </div>
+          )}
+          {module.resourceLabel && (
+            module.resourceLink
+              ? <a href={module.resourceLink} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 6 }}>📄 {module.resourceLabel}</a>
+              : <div style={{ fontSize: 11, color: 'var(--text-dim, #999)', marginTop: 6, fontStyle: 'italic' }}>📄 {module.resourceLabel} — link pending</div>
           )}
         </div>
       )}
@@ -578,21 +728,60 @@ function EndEvalSection({ isOpen, onToggle, evaluations, onSaveEval, employee, o
               fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
               color: 'var(--text-secondary)', marginBottom: 6,
             }}>
+              90-Day Leadership Review
+            </div>
+            <div style={{ padding: '6px 10px', background: 'var(--surface-2, #f8f8f8)', borderRadius: 6, marginBottom: 12 }}>
+              <YesNoRow
+                label="90-day review with warehouse leadership conducted?"
+                value={employee.day90_review_conducted}
+                onChange={(v) => onSaveEmployee({ day90_review_conducted: v })}
+              />
+              {employee.day90_review_conducted && (
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginTop: 6 }}>
+                  Date conducted
+                  <input
+                    type="date"
+                    value={employee.day90_review_date || ''}
+                    onChange={(e) => onSaveEmployee({ day90_review_date: e.target.value || null })}
+                    style={{ ...inputStyle, marginLeft: 6, width: 140 }}
+                  />
+                </label>
+              )}
+            </div>
+
+            <div style={{
+              fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+              color: 'var(--text-secondary)', marginBottom: 6,
+            }}>
               Recommendation to Retain Past Initial Probationary Period?
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <textarea
-                placeholder="Trainer comment"
-                defaultValue={employee.trainer_recommendation || ''}
-                onBlur={(e) => onSaveEmployee({ trainer_recommendation: e.target.value })}
-                style={{ ...inputStyle, flex: 1, minWidth: 200, minHeight: 50, resize: 'vertical' }}
-              />
-              <textarea
-                placeholder="Supervisor comment"
-                defaultValue={employee.supervisor_recommendation || ''}
-                onBlur={(e) => onSaveEmployee({ supervisor_recommendation: e.target.value })}
-                style={{ ...inputStyle, flex: 1, minWidth: 200, minHeight: 50, resize: 'vertical' }}
-              />
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <YesNoRow
+                  label="Trainer recommends retain?"
+                  value={employee.trainer_retain_flag}
+                  onChange={(v) => onSaveEmployee({ trainer_retain_flag: v })}
+                />
+                <textarea
+                  placeholder="Trainer comment"
+                  defaultValue={employee.trainer_recommendation || ''}
+                  onBlur={(e) => onSaveEmployee({ trainer_recommendation: e.target.value })}
+                  style={{ ...inputStyle, width: '100%', minHeight: 50, resize: 'vertical', marginTop: 6, boxSizing: 'border-box' }}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <YesNoRow
+                  label="Supervisor recommends retain?"
+                  value={employee.supervisor_retain_flag}
+                  onChange={(v) => onSaveEmployee({ supervisor_retain_flag: v })}
+                />
+                <textarea
+                  placeholder="Supervisor comment"
+                  defaultValue={employee.supervisor_recommendation || ''}
+                  onBlur={(e) => onSaveEmployee({ supervisor_recommendation: e.target.value })}
+                  style={{ ...inputStyle, width: '100%', minHeight: 50, resize: 'vertical', marginTop: 6, boxSizing: 'border-box' }}
+                />
+              </div>
             </div>
           </div>
         </div>
