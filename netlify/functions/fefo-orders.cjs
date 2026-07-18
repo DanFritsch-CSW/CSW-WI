@@ -5,11 +5,11 @@
 // POST input: { facility, projectIds, dayCount = 5 }
 //   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
 //   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
-//                 'riche5', 'golst5', 'birch5', 'palvi9'). Not all facilities
-//                 in one call — 'facility' is a single warehouse per request
-//                 (see src/lib/fefo.js's fetchLiveFefoOrdersBatch for how the
-//                 client splits a mixed-facility batch into per-facility
-//                 calls to this function).
+//                 'riche5', 'golst5', 'birch5', 'palvi9', 'jdf1'). Not all
+//                 facilities in one call — 'facility' is a single warehouse
+//                 per request (see src/lib/fefo.js's fetchLiveFefoOrdersBatch
+//                 for how the client splits a mixed-facility batch into
+//                 per-facility calls to this function).
 //   - dayCount:   optional, 1..7 (default 5)
 //
 // ── Date formats per project ────────────────────────────────────────────────
@@ -30,6 +30,15 @@
 //                      (that column exists but is ~0% populated here).
 //                      Same source PVI Shelf Life already uses for this
 //                      project (see pvi-shelf-life.cjs).
+//   manDateF         — Jones Dairy Farm (added 2026-07-18). Manufacture
+//                      date, parsed straight from lookup_code ('F' + YYMMDD
+//                      + 4-digit sequence) — no DB timestamp join needed,
+//                      unlike receiveDate/vendorLotExpiration. This project
+//                      also uses `closedOrders: true` (see that flag's
+//                      handling in loadOrdersForProject below) — it audits
+//                      CLOSED orders backward in time rather than open
+//                      orders forward, per Dan's request for a "did we
+//                      actually ship FEFO" retrospective check.
 //
 // ── Undated lots (2026-07-10, Dean/Bry FEFO feedback) ───────────────────────
 //
@@ -92,6 +101,13 @@ const PROJECTS = {
   // schema-anchor comment, verified 100% coverage). See "vendorLotExpiration"
   // handling below.
   palvi9: { datexName: 'Palermos CALEDONIA finished', dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration' },
+  // Added 2026-07-18 — Jones Dairy Farm (facility MAD, warehouse_id 4).
+  // Retrospective/audit project: reviews CLOSED orders looking BACKWARD,
+  // not open orders looking forward (see closedOrders handling throughout
+  // this file, and src/lib/fefo.js's project-entry comment for the full
+  // rationale). Lot codes encode the manufacture date ('F' + YYMMDD + 4-digit
+  // sequence), parsed by parseJDFManDate below.
+  jdf1: { datexName: 'Jones Dairy Farm - CSW-Madison', dateFormat: 'manDateF', dateSemantic: 'man', closedOrders: true },
 }
 
 const FACILITY_WAREHOUSE_ID = {
@@ -214,6 +230,22 @@ function parseReceiveDate(receiveDate) {
   return { k, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
 }
 
+// JDF man-date — 'F' + YYMMDD + 4-digit sequence (e.g. F2606269444 =
+// manufactured 6/26/26). Verified 100% consistent across 2000+ sampled
+// lots. Unlike receiveDate/vendorLotExpiration, this parses straight from
+// lookup_code so it's identical logic to the client-side copy in fefo.js.
+function parseJDFManDate(lookupCode) {
+  if (!lookupCode || typeof lookupCode !== 'string') return null
+  const m = lookupCode.match(/^F(\d{2})(\d{2})(\d{2})\d{4}$/)
+  if (!m) return null
+  const year  = 2000 + Number(m[1])
+  const month = Number(m[2])
+  const day   = Number(m[3])
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  const kDay = year * 10000 + month * 100 + day
+  return { k: kDay, kDay, display: `${month}/${day}/${String(year).slice(-2)}` }
+}
+
 function parseLotDateKey(lookupCode, dateFormat, extras) {
   let parsed
   if (dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
@@ -226,6 +258,7 @@ function parseLotDateKey(lookupCode, dateFormat, extras) {
   // fully generic (any timestamp -> {k, kDay, display}) so it's reused
   // as-is rather than duplicated.
   else if (dateFormat === 'vendorLotExpiration') parsed = parseReceiveDate(extras?.expirationDate)
+  else if (dateFormat === 'manDateF') parsed = parseJDFManDate(lookupCode)
   else parsed = null
   if (!parsed) return { k: 0, kDay: 0, display: lookupCode || '?', error: `unparseable ${dateFormat}` }
   return parsed
@@ -291,6 +324,18 @@ function fmtDest(name, city, state) {
 async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount, dismissedSet }) {
   const safeProjectName = project.datexName.replace(/'/g, "''")
 
+  // closedOrders projects (e.g. JDF) look BACKWARD — last dayCount days,
+  // ending yesterday — instead of the shared forward window the handler
+  // computes for open-order projects (today-1 .. today+dayCount-1).
+  // Recomputed here per-project rather than in the shared handler since a
+  // batch request could in principle mix closed- and open-order projects
+  // (it doesn't today — JDF is alone on facility MAD — but this keeps the
+  // function correct regardless).
+  if (project.closedOrders) {
+    dateTo = fmtDateISO(new Date(today.getTime() - 86400000))            // yesterday
+    dateFrom = fmtDateISO(new Date(today.getTime() - dayCount * 86400000)) // dayCount days back
+  }
+
   const orderSql = `
     WITH proj AS (
       SELECT project_id FROM production_db.silver.datex_slv_projects
@@ -314,7 +359,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         JOIN production_db.silver.datex_slv_dockappointmentstatuses ds
           ON ds.dock_appointment_status_id = da.status_id
         WHERE dai.item_entity_type = 'Order'
-          AND ds.dock_appointment_status_name NOT IN ('Cancelled', 'Completed')
+          AND ds.dock_appointment_status_name NOT IN (${project.closedOrders ? `'Cancelled'` : `'Cancelled', 'Completed'`})
           AND da.warehouse_id = ${warehouseId}
           AND DATE(da.scheduled_arrival) BETWEEN '${dateFrom}' AND '${dateTo}'
       ) ranked
@@ -337,7 +382,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     JOIN production_db.silver.datex_slv_orderstatuses os       ON o.order_status_id = os.order_status_id
     JOIN appts a                                               ON a.order_id = o.order_id
     LEFT JOIN production_db.silver.datex_slv_orderaddresses oa ON oa.order_id = o.order_id
-    WHERE os.status_name = 'Processing'
+    WHERE os.status_name = '${project.closedOrders ? 'Completed' : 'Processing'}'
     GROUP BY o.order_id, o.lookup_code, o.requested_delivery_date,
              os.status_name, o.modified_sys_user,
              a.scheduled_arrival, a.appt_lookup, a.appt_status
@@ -606,7 +651,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const arrival = arrivalToDate(oh.scheduled_arrival)
     const dayOffset = dayOffsetFrom(arrival, today)
     const day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
-    const past = arrival ? arrival.getTime() < nowMs : false
+    // closedOrders (e.g. JDF) force past:false — the 'stale' verdict means
+    // "past appointment, still holding allocated stock," which doesn't
+    // apply to an order that has already shipped and closed. Every
+    // closedOrders order is in the past by definition, so leaving this
+    // computed normally would make every non-violating order show as
+    // 'stale' instead of 'clean'.
+    const past = project.closedOrders ? false : (arrival ? arrival.getTime() < nowMs : false)
 
     const orderLines = []
     for (const [, line] of linesByOrderMaterial.entries()) {
@@ -625,6 +676,12 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       proj:     projectId,
       dest:     fmtDest(oh.dest_name, oh.dest_city, oh.dest_state),
       appt:     fmtApptTime(oh.scheduled_arrival),
+      // shipDateDisplay — only set for closedOrders projects, since there's
+      // no day-stepper context to convey "which day" an order belongs to.
+      // Format matches the rest of the app's M/D/YY convention.
+      shipDateDisplay: project.closedOrders && arrival
+        ? `${arrival.getUTCMonth() + 1}/${arrival.getUTCDate()}/${String(arrival.getUTCFullYear()).slice(-2)}`
+        : undefined,
       past,
       status:   oh.status_name,
       apptStatus: oh.appt_status || null,
