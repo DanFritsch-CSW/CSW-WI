@@ -162,7 +162,7 @@ export const MODULES = {
       objectives: 'Trainee understands how to read the BOL and use an Inbound Tally Sheet to confirm accurate product receipt; demonstrates use of the DVRS tablet per Inventory Specialist standards.',
     },
     {
-      key: 'm1_111', code: '111', title: 'Damage/Inventory Discrepancy Reporting (with Inventory Specialist)',
+      key: 'm1_111', code: '111', title: 'Damage/Inventory Discrepancy Reporting',
       bullets: [
         'How to complete a Damage & Variance Report (DVRS), where the tablet is located, and when a report should be submitted.',
         'Loose/unlabeled/unmovable/damaged pallets: take a photo, move to inventory zone, notify supervisor.',
@@ -179,6 +179,9 @@ export const MODULES = {
         'When stacking, reference existing full pallets for TI-HI configuration to maintain stability and prevent crushing/collapse during storage or transport.',
       ],
       objectives: 'Trainee understands the differences in TI-HI and layering orientations used throughout the warehouse.',
+      // resourceLink: pending — Dan to share "Warehouse Tips and Tricks v1.1.pdf" (hosted or uploaded) so this can point to it.
+      resourceLink: null,
+      resourceLabel: 'Warehouse Tips and Tricks (v1.1)',
     },
     {
       key: 'm1_113', code: '113', title: 'FEFO / FIFO',
@@ -214,6 +217,8 @@ export const MODULES = {
         'Reference the CSW Tips and Tricks PDF.',
       ],
       objectives: null,
+      resourceLink: null,
+      resourceLabel: 'Warehouse Tips and Tricks (v1.1)',
     },
     {
       key: 'm2_203', code: '203', title: 'How to Conduct a Multi-Stop Load',
