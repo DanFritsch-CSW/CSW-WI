@@ -4,6 +4,13 @@ const TENANT_ID      = process.env.SHAREPOINT_TENANT_ID
 const CLIENT_ID      = process.env.SHAREPOINT_CLIENT_ID
 const CLIENT_SECRET  = process.env.SHAREPOINT_CLIENT_SECRET
 const WEBHOOK_SECRET = process.env.SHAREPOINT_WEBHOOK_SECRET
+const FRONT_API_KEY  = process.env.FRONT_API_KEY
+
+// Front conversation to notify on every new LoadProof entry (monitoring only)
+const NOTIFY_CONVERSATION = 'cnv_1bwzzexg'
+
+const FAC_LABEL = { mad: 'Madison', ken: 'Kenosha', cal: 'Caledonia' }
+const TAB_LABEL = { dvrs: 'DVRS', inbound: 'Inbound', outbound: 'Outbound', hold: 'Inbound Hold' }
 
 const FACILITY_CONFIG = {
   mad: {
@@ -65,13 +72,36 @@ function toExcelDate(raw){
 }
 function str(v){return v!=null?String(v).trim():''}
 
-// Route category string to the correct tab key
 function getCategoryTab(category){
   const cat=(category||'').toLowerCase()
   if(cat.includes('dvrs')||cat.includes('inv ctrl'))return'dvrs'
   if(cat.includes('outbound'))return'outbound'
   if(cat.includes('hold'))return'hold'
   return'inbound'
+}
+
+async function notifyFront(facility, tabKey, payload, rowNum){
+  if(!FRONT_API_KEY) return
+  try{
+    const facLabel = FAC_LABEL[facility] || facility.toUpperCase()
+    const tabLabel = TAB_LABEL[tabKey] || tabKey
+    const lines = [
+      `New LoadProof Entry - ${facLabel} / ${tabLabel} (row ${rowNum})`,
+      `Customer: ${str(payload.customer)||'-'}`,
+      `Employee: ${str(payload.employee)||'-'}`,
+      `Type: ${str(payload.incidentType)||str(payload.category)||'-'} | Reason: ${str(payload.reason)||'-'}`,
+    ]
+    if(str(payload.loadproofUrl)) lines.push(`LP Link: ${str(payload.loadproofUrl)}`)
+    if(str(payload.orderNum))     lines.push(`Order: ${str(payload.orderNum)}`)
+    await fetch(`https://api2.frontapp.com/conversations/${NOTIFY_CONVERSATION}/comments`,{
+      method:'POST',
+      headers:{Authorization:`Bearer ${FRONT_API_KEY}`,'Content-Type':'application/json'},
+      body:JSON.stringify({author_id:'default',body:lines.join('\n')}),
+    })
+    console.log(`[loadproof-notify] Posted to ${NOTIFY_CONVERSATION}`)
+  }catch(e){
+    console.warn(`[loadproof-notify] Front comment failed (non-fatal):`,e.message)
+  }
 }
 
 exports.handler=async function(event){
@@ -85,14 +115,12 @@ exports.handler=async function(event){
   const facility=((event.queryStringParameters||{}).facility||'mad').toLowerCase()
   const config=FACILITY_CONFIG[facility]
   if(!config)return{statusCode:400,headers:cors,body:JSON.stringify({error:`Unknown facility: ${facility}`})}
-  // Route to correct tab based on LoadProof category field
   const tabKey=getCategoryTab(payload.category||payload.incidentType||'')
   const sheetName=config.tabs[tabKey]
   try{
     const token=await getToken()
     const{driveId,itemId}=await getDriveRef(facility,token)
     const sheetBase=`/drives/${driveId}/items/${itemId}/workbook/worksheets/${encodeURIComponent(sheetName)}`
-    // Get headers to map columns
     const headerRange=await graph(`${sheetBase}/range(address='1:1')`,token)
     const headerRow=headerRange.values?.[0]||[]
     const c=buildColMap(headerRow)
@@ -101,7 +129,6 @@ exports.handler=async function(event){
     const set=(idx,val)=>{if(idx>=0&&idx<totalCols&&val!==''&&val!=null)row[idx]=val}
     const dateStr=toExcelDate(payload.date)
     if(tabKey==='dvrs'){
-      // DVRS column mapping
       set(c.find('filter by this date'),dateStr)
       set(c.find('loadproof date'),str(payload.date))
       set(c.find('csw inv ctrl - shipment type','shipment type'),str(payload.incidentType))
@@ -121,7 +148,6 @@ exports.handler=async function(event){
       set(c.find('link to load proof','load proof url','loadproof'),str(payload.loadproofUrl))
       set(c.find('uploaded by'),str(payload.uploadedBy))
     } else {
-      // Inbound / Outbound / Hold - simpler column mapping
       set(c.find('filter by this date'),dateStr)
       set(c.find('date'),str(payload.date))
       set(c.find('order number','order'),str(payload.orderNum))
@@ -144,6 +170,7 @@ exports.handler=async function(event){
     const endCol=colLetter(totalCols-1)
     await graph(`${sheetBase}/range(address='A${nextRow}:${endCol}${nextRow}')`,token,'PATCH',{values:[row]})
     console.log(`[sharepoint-dvr-append][${facility}][${tabKey}] Appended row ${nextRow}`)
+    notifyFront(facility,tabKey,payload,nextRow)
     return{statusCode:200,headers:cors,body:JSON.stringify({success:true,facility,tab:tabKey,row:nextRow})}
   }catch(err){
     console.error(`[sharepoint-dvr-append][${facility}][${tabKey}]`,err.message)
