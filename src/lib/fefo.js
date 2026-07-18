@@ -75,16 +75,60 @@ export const FEFO_PROJECTS = [
     color: '#1f7a8c', facility: 'cal',
     datexProjectName: 'Palermos CALEDONIA finished',
   },
+  {
+    // Added 2026-07-18 per Dan's request. Fundamentally different from every
+    // other FEFO project: instead of watching OPEN orders forward-looking
+    // for upcoming violations, JDF is a retrospective/audit view — "did we
+    // actually ship in FEFO order" — over CLOSED (status='Completed')
+    // orders, looking BACKWARD. Confirmed via MotherDuck: project_id=365,
+    // lookup_code='JDF1', facility MAD (warehouse_id=4) — first FEFO
+    // project at Madison. 411 completed orders vs. only 1 in Processing,
+    // which is exactly why Dan wants the backward view instead of forward.
+    //
+    // Lot codes are the MAN date (manufacture date), not expiration or
+    // receive date — format confirmed 100% consistent across 2000+ sampled
+    // lots: 'F' + YYMMDD + 4-digit sequence (e.g. F2606269444 = manufactured
+    // 6/26/26). See parseJDFManDate / dateFormat 'manDateF' below.
+    //
+    // `closedOrders: true` and `lazy: true` are both load-bearing flags:
+    //   - closedOrders tells fefo-orders.cjs to query status='Completed'
+    //     with a BACKWARD date window (last N days, ending yesterday)
+    //     instead of status='Processing' with a forward window, and to
+    //     force past:false on every order (the "stale — past appointment"
+    //     verdict doesn't apply to something that already shipped).
+    //   - lazy excludes this project from AUTO_LOAD_PROJECT_IDS — per
+    //     Dan's explicit call, this project should NOT auto-fetch on tab
+    //     load or under "All Projects"; it only fetches when a user
+    //     explicitly picks it from the project dropdown (see
+    //     FefoRotationTab.jsx's lazy-fetch effect).
+    id: 'jdf1', code: 'JDF1', name: 'Jones Dairy Farm',
+    proj: 365, dateFormat: 'manDateF', dateSemantic: 'man',
+    color: '#6b4c9a', facility: 'mad',
+    datexProjectName: 'Jones Dairy Farm - CSW-Madison',
+    closedOrders: true, lazy: true,
+  },
 ]
 
 export function getProject(projId) {
   return FEFO_PROJECTS.find(p => p.id === projId) || null
 }
 
+// AUTO_LOAD_PROJECT_IDS — projects fetched automatically on tab mount and
+// included under "All Projects." Added 2026-07-18 alongside JDF: JDF is
+// marked `lazy: true` and deliberately excluded here per Dan's call — it
+// only fetches when explicitly selected from the project dropdown (see
+// FefoRotationTab.jsx). Everything else auto-loads as before.
+export const AUTO_LOAD_PROJECT_IDS = FEFO_PROJECTS.filter(p => !p.lazy).map(p => p.id)
+
+export function isClosedOrdersProject(projId) {
+  return !!getProject(projId)?.closedOrders
+}
+
 export function dateVerb(projId) {
   const p = getProject(projId)
   if (p?.dateSemantic === 'expiration') return 'expiring'
   if (p?.dateSemantic === 'received')   return 'received'
+  if (p?.dateSemantic === 'man')        return 'manufactured'
   return 'packed'
 }
 
@@ -156,6 +200,24 @@ export function parseCrownDate(lookupCode) {
   return parseRichelieuDate(stripped)
 }
 
+// JDF man-date format — 'F' + YYMMDD + 4-digit sequence (e.g. F2606269444 =
+// manufactured 6/26/26). Unlike receiveDate/vendorLotExpiration, this IS
+// derivable purely from lookup_code, so (like Fair Oaks/Richelieu/Crown) it
+// can be parsed client-side as well as server-side. Verified against 2000+
+// sampled JDF lots — 100% consistent, no century ambiguity since YY is a
+// literal 2-digit year (not a single-digit decade offset like Fair Oaks).
+export function parseJDFManDate(lookupCode) {
+  if (!lookupCode || typeof lookupCode !== 'string') return null
+  const m = lookupCode.match(/^F(\d{2})(\d{2})(\d{2})\d{4}$/)
+  if (!m) return null
+  const year  = 2000 + Number(m[1])
+  const month = Number(m[2])
+  const day   = Number(m[3])
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  const kDay = year * 10000 + month * 100 + day
+  return { k: kDay, kDay, display: fmtMDY(year, month, day) }
+}
+
 export function parseLotDateKey(lookupCode, projId) {
   const project = getProject(projId)
   if (!project) {
@@ -165,6 +227,7 @@ export function parseLotDateKey(lookupCode, projId) {
   if (project.dateFormat === 'YDDDHHMMSS')        parsed = parseFairOaksDate(lookupCode)
   else if (project.dateFormat === 'MMDDYYYY')     parsed = parseRichelieuDate(lookupCode)
   else if (project.dateFormat === 'PPW+MMDDYYYY') parsed = parseCrownDate(lookupCode)
+  else if (project.dateFormat === 'manDateF')     parsed = parseJDFManDate(lookupCode)
   // 'receiveDate' and 'vendorLotExpiration' are only parsed server-side
   // (need a DB timestamp field, not something derivable from lookup_code)
   else parsed = null
