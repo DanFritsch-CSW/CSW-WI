@@ -27,7 +27,7 @@ import {
   fetchEmployeeBreaks, upsertEmployeeBreak, deleteEmployeeBreak,
 } from '../lib/supabase.js'
 import { applyFacilityOt, revertFacilityOt } from '../lib/ot.js'
-import { fetchB2eRoster, fetchB2eRosterForRange, fetchB2eTimeOff, fetchActiveB2eEmployees } from '../lib/omni.js'
+import { fetchB2eRoster, fetchB2eRosterForRange, fetchB2eTimeOff, fetchActiveB2eEmployees, fetchActiveB2eEmployeesFull } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
   shift1: { start: 'shift1_start', hours: 'shift1_hours' },
@@ -101,6 +101,16 @@ function daysBetweenISO(fromIso, toIso) {
   const from = new Date(fromIso + 'T00:00:00Z')
   const to   = new Date(toIso   + 'T00:00:00Z')
   return Math.floor((to - from) / 86400000)
+}
+
+// isWeekendDate — parses an ISO date as UTC (matching every other
+// date-math helper in this file) and checks whether it lands on
+// Saturday (6) or Sunday (0). Used by the weekend Special Project
+// auto-populate path in load() below — see 2026-07-17 Dean/Dan check-in
+// call for the design this implements.
+function isWeekendDate(dateStr) {
+  const dow = new Date(dateStr + 'T00:00:00Z').getUTCDay()
+  return dow === 0 || dow === 6
 }
 
 function sortEmployees(employees, sortOrder) {
@@ -483,6 +493,47 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
         autoSyncCheckedRef.current.add(`${facId}:${date}`)
         scheduleBackgroundHorizonSync(facId, date, withTimeOff.map(e => e.id))
         return
+      }
+      // Weekend cold-cache path — B2E's futurescheduleentries table simply
+      // has no Saturday/Sunday rows at all, so `persistable` above is
+      // always empty here on a weekend (this is not the stale-snapshot
+      // situation the weekday path guards against — there's nothing
+      // published for these days, period). Rather than fall through to
+      // STUB_EMPLOYEES fake data, auto-populate every ACTIVE B2E employee
+      // at this facility into the Special Project lane with no shift
+      // time set — the team then drags people out into 1st/2nd/Call-In/PTO
+      // to build the actual weekend schedule.
+      //
+      // Per the 2026-07-17 Dean/Dan check-in call: defaulting everyone
+      // into PTO was considered and rejected — if a real PTO request also
+      // lands in that lane, there'd be no way to tell "defaulted here
+      // because unscheduled" from "actually approved time off." Special
+      // Project carries no such collision risk, so it's the safe default
+      // bucket. Confirmed with Dan: source is ALL active facility
+      // employees regardless of recent schedule (not just Friday's
+      // roster), auto-triggered the moment a weekend date with no rows
+      // is opened — no manual button required.
+      if (isWeekendDate(date)) {
+        const activeEmps = await fetchActiveB2eEmployeesFull(facId).catch(() => [])
+        if (isCancelled()) return
+        if (activeEmps.length > 0) {
+          const weekendEmps = activeEmps.map(e => ({
+            id:           e.id,
+            name:         e.name,
+            role:         null,
+            facility:     facId,
+            default_lane: 'specialProject',
+            shift_start:  null,
+            shift_hours:  null,
+          }))
+          await replaceEmployees(facId, weekendEmps)
+          await seedRosterAssignments(weekendEmps, date)
+          const seeded = await fetchTodayAssignments(facId, date)
+          if (isCancelled()) return
+          _buildState(facId, seeded, timeOffMap, carryovers)
+          autoSyncCheckedRef.current.add(`${facId}:${date}`)
+          return
+        }
       }
     } else {
       if (timeOffMap.size > 0) {
