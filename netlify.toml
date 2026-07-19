@@ -14,17 +14,17 @@
   #      .node native binary at node_modules/duckdb/lib/binding/duckdb.node)
   #      into the function deploy artifact. Without (2), the require()
   #      finds nothing at runtime and throws "Connection Error: Connection
-  #      was never established" within a few ms — misleading error coming
+  #      was never established" within a few ms -- misleading error coming
   #      from duckdb's constructor when the native binding fails to load.
   #   @napi-rs/canvas (added 2026-07-14, dailyops-digest-run.cjs) is the
-  #   same class of native module — prebuilt binaries per platform, no
+  #   same class of native module -- prebuilt binaries per platform, no
   #   build step, but esbuild/zip-it-and-ship-it still needs to be told to
   #   leave it alone and actually ship the binary, same as duckdb above.
   #   dejavu-fonts-ttf ships the font files @napi-rs/canvas registers at
-  #   runtime (see dailyops-digest-run.cjs "Font registration" comment —
+  #   runtime (see dailyops-digest-run.cjs "Font registration" comment --
   #   Netlify's Lambda has zero system fonts, so text draws as nothing
   #   without an explicitly-registered font file). First attempt listed
-  #   only the 2 specific TTF files + package.json in included_files —
+  #   only the 2 specific TTF files + package.json in included_files --
   #   that silently failed to ship at runtime ("Cannot find module
   #   'dejavu-fonts-ttf/package.json'"). Switched to the same glob
   #   pattern already proven working for duckdb/@napi-rs/canvas above
@@ -39,178 +39,75 @@
     "node_modules/dejavu-fonts-ttf/**",
   ]
 
-# Bump omni-query timeout from default 10s to 26s (Netlify max for synchronous functions).
-# KEN's facility load fires the heaviest Omni query batch and during periods of Omni
-# slowness can exceed the 10s default. The internal retry-on-timeout logic in
-# omni-query.cjs needs room to actually retry before the function process is killed.
 [functions."omni-query"]
   timeout = 26
 
-# fefo-orders runs 3 sequential MotherDuck queries per project × up to 4 projects.
-# Default 10s is too tight even with one shared duckdb connection. Bump to 26s.
 [functions."fefo-orders"]
   timeout = 26
 
-# pvi-derive-accounts scans 90d of PVI orderlines + orderaddresses with a
-# large aggregation. Runs on-demand from the Settings "Suggest from history"
-# button so latency isn't critical, but the query touches ~700k rows so give
-# it room.
 [functions."pvi-derive-accounts"]
   timeout = 26
 
-# Scheduled nightly B2E sync — runs at 10:00 UTC daily = 5 AM CDT / 4 AM CST.
-# Fires AFTER B2E's midnight-CDT silver ingest so all overnight schedule
-# changes are in MotherDuck by the time this pulls them into Supabase.
-# Loops all 5 facilities sequentially; each does ~2 Omni queries + a handful
-# of Supabase writes. Typical runtime ~10-20s across all facilities.
 [functions."nightly-b2e-sync"]
   schedule = "0 10 * * *"
   timeout = 26
 
-# Scheduled nightly Front teammates sync — runs at 10:10 UTC daily (right
-# after nightly-b2e-sync at 10:00, offset by 10min to avoid overlapping cold
-# starts). Keeps front_teammates current for the Customer Onboarding
-# @username picker as CSW staff join/leave/change roles.
 [functions."front-teammates-nightly-sync"]
   schedule = "10 10 * * *"
 
-# Scheduled nightly Front channels sync — runs at 10:20 UTC daily (10min
-# after front-teammates-nightly-sync). Keeps front_channels current for
-# the "From" channel picker in Settings > CMM Outbound Appts (added
-# 2026-07-19) — also callable on-demand via a manual POST ("Sync channels
-# now" button) so Dan doesn't have to wait for the nightly tick.
 [functions."front-channels-sync"]
   schedule = "20 10 * * *"
 
-# Daily Front discussion creator — runs at 23:00 UTC = 6pm CDT / 5pm CST
-# (DST-unadjusted, same caveat as every other scheduled function above).
-# Creates tomorrow's "{Facility} {Weekday} {M/D}" discussion for every active
-# row in front_daily_discussion_configs. Recipients managed in
-# Settings > Daily Discussions.
 [functions."front-daily-discussion-run"]
   schedule = "0 23 * * *"
 
-# Pre-Pick Status nightly digest — as of 2026-07-14, ticks every 15
-# minutes (was a fixed "15 3 * * *" = 10:15pm CDT before Dan asked for a
-# configurable send time). The function itself checks the current
-# America/Chicago local time against prepick_notify_settings.notify_hour/
-# notify_minute (facility='mad', dashboard_type='prepick') and only
-# actually sends when they match and it hasn't already sent today — see
-# prepick-digest-run.cjs's file header "Configurable send time" for the
-# full mechanism. Posts a comment summarizing TOMORROW's Madison outbound
-# pre-pick status to the Front conversation configured in
-# prepick_notify_settings (editable from the Pre-Pick Status tab). See
-# prepick-digest-run.cjs header for why this posts a COMMENT on an
-# existing conversation rather than creating a new discussion like
-# front-daily-discussion-run.cjs does.
 [functions."prepick-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# WR Cases To Pick nightly digest — added 2026-07-14, mirrors
-# prepick-digest-run.cjs exactly (same every-15-min tick + configurable
-# notify_hour/notify_minute check, facility='wr'/dashboard_type=
-# 'cases_to_pick' in prepick_notify_settings). Posts a comment summarizing
-# TOMORROW's Bernatello's - Wisconsin Rapids Cases To Pick numbers.
 [functions."wr-cases-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# Madison Daily Ops nightly snapshot digest — added 2026-07-14, same
-# every-15-min tick + configurable notify_hour/notify_minute/notify_days
-# pattern as prepick-digest-run.cjs (facility='mad', dashboard_type=
-# 'daily_ops' in prepick_notify_settings). Renders two PNGs (Total
-# Appointments card + Projects table) via @napi-rs/canvas and posts them
-# as two separate Front comments — see dailyops-digest-run.cjs file
-# header for why images instead of text, and the documented calculation
-# simplifications (facility-default HPA only, no per-employee break
-# overrides, no carryover tail employees).
 [functions."dailyops-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# FEFO Rotation nightly digest — added 2026-07-14, per-project (not
-# per-facility) — one prepick_notify_settings row per FEFO customer
-# (facility='ken', dashboard_type='fefo_<projectId>'), all served by this
-# one shared function. Same every-15-min tick pattern as the other digests,
-# but content date is TODAY not tomorrow (FEFO is "is rotation compliant
-# right now", no appointment lead-time to look ahead across) — see
-# fefo-digest-run.cjs file header for the full reasoning. Posts a full
-# rotation-status summary (order count, violations w/ severity, holds,
-# stale, undated lots) as a Front comment per project.
 [functions."fefo-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# WR Pick Location Lot Check nightly digest — added same day as the tab
-# itself, same every-15-min tick + configurable notify_hour/notify_minute/
-# notify_days pattern as the other digests (facility='wr', dashboard_type=
-# 'pick_check' in prepick_notify_settings). Content date is TODAY, not
-# tomorrow — see wr-pickcheck-digest-run.cjs file header (same reasoning
-# as fefo-digest-run.cjs: this is a live "right now" check, no appointment
-# lead-time to look ahead across).
 [functions."wr-pickcheck-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# WR Secondary Replenishments backend — rewritten 2026-07-15 to query
-# MotherDuck directly (3 combined queries, one connection) instead of
-# proxying 6 separate Omni round-trips through omni-query.cjs, per Dan's
-# ask for faster collective results. Bumped to 26s alongside the other
-# MotherDuck-backed functions above as a safety margin, though 3 queries
-# over one connection should typically complete well under that.
 [functions."wr-secondary-repl"]
   timeout = 26
 
-# WR Secondary Replenishments nightly digest — added 2026-07-15 alongside
-# the MotherDuck rewrite, same every-15-min tick + configurable
-# notify_hour/notify_minute/notify_days pattern as the other digests
-# (facility='wr', dashboard_type='secondary_repl' in
-# prepick_notify_settings). Content date is TODAY, not tomorrow — same
-# "live right now" reasoning as wr-pickcheck-digest-run.cjs. Proxies to
-# wr-secondary-repl.cjs and posts its server-computed bay-stats summary.
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# Revision Tracker sync — runs every 15 min (unlike the daily/nightly jobs
-# above, this covers time-sensitive customer-facing issues — SLA breach/
-# warning tags need to show up in-app well before end of day). Pulls
-# "Revision"/"Revisions"-tagged Front conversations + comments from the
-# separate csw-kb-assistant Supabase project into revision_conversations/
-# revision_comments here. See netlify/functions/revision-sync.cjs header
-# comment for the two external prerequisites (kb schema exposure +
-# service_role key) this depends on — until both are set, every run
-# fails fast with a clear config error rather than syncing silently wrong.
 [functions."revision-sync"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# CMM Outbound Appts (Caledonia) — added 2026-07-18. Same every-15-min tick
-# + configurable notify_hour/notify_minute/notify_days pattern as the other
-# digests (facility='cal', dashboard_type='cmm_outbound_appts' in
-# prepick_notify_settings). Content date is TOMORROW — a next-day forecast
-# of open CMM/Palermo's outbound appointments, queried directly from
-# MotherDuck (production_db.gold.truck_appointments). Unlike every other
-# digest here, this one does NOT post a Front comment on an existing
-# conversation — it creates a brand-new Front DRAFT (POST /channels/{id}/
-# drafts, never sent) addressed to the TO/CC emails configured in
-# cmm_outbound_email_recipients, then adds any configured internal Front
-# teammates as conversation followers and posts the configured discussion
-# comment on that same draft conversation. See cmm-outbound-draft-create.cjs
-# file header for the full mechanism and why followers (not inline
-# @mentions — Front's sanitizer rejects that syntax, see
-# front-post-discussion.cjs's note). "From" channel is configurable
-# (prepick_notify_settings.from_channel_id, added 2026-07-19) — falls back
-# to CSW Main (cha_erzf8) if unset.
 [functions."cmm-outbound-draft-create"]
   schedule = "*/15 * * * *"
   timeout = 26
 
-# Password gate for the Palermo's standalone deploy (cswpvi.netlify.app).
-# The edge function itself checks VITE_APP_MODE and no-ops on the main
-# CSW-WI app, so registering it globally here is safe for both sites.
-# See netlify/edge-functions/pvi-password-gate.js for details.
+# LoadProof / DVRS open-incidents daily digest -- added 2026-07-19, same
+# every-15-min tick + configurable notify_hour/notify_minute/notify_days
+# pattern as the other digests (facility='all', dashboard_type=
+# 'dvr_incidents' in prepick_notify_settings). Content date is TODAY --
+# live snapshot of open DVRS incidents across all 3 facilities (CAL, KEN,
+# MAD). Fetches from sharepoint-dvr.cjs internally and posts a summary
+# Front comment. Configurable from the DVR Tracker Dashboard's
+# Notify Settings panel.
+[functions."dvr-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
