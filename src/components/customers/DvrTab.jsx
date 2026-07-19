@@ -11,17 +11,38 @@ const TABS = [
 
 export default function DvrTab() {
   const [type, setType] = useState('dvrs')
+
+  const typeSelector = (
+    <div style={{ display:'flex', gap:4, alignItems:'center' }}>
+      {TABS.map(tab => (
+        <button
+          key={tab.id}
+          onClick={() => setType(tab.id)}
+          style={{
+            padding:'4px 14px', fontSize:12, fontWeight:600, cursor:'pointer',
+            border:'1px solid var(--border)', borderRadius:6,
+            background: type===tab.id ? tab.color : 'var(--bg0)',
+            color: type===tab.id ? '#fff' : 'var(--text-secondary)',
+            fontFamily:'var(--font-mono)', transition:'all .15s',
+          }}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
+
   return (
     <div style={{ margin: '-24px' }}>
-      <div style={{ display:'flex', gap:4, padding:'10px 20px 10px', borderBottom:'1px solid var(--border)', background:'var(--bg1)', alignItems:'center' }}>
-        <span style={{ fontSize:11, fontWeight:600, color:'var(--text-secondary)', fontFamily:'var(--font-mono)', marginRight:8 }}>TAB:</span>
-        {TABS.map(tab => (
-          <button key={tab.id} onClick={() => setType(tab.id)} style={{ padding:'5px 16px', fontSize:12, fontWeight:600, cursor:'pointer', border:'1px solid var(--border)', borderRadius:6, background: type===tab.id ? tab.color : 'var(--bg0)', color: type===tab.id ? '#fff' : 'var(--text-secondary)', fontFamily:'var(--font-mono)', transition:'all .15s' }}>
-            {tab.label}
-          </button>
-        ))}
-      </div>
-      {type === 'dvrs' ? <DvrTracker /> : <LoadProofInboundTracker key={type} type={type} />}
+      {type === 'dvrs'
+        ? <DvrTracker typeSelector={typeSelector} />
+        : <>
+            <div style={{ display:'flex', gap:4, padding:'10px 20px', borderBottom:'1px solid var(--border)', background:'var(--bg1)', alignItems:'center' }}>
+              {typeSelector}
+            </div>
+            <LoadProofInboundTracker key={type} type={type} />
+          </>
+      }
     </div>
   )
 }
