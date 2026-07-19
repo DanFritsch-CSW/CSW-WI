@@ -178,7 +178,6 @@ export default function DvrTracker({ typeSelector = null }) {
   const [page,setPage]=useState(1)
   const [detail,setDetail]=useState(null)
   const [showAdd,setShowAdd]=useState(false)
-  const [showNotify,setShowNotify]=useState(false)
 
   useEffect(()=>{
     setLoading(true)
@@ -287,7 +286,7 @@ export default function DvrTracker({ typeSelector = null }) {
         ))}
       </div>
 
-      {/* Row 2: DVR Tracker + facility pills + Add incident + Notify settings */}
+      {/* Row 2: DVR Tracker + facility pills + Add incident */}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <span style={{fontSize:14,fontWeight:700,fontFamily:'var(--font-mono)'}}>DVR Tracker</span>
@@ -305,10 +304,7 @@ export default function DvrTracker({ typeSelector = null }) {
           }
           <span style={{fontSize:10,color:'var(--text-secondary)'}}>live from SharePoint</span>
         </div>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          <button onClick={()=>setShowAdd(true)} style={{background:'var(--text-primary)',border:'none',borderRadius:6,padding:'6px 14px',cursor:'pointer',color:'var(--bg0)',fontSize:12,fontWeight:600,fontFamily:'var(--font-mono)'}}>+ Add incident</button>
-          <button onClick={()=>setShowNotify(v=>!v)} style={{background:'none',border:'1px solid var(--border)',borderRadius:6,padding:'6px 12px',cursor:'pointer',color:'var(--text-secondary)',fontSize:12,fontFamily:'var(--font-mono)'}}>{showNotify?'Hide notify settings':'Notify settings'}</button>
-        </div>
+        <button onClick={()=>setShowAdd(true)} style={{background:'var(--text-primary)',border:'none',borderRadius:6,padding:'6px 14px',cursor:'pointer',color:'var(--bg0)',fontSize:12,fontWeight:600,fontFamily:'var(--font-mono)'}}>+ Add incident</button>
       </div>
 
       {/* Row 3: Type selector (DVRS / Inbound / Outbound / Hold) */}
@@ -460,19 +456,17 @@ export default function DvrTracker({ typeSelector = null }) {
                 </div>
               ))}
             </div>
-            {/* Notify settings panel */}
-            {showNotify&&(
-              <div style={{marginTop:20}}>
-                <NotifySettingsPanel
-                  facility="all"
-                  dashboardType="dvr_incidents"
-                  functionName="dvr-digest-run"
-                  contentDateLabel="today"
-                  showSkipToNextValidDay={true}
-                  digestDescription="Posts a daily summary of open LoadProof / DVRS incidents (all facilities) to this Front conversation. Fires at the configured time on checked days."
-                />
-              </div>
-            )}
+            {/* Notify settings panel — always rendered on Dashboard, manages its own open/close */}
+            <div style={{marginTop:20}}>
+              <NotifySettingsPanel
+                facility="all"
+                dashboardType="dvr_incidents"
+                functionName="dvr-digest-run"
+                contentDateLabel="today"
+                showSkipToNextValidDay={true}
+                digestDescription="Posts a daily summary of open LoadProof / DVRS incidents (all facilities) to this Front conversation. Fires at the configured time on checked days."
+              />
+            </div>
           </>
         )}
       </div>
