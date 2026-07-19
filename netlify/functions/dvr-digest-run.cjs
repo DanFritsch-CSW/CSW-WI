@@ -11,7 +11,7 @@
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
-const FRONT_API_KEY = process.env.FRONT_API_KEY
+const FRONT_TOKEN = process.env.FRONT_API_TOKEN   // matches every other digest function
 const APP_URL = 'https://csw-wi.netlify.app'
 
 async function sbGet(path) {
@@ -55,9 +55,10 @@ async function fetchFacilityIncidents(facilityId, baseUrl) {
 }
 
 async function postFrontComment(conversationId, body) {
+  if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
   const r = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${FRONT_API_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ author_id: 'default', body })
   })
   if (!r.ok) {
@@ -87,7 +88,6 @@ async function runDigest(isManual, baseUrl) {
     const todayWeekday = isoWeekday(todayISO)
     if (!notifyDays.includes(todayWeekday)) {
       if (!settings.skip_to_next_valid_day) return { ok: false, reason: `Day ${todayWeekday} not in notify_days` }
-      // Find next valid day (cap +7)
       let found = null
       for (let offset = 1; offset <= 7; offset++) {
         const candidate = new Date(todayISO + 'T12:00:00')
