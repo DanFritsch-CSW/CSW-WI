@@ -74,6 +74,14 @@
 [functions."front-teammates-nightly-sync"]
   schedule = "10 10 * * *"
 
+# Scheduled nightly Front channels sync — runs at 10:20 UTC daily (10min
+# after front-teammates-nightly-sync). Keeps front_channels current for
+# the "From" channel picker in Settings > CMM Outbound Appts (added
+# 2026-07-19) — also callable on-demand via a manual POST ("Sync channels
+# now" button) so Dan doesn't have to wait for the nightly tick.
+[functions."front-channels-sync"]
+  schedule = "20 10 * * *"
+
 # Daily Front discussion creator — runs at 23:00 UTC = 6pm CDT / 5pm CST
 # (DST-unadjusted, same caveat as every other scheduled function above).
 # Creates tomorrow's "{Facility} {Weekday} {M/D}" discussion for every active
@@ -192,7 +200,9 @@
 # comment on that same draft conversation. See cmm-outbound-draft-create.cjs
 # file header for the full mechanism and why followers (not inline
 # @mentions — Front's sanitizer rejects that syntax, see
-# front-post-discussion.cjs's note).
+# front-post-discussion.cjs's note). "From" channel is configurable
+# (prepick_notify_settings.from_channel_id, added 2026-07-19) — falls back
+# to CSW Main (cha_erzf8) if unset.
 [functions."cmm-outbound-draft-create"]
   schedule = "*/15 * * * *"
   timeout = 26
