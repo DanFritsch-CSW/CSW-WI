@@ -166,14 +166,14 @@ function AddModal({defaultFac,onClose,onAdd}) {
   )
 }
 
-export default function DvrTracker() {
+export default function DvrTracker({ typeSelector = null }) {
   const [cal,setCal]=useState(SEED_CAL)
   const [ken,setKen]=useState(SEED_KEN)
   const [mad,setMad]=useState([])
   const [loading,setLoading]=useState(true)
   const [loadErrors,setLoadErrors]=useState({})
   const [facility,setFacility]=useState('all')
-  const [tab,setTab]=useState('tracker')
+  const [tab,setTab]=useState('dash')
   const [search,setSearch]=useState('')
   const [typeFilter,setTypeFilter]=useState('all')
   const [reasonFilter,setReasonFilter]=useState('all')
@@ -287,6 +287,7 @@ export default function DvrTracker() {
       {/* Topbar */}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
+          {typeSelector&&<>{typeSelector}<div style={{width:1,height:20,background:'var(--border)',flexShrink:0}}/></>}
           <span style={{fontSize:14,fontWeight:700,fontFamily:'var(--font-mono)'}}>DVR Tracker</span>
           <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:7,overflow:'hidden'}}>
             {[['all','All','#374151'],['cal','Caledonia','#1d4ed8'],['ken','Kenosha','#15803d'],['mad','Madison','#7c3aed']].map(([id,label,color])=>(
@@ -305,9 +306,9 @@ export default function DvrTracker() {
         <button onClick={()=>setShowAdd(true)} style={{background:'var(--text-primary)',border:'none',borderRadius:6,padding:'6px 14px',cursor:'pointer',color:'var(--bg0)',fontSize:12,fontWeight:600,fontFamily:'var(--font-mono)'}}>+ Add incident</button>
       </div>
 
-      {/* Tab nav */}
+      {/* Tab nav — Dashboard first */}
       <div style={{display:'flex',gap:2,padding:'0 20px',borderBottom:'1px solid var(--border)'}}>
-        {[['tracker','Open tracker'],['dash','Dashboard']].map(([id,label])=>(
+        {[['dash','Dashboard'],['tracker','Open tracker']].map(([id,label])=>(
           <button key={id} onClick={()=>setTab(id)} style={{padding:'10px 14px',fontSize:13,border:'none',background:'transparent',cursor:'pointer',color:tab===id?'var(--text-primary)':'var(--text-secondary)',fontWeight:tab===id?600:400,borderBottom:tab===id?'2px solid var(--text-primary)':'2px solid transparent',marginBottom:-1,fontFamily:'inherit'}}>{label}</button>
         ))}
       </div>
