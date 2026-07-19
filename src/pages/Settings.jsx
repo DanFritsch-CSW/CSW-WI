@@ -8,8 +8,13 @@ import {
   upsertProjectLaborAssumption, deleteProjectLaborAssumption,
   fetchDailyDiscussionConfigs, upsertDailyDiscussionConfigActive,
   fetchFrontTeammates, fetchDiscussionRecipients, saveDiscussionRecipients,
-  triggerDailyDiscussionTest,
+  triggerDailyDiscussionTest, triggerDigestTest,
 } from '../lib/supabase.js'
+import {
+  fetchCmmOutboundSettings, upsertCmmOutboundSettings,
+  fetchCmmOutboundEmailRecipients, saveCmmOutboundEmailRecipients,
+  fetchCmmOutboundDiscussionRecipients, saveCmmOutboundDiscussionRecipients,
+} from '../lib/cmmOutbound.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
 
@@ -22,6 +27,7 @@ const TABS = [
   { id: 'estdrops',    label: 'EST Drop Projects' },
   { id: 'pvi',         label: 'PVI Accounts' },
   { id: 'discussions', label: 'Daily Discussions' },
+  { id: 'cmmOutbound', label: 'CMM Outbound Appts' },
 ]
 
 // Hardcoded EST drop projects per facility (mirrors PROJECT_DROP_RULES in omni.js).
@@ -704,6 +710,315 @@ function DailyDiscussionsEditor() {
   )
 }
 
+// ── CMM Outbound Appts (Caledonia) ──────────────────────────
+//
+// Single-facility tab (cal only — the only warehouse this appt filter
+// currently targets). Three independent pieces, matching
+// cmm-outbound-draft-create.cjs exactly:
+//   1. Send time / days / active toggle (prepick_notify_settings)
+//   2. TO/CC email recipients (cmm_outbound_email_recipients) — external
+//      addresses that land on the draft itself
+//   3. Draft Author + discussion comment + internal teammate picker
+//      (front_teammate_id followers) — people who see the internal note,
+//      not the email
+
+const CMM_FACILITY = 'cal'
+
+function EmailListEditor({ label, emails, onChange }) {
+  const [draft, setDraft] = useState('')
+
+  function addEmail() {
+    const trimmed = draft.trim().toLowerCase()
+    if (!trimmed) return
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      alert(`"${trimmed}" doesn't look like a valid email address.`)
+      return
+    }
+    if (emails.includes(trimmed)) { setDraft(''); return }
+    onChange([...emails, trimmed])
+    setDraft('')
+  }
+
+  function removeEmail(email) {
+    onChange(emails.filter(e => e !== email))
+  }
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>{label}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+        {emails.map(email => (
+          <span key={email} style={{
+            display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', borderRadius: 3,
+            fontFamily: 'var(--font-mono)', fontSize: 11, background: 'var(--brand-bg, rgba(61,186,126,0.12))',
+          }}>
+            {email}
+            <button
+              onClick={() => removeEmail(email)}
+              style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: 12, lineHeight: 1, padding: 0 }}
+              aria-label={`Remove ${email}`}
+            >×</button>
+          </span>
+        ))}
+        {emails.length === 0 && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic' }}>None added yet.</span>}
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          type="email"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addEmail() } }}
+          placeholder="name@example.com"
+          className="est-drops-select"
+          style={{ flex: 1 }}
+        />
+        <button className="settings-save-btn" onClick={addEmail}>Add</button>
+      </div>
+    </div>
+  )
+}
+
+function CmmOutboundApptsEditor() {
+  const [settings, setSettings]   = useState(null)
+  const [teammates, setTeammates] = useState([])
+  const [toEmails, setToEmails]   = useState([])
+  const [ccEmails, setCcEmails]   = useState([])
+  const [selectedDiscussion, setSelectedDiscussion] = useState(new Set())
+  const [comment, setComment]     = useState('')
+  const [authorId, setAuthorId]   = useState('')
+  const [notifyHour, setNotifyHour] = useState(18)
+  const [notifyMinute, setNotifyMinute] = useState(0)
+  const [notifyDays, setNotifyDays] = useState([1, 2, 3, 4, 5, 6, 7])
+  const [active, setActive]       = useState(false)
+  const [loading, setLoading]     = useState(true)
+  const [saveState, setSave]      = useState(null)
+  const [testState, setTestState] = useState(null)
+  const [testDetail, setTestDetail] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const [s, tms, emails, discussion] = await Promise.all([
+        fetchCmmOutboundSettings(CMM_FACILITY),
+        fetchFrontTeammates(),
+        fetchCmmOutboundEmailRecipients(CMM_FACILITY),
+        fetchCmmOutboundDiscussionRecipients(CMM_FACILITY),
+      ])
+      if (cancelled) return
+      setSettings(s)
+      setTeammates(tms)
+      setToEmails((emails.to || []).map(r => r.email))
+      setCcEmails((emails.cc || []).map(r => r.email))
+      setSelectedDiscussion(new Set(discussion.filter(r => r.front_teammate_id).map(r => r.front_teammate_id)))
+      if (s) {
+        setNotifyHour(s.notify_hour ?? 18)
+        setNotifyMinute(s.notify_minute ?? 0)
+        setNotifyDays(s.notify_days ?? [1, 2, 3, 4, 5, 6, 7])
+        setActive(!!s.active)
+        setComment(s.discussion_comment ?? '')
+        setAuthorId(s.author_teammate_id ?? '')
+      }
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  function toggleDay(day) {
+    setNotifyDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
+  }
+
+  function toggleTeammate(teammateId) {
+    setSelectedDiscussion(prev => {
+      const next = new Set(prev)
+      if (next.has(teammateId)) next.delete(teammateId)
+      else next.add(teammateId)
+      return next
+    })
+  }
+
+  async function handleSave() {
+    setSave('saving')
+    try {
+      await Promise.all([
+        upsertCmmOutboundSettings(CMM_FACILITY, {
+          notifyHour, notifyMinute, notifyDays, active,
+          discussionComment: comment, authorTeammateId: authorId || null,
+        }),
+        saveCmmOutboundEmailRecipients(CMM_FACILITY, toEmails, ccEmails),
+        saveCmmOutboundDiscussionRecipients(
+          CMM_FACILITY,
+          teammates.filter(t => selectedDiscussion.has(t.teammate_id))
+        ),
+      ])
+      setSave('ok')
+      setTimeout(() => setSave(null), 2500)
+    } catch (err) {
+      setSave('error')
+      setTimeout(() => setSave(null), 3000)
+    }
+  }
+
+  async function handleTest() {
+    setTestState('running')
+    setTestDetail(null)
+    try {
+      // Save current state first — same reasoning as Daily Discussions'
+      // handleTest: a freshly-edited field that hasn't been saved yet would
+      // otherwise produce a confusing result that doesn't match what's on screen.
+      await Promise.all([
+        upsertCmmOutboundSettings(CMM_FACILITY, {
+          notifyHour, notifyMinute, notifyDays, active,
+          discussionComment: comment, authorTeammateId: authorId || null,
+        }),
+        saveCmmOutboundEmailRecipients(CMM_FACILITY, toEmails, ccEmails),
+        saveCmmOutboundDiscussionRecipients(
+          CMM_FACILITY,
+          teammates.filter(t => selectedDiscussion.has(t.teammate_id))
+        ),
+      ])
+      const res = await triggerDigestTest('cmm-outbound-draft-create', { facility: CMM_FACILITY })
+      if (res?.success) {
+        setTestState('ok')
+        setTestDetail(`Draft created: "${res.subject}" — ${res.apptCount} appt(s), ${res.toCount} TO / ${res.ccCount} CC, ${res.followerCount} follower(s).`)
+      } else {
+        setTestState('error')
+        setTestDetail(res?.reason || 'No result returned.')
+      }
+    } catch (err) {
+      setTestState('error')
+      setTestDetail(err.message)
+    }
+    setTimeout(() => { setTestState(null); setTestDetail(null) }, 8000)
+  }
+
+  if (loading) {
+    return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>Loading…</div>
+  }
+
+  const DAY_LABELS = [['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6], ['Sun', 7]]
+
+  return (
+    <div className="cmm-outbound-editor">
+      <p className="settings-page-sub" style={{ marginBottom: 16 }}>
+        Creates a Front <strong>email draft</strong> (never sent automatically) listing tomorrow's open outbound
+        appointments for carrier CMM / Palermo's at Caledonia. A human still reviews and sends it. Currently
+        configured for Caledonia only.
+      </p>
+
+      <div className="break-schedule-controls" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+          <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />
+          Auto-create nightly (for the next day)
+        </label>
+        <div className="break-schedule-warehouse">
+          <span className="break-schedule-warehouse-label">Send time (CT)</span>
+          <select className="est-drops-select" value={notifyHour} onChange={e => setNotifyHour(Number(e.target.value))}>
+            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{h}:00</option>)}
+          </select>
+          <select className="est-drops-select" value={notifyMinute} onChange={e => setNotifyMinute(Number(e.target.value))}>
+            {[0, 15, 30, 45].map(m => <option key={m} value={m}>:{String(m).padStart(2, '0')}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+        {DAY_LABELS.map(([label, day]) => (
+          <button
+            key={day}
+            onClick={() => toggleDay(day)}
+            className="settings-save-btn"
+            style={{
+              padding: '4px 10px', fontSize: 11,
+              background: notifyDays.includes(day) ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <EmailListEditor label="TO (external — receives the draft)" emails={toEmails} onChange={setToEmails} />
+      <EmailListEditor label="CC (external — receives the draft)" emails={ccEmails} onChange={setCcEmails} />
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>Draft Author (Front teammate)</div>
+        <select className="est-drops-select" value={authorId} onChange={e => setAuthorId(e.target.value)} style={{ minWidth: 240 }}>
+          <option value="">— select —</option>
+          {teammates.map(t => (
+            <option key={t.teammate_id} value={t.teammate_id}>
+              {[t.first_name, t.last_name].filter(Boolean).join(' ') || t.email}
+            </option>
+          ))}
+        </select>
+        <p className="settings-page-sub" style={{ marginTop: 4, fontSize: 10 }}>
+          Required — Front needs an author to create the draft under.
+        </p>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Internal discussion comment (posted on the draft, visible only to teammates below)
+        </div>
+        <textarea
+          value={comment}
+          onChange={e => setComment(e.target.value)}
+          rows={3}
+          placeholder="e.g. Flag anything that looks off before sending."
+          className="est-drops-select"
+          style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Internal discussion people (added as conversation followers — {teammates.length} available)
+        </div>
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 6,
+          maxHeight: 260, overflowY: 'auto', padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+        }}>
+          {teammates.map(t => {
+            const label = [t.first_name, t.last_name].filter(Boolean).join(' ') || t.email
+            const checked = selectedDiscussion.has(t.teammate_id)
+            return (
+              <label
+                key={t.teammate_id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', borderRadius: 3,
+                  fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer',
+                  background: checked ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
+                }}
+              >
+                <input type="checkbox" checked={checked} onChange={() => toggleTeammate(t.teammate_id)} />
+                <span>{label}</span>
+              </label>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="settings-card-footer" style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
+          {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
+        </button>
+        <button className="settings-save-btn" onClick={handleTest} disabled={testState === 'running' || !authorId}>
+          {testState === 'running' ? 'Creating…' : testState === 'ok' ? 'Created ✓' : testState === 'error' ? 'Failed' : 'Create Draft Now (test)'}
+        </button>
+        {testDetail && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: testState === 'error' ? '#e05a5a' : 'var(--text-dim)' }}>
+            {testDetail}
+          </span>
+        )}
+      </div>
+      {!authorId && (
+        <p className="settings-page-sub" style={{ marginTop: 8, fontStyle: 'italic' }}>
+          Select a Draft Author above to enable the test button.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── Page ───────────────────────────────────────────────────
 
 export default function Settings() {
@@ -801,6 +1116,16 @@ export default function Settings() {
             <p className="settings-page-sub">Automated per-facility Front discussion threads for daily check-ins — leadership, supervisors, GM/CEM, etc. Created automatically each evening for the next day.</p>
           </div>
           <DailyDiscussionsEditor />
+        </>
+      )}
+
+      {activeTab === 'cmmOutbound' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">CMM Outbound Appts</h2>
+            <p className="settings-page-sub">Creates a Front email draft (not sent) of tomorrow's open CMM/Palermo's outbound appointments at Caledonia, for review before sending.</p>
+          </div>
+          <CmmOutboundApptsEditor />
         </>
       )}
     </div>
