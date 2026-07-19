@@ -178,6 +178,25 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# CMM Outbound Appts (Caledonia) — added 2026-07-18. Same every-15-min tick
+# + configurable notify_hour/notify_minute/notify_days pattern as the other
+# digests (facility='cal', dashboard_type='cmm_outbound_appts' in
+# prepick_notify_settings). Content date is TOMORROW — a next-day forecast
+# of open CMM/Palermo's outbound appointments, queried directly from
+# MotherDuck (production_db.gold.truck_appointments). Unlike every other
+# digest here, this one does NOT post a Front comment on an existing
+# conversation — it creates a brand-new Front DRAFT (POST /channels/{id}/
+# drafts, never sent) addressed to the TO/CC emails configured in
+# cmm_outbound_email_recipients, then adds any configured internal Front
+# teammates as conversation followers and posts the configured discussion
+# comment on that same draft conversation. See cmm-outbound-draft-create.cjs
+# file header for the full mechanism and why followers (not inline
+# @mentions — Front's sanitizer rejects that syntax, see
+# front-post-discussion.cjs's note).
+[functions."cmm-outbound-draft-create"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
 # Password gate for the Palermo's standalone deploy (cswpvi.netlify.app).
 # The edge function itself checks VITE_APP_MODE and no-ops on the main
 # CSW-WI app, so registering it globally here is safe for both sites.
