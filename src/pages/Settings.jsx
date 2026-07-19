@@ -14,6 +14,7 @@ import {
   fetchCmmOutboundSettings, upsertCmmOutboundSettings,
   fetchCmmOutboundEmailRecipients, saveCmmOutboundEmailRecipients,
   fetchCmmOutboundDiscussionRecipients, saveCmmOutboundDiscussionRecipients,
+  fetchFrontChannels, triggerFrontChannelsSync,
 } from '../lib/cmmOutbound.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
@@ -713,14 +714,18 @@ function DailyDiscussionsEditor() {
 // ── CMM Outbound Appts (Caledonia) ──────────────────────────
 //
 // Single-facility tab (cal only — the only warehouse this appt filter
-// currently targets). Three independent pieces, matching
+// currently targets). Four independent pieces, matching
 // cmm-outbound-draft-create.cjs exactly:
 //   1. Send time / days / active toggle (prepick_notify_settings)
 //   2. TO/CC email recipients (cmm_outbound_email_recipients) — external
 //      addresses that land on the draft itself
-//   3. Draft Author + discussion comment + internal teammate picker
-//      (front_teammate_id followers) — people who see the internal note,
-//      not the email
+//   3. From channel picker (front_channels) + Draft Author — two SEPARATE
+//      concepts. Front ties the From address to the channel a draft is
+//      created on, NOT to the author (author just controls who Front shows
+//      as the draft's owner). Added 2026-07-19 after Dan noticed drafts
+//      always showed "From: cswmain@csw-wi.com" regardless of Draft Author.
+//   4. Discussion comment + internal teammate picker (front_teammate_id
+//      followers) — people who see the internal note, not the email
 
 const CMM_FACILITY = 'cal'
 
@@ -781,11 +786,14 @@ function EmailListEditor({ label, emails, onChange }) {
 function CmmOutboundApptsEditor() {
   const [settings, setSettings]   = useState(null)
   const [teammates, setTeammates] = useState([])
+  const [channels, setChannels]   = useState([])
+  const [syncingChannels, setSyncingChannels] = useState(false)
   const [toEmails, setToEmails]   = useState([])
   const [ccEmails, setCcEmails]   = useState([])
   const [selectedDiscussion, setSelectedDiscussion] = useState(new Set())
   const [comment, setComment]     = useState('')
   const [authorId, setAuthorId]   = useState('')
+  const [channelId, setChannelId] = useState('')
   const [notifyHour, setNotifyHour] = useState(18)
   const [notifyMinute, setNotifyMinute] = useState(0)
   const [notifyDays, setNotifyDays] = useState([1, 2, 3, 4, 5, 6, 7])
@@ -798,15 +806,17 @@ function CmmOutboundApptsEditor() {
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      const [s, tms, emails, discussion] = await Promise.all([
+      const [s, tms, chans, emails, discussion] = await Promise.all([
         fetchCmmOutboundSettings(CMM_FACILITY),
         fetchFrontTeammates(),
+        fetchFrontChannels(),
         fetchCmmOutboundEmailRecipients(CMM_FACILITY),
         fetchCmmOutboundDiscussionRecipients(CMM_FACILITY),
       ])
       if (cancelled) return
       setSettings(s)
       setTeammates(tms)
+      setChannels(chans)
       setToEmails((emails.to || []).map(r => r.email))
       setCcEmails((emails.cc || []).map(r => r.email))
       setSelectedDiscussion(new Set(discussion.filter(r => r.front_teammate_id).map(r => r.front_teammate_id)))
@@ -817,6 +827,7 @@ function CmmOutboundApptsEditor() {
         setActive(!!s.active)
         setComment(s.discussion_comment ?? '')
         setAuthorId(s.author_teammate_id ?? '')
+        setChannelId(s.from_channel_id ?? '')
       }
       setLoading(false)
     })()
@@ -836,13 +847,25 @@ function CmmOutboundApptsEditor() {
     })
   }
 
+  async function handleSyncChannels() {
+    setSyncingChannels(true)
+    try {
+      await triggerFrontChannelsSync()
+      setChannels(await fetchFrontChannels())
+    } catch (err) {
+      alert(`Failed to sync channels: ${err.message}`)
+    } finally {
+      setSyncingChannels(false)
+    }
+  }
+
   async function handleSave() {
     setSave('saving')
     try {
       await Promise.all([
         upsertCmmOutboundSettings(CMM_FACILITY, {
           notifyHour, notifyMinute, notifyDays, active,
-          discussionComment: comment, authorTeammateId: authorId || null,
+          discussionComment: comment, authorTeammateId: authorId || null, fromChannelId: channelId || null,
         }),
         saveCmmOutboundEmailRecipients(CMM_FACILITY, toEmails, ccEmails),
         saveCmmOutboundDiscussionRecipients(
@@ -868,7 +891,7 @@ function CmmOutboundApptsEditor() {
       await Promise.all([
         upsertCmmOutboundSettings(CMM_FACILITY, {
           notifyHour, notifyMinute, notifyDays, active,
-          discussionComment: comment, authorTeammateId: authorId || null,
+          discussionComment: comment, authorTeammateId: authorId || null, fromChannelId: channelId || null,
         }),
         saveCmmOutboundEmailRecipients(CMM_FACILITY, toEmails, ccEmails),
         saveCmmOutboundDiscussionRecipients(
@@ -941,6 +964,30 @@ function CmmOutboundApptsEditor() {
       <EmailListEditor label="CC (external — receives the draft)" emails={ccEmails} onChange={setCcEmails} />
 
       <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          From (Front channel — the address the draft actually sends from)
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select className="est-drops-select" value={channelId} onChange={e => setChannelId(e.target.value)} style={{ minWidth: 280 }}>
+            <option value="">— CSW Main (default) —</option>
+            {channels.map(c => (
+              <option key={c.channel_id} value={c.channel_id}>
+                {c.name}{c.address ? ` <${c.address}>` : ''}
+              </option>
+            ))}
+          </select>
+          <button className="settings-save-btn" onClick={handleSyncChannels} disabled={syncingChannels}>
+            {syncingChannels ? 'Syncing…' : 'Sync channels now'}
+          </button>
+        </div>
+        <p className="settings-page-sub" style={{ marginTop: 4, fontSize: 10 }}>
+          Front ties the From address to the channel a draft is created on, not to the Draft Author below —
+          pick the actual inbox/address you want this to send from. {channels.length} channel(s) available
+          (synced nightly, or click "Sync channels now" for an immediate refresh).
+        </p>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
         <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>Draft Author (Front teammate)</div>
         <select className="est-drops-select" value={authorId} onChange={e => setAuthorId(e.target.value)} style={{ minWidth: 240 }}>
           <option value="">— select —</option>
@@ -951,7 +998,8 @@ function CmmOutboundApptsEditor() {
           ))}
         </select>
         <p className="settings-page-sub" style={{ marginTop: 4, fontSize: 10 }}>
-          Required — Front needs an author to create the draft under.
+          Required — Front needs an author to create the draft under. Controls who Front shows as the draft's
+          owner, not the From address (that's the picker above).
         </p>
       </div>
 
