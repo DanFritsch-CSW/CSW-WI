@@ -1,35 +1,63 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 
-const SEED_CAL=[{"id":"DVR-1165","date":"2026-07-01","orderNum":"","customer":"PALERMOS FINISHED","employee":"Collin p","responsibleParty":"Customer / Carrier","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":84,"lotNum":"WC103297","materialNum":"30898","licensePlate":"MFG0406086","incidentNotes":"no scan. located middle x-over BE.","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"invOpen":true,"loadproofUrl":""}]
-const SEED_KEN=[{"id":"KEN-1988","date":"2026-07-01","orderNum":"4500409921","customer":"Crown","employee":"joshg","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":1,"lotNum":"PPW02222026","materialNum":"4210314","licensePlate":"9000585385","incidentNotes":"pallet in system as 27 cases but only 26","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"invOpen":true,"loadproofUrl":""}]
+// Seed data (fallback if SharePoint unavailable)
+const SEED_CAL = [{"id":"DVR-1165","date":"2026-03-12","orderNum":"","customer":"PALERMOS FINISHED","employee":"Collin p","responsibleParty":"Customer / Carrier","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":84,"lotNum":"WC103297","materialNum":"30898","licensePlate":"MFG0406086","incidentNotes":"no scan. located middle x-over BE.","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"invOpen":true,"loadproofUrl":""},{"id":"DVR-1320","date":"2026-04-03","orderNum":"na","customer":"PALERMOS RAW","employee":"Collin p","responsibleParty":"CSW","incidentType":"Warehouse Ops Damage","reason":"Receiving Error","damageType":"No Damage","cases":0,"lotNum":"34025","materialNum":"1003096","licensePlate":"multi","incidentNotes":"no scan. kept in location AM042A","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"","adjOpen":true,"coachingRequired":"","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":false,"invOpen":true,"loadproofUrl":""}]
+const SEED_KEN = [{"id":"KEN-1988","date":"2026-03-12","orderNum":"4500409921","customer":"Crown - CSW Kenosha","employee":"joshg","responsibleParty":"CSW","incidentType":"Outbound","reason":"Missing","damageType":"No Damage","cases":1,"lotNum":"PPW02222026","materialNum":"4210314","licensePlate":"9000585385","incidentNotes":"pallet in system as 27 cases but only 26","investigationNotes":"","adjDate":"","adjBy":"","adjNotes":"No inventory to adjust","adjOpen":true,"coachingRequired":"Yes","employeeResponsible":"","coachingDate":"","coachingBy":"","coachingNotes":"","coachingOpen":true,"invOpen":true,"loadproofUrl":""}]
 
-const PAGE_SIZE=25
-function fmtDate(d){if(!d)return'—';try{return new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})}catch{return d}}
-function ageInDays(d){return!d?0:Math.floor((Date.now()-new Date(d+'T12:00:00'))/86400000)}
-function ageColor(d){const a=ageInDays(d);return a>21?'var(--red)':a>14?'#e09a2a':'var(--text-primary)'}
-function preview(s,n=55){return!s?'':s.length>n?s.slice(0,n)+'…':s}
-function topN(arr,key,n=6){const c={};arr.forEach(i=>{const v=(i[key]||'Unknown').trim()||'Unknown';c[v]=(c[v]||0)+1});return Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,n)}
-function sortItems(items,field,dir){
+const PAGE_SIZE = 25
+function fmtDate(d) { if(!d)return'—'; try{return new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})}catch{return d} }
+function ageInDays(d) { return !d?0:Math.floor((Date.now()-new Date(d+'T12:00:00'))/86400000) }
+function ageColor(d) { const a=ageInDays(d); return a>21?'var(--red)':a>14?'#e09a2a':'var(--text-primary)' }
+function preview(s,n=55) { return !s?'':s.length>n?s.slice(0,n)+'…':s }
+function topN(arr,key,n=6) { const c={}; arr.forEach(i=>{const v=(i[key]||'Unknown').trim()||'Unknown';c[v]=(c[v]||0)+1}); return Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,n) }
+function sortItems(items,field,dir) {
   if(!field)return items
-  return[...items].sort((a,b)=>{
+  return [...items].sort((a,b)=>{
     let va=a[field]??'',vb=b[field]??''
     if(field==='date'){va=new Date(va+'T12:00:00');vb=new Date(vb+'T12:00:00')}
     else if(field==='cases'){va=Number(va);vb=Number(vb)}
     else if(field==='age'){va=ageInDays(a.date);vb=ageInDays(b.date)}
     else{va=String(va).toLowerCase();vb=String(vb).toLowerCase()}
-    if(va<vb)return dir==='asc'?-1:1;if(va>vb)return dir==='asc'?1:-1;return 0
+    if(va<vb)return dir==='asc'?-1:1; if(va>vb)return dir==='asc'?1:-1; return 0
   })
 }
-function TypePill({type}){const t=(type||'').toLowerCase().trim();let bg='var(--bg3)',color='var(--text-secondary)';if(t==='inbound'){bg='rgba(37,99,235,0.12)';color='#3b82f6'}if(t==='outbound'){bg='rgba(22,163,74,0.12)';color='#16a34a'}if(t.includes('warehouse')){bg='rgba(217,119,6,0.12)';color='#d97706'}return<span style={{display:'inline-block',fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{type||'—'}</span>}
-function Badge({label,variant}){const s={adj:{bg:'rgba(217,119,6,0.12)',color:'#d97706'},coach:{bg:'rgba(220,38,38,0.12)',color:'var(--red)'},inv:{bg:'rgba(124,58,237,0.12)',color:'#7c3aed'},done:{bg:'rgba(22,163,74,0.12)',color:'#16a34a'},na:{bg:'var(--bg3)',color:'var(--text-secondary)'}}[variant]||{bg:'var(--bg3)',color:'var(--text-secondary)'};return<span style={{display:'inline-block',fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,background:s.bg,color:s.color,fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{label}</span>}
-function FacBadge({fac}){const map={cal:['rgba(29,78,216,0.1)','#1d4ed8','CAL'],ken:['rgba(21,128,61,0.1)','#15803d','KEN'],mad:['rgba(124,58,237,0.1)','#7c3aed','MAD']};const[bg,color,label]=map[fac]||map.cal;return<span style={{fontSize:10,padding:'2px 7px',borderRadius:10,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)'}}>{label}</span>}
-function SortTh({label,field,sortField,sortDir,onSort,style={}}){const active=sortField===field;const arrow=active?(sortDir==='asc'?' ↑':' ↓'):'';return<th onClick={()=>onSort(field)} style={{padding:'9px 12px',textAlign:'left',fontSize:10,fontWeight:600,color:active?'var(--text-primary)':'var(--text-secondary)',borderBottom:'1px solid var(--border)',background:'var(--bg1)',textTransform:'uppercase',letterSpacing:'.3px',whiteSpace:'nowrap',cursor:'pointer',userSelect:'none',...style}}>{label}{arrow}</th>}
-function BarChart({entries,color='#3b82f6'}){const max=entries[0]?.[1]||1;return<div>{entries.map(([l,n])=>(<div key={l} style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}><div style={{fontSize:12,color:'var(--text-secondary)',width:130,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={l}>{l}</div><div style={{flex:1,height:7,background:'var(--bg3)',borderRadius:4,overflow:'hidden'}}><div style={{height:'100%',borderRadius:4,background:color,width:`${Math.round(n/max*100)}%`,transition:'width 0.3s'}}/></div><div style={{fontSize:12,color:'var(--text-secondary)',minWidth:28,textAlign:'right'}}>{n}</div></div>))}</div>}
 
-function DetailModal({incident,fac,onClose,onUpdate,onDelete}){
-  const[fields,setFields]=useState({...incident})
-  const set=(k,v)=>{const next={...fields,[k]:v};next.adjOpen=!next.adjBy;next.coachingOpen=next.coachingRequired==='Yes'&&!next.coachingDate;next.invOpen=!next.investigationNotes;setFields(next)}
+function TypePill({type}) {
+  const t=(type||'').toLowerCase().trim()
+  let bg='var(--bg3)',color='var(--text-secondary)'
+  if(t==='inbound'){bg='rgba(37,99,235,0.12)';color='#3b82f6'}
+  if(t==='outbound'){bg='rgba(22,163,74,0.12)';color='#16a34a'}
+  if(t.includes('warehouse')){bg='rgba(217,119,6,0.12)';color='#d97706'}
+  return <span style={{display:'inline-block',fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{type||'—'}</span>
+}
+function Badge({label,variant}) {
+  const s={adj:{bg:'rgba(217,119,6,0.12)',color:'#d97706'},coach:{bg:'rgba(220,38,38,0.12)',color:'var(--red)'},inv:{bg:'rgba(124,58,237,0.12)',color:'#7c3aed'},done:{bg:'rgba(22,163,74,0.12)',color:'#16a34a'},na:{bg:'var(--bg3)',color:'var(--text-secondary)'}}[variant]||{bg:'var(--bg3)',color:'var(--text-secondary)'}
+  return <span style={{display:'inline-block',fontSize:10,padding:'2px 8px',borderRadius:20,fontWeight:600,background:s.bg,color:s.color,fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{label}</span>
+}
+function FacBadge({fac}) {
+  const map={cal:['rgba(29,78,216,0.1)','#1d4ed8','CAL'],ken:['rgba(21,128,61,0.1)','#15803d','KEN'],mad:['rgba(124,58,237,0.1)','#7c3aed','MAD']}
+  const [bg,color,label]=map[fac]||map.cal
+  return <span style={{fontSize:10,padding:'2px 7px',borderRadius:10,fontWeight:600,background:bg,color,fontFamily:'var(--font-mono)'}}>{label}</span>
+}
+function SortTh({label,field,sortField,sortDir,onSort,style={}}) {
+  const active=sortField===field; const arrow=active?(sortDir==='asc'?' ↑':' ↓'):''
+  return <th onClick={()=>onSort(field)} style={{padding:'9px 12px',textAlign:'left',fontSize:10,fontWeight:600,color:active?'var(--text-primary)':'var(--text-secondary)',borderBottom:'1px solid var(--border)',background:'var(--bg1)',textTransform:'uppercase',letterSpacing:'.3px',whiteSpace:'nowrap',cursor:'pointer',userSelect:'none',...style}}>{label}{arrow}</th>
+}
+function BarChart({entries,color='#3b82f6'}) {
+  const max=entries[0]?.[1]||1
+  return <div>{entries.map(([l,n])=>(<div key={l} style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}><div style={{fontSize:12,color:'var(--text-secondary)',width:130,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={l}>{l}</div><div style={{flex:1,height:7,background:'var(--bg3)',borderRadius:4,overflow:'hidden'}}><div style={{height:'100%',borderRadius:4,background:color,width:`${Math.round(n/max*100)}%`,transition:'width 0.3s'}}/></div><div style={{fontSize:12,color:'var(--text-secondary)',minWidth:28,textAlign:'right'}}>{n}</div></div>))}</div>
+}
+
+function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
+  const [fields,setFields]=useState({...incident})
+  const set=(k,v)=>{
+    const next={...fields,[k]:v}
+    next.adjOpen=!next.adjBy
+    next.coachingOpen=next.coachingRequired==='Yes'&&!next.coachingDate
+    next.invOpen=!next.investigationNotes
+    setFields(next)
+  }
   const inp=(ov={})=>({width:'100%',padding:'7px 10px',fontSize:13,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg1)',color:'var(--text-primary)',fontFamily:'inherit',boxSizing:'border-box',...ov})
   const lbl={display:'block',fontSize:11,fontWeight:600,color:'var(--text-secondary)',marginBottom:4,textTransform:'uppercase',letterSpacing:'.4px',fontFamily:'var(--font-mono)'}
   const row=(label,el)=><div style={{marginBottom:12}}><label style={lbl}>{label}</label>{el}</div>
@@ -92,9 +120,9 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}){
   )
 }
 
-function AddModal({defaultFac,onClose,onAdd}){
+function AddModal({defaultFac,onClose,onAdd}) {
   const today=new Date().toISOString().split('T')[0]
-  const[f,setF]=useState({fac:defaultFac==='ken'?'ken':defaultFac==='mad'?'mad':'cal',date:today,orderNum:'',customer:'',employee:'',responsibleParty:'',incidentType:'Outbound',reason:'Damaged',damageType:'No Damage',cases:'',lotNum:'',materialNum:'',licensePlate:'',incidentNotes:'',investigationNotes:'',loadproofUrl:'',adjDate:'',adjBy:'',adjNotes:'',coachingRequired:'No',employeeResponsible:'',coachingDate:'',coachingBy:'',coachingNotes:''})
+  const [f,setF]=useState({fac:defaultFac==='ken'?'ken':defaultFac==='mad'?'mad':'cal',date:today,orderNum:'',customer:'',employee:'',responsibleParty:'',incidentType:'Outbound',reason:'Damaged',damageType:'No Damage',cases:'',lotNum:'',materialNum:'',licensePlate:'',incidentNotes:'',investigationNotes:'',loadproofUrl:'',adjDate:'',adjBy:'',adjNotes:'',coachingRequired:'No',employeeResponsible:'',coachingDate:'',coachingBy:'',coachingNotes:''})
   const set=(k,v)=>setF(p=>({...p,[k]:v}))
   const inp={width:'100%',padding:'7px 10px',fontSize:13,border:'1px solid var(--border)',borderRadius:6,background:'var(--bg1)',color:'var(--text-primary)',fontFamily:'inherit',boxSizing:'border-box'}
   const lbl={display:'block',fontSize:11,fontWeight:600,color:'var(--text-secondary)',marginBottom:4,textTransform:'uppercase',letterSpacing:'.4px',fontFamily:'var(--font-mono)'}
@@ -133,24 +161,24 @@ function AddModal({defaultFac,onClose,onAdd}){
   )
 }
 
-export default function DvrTracker({typeSelector=null}){
-  const[cal,setCal]=useState(SEED_CAL)
-  const[ken,setKen]=useState(SEED_KEN)
-  const[mad,setMad]=useState([])
-  const[loading,setLoading]=useState(true)
-  const[loadErrors,setLoadErrors]=useState({})
-  const[facility,setFacility]=useState('all')
-  const[tab,setTab]=useState('dash')
-  const[search,setSearch]=useState('')
-  const[typeFilter,setTypeFilter]=useState('all')
-  const[reasonFilter,setReasonFilter]=useState('all')
-  const[statusFilter,setStatusFilter]=useState('all')
-  const[sortField,setSortField]=useState('date')
-  const[sortDir,setSortDir]=useState('desc')
-  const[page,setPage]=useState(1)
-  const[detail,setDetail]=useState(null)
-  const[showAdd,setShowAdd]=useState(false)
-  const[showNotify,setShowNotify]=useState(false)
+export default function DvrTracker({ typeSelector = null }) {
+  const [cal,setCal]=useState(SEED_CAL)
+  const [ken,setKen]=useState(SEED_KEN)
+  const [mad,setMad]=useState([])
+  const [loading,setLoading]=useState(true)
+  const [loadErrors,setLoadErrors]=useState({})
+  const [facility,setFacility]=useState('all')
+  const [tab,setTab]=useState('dash')
+  const [search,setSearch]=useState('')
+  const [typeFilter,setTypeFilter]=useState('all')
+  const [reasonFilter,setReasonFilter]=useState('all')
+  const [statusFilter,setStatusFilter]=useState('all')
+  const [sortField,setSortField]=useState('date')
+  const [sortDir,setSortDir]=useState('desc')
+  const [page,setPage]=useState(1)
+  const [detail,setDetail]=useState(null)
+  const [showAdd,setShowAdd]=useState(false)
+  const [showNotify,setShowNotify]=useState(false)
 
   useEffect(()=>{
     setLoading(true)
@@ -173,8 +201,8 @@ export default function DvrTracker({typeSelector=null}){
     }).finally(()=>setLoading(false))
   },[])
 
-  const handleSort=field=>{
-    if(sortField===field)setSortDir(d=>d==='asc'?'desc':'asc')
+  const handleSort=(field)=>{
+    if(sortField===field){setSortDir(d=>d==='asc'?'desc':'asc')}
     else{setSortField(field);setSortDir('asc')}
     setPage(1)
   }
@@ -206,8 +234,8 @@ export default function DvrTracker({typeSelector=null}){
   const safePg=Math.min(page,pages)
   const paged=filtered.slice((safePg-1)*PAGE_SIZE,safePg*PAGE_SIZE)
   const reasons=useMemo(()=>[...new Set(activeData.map(i=>i.reason).filter(Boolean))].sort(),[activeData])
-  const extraCols=facility==='all'?1:0
-  const totalCols=15+extraCols
+  const extraCols = facility==='all' ? 1 : 0
+  const totalCols = 15 + extraCols
 
   const writeBack=useCallback((id,fac,next)=>{
     const arr=fac==='cal'?cal:fac==='ken'?ken:mad
@@ -217,7 +245,10 @@ export default function DvrTracker({typeSelector=null}){
     const fields=['adjDate','adjBy','adjNotes','coachingRequired','employeeResponsible','coachingDate','coachingBy','coachingNotes','investigationNotes']
     fields.forEach(f=>{if(next[f]!==undefined&&next[f]!==incident[f])updates[f]=next[f]})
     if(Object.keys(updates).length===0)return
-    fetch(`/.netlify/functions/sharepoint-dvr?facility=${fac}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rowIndex:incident.rowIndex,updates,colMap:incident._colMap})}).catch(e=>console.error(`[DVR] ${fac} write-back failed:`,e))
+    fetch(`/.netlify/functions/sharepoint-dvr?facility=${fac}`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rowIndex:incident.rowIndex,updates,colMap:incident._colMap}),
+    }).catch(e=>console.error(`[DVR] ${fac} write-back failed:`,e))
   },[cal,ken,mad])
 
   const handleUpdate=useCallback((id,fac,next,remove=false)=>{
@@ -256,7 +287,7 @@ export default function DvrTracker({typeSelector=null}){
         ))}
       </div>
 
-      {/* Row 2: DVR Tracker + facility pills + action buttons */}
+      {/* Row 2: DVR Tracker + facility pills + Add incident + Notify settings */}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <span style={{fontSize:14,fontWeight:700,fontFamily:'var(--font-mono)'}}>DVR Tracker</span>
@@ -280,7 +311,7 @@ export default function DvrTracker({typeSelector=null}){
         </div>
       </div>
 
-      {/* Row 3: Type selector */}
+      {/* Row 3: Type selector (DVRS / Inbound / Outbound / Hold) */}
       {typeSelector&&(
         <div style={{display:'flex',gap:4,padding:'8px 20px',borderBottom:'1px solid var(--border)',background:'var(--bg1)'}}>
           {typeSelector}
@@ -288,12 +319,14 @@ export default function DvrTracker({typeSelector=null}){
       )}
 
       <div style={{padding:20}}>
+        {/* Error banners */}
         {Object.entries(loadErrors).map(([fac,err])=>(
           <div key={fac} style={{background:'rgba(220,38,38,0.08)',border:'1px solid rgba(220,38,38,0.2)',borderRadius:8,padding:'10px 14px',marginBottom:10,fontSize:12,color:'var(--red)',fontFamily:'var(--font-mono)'}}>
             {fac.toUpperCase()} SharePoint: {err} — showing cached data
           </div>
         ))}
 
+        {/* ══ TRACKER ══ */}
         {tab==='tracker'&&(
           <>
             <div style={{background:'var(--bg1)',border:'1px solid var(--border)',borderRadius:10,padding:'14px 16px',marginBottom:16}}>
@@ -315,6 +348,7 @@ export default function DvrTracker({typeSelector=null}){
                 <span style={{fontSize:11,color:'var(--text-secondary)',fontFamily:'var(--font-mono)',marginLeft:'auto'}}>{filtered.length} of {activeData.length} records{hasFilters?' (filtered)':''}</span>
               </div>
             </div>
+
             <div style={{border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
               <div style={{overflowX:'auto'}}>
                 <table style={{width:'100%',borderCollapse:'collapse',fontSize:13,minWidth:1200}}>
@@ -340,7 +374,9 @@ export default function DvrTracker({typeSelector=null}){
                     {loading&&!paged.length?(
                       <tr><td colSpan={totalCols} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13,fontFamily:'var(--font-mono)'}}>Loading from SharePoint…</td></tr>
                     ):paged.length?paged.map((i,idx)=>(
-                      <tr key={i.id} onClick={()=>setDetail({id:i.id,fac:i._fac})} style={{background:idx%2===0?'var(--bg0)':'var(--bg1)',cursor:'pointer'}} onMouseEnter={e=>e.currentTarget.style.background='var(--bg2)'} onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?'var(--bg0)':'var(--bg1)'}>
+                      <tr key={i.id} onClick={()=>setDetail({id:i.id,fac:i._fac})} style={{background:idx%2===0?'var(--bg0)':'var(--bg1)',cursor:'pointer'}}
+                        onMouseEnter={e=>e.currentTarget.style.background='var(--bg2)'}
+                        onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?'var(--bg0)':'var(--bg1)'}>
                         {facility==='all'&&<td style={tdBase}><FacBadge fac={i._fac}/></td>}
                         <td style={{...tdBase,whiteSpace:'nowrap'}}>{fmtDate(i.date)}</td>
                         <td style={{...tdBase,fontSize:11,color:'var(--text-secondary)',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{i.id}</td>
@@ -348,7 +384,10 @@ export default function DvrTracker({typeSelector=null}){
                         <td style={{...tdBase,fontFamily:'var(--font-mono)',fontSize:11,whiteSpace:'nowrap'}}>{i.orderNum||'—'}</td>
                         <td style={tdBase}><TypePill type={i.incidentType}/></td>
                         <td style={{...tdBase,whiteSpace:'nowrap'}}>{i.reason||'—'}</td>
-                        <td style={{...tdBase,fontSize:11,fontFamily:'var(--font-mono)'}}><div style={{color:'var(--text-secondary)'}}>{i.licensePlate||'—'}</div><div style={{color:'var(--text-dim,#888)',marginTop:2}}>{[i.lotNum,i.materialNum].filter(Boolean).join(' / ')||''}</div></td>
+                        <td style={{...tdBase,fontSize:11,fontFamily:'var(--font-mono)'}}>
+                          <div style={{color:'var(--text-secondary)'}}>{i.licensePlate||'—'}</div>
+                          <div style={{color:'var(--text-dim,#888)',marginTop:2}}>{[i.lotNum,i.materialNum].filter(Boolean).join(' / ')||''}</div>
+                        </td>
                         <td style={{...tdBase,textAlign:'center',fontFamily:'var(--font-mono)'}}>{i.cases!=null&&i.cases!==''&&i.cases!==0?i.cases:'—'}</td>
                         <td style={{...tdBase,maxWidth:180}}>
                           {i.incidentNotes&&<div style={{fontSize:12,color:'var(--text-secondary)',lineHeight:1.4}}>{preview(i.incidentNotes)}</div>}
@@ -359,7 +398,9 @@ export default function DvrTracker({typeSelector=null}){
                         <td style={tdBase}>{i.adjOpen?<Badge label="Needed" variant="adj"/>:<Badge label="Done" variant="done"/>}</td>
                         <td style={tdBase}>{i.coachingRequired==='Yes'?(i.coachingOpen?<Badge label="Pending" variant="coach"/>:<Badge label="Done" variant="done"/>):<Badge label="N/A" variant="na"/>}</td>
                         <td style={tdBase}>{i.invOpen?<Badge label="Needed" variant="inv"/>:<Badge label="Done" variant="done"/>}</td>
-                        <td style={tdBase} onClick={e=>e.stopPropagation()}>{i.loadproofUrl?<a href={i.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>View ↗</a>:<span style={{fontSize:11,color:'var(--text-dim,#aaa)',fontFamily:'var(--font-mono)' }}>—</span>}</td>
+                        <td style={tdBase} onClick={e=>e.stopPropagation()}>
+                          {i.loadproofUrl?<a href={i.loadproofUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'var(--accent,#3b82f6)',textDecoration:'none',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>View ↗</a>:<span style={{fontSize:11,color:'var(--text-dim,#aaa)',fontFamily:'var(--font-mono)'}}>—</span>}
+                        </td>
                       </tr>
                     )):(
                       <tr><td colSpan={totalCols} style={{padding:40,textAlign:'center',color:'var(--text-secondary)',fontSize:13}}>No records match — <button onClick={()=>{setSearch('');setTypeFilter('all');setReasonFilter('all');setStatusFilter('all')}} style={{background:'none',border:'none',color:'var(--accent,#3b82f6)',cursor:'pointer',fontSize:13,fontFamily:'inherit'}}>clear filters</button></td></tr>
@@ -379,12 +420,14 @@ export default function DvrTracker({typeSelector=null}){
           </>
         )}
 
+        {/* ══ DASHBOARD ══ */}
         {tab==='dash'&&(
           <>
             <div style={{background:'rgba(217,119,6,0.1)',border:'1px solid rgba(217,119,6,0.3)',borderRadius:8,padding:'10px 16px',marginBottom:18,fontSize:13,color:'#d97706',display:'flex',alignItems:'center',gap:8}}>
               <span style={{width:7,height:7,borderRadius:'50%',background:'#d97706',display:'inline-block',flexShrink:0}}/>
               <strong>{loading?'Loading…':activeData.length+' open incidents'}</strong> — {facility==='all'?'All facilities • live from SharePoint':facility==='cal'?'Caledonia':facility==='ken'?'Kenosha':'Madison'}
             </div>
+            {/* KPI cards — clickable, navigate to tracker with matching status filter */}
             <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:12,marginBottom:20}}>
               {[['Total open',activeData.length,'var(--red)','all'],['Adj. needed',adjOpen,'#d97706','adj'],['Coaching pending',coachOpen,'var(--red)','coaching'],['Inv. pending',invPending,'#7c3aed','inv']].map(([l,v,c,sf])=>(
                 <div key={l} onClick={()=>{setStatusFilter(sf);setTab('tracker');setPage(1)}} style={{background:'var(--bg1)',border:'1px solid var(--border)',borderRadius:8,padding:'12px 16px',cursor:'pointer',transition:'box-shadow .15s'}} onMouseEnter={e=>e.currentTarget.style.boxShadow='0 0 0 2px '+c} onMouseLeave={e=>e.currentTarget.style.boxShadow='none'}>
@@ -417,6 +460,7 @@ export default function DvrTracker({typeSelector=null}){
                 </div>
               ))}
             </div>
+            {/* Notify settings panel */}
             {showNotify&&(
               <div style={{marginTop:20}}>
                 <NotifySettingsPanel
@@ -425,7 +469,7 @@ export default function DvrTracker({typeSelector=null}){
                   functionName="dvr-digest-run"
                   contentDateLabel="today"
                   showSkipToNextValidDay={true}
-                  digestDescription="Posts a daily summary of open LoadProof / DVRS incidents (all facilities) to this Front conversation. Fires at the configured time on checked days. 'Send test now' fires immediately regardless of time/day/enabled settings."
+                  digestDescription="Posts a daily summary of open LoadProof / DVRS incidents (all facilities) to this Front conversation. Fires at the configured time on checked days."
                 />
               </div>
             )}
