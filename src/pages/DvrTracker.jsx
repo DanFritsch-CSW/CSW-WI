@@ -73,18 +73,14 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
           </div>
         </div>
         <div style={{padding:20,overflowY:'auto',flex:1}}>
-          {/* Info grid */}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
             {[['Date',fmtDate(incident.date)],['Age',`${ageInDays(incident.date)} days`],['Order #',incident.orderNum||'—'],['Type',incident.incidentType],['Reason',incident.reason],['Cases',incident.cases||'—'],['License plate',incident.licensePlate||'—'],['Material # / Lot',`${incident.materialNum||'—'} / ${incident.lotNum||'—'}`],['Responsible party',incident.responsibleParty||'—']].map(([l,v])=>(
               <div key={l} style={{background:'var(--bg1)',borderRadius:7,padding:'8px 12px',border:'1px solid var(--border-subtle)'}}><div style={{fontSize:10,color:'var(--text-secondary)',marginBottom:2}}>{l}</div><div style={{fontSize:13,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={String(v)}>{v}</div></div>
             ))}
           </div>
-          {/* Incident notes (read-only) */}
           {incident.incidentNotes&&<div style={{background:'var(--bg1)',borderRadius:7,padding:12,marginBottom:12,fontSize:13,color:'var(--text-secondary)',lineHeight:1.5,whiteSpace:'pre-wrap',wordBreak:'break-word',border:'1px solid var(--border-subtle)'}}>{incident.incidentNotes}</div>}
-          {/* LoadProof URL */}
           {sdiv('LoadProof link')}
           {row('Record URL',<input type="url" style={inp()} value={fields.loadproofUrl||''} onChange={e=>set('loadproofUrl',e.target.value)} placeholder="Paste LoadProof record URL here"/>)}
-          {/* Investigation */}
           <div style={{border:'1px solid var(--border)',borderRadius:8,padding:14,marginBottom:12}}>
             <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}>
               <span style={{width:7,height:7,borderRadius:'50%',background:fields.invOpen?'#7c3aed':'#16a34a',display:'inline-block'}}/>
@@ -93,7 +89,6 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
             </div>
             {row('Investigation notes',<textarea style={{...inp(),minHeight:72,resize:'vertical'}} value={fields.investigationNotes||''} onChange={e=>set('investigationNotes',e.target.value)} placeholder="Video watched, findings, root cause, follow-up action..."/>)}
           </div>
-          {/* Adjustment */}
           <div style={{border:'1px solid var(--border)',borderRadius:8,padding:14,marginBottom:12}}>
             <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}>
               <span style={{width:7,height:7,borderRadius:'50%',background:fields.adjOpen?'#d97706':'#16a34a',display:'inline-block'}}/>
@@ -102,7 +97,6 @@ function DetailModal({incident,fac,onClose,onUpdate,onDelete}) {
             {two(<>{row('Completed date',<input type="date" style={inp()} value={fields.adjDate||''} onChange={e=>set('adjDate',e.target.value)}/>)}{row('Completed by',<input type="text" style={inp()} value={fields.adjBy||''} onChange={e=>set('adjBy',e.target.value)} placeholder="Name"/>)}</>)}
             {row('Adjustment notes',<input type="text" style={inp()} value={fields.adjNotes||''} onChange={e=>set('adjNotes',e.target.value)} placeholder="LP, Datex ref..."/>)}
           </div>
-          {/* Coaching */}
           <div style={{border:'1px solid var(--border)',borderRadius:8,padding:14,marginBottom:12}}>
             <div style={{fontSize:12,fontWeight:600,color:'var(--text-secondary)',marginBottom:10,display:'flex',alignItems:'center',gap:5}}>
               <span style={{width:7,height:7,borderRadius:'50%',background:fields.coachingOpen?'var(--red)':'#16a34a',display:'inline-block'}}/>
@@ -221,7 +215,6 @@ export default function DvrTracker({ typeSelector = null }) {
   const adjOpen=useMemo(()=>activeData.filter(i=>i.adjOpen).length,[activeData])
   const coachOpen=useMemo(()=>activeData.filter(i=>i.coachingOpen).length,[activeData])
   const invPending=useMemo(()=>activeData.filter(i=>i.invOpen).length,[activeData])
-  const oldest=useMemo(()=>activeData.reduce((mx,i)=>ageInDays(i.date)>ageInDays(mx?.date||'')?i:mx,activeData[0]),[activeData])
 
   const filtered=useMemo(()=>{
     let items=activeData.slice()
@@ -239,8 +232,8 @@ export default function DvrTracker({ typeSelector = null }) {
   const safePg=Math.min(page,pages)
   const paged=filtered.slice((safePg-1)*PAGE_SIZE,safePg*PAGE_SIZE)
   const reasons=useMemo(()=>[...new Set(activeData.map(i=>i.reason).filter(Boolean))].sort(),[activeData])
-  const extraCols = facility==='all' ? 1 : 0 // fac column
-  const totalCols = 15 + extraCols // base 15 + optional fac
+  const extraCols = facility==='all' ? 1 : 0
+  const totalCols = 15 + extraCols
 
   const writeBack=useCallback((id,fac,next)=>{
     const arr=fac==='cal'?cal:fac==='ken'?ken:mad
@@ -284,10 +277,17 @@ export default function DvrTracker({ typeSelector = null }) {
 
   return(
     <div style={{padding:0,background:'var(--bg0)'}}>
-      {/* Topbar */}
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap',gap:8}}>
+
+      {/* Row 1: Dashboard | Open tracker */}
+      <div style={{display:'flex',gap:2,padding:'0 20px',borderBottom:'1px solid var(--border)',background:'var(--bg0)'}}>
+        {[['dash','Dashboard'],['tracker','Open tracker']].map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{padding:'10px 14px',fontSize:13,border:'none',background:'transparent',cursor:'pointer',color:tab===id?'var(--text-primary)':'var(--text-secondary)',fontWeight:tab===id?600:400,borderBottom:tab===id?'2px solid var(--text-primary)':'2px solid transparent',marginBottom:-1,fontFamily:'inherit'}}>{label}</button>
+        ))}
+      </div>
+
+      {/* Row 2: DVR Tracker + facility pills + Add incident */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 20px',borderBottom:'1px solid var(--border)',flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
-          {typeSelector&&<>{typeSelector}<div style={{width:1,height:20,background:'var(--border)',flexShrink:0}}/></>}
           <span style={{fontSize:14,fontWeight:700,fontFamily:'var(--font-mono)'}}>DVR Tracker</span>
           <div style={{display:'flex',border:'1px solid var(--border)',borderRadius:7,overflow:'hidden'}}>
             {[['all','All','#374151'],['cal','Caledonia','#1d4ed8'],['ken','Kenosha','#15803d'],['mad','Madison','#7c3aed']].map(([id,label,color])=>(
@@ -306,12 +306,12 @@ export default function DvrTracker({ typeSelector = null }) {
         <button onClick={()=>setShowAdd(true)} style={{background:'var(--text-primary)',border:'none',borderRadius:6,padding:'6px 14px',cursor:'pointer',color:'var(--bg0)',fontSize:12,fontWeight:600,fontFamily:'var(--font-mono)'}}>+ Add incident</button>
       </div>
 
-      {/* Tab nav — Dashboard first */}
-      <div style={{display:'flex',gap:2,padding:'0 20px',borderBottom:'1px solid var(--border)'}}>
-        {[['dash','Dashboard'],['tracker','Open tracker']].map(([id,label])=>(
-          <button key={id} onClick={()=>setTab(id)} style={{padding:'10px 14px',fontSize:13,border:'none',background:'transparent',cursor:'pointer',color:tab===id?'var(--text-primary)':'var(--text-secondary)',fontWeight:tab===id?600:400,borderBottom:tab===id?'2px solid var(--text-primary)':'2px solid transparent',marginBottom:-1,fontFamily:'inherit'}}>{label}</button>
-        ))}
-      </div>
+      {/* Row 3: Type selector (DVRS / Inbound / Outbound / Hold) */}
+      {typeSelector&&(
+        <div style={{display:'flex',gap:4,padding:'8px 20px',borderBottom:'1px solid var(--border)',background:'var(--bg1)'}}>
+          {typeSelector}
+        </div>
+      )}
 
       <div style={{padding:20}}>
         {/* Error banners */}
