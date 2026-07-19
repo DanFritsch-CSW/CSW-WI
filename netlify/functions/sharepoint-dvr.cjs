@@ -23,6 +23,8 @@ const FACILITY_CONFIG = {
 }
 // Bounded fallback — avoids usedRange timeouts from phantom formatting
 const FALLBACK_RANGE = 'A1:CB500'
+// Only show records on or after this date — filters out stale pre-July data
+const DATE_CUTOFF = '2026-07-01'
 
 let _token=null, _tokenExpiry=0
 async function getToken() {
@@ -49,8 +51,6 @@ async function getDriveRef(facility,token) {
   return _driveCache[facility]
 }
 async function fetchSheetValues(sheetBase,token) {
-  // Try usedRange first; fall back to bounded range on ANY error
-  // (catches RangeExceedsLimit, 504 MaxRequestDurationExceeded, phantom-format timeouts)
   try {
     const r=await graph(`${sheetBase}/usedRange`,token)
     if(r.values&&r.values.length>0) return r.values
@@ -69,9 +69,6 @@ function parseDate(v) {
   try{const d=new Date(s);return isNaN(d.getTime())?'':d.toISOString().slice(0,10)}catch{return ''}
 }
 function str(v){if(v==null)return '';const s=String(v).trim();return['null','nan','none','n/a'].includes(s.toLowerCase())?'':s}
-// strText: like str() but treats numeric values (including 0) as empty.
-// Used for text-only fields like adjBy, invNotes that should never be a number.
-// Prevents false 'closed' status when Graph API returns 0 for unwritten cells in bounded-range reads.
 function strText(v){if(v==null||typeof v==='number') return '';const s=String(v).trim();return['null','nan','none','n/a'].includes(s.toLowerCase())?'':s}
 function colLetter(idx){let r='',n=idx+1;while(n>0){n--;r=String.fromCharCode(65+(n%26))+r;n=Math.floor(n/26)}return r}
 function buildColMap(headerRow) {
@@ -84,7 +81,6 @@ function linkVal(raw) {
   return (s&&s.toLowerCase()!=='load link'&&s.toLowerCase()!=='load url') ? s : ''
 }
 
-// DVRS parser
 function parseDvrs(headerRow,dataRows,prefix) {
   const c=buildColMap(headerRow)
   const i_date=c.find('filter by this date'),i_order=c.find('csw inv ctrl - order #','csw inv ctrl - order','order')
@@ -105,7 +101,7 @@ function parseDvrs(headerRow,dataRows,prefix) {
   for(let i=0;i<dataRows.length;i++){
     const row=dataRows[i],rowIndex=i+2
     const incDate=parseDate(i_date>=0?row[i_date]:null);if(!incDate){counter++;continue}
-    // Use strText for text-only fields: treats numeric 0 as empty (prevents false 'closed' on bounded-range reads)
+    if(incDate<DATE_CUTOFF){counter++;continue}
     const adjBy=strText(i_adjBy>=0?row[i_adjBy]:''),adjDate=parseDate(i_adjDate>=0?row[i_adjDate]:null),adjOpen=!adjBy
     const coachRaw=strText(i_coachReq>=0?row[i_coachReq]:'').toLowerCase()
     const coaching=coachRaw==='yes'?'Yes':coachRaw==='no'?'No':''
@@ -143,7 +139,6 @@ function parseDvrs(headerRow,dataRows,prefix) {
   return incidents
 }
 
-// Inbound parser
 function parseInbound(headerRow,dataRows,prefix) {
   const c=buildColMap(headerRow)
   const i_date=c.find('filter by this date'),i_lpDate=c.find('date')
@@ -159,6 +154,7 @@ function parseInbound(headerRow,dataRows,prefix) {
   for(let i=0;i<dataRows.length;i++){
     const row=dataRows[i],rowIndex=i+2
     const incDate=parseDate(i_date>=0?row[i_date]:null);if(!incDate) continue
+    if(incDate<DATE_CUTOFF) continue
     const problem=str(i_problem>=0?row[i_problem]:''),custNotified=strText(i_custNotified>=0?row[i_custNotified]:'')
     const whoResolved=strText(i_whoResolved>=0?row[i_whoResolved]:'')
     const hasProblem=problem.toLowerCase().startsWith('yes')
@@ -179,7 +175,6 @@ function parseInbound(headerRow,dataRows,prefix) {
   return records
 }
 
-// Outbound parser
 function parseOutbound(headerRow,dataRows,prefix) {
   const c=buildColMap(headerRow)
   const i_date=c.find('filter by this date'),i_lpDate=c.find('date')
@@ -193,6 +188,7 @@ function parseOutbound(headerRow,dataRows,prefix) {
   for(let i=0;i<dataRows.length;i++){
     const row=dataRows[i],rowIndex=i+2
     const incDate=parseDate(i_date>=0?row[i_date]:null);if(!incDate) continue
+    if(incDate<DATE_CUTOFF) continue
     const problem=str(i_problem>=0?row[i_problem]:''),hasProblem=problem.toLowerCase().startsWith('yes')
     records.push({
       id:`${prefix}-${String(i+1).padStart(4,'0')}`,rowIndex,date:incDate,
@@ -209,7 +205,6 @@ function parseOutbound(headerRow,dataRows,prefix) {
   return records
 }
 
-// Hold parser
 function parseHold(headerRow,dataRows,prefix) {
   const c=buildColMap(headerRow)
   const i_date=c.find('filter by this date'),i_lpDate=c.find('date')
@@ -224,6 +219,7 @@ function parseHold(headerRow,dataRows,prefix) {
   for(let i=0;i<dataRows.length;i++){
     const row=dataRows[i],rowIndex=i+2
     const incDate=parseDate(i_date>=0?row[i_date]:null);if(!incDate) continue
+    if(incDate<DATE_CUTOFF) continue
     const problem=str(i_problem>=0?row[i_problem]:''),hasProblem=problem.toLowerCase().startsWith('yes')
     const csrNotified=strText(i_csrNotified>=0?row[i_csrNotified]:'')
     let status='clean'
