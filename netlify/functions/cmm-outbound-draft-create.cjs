@@ -35,7 +35,10 @@
 //      America/Chicago time matches notify_hour/notify_minute for any
 //      active row in prepick_notify_settings (dashboard_type=
 //      'cmm_outbound_appts'), gated by notify_days + last_sent_date dedup
-//      (keyed to the content date — tomorrow).
+//      (keyed to the content date — tomorrow — since a Fri/Sat/Sun night
+//      run all target different Mondays... actually different tomorrows,
+//      so no special dedup collision like the old fixed-cron discussion
+//      function had).
 //   2. MANUAL TEST (POST { facility }) — bypasses time/active/dedup
 //      checks, never writes last_sent_date. Open, no shared secret — same
 //      reasoning as every other digest here: recipients and content are
@@ -47,7 +50,11 @@ const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
 const FRONT_TOKEN = process.env.FRONT_API_TOKEN
 const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN
-const FRONT_SEND_CHANNEL_ID = 'cha_erzf8' // CSW Main — same channel front-send-email.cjs uses
+// CSW Main — same channel front-send-email.cjs uses. Now just the FALLBACK
+// when a facility's prepick_notify_settings.from_channel_id is unset — see
+// Settings > CMM Outbound Appts' new "From" picker (added 2026-07-19,
+// backed by the front_channels table synced by front-channels-sync.cjs).
+const DEFAULT_FRONT_CHANNEL_ID = 'cha_erzf8'
 
 // warehouse_id map — matches production_db.gold.truck_appointments
 // (same map as motherduck-appointments.cjs). Only 'cal' is wired up today;
@@ -179,11 +186,11 @@ async function queryAppointments(warehouseId, date) {
   return rows || []
 }
 
-async function frontCreateDraft({ authorId, to, cc, subject, body }) {
+async function frontCreateDraft({ authorId, to, cc, subject, body, channelId }) {
   const payload = { author_id: authorId, subject, body }
   if (to && to.length) payload.to = to
   if (cc && cc.length) payload.cc = cc
-  const res = await fetch(`https://api2.frontapp.com/channels/${FRONT_SEND_CHANNEL_ID}/drafts`, {
+  const res = await fetch(`https://api2.frontapp.com/channels/${channelId || DEFAULT_FRONT_CHANNEL_ID}/drafts`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(payload),
@@ -229,7 +236,7 @@ async function runDigest({ isManualTest, facility }) {
   if (!warehouseId) return { ok: false, reason: `Unknown facility "${facility}"` }
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.${facility}&dashboard_type=eq.cmm_outbound_appts&select=notify_hour,notify_minute,notify_days,active,last_sent_date,discussion_comment,author_teammate_id`
+    `prepick_notify_settings?facility=eq.${facility}&dashboard_type=eq.cmm_outbound_appts&select=notify_hour,notify_minute,notify_days,active,last_sent_date,discussion_comment,author_teammate_id,from_channel_id`
   )
   const settings = settingsRows?.[0]
   if (!settings) return { ok: false, reason: `No prepick_notify_settings row for ${facility}/cmm_outbound_appts` }
@@ -275,7 +282,7 @@ async function runDigest({ isManualTest, facility }) {
   const subject = `CMM Outbound Appts — ${facilityDisplay} — ${date}`
   const html = buildDraftHtml(appts, dateObj, facilityDisplay)
 
-  const draft = await frontCreateDraft({ authorId: settings.author_teammate_id, to, cc, subject, body: html })
+  const draft = await frontCreateDraft({ authorId: settings.author_teammate_id, to, cc, subject, body: html, channelId: settings.from_channel_id })
   const conversationId = conversationIdFromDraftResponse(draft)
 
   if (conversationId && discussionTeammateIds.length) {
@@ -293,6 +300,7 @@ async function runDigest({ isManualTest, facility }) {
     ok: true, date, subject, conversationId,
     apptCount: appts.length, toCount: to.length, ccCount: cc.length,
     followerCount: discussionTeammateIds.length,
+    channelId: settings.from_channel_id || DEFAULT_FRONT_CHANNEL_ID,
   }
 }
 
