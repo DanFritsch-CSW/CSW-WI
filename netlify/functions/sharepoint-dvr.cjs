@@ -21,9 +21,12 @@ const FACILITY_CONFIG = {
     prefix: { dvrs:'DVR', inbound:'CAL-IN', outbound:'CAL-OUT', hold:'CAL-HLD' },
   },
 }
-// Bounded fallback — avoids usedRange timeouts from phantom formatting
-const FALLBACK_RANGE = 'A1:CB500'
-// Only show records on or after this date — filters out stale pre-July data
+// Bounded fallback ranges for when usedRange times out (e.g. MAD phantom-formatting issue).
+// KEN has 2400+ rows; the original 500-row fallback silently missed all July 2026 data.
+// Progressive retry: try large (5000 rows) first, fall back to small (500) if large also fails.
+const FALLBACK_RANGE_LARGE = 'A1:CB5000'
+const FALLBACK_RANGE_SMALL = 'A1:CB500'
+// Only show records on or after this date
 const DATE_CUTOFF = '2026-07-01'
 
 let _token=null, _tokenExpiry=0
@@ -55,12 +58,24 @@ async function fetchSheetValues(sheetBase,token) {
     const r=await graph(`${sheetBase}/usedRange`,token)
     if(r.values&&r.values.length>0) return r.values
   } catch(err) {
-    console.warn(`[fetchSheetValues] usedRange failed, using bounded fallback: ${err.message.slice(0,80)}`)
+    console.warn(`[fetchSheetValues] usedRange failed: ${err.message.slice(0,80)}`)
   }
-  const r=await graph(`${sheetBase}/range(address='${FALLBACK_RANGE}')`,token)
-  const vals=r.values||[]; let last=vals.length-1
-  while(last>0&&vals[last].every(v=>v===null||v===''||v===0)) last--
-  return vals.slice(0,last+1)
+  // usedRange failed or returned empty — try large bounded range first (covers KEN 2400+ rows),
+  // fall back to small if large also times out (MAD phantom-formatting)
+  for(const range of [FALLBACK_RANGE_LARGE, FALLBACK_RANGE_SMALL]) {
+    try {
+      console.warn(`[fetchSheetValues] trying bounded fallback ${range}`)
+      const r=await graph(`${sheetBase}/range(address='${range}')`,token)
+      const vals=r.values||[]; let last=vals.length-1
+      while(last>0&&vals[last].every(v=>v===null||v===''||v===0)) last--
+      const trimmed=vals.slice(0,last+1)
+      console.log(`[fetchSheetValues] fallback ${range} returned ${trimmed.length} rows`)
+      return trimmed
+    } catch(err2) {
+      console.warn(`[fetchSheetValues] fallback ${range} failed: ${err2.message.slice(0,80)}`)
+    }
+  }
+  return []
 }
 function parseDate(v) {
   if(v==null||v==='') return ''
