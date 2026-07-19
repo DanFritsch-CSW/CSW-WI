@@ -11,7 +11,7 @@
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
-const FRONT_TOKEN = process.env.FRONT_API_TOKEN   // matches every other digest function
+const FRONT_TOKEN = process.env.FRONT_API_TOKEN
 const APP_URL = 'https://csw-wi.netlify.app'
 
 async function sbGet(path) {
@@ -59,7 +59,7 @@ async function postFrontComment(conversationId, body) {
   const r = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ author_id: 'default', body })
+    body: JSON.stringify({ body })
   })
   if (!r.ok) {
     const t = await r.text()
@@ -101,7 +101,6 @@ async function runDigest(isManual, baseUrl) {
     if (settings.last_sent_date === todayISO) return { ok: false, reason: `Already sent for ${todayISO}` }
   }
 
-  // Fetch incidents from all facilities
   const [calRes, kenRes, madRes] = await Promise.all([
     fetchFacilityIncidents('cal', baseUrl),
     fetchFacilityIncidents('ken', baseUrl),
