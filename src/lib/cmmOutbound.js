@@ -6,16 +6,23 @@
 // `supabase` client and `triggerDigestTest`/`fetchFrontTeammates` from
 // supabase.js instead of duplicating them.
 //
-// Three concepts, matching cmm-outbound-draft-create.cjs:
+// Four concepts, matching cmm-outbound-draft-create.cjs:
 //   1. Settings row (prepick_notify_settings, facility='cal',
 //      dashboard_type='cmm_outbound_appts') — send time/days/active +
-//      the two new columns (discussion_comment, author_teammate_id).
+//      discussion_comment/author_teammate_id + from_channel_id (added
+//      2026-07-19 — which Front channel/address the draft is created on).
 //   2. Email recipients (cmm_outbound_email_recipients) — TO/CC, external
 //      addresses. Land on the draft itself.
 //   3. Discussion recipients (notification_recipients,
 //      list_name='cmm_outbound_<facility>') — internal Front teammates,
 //      added as conversation followers + see the discussion comment. Same
 //      list_name convention as daily_discussion_<facility> in supabase.js.
+//   4. Front channels (front_channels, synced nightly by
+//      front-channels-sync.cjs) — backs the "From" picker. author_teammate_id
+//      (who Front shows as the draft's owner) and from_channel_id (which
+//      email address it actually sends FROM) are two separate concepts —
+//      Front ties the From address to the channel a draft is created on,
+//      not to the author. See front-channels-sync.cjs header for why.
 
 import { supabase } from './supabase.js'
 
@@ -27,7 +34,7 @@ export async function fetchCmmOutboundSettings(facility) {
   if (!supabase) return null
   const { data, error } = await supabase
     .from('prepick_notify_settings')
-    .select('notify_hour, notify_minute, notify_days, active, last_sent_date, discussion_comment, author_teammate_id')
+    .select('notify_hour, notify_minute, notify_days, active, last_sent_date, discussion_comment, author_teammate_id, from_channel_id')
     .eq('facility', facility)
     .eq('dashboard_type', DASHBOARD_TYPE)
     .maybeSingle()
@@ -35,7 +42,7 @@ export async function fetchCmmOutboundSettings(facility) {
   return data
 }
 
-export async function upsertCmmOutboundSettings(facility, { notifyHour, notifyMinute, notifyDays, active, discussionComment, authorTeammateId }) {
+export async function upsertCmmOutboundSettings(facility, { notifyHour, notifyMinute, notifyDays, active, discussionComment, authorTeammateId, fromChannelId }) {
   if (!supabase) return
   const { error } = await supabase
     .from('prepick_notify_settings')
@@ -45,6 +52,7 @@ export async function upsertCmmOutboundSettings(facility, { notifyHour, notifyMi
         notify_hour: notifyHour, notify_minute: notifyMinute, notify_days: notifyDays, active,
         discussion_comment: discussionComment ?? null,
         author_teammate_id: authorTeammateId ?? null,
+        from_channel_id: fromChannelId ?? null,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'facility,dashboard_type' }
@@ -143,4 +151,32 @@ export async function saveCmmOutboundDiscussionRecipients(facility, chosenTeamma
       .in('id', removeIds)
     if (delErr) { console.error('saveCmmOutboundDiscussionRecipients delete:', delErr); throw delErr }
   }
+}
+
+// ─── Front channels (From picker) ────────────────────────────────────────
+//
+// Synced nightly (10:20 UTC) by front-channels-sync.cjs, upsert-only —
+// same posture as front_teammates (a removed/archived channel's row just
+// goes stale, harmless). "Sync channels now" in Settings calls
+// triggerFrontChannelsSync() for an immediate on-demand refresh.
+
+export async function fetchFrontChannels() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('front_channels')
+    .select('channel_id, name, address, channel_type')
+    .order('name')
+  if (error) { console.error('fetchFrontChannels:', error); return [] }
+  return data ?? []
+}
+
+export async function triggerFrontChannelsSync() {
+  const res = await fetch('/.netlify/functions/front-channels-sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  const json = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
+  return json
 }
