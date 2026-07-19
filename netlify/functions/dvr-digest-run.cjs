@@ -21,11 +21,13 @@ async function sbGet(path) {
   return r.json()
 }
 async function sbPatch(path, body) {
-  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method: 'PATCH',
     headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
     body: JSON.stringify(body)
   })
+  if (!r.ok) console.error(`[dvr-digest] sbPatch failed ${r.status}: ${await r.text()}`)
+  return r
 }
 
 function centralNowParts() {
@@ -99,6 +101,11 @@ async function runDigest(isManual, baseUrl) {
     }
 
     if (settings.last_sent_date === todayISO) return { ok: false, reason: `Already sent for ${todayISO}` }
+
+    // Lock last_sent_date BEFORE slow SharePoint reads — prevents re-sends if
+    // the function times out mid-fetch (KEN has 2400+ rows, reads can take 20s+).
+    // Even if the function is killed after this point, the gate is already set.
+    await sbPatch(`prepick_notify_settings?facility=eq.all&dashboard_type=eq.dvr_incidents`, { last_sent_date: todayISO })
   }
 
   const [calRes, kenRes, madRes] = await Promise.all([
@@ -147,10 +154,6 @@ async function runDigest(isManual, baseUrl) {
 
   await postFrontComment(settings.front_conversation_id, lines.join('\n'))
   console.log(`[dvr-digest] Posted to ${settings.front_conversation_id}, all=${all.length}`)
-
-  if (!isManual) {
-    await sbPatch(`prepick_notify_settings?facility=eq.all&dashboard_type=eq.dvr_incidents`, { last_sent_date: todayISO })
-  }
 
   return { ok: true, totalOpen: all.length, message: `Digest sent — ${all.length} open incidents` }
 }
