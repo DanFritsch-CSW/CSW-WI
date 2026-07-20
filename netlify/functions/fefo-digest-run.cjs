@@ -8,8 +8,8 @@
 //
 // ── Why one settings row per project instead of one combined digest ───────
 // Dan's call: each FEFO project (Fair Oaks, Fair Oaks West, Richelieu,
-// Crown Bakeries, Birchwood — all KEN — plus Palermo's Caledonia at CAL,
-// added 2026-07-17) gets its OWN prepick_notify_settings row —
+// Crown Bakeries, Birchwood — all KEN — plus Palermo's Caledonia's three
+// projects at CAL) gets its OWN prepick_notify_settings row —
 // (facility, dashboard_type)=('ken'|'cal', 'fefo_<projectId>') — with its
 // own Front conversation, its own send time, and its own Enabled toggle.
 // No schema change was needed: the table's existing composite key
@@ -17,11 +17,11 @@
 // new dashboard_type value per project, in whichever facility that
 // project actually lives at.
 //
-// This one Netlify function is SHARED across all 5 rows (one file, one
-// cron tick every 15 min) rather than 5 separate function files — the only
-// thing that differs per row is which project's data to pull and which
-// conversation to post to, so looping 5 settings rows inside one scheduled
-// tick is simpler than 5 near-identical function files.
+// This one Netlify function is SHARED across all rows (one file, one
+// cron tick every 15 min) rather than one function file per project — the
+// only thing that differs per row is which project's data to pull and
+// which conversation to post to, so looping settings rows inside one
+// scheduled tick is simpler than near-identical function files.
 //
 // ── Content date is the NEXT BUSINESS DAY, always (2026-07-14, later) ──────
 // Original version summarized TODAY (rotation compliance "right now"). Dan's
@@ -105,7 +105,7 @@
 //      next business day from its own notify_days.
 //   2. MANUAL TEST — POST { dashboardType: 'fefo_<projectId>' }. Unlike the
 //      single-row digests, this one MUST be told which project's settings
-//      row to use, since one function backs 5 rows. Always sends
+//      row to use, since one function backs all rows. Always sends
 //      immediately for the next business day regardless of time/active, and
 //      does not touch last_sent_date (same "test doesn't interfere with the
 //      real scheduled send" reasoning as the other digests).
@@ -129,6 +129,11 @@ const FEFO_PROJECTS = [
   // as a WHERE-clause value when updating last_sent_date; a mismatch there
   // would silently update 0 rows rather than error.
   { id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia", facility: 'cal' },
+  // Added 2026-07-18 per Dan's request ("add PALMA9 and PALDSD9 to be
+  // exactly the same conditions as PALVI9") — same CAL facility, same
+  // mechanics as palvi9 above, just a different underlying project.
+  { id: 'palma9', code: 'PALMA9', name: "Palermo's Caledonia Materials", facility: 'cal' },
+  { id: 'paldsd9', code: 'PALDSD9', name: "Palermo's Caledonia DSD", facility: 'cal' },
   // Added 2026-07-18 — Jones Dairy Farm, facility MAD. Backward-looking
   // retrospective audit ("did we ship FEFO"), not a forward-looking watch —
   // see closedOrders branches in nextBusinessDayDateObj/runForProject/
@@ -507,9 +512,9 @@ async function runDigest({ isManualTest, dashboardType }) {
   }
 
   // Scheduled tick — loop every fefo_* row (across ALL facilities, not just
-  // ken, now that Palermo's Caledonia/CAL exists — dashboard_type already
-  // uniquely identifies the project, so facility isn't needed as a filter
-  // here). Each row resolves its OWN next business day from its own
+  // ken, now that Palermo's Caledonia's projects/CAL exist — dashboard_type
+  // already uniquely identifies the project, so facility isn't needed as a
+  // filter here). Each row resolves its OWN next business day from its own
   // notify_days, then fires if this tick matches the configured send time
   // and it hasn't already sent for that resolved date.
   const rows = await sbFetch(
