@@ -5,11 +5,12 @@
 // POST input: { facility, projectIds, dayCount = 5 }
 //   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
 //   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
-//                 'riche5', 'golst5', 'birch5', 'palvi9', 'jdf1'). Not all
-//                 facilities in one call — 'facility' is a single warehouse
-//                 per request (see src/lib/fefo.js's fetchLiveFefoOrdersBatch
-//                 for how the client splits a mixed-facility batch into
-//                 per-facility calls to this function).
+//                 'riche5', 'golst5', 'birch5', 'palvi9', 'palma9', 'paldsd9',
+//                 'jdf1'). Not all facilities in one call — 'facility' is a
+//                 single warehouse per request (see src/lib/fefo.js's
+//                 fetchLiveFefoOrdersBatch for how the client splits a
+//                 mixed-facility batch into per-facility calls to this
+//                 function).
 //   - dayCount:   optional, 1..7 (default 5)
 //
 // ── Date formats per project ────────────────────────────────────────────────
@@ -22,9 +23,9 @@
 //                      either. Use lot.receive_date TIMESTAMP directly as
 //                      an age proxy. Verb changes to "received" on the
 //                      client since it's not pack date.
-//   vendorLotExpiration — Palermo's Caledonia (added 2026-07-17). Real
-//                      expiration date, sourced from
-//                      datex_slv_vendorlots.expiration_date (joined via
+//   vendorLotExpiration — Palermo's Caledonia projects (finished goods,
+//                      materials bulk, DSD). Real expiration date, sourced
+//                      from datex_slv_vendorlots.expiration_date (joined via
 //                      lot.vendor_lot_id) — NOT from lookup_code and NOT
 //                      from datex_slv_licenseplatecontents.expiration_date
 //                      (that column exists but is ~0% populated here).
@@ -54,7 +55,7 @@
 // "violations" — nonsensical, since an inbound receipt was never "shipped
 // ahead of" anything). Fixed by joining orderclasses/ordertypes and adding
 // `AND ot.order_type_name = 'Outbound'` to orderSql's WHERE clause, applied
-// universally (all 7 projects share this query path, both closedOrders and
+// universally (all projects share this query path, both closedOrders and
 // open-orders branches) rather than as a JDF-only patch.
 //
 // ── closedOrders window now includes TODAY (2026-07-18, later) ─────────────
@@ -149,6 +150,16 @@ const PROJECTS = {
   // schema-anchor comment, verified 100% coverage). See "vendorLotExpiration"
   // handling below.
   palvi9: { datexName: 'Palermos CALEDONIA finished', dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration' },
+  // Added 2026-07-18 per Dan's request — same CAL facility, same
+  // vendorLotExpiration architecture as palvi9 (confirmed via MotherDuck:
+  // project_id=8, 100% of sampled lots have a vendorlots join + expiration
+  // date, 25 Processing/Outbound orders currently).
+  palma9: { datexName: 'Palermos CALEDONIA materials bulk', dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration' },
+  // Added 2026-07-18 per Dan's request — same CAL facility, same
+  // vendorLotExpiration architecture as palvi9 (confirmed via MotherDuck:
+  // project_id=250, project_name "Palermo's Caledonia DSD", 100% vendorlots
+  // coverage, 79 Processing/Outbound orders currently).
+  paldsd9: { datexName: "Palermo's Caledonia DSD", dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration' },
   // Added 2026-07-18 — Jones Dairy Farm (facility MAD, warehouse_id 4).
   // Retrospective/audit project: reviews CLOSED orders looking BACKWARD,
   // not open orders looking forward (see closedOrders handling throughout
