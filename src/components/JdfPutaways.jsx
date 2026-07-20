@@ -1,32 +1,28 @@
-import { useMemo, useState, Fragment } from 'react'
-import { Chart } from 'react-chartjs-2'
-import {
-  Chart as ChartJS,
-  CategoryScale, LinearScale,
-  LineController, LineElement, PointElement,
-  Tooltip, Legend,
-} from 'chart.js'
-import { RACK_TYPE, RACK_GROUP, CUSTOMER_NAMES, RAW_LOCATIONS } from '../lib/jdfPutawaysLocations.js'
-import { EMPLOYEE_EVENTS } from '../lib/jdfPutawaysEvents.js'
-import { ALL_F8_MOVES, DEFAULT_HISTORY } from '../lib/jdfPutawaysMoves.js'
-import { LOCATION_ITEM_DETAIL, MATERIAL_NAMES } from '../lib/jdfPutawaysItems.js'
+import { useMemo, useState, useEffect, Fragment } from 'react'
+import { RACK_TYPE, RACK_GROUP, CUSTOMER_NAMES } from '../lib/jdfPutawaysLocations.js'
+import { fetchJdfPutaways } from '../lib/jdfPutaways.js'
 import { pct, classifyLocation, getWindowStart, windowLabel } from '../lib/jdfPutawaysLogic.js'
-
-ChartJS.register(CategoryScale, LinearScale, LineController, LineElement, PointElement, Tooltip, Legend)
 
 // ─── JDF Putaways ───────────────────────────────────────────────────────
 // Visibility tool for F8 (Madison) JDF slotting: how well putaways are
 // following FEFO/single-SKU discipline within JDF's own product, who's
-// been moving pallets into currently-mixed locations, and a weekly trend.
+// been moving pallets into currently-mixed locations, and recent raw
+// volume by employee/aisle.
 //
-// DATA NOTE: all data below (RAW_LOCATIONS, EMPLOYEE_EVENTS, ALL_F8_MOVES,
-// LOCATION_ITEM_DETAIL, MATERIAL_NAMES, DEFAULT_HISTORY) is a manually
-// refreshed MotherDuck snapshot, not a live query. Regenerate by re-running
-// the location/employee/moves queries (see chat history / Notion changelog
-// for the exact SQL) and replacing the corresponding file in src/lib/.
-// Wiring this to a live Netlify function + MotherDuck proxy is on the
-// pending-work list -- not done yet, so treat the numbers here as "as of
-// last refresh," not real-time.
+// LIVE DATA (2026-07-20 rewrite): all data below comes from
+// netlify/functions/motherduck-jdf-putaways.cjs on every load -- see that
+// file's header comment for the underlying MotherDuck query. This
+// replaces the original 2026-07-17 build's manually-refreshed snapshot
+// (src/lib/jdfPutaways{Locations,Events,Moves,Items}.js) which is now
+// orphaned (Claude has no file-delete tool -- those files are unused dead
+// code, safe to ignore or manually remove from the repo).
+//
+// DROPPED in this rewrite: the 8-week "weekly clean-move rate" chart.
+// Reconstructing "was this location clean at the moment of a past move"
+// isn't possible without point-in-time state tracking this app doesn't
+// have -- the old snapshot's version had quietly used each move's
+// CURRENT-day classification, which wasn't a real historical trend.
+// Dropped per Dan's call rather than shipped with that caveat baked in.
 //
 // Comingling in the 7-deep drive-in racks (A, G, H) is NOT scored here --
 // putting a slower-moving customer's pallets behind faster JDF movers is a
@@ -36,6 +32,11 @@ ChartJS.register(CategoryScale, LinearScale, LineController, LineElement, PointE
 const STATUS_ORDER = { clean: 0, mixed_date: 1, mixed_item: 2 }
 
 export default function JdfPutaways() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState(null)
+  const [refreshTick, setRefreshTick] = useState(0)
+
   const [groupBy, setGroupBy] = useState('aisle')
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [sortKey, setSortKey] = useState('location')
@@ -44,18 +45,31 @@ export default function JdfPutaways() {
   const [selectedEmployee, setSelectedEmployee] = useState(null)
   const [selectedLocation, setSelectedLocation] = useState(null)
 
-  // Demo/snapshot "now" — defaults to the latest event in the data so the
-  // recent-activity window isn't empty. Swap to `new Date()` once this is
-  // wired to a live feed; the window math itself doesn't change.
-  const now = useMemo(
-    () => new Date(Math.max(...EMPLOYEE_EVENTS.map(e => new Date(e[3]).getTime()))),
-    []
-  )
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setErr(null)
+    fetchJdfPutaways()
+      .then(d => { if (!cancelled) setData(d) })
+      .catch(e => { if (!cancelled) setErr(e.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [refreshTick])
+
+  const rawLocations = data?.locations ?? []
+  const employeeEvents = data?.employeeEvents ?? []
+  const allF8Moves = data?.allMoves ?? []
+  const locationItemDetail = data?.locationItemDetail ?? {}
+  const materialNames = data?.materialNames ?? {}
+  // Curated labels win over Datex's raw project_name for customers we know.
+  const customerNames = useMemo(() => ({ ...(data?.customerNames ?? {}), ...CUSTOMER_NAMES }), [data])
+
+  const now = useMemo(() => new Date(), [data])
   const windowStart = useMemo(() => getWindowStart(now), [now])
 
   const enriched = useMemo(
     () =>
-      RAW_LOCATIONS.map(loc => {
+      rawLocations.map(loc => {
         const [location, aisle, jdfLp, distinctMaterials, distinctMfgDates, earliest, latest, otherLp, otherCustomers] = loc
         return {
           location, aisle, jdfLp, distinctMaterials, distinctMfgDates, earliest, latest, otherLp,
@@ -65,7 +79,7 @@ export default function JdfPutaways() {
           rackGroup: RACK_GROUP[aisle] || 'unknown',
         }
       }),
-    []
+    [rawLocations]
   )
 
   const groupKey = groupBy === 'aisle' ? 'aisle' : 'rackGroup'
@@ -151,7 +165,7 @@ export default function JdfPutaways() {
   // ── Recent-activity window (employee + aisle raw volume) ──────────────
   const recentByEmployee = useMemo(() => {
     const map = new Map()
-    for (const [employee, location, status, ts, lpCode] of EMPLOYEE_EVENTS) {
+    for (const [employee, location, status, ts, lpCode] of employeeEvents) {
       const t = new Date(ts)
       if (t < windowStart || t > now) continue
       if (!map.has(employee)) map.set(employee, { employee, mixedItem: 0, mixedDate: 0, events: [] })
@@ -163,7 +177,7 @@ export default function JdfPutaways() {
     return Array.from(map.values())
       .map(e => ({ ...e, total: e.mixedItem + e.mixedDate, events: [...e.events].sort((a, b) => new Date(b.ts) - new Date(a.ts)) }))
       .sort((a, b) => b.total - a.total)
-  }, [windowStart, now])
+  }, [employeeEvents, windowStart, now])
 
   const selectedEmployeeData = recentByEmployee.find(e => e.employee === selectedEmployee) || null
 
@@ -188,7 +202,7 @@ export default function JdfPutaways() {
 
   const recentByAisle = useMemo(() => {
     const mixedMap = new Map()
-    for (const [, location, status, ts] of EMPLOYEE_EVENTS) {
+    for (const [, location, status, ts] of employeeEvents) {
       const t = new Date(ts)
       if (t < windowStart || t > now) continue
       const aisle = location.charAt(2)
@@ -198,7 +212,7 @@ export default function JdfPutaways() {
       else a.mixedDate += 1
     }
     const totalMap = new Map()
-    for (const [aisle, ts] of ALL_F8_MOVES) {
+    for (const [aisle, ts] of allF8Moves) {
       const t = new Date(ts)
       if (t < windowStart || t > now) continue
       totalMap.set(aisle, (totalMap.get(aisle) || 0) + 1)
@@ -213,44 +227,24 @@ export default function JdfPutaways() {
         return { aisle, mixedItem: m.mixedItem, mixedDate: m.mixedDate, clean, total: Math.max(total, mixed) }
       })
       .sort((a, b) => b.total - a.total)
-  }, [windowStart, now])
-
-  const historySorted = useMemo(() => [...DEFAULT_HISTORY].sort((a, b) => a.date.localeCompare(b.date)), [])
-
-  const chartData = {
-    labels: historySorted.map(h => h.date),
-    datasets: [
-      { label: 'Clean %', data: historySorted.map(h => h.cleanPct), borderColor: '#1a8a52', backgroundColor: '#1a8a52', borderWidth: 2, pointRadius: 3, tension: 0.25 },
-      { label: 'Mixed SKU %', data: historySorted.map(h => h.mixedItemPct), borderColor: '#c0392b', backgroundColor: '#c0392b', borderWidth: 2, pointRadius: 3, tension: 0.25 },
-    ],
-  }
-  const chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        backgroundColor: '#ffffff', borderColor: '#dce2ec', borderWidth: 1,
-        titleColor: '#6b7a90', bodyColor: '#111827',
-        titleFont: { family: 'DM Mono', size: 10 }, bodyFont: { family: 'DM Mono', size: 11 },
-        callbacks: {
-          afterBody: (items) => {
-            const row = historySorted[items[0].dataIndex]
-            return `${row.totalMoves} moves that week`
-          },
-        },
-      },
-    },
-    scales: {
-      x: { grid: { color: '#e8edf3' }, ticks: { color: '#6b7a90', font: { family: 'DM Mono', size: 10 } } },
-      y: { min: 0, max: 100, grid: { color: '#e8edf3' }, ticks: { color: '#6b7a90', font: { family: 'DM Mono', size: 10 }, callback: v => `${v}%` } },
-    },
-  }
+  }, [employeeEvents, allF8Moves, windowStart, now])
 
   const cardStyle = { background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '12px 16px' }
   const labelStyle = { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }
   const valueStyle = { fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 500 }
+
+  if (loading && !data) {
+    return <div style={{ padding: 20, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-secondary)' }}>Loading JDF Putaways…</div>
+  }
+
+  if (err && !data) {
+    return (
+      <div style={{ padding: 20, fontFamily: 'var(--font-mono)', fontSize: 12, color: '#e05a5a' }}>
+        {err}
+        <button className="est-reset-btn" style={{ marginLeft: 10 }} onClick={() => setRefreshTick(t => t + 1)}>Retry</button>
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -259,6 +253,10 @@ export default function JdfPutaways() {
           <div className="section-label" style={{ marginBottom: 4 }}>JDF Putaways — F8 slotting visibility</div>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', maxWidth: 620 }}>
             JDF product only — surfacing where slotting could run tighter, not a scorecard on any one person.
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+            {data?.fetchedAt && <span>as of {new Date(data.fetchedAt).toLocaleTimeString()}</span>}
+            <button className="est-reset-btn" onClick={() => setRefreshTick(t => t + 1)} disabled={loading}>{loading ? 'Refreshing…' : '↻ Refresh'}</button>
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -386,7 +384,7 @@ export default function JdfPutaways() {
                     <td>{r.jdfLp}</td>
                     <td style={{ textAlign: 'left' }}>
                       {r.isShared
-                        ? <span style={{ color: 'var(--blue)' }}>{r.otherCustomers.map(c => CUSTOMER_NAMES[c] || c).join(', ')} ({r.otherLp})</span>
+                        ? <span style={{ color: 'var(--blue)' }}>{r.otherCustomers.map(c => customerNames[c] || c).join(', ')} ({r.otherLp})</span>
                         : <span style={{ color: 'var(--text-dim)' }}>JDF only</span>}
                     </td>
                   </tr>
@@ -453,7 +451,7 @@ export default function JdfPutaways() {
                 <tbody>
                   {groupedLocations.map((g, i) => {
                     const isLocSel = selectedLocation === g.location
-                    const detail = LOCATION_ITEM_DETAIL[g.location]
+                    const detail = locationItemDetail[g.location]
                     const typeLabel = g.mixedItem > 0 && g.mixedDate > 0 ? 'SKU + date' : g.mixedItem > 0 ? 'Mixed SKU' : 'Mixed date'
                     return (
                       <Fragment key={i}>
@@ -493,7 +491,7 @@ export default function JdfPutaways() {
                                       {detail.map(([mat, date, cnt], j) => (
                                         <tr key={j}>
                                           <td style={{ padding: '2px 6px', fontWeight: 600 }}>{mat}</td>
-                                          <td style={{ padding: '2px 6px', color: 'var(--text-secondary)' }}>{MATERIAL_NAMES[mat] || '—'}</td>
+                                          <td style={{ padding: '2px 6px', color: 'var(--text-secondary)' }}>{materialNames[mat] || '—'}</td>
                                           <td style={{ padding: '2px 6px', color: 'var(--text-secondary)' }}>{date}</td>
                                           <td style={{ padding: '2px 6px', textAlign: 'right' }}>{cnt}</td>
                                         </tr>
@@ -520,7 +518,7 @@ export default function JdfPutaways() {
       </div>
 
       {/* ── Raw pallets per aisle ───────────────────────────────────────── */}
-      <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 16, marginBottom: 16 }}>
+      <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 16, marginBottom: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div className="section-label" style={{ marginBottom: 4 }}>Raw pallets per aisle</div>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)' }}>{windowLabel(now)}</div>
@@ -553,25 +551,6 @@ export default function JdfPutaways() {
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: 'var(--green)', marginRight: 4, borderRadius: 2 }} />Clean</span>
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: '#e57373', marginRight: 4, borderRadius: 2 }} />Mixed SKU</span>
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: '#f0c14b', marginRight: 4, borderRadius: 2 }} />Mixed man date</span>
-        </div>
-      </div>
-
-      {/* ── Weekly clean-move rate ──────────────────────────────────────── */}
-      <div className="chart-card" style={{ marginTop: 0 }}>
-        <div className="chart-header">
-          <span className="chart-title">Weekly clean-move rate — last 8 weeks</span>
-          <div className="chart-legend">
-            <span className="legend-item"><span className="legend-dot" style={{ background: '#1a8a52' }} />Clean %</span>
-            <span className="legend-item"><span className="legend-dot" style={{ background: '#c0392b' }} />Mixed SKU %</span>
-          </div>
-        </div>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', marginBottom: 10 }}>
-          Share of F8 JDF moves each week landing in a location currently classified clean vs mixed. Built from move
-          timestamps, not a rewound snapshot — a move counted clean this week could still end up mixed later if
-          something else lands on top of it.
-        </div>
-        <div style={{ height: 220 }}>
-          <Chart type="line" data={chartData} options={chartOptions} />
         </div>
       </div>
     </div>
