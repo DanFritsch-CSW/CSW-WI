@@ -58,9 +58,10 @@ export const FEFO_PROJECTS = [
     // — this is CSW's own Caledonia finished-goods project (Palermo Villa,
     // Inc.), not a KEN customer, hence facility: 'cal'. Confirmed via
     // MotherDuck (silver.datex_slv_projects: project_id=5, lookup_code=
-    // 'PALVI9', 195 orders currently Processing). Left out PALMA9
+    // 'PALVI9', 195 orders currently Processing). Initially left out PALMA9
     // (materials bulk) and PALDSD9 (DSD) per Dan's call — only the
-    // finished-goods project for now.
+    // finished-goods project at first. Both were added below on 2026-07-18
+    // per Dan's follow-up request, under the exact same architecture.
     //
     // CORRECTED 2026-07-17 (later, same day): initially shipped as
     // dateFormat 'receiveDate' — assumed no real expiration data existed
@@ -74,6 +75,30 @@ export const FEFO_PROJECTS = [
     proj: 5, dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration',
     color: '#1f7a8c', facility: 'cal',
     datexProjectName: 'Palermos CALEDONIA finished',
+  },
+  {
+    // Added 2026-07-18 per Dan's request ("add PALMA9 and PALDSD9 to be
+    // exactly the same conditions as PALVI9"). Confirmed via MotherDuck:
+    // project_id=8, project_name "Palermos CALEDONIA materials bulk",
+    // facility CAL (warehouse_id=1, same as PALVI9), 25 Processing/Outbound
+    // orders currently, 100% of sampled lots have a vendorlots join with an
+    // expiration date populated — same vendorLotExpiration architecture as
+    // PALVI9, no differences.
+    id: 'palma9', code: 'PALMA9', name: "Palermo's Caledonia Materials",
+    proj: 8, dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration',
+    color: '#b0413e', facility: 'cal',
+    datexProjectName: 'Palermos CALEDONIA materials bulk',
+  },
+  {
+    // Added 2026-07-18 per Dan's request, same as PALMA9 above. Confirmed
+    // via MotherDuck: project_id=250, project_name "Palermo's Caledonia
+    // DSD", facility CAL (warehouse_id=1), 79 Processing/Outbound orders
+    // currently, 100% vendorlots coverage — same vendorLotExpiration
+    // architecture as PALVI9/PALMA9.
+    id: 'paldsd9', code: 'PALDSD9', name: "Palermo's Caledonia DSD",
+    proj: 250, dateFormat: 'vendorLotExpiration', dateSemantic: 'expiration',
+    color: '#3f7d52', facility: 'cal',
+    datexProjectName: "Palermo's Caledonia DSD",
   },
   {
     // Added 2026-07-18 per Dan's request. Fundamentally different from every
