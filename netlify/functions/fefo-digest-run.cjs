@@ -205,14 +205,23 @@ function nextBusinessDayDateObj(notifyDays) {
   return d
 }
 
-// previousCalendarDayDateObj — content date for closedOrders projects
-// (e.g. JDF). Simply "yesterday" (Central calendar day), no business-day
-// skipping — Dan's ask was literally "did we ship in FEFO status" for
-// whatever shipped the day before, weekday or not. notify_days still
-// governs which days the SCHEDULED tick fires (see runDigest), this only
-// controls what content date that fire reviews.
+// previousCalendarDayDateObj — kept for reference/rollback, no longer used
+// by closedOrders projects as of 2026-07-20 (see sameCalendarDayDateObj
+// below for why).
 function previousCalendarDayDateObj() {
   return new Date(centralTodayDateObj().getTime() - 24 * 60 * 60 * 1000)
+}
+
+// sameCalendarDayDateObj — content date for closedOrders projects (e.g.
+// JDF) as of 2026-07-20, per Dan: JDF's digest now runs at 8pm Central
+// (moved off the original ~10pm-ish default), by which time all of that
+// day's orders are already shipped/closed — so there's no longer a reason
+// to wait a day. Reviews TODAY's closed orders instead of yesterday's.
+// notify_days is still not consulted for closedOrders rows (see runDigest)
+// — this fires every calendar day the tick matches notify_hour/minute,
+// weekday or not, same as before.
+function sameCalendarDayDateObj() {
+  return centralTodayDateObj()
 }
 
 function isNotifyTimeMatch(notifyHour, notifyMinute) {
@@ -327,8 +336,10 @@ function buildDigestBody(orders, project, dateObj) {
   // what Front auto-linkifies. See file header "Link back to the app".
   lines.push(APP_URL)
   lines.push('CSW Operations Hub')
-  // closedOrders (JDF) is a retrospective audit over yesterday's CLOSED
-  // orders, not a forward-looking watch — header wording branches to match.
+  // closedOrders (JDF) is a retrospective audit over the SAME calendar
+  // day's CLOSED orders (as of 2026-07-20 — was yesterday's before the
+  // digest moved to an 8pm send), not a forward-looking watch — header
+  // wording branches to match.
   lines.push(project.closedOrders
     ? `Reviewing closed orders shipped: ${formatHeaderDate(dateObj)}`
     : `Next business day: ${formatHeaderDate(dateObj)}`)
@@ -424,19 +435,14 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   let dayCount
   let closedDayBucket = 0
   if (project.closedOrders) {
-    // closedOrders (JDF): fefo-orders.cjs's window for these projects now
-    // runs from (today - (dayCount-1)) through TODAY inclusive (changed
-    // 2026-07-18, later — the live tab's day-stepper needed to be able to
-    // select today, not just historical days; see that file's "closedOrders
-    // window now includes TODAY" note). Day buckets renumbered to match:
-    // 0 = today, 1 = yesterday, 2 = two days ago, etc. This digest still
-    // specifically wants YESTERDAY's shipped orders (dateObj =
-    // previousCalendarDayDateObj), so it requests a 2-day window (today +
-    // yesterday) and filters down to bucket 1 rather than taking every
-    // order the window returns — dayCount=1 would now mean "today only"
-    // under the new numbering, which is the wrong day for this digest.
-    dayCount = 2
-    closedDayBucket = 1
+    // closedOrders (JDF): fefo-orders.cjs's window for these projects runs
+    // from (today - (dayCount-1)) through TODAY inclusive, bucket 0 = today.
+    // As of 2026-07-20 this digest wants TODAY's shipped orders (dateObj =
+    // sameCalendarDayDateObj, digest now runs at 8pm after same-day orders
+    // are closed), so a 1-day window targeting bucket 0 is sufficient —
+    // no need to pull yesterday into the window anymore.
+    dayCount = 1
+    closedDayBucket = 0
   } else {
     // targetDayOffset — number of days between fefo-orders.cjs's own "today"
     // and our resolved content date. Both sides now anchor "today" to
@@ -468,9 +474,8 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
 
   const allOrders = ordersJson.ordersByProject?.[project.id] || []
   // closedOrders projects filter to the specific bucket this digest wants
-  // (yesterday = bucket 1, see closedDayBucket above) rather than taking
-  // every order in the fetched window, since that window now also includes
-  // today.
+  // (today = bucket 0, see closedDayBucket above) rather than taking every
+  // order in the fetched window.
   const targetOrders = project.closedOrders ? allOrders.filter(o => o.day === closedDayBucket) : allOrders.filter(o => o.day === dayCount - 1)
 
   const body = buildDigestBody(targetOrders, project, dateObj)
@@ -506,7 +511,7 @@ async function runDigest({ isManualTest, dashboardType }) {
       `prepick_notify_settings?facility=eq.${project.facility}&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
     )
     const settingsRow = rows?.[0]
-    const dateObj = project.closedOrders ? previousCalendarDayDateObj() : nextBusinessDayDateObj(settingsRow?.notify_days)
+    const dateObj = project.closedOrders ? sameCalendarDayDateObj() : nextBusinessDayDateObj(settingsRow?.notify_days)
     const result = await runForProject({ settingsRow, project, dateObj, isManualTest: true })
     return result
   }
@@ -525,7 +530,7 @@ async function runDigest({ isManualTest, dashboardType }) {
     const project = PROJECT_BY_DASHBOARD_TYPE.get(row.dashboard_type)
     if (!project) continue
     if (row.active === false) { results.push({ ok: true, skipped: true, project: project.code, reason: 'Digest disabled' }); continue }
-    const dateObj = project.closedOrders ? previousCalendarDayDateObj() : nextBusinessDayDateObj(row.notify_days)
+    const dateObj = project.closedOrders ? sameCalendarDayDateObj() : nextBusinessDayDateObj(row.notify_days)
     const notifyHour = row.notify_hour ?? 22
     const notifyMinute = row.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
