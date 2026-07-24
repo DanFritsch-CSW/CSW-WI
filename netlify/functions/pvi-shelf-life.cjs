@@ -10,7 +10,7 @@
 //       lot_id, lot_code, lot_status,
 //       expiration_date_iso,          // YYYY-MM-DD or null
 //       received_at_iso,              // YYYY-MM-DD or null (fallback pack proxy)
-//       project_lookup,               // 'PALVI9' | 'PALDSD9' | 'PALMA9' (of first PVI order using it)
+//       project_lookup,               // 'PALVI9' | 'PALVI5' | 'PALDSD9' | 'PALDSD5' | 'PALMA9' (of first PVI order using it)
 //       cases_onhand, cases_committed, cases_available, lp_count }
 //   ],
 //   pendingOrders: [
@@ -61,7 +61,24 @@ const NO_CACHE_HEADERS = {
   'Pragma': 'no-cache',
 }
 
-const PVI_PROJECT_LOOKUPS = ['PALVI9', 'PALDSD9', 'PALMA9']
+// PVI_PROJECT_LOOKUPS — every Omni/Datex project lookup code that should be
+// pulled into the PVI At Risk dashboard.
+//
+// Updated 2026-07-07 (Hill's Slack thread): Dean clarified two lookups that
+// were previously missing from this list entirely — PALVI5 and PALDSD5:
+//   PALVI9  -> Palermo's number 247
+//   PALVI5  -> Palermo's number 240
+//   PALDSD9 -> Palermo's number 243
+//   PALDSD5 -> Palermo's number 243
+//   PALMA9  -> Palermo's number 248
+// (The Palermo's-number mapping itself lives client-side in
+// PROJECT_CODE_MAP, src/lib/pviShelfLife.js — this array is only the
+// server-side allowlist that determines which Datex projects get queried
+// at all.) Before this fix, any PALVI5/PALDSD5 lots were invisible to the
+// entire dashboard regardless of front-end logic, since the four SQL
+// queries below all filter on `lookup_code IN (${projList})` built from
+// this array.
+const PVI_PROJECT_LOOKUPS = ['PALVI9', 'PALVI5', 'PALDSD9', 'PALDSD5', 'PALMA9']
 const CAL_WAREHOUSE_ID = 1
 
 // Window for pending orders — 3 weeks forward covers the longest end-customer
