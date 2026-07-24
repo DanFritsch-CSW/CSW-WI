@@ -91,28 +91,31 @@ export function formatProjectLabel(projectLookup) {
 // ratio-based (daysToCodeAtShip / shelfLifeDays) approach entirely:
 //
 //   Expired      — Days to Code is negative                      (today)
-//   Unshippable  — Days to Code < 30 for 243, < 90 for 247,
+//   Unshippable  — Days to Code < 30 for 243, < 90 for 247/240,
 //                  < 5 for 248                                    (today)
 //   Critical     — projected ship is under req by MORE than 15 days
 //   At Risk      — projected ship is under req by 0–15 days
 //   Watch        — leave as is (everything else: has buffer, or we
 //                  don't have enough data to say)
 //
-// Two things worth flagging:
-//   1. "Days to Code" for Unshippable is explicitly TODAY's count, not
-//      at-projected-ship — same as Expired. This is a real behavior change
-//      from the old rule (which used daysToCodeAtShip <= 0). It reframes
-//      Unshippable from "will be past code by the time it ships" to "this
-//      project's customer won't even consider it beyond this floor,
-//      regardless of when it's projected to actually move."
-//   2. Hill only gave thresholds for 243/247/248. PALVI5 (240) has no
-//      stated threshold — falls back to the old at-ship <= 0 definition
-//      via UNSHIPPABLE_FALLBACK. Worth confirming a 240 threshold with
-//      Hill if PALVI5 lots start showing up in this stage unexpectedly.
+// Worth flagging: "Days to Code" for Unshippable is explicitly TODAY's
+// count, not at-projected-ship — same as Expired. This is a real behavior
+// change from the old rule (which used daysToCodeAtShip <= 0). It reframes
+// Unshippable from "will be past code by the time it ships" to "this
+// project's customer won't even consider it beyond this floor, regardless
+// of when it's projected to actually move."
+//
+// 240 (PALVI5) threshold confirmed by Hill 2026-07-24: "240 can match
+// 247" — same 90-day floor as PALVI9. Any project_lookup not covered here
+// (i.e. not 243/247/248/240) falls back to the pre-existing "at or past
+// projected ship" definition via the `else` branch in verdictForLot, so
+// coverage isn't silently lost if a new project code shows up before a
+// threshold is defined for it.
 const UNSHIPPABLE_DAYS_TO_CODE_THRESHOLD_BY_PROJECT_NUMBER = {
   '243': 30,
   '247': 90,
   '248': 5,
+  '240': 90, // matches 247, per Hill 2026-07-24
 }
 
 // Critical/At Risk split point on shortfall_days (shelfLifeDays required −
@@ -455,14 +458,12 @@ export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory
 // wonky right now"). Priority order, first match wins:
 //
 //   1. Expired      — daysToCodeToday < 0
-//   2. Unshippable  — daysToCodeToday < per-project threshold (243/247/248
-//                      per UNSHIPPABLE_DAYS_TO_CODE_THRESHOLD_BY_PROJECT_NUMBER).
-//                      Projects with no defined threshold (e.g. PALVI5/240,
-//                      or no project at all) fall back to the pre-existing
-//                      "at or past projected ship" definition so nothing
-//                      silently loses Unshippable coverage while Hill's
-//                      thresholds only cover three of the five known
-//                      project numbers.
+//   2. Unshippable  — daysToCodeToday < per-project threshold (243/247/
+//                      248/240 per UNSHIPPABLE_DAYS_TO_CODE_THRESHOLD_BY_
+//                      PROJECT_NUMBER). Any project_lookup with no defined
+//                      threshold falls back to the pre-existing "at or
+//                      past projected ship" definition so nothing silently
+//                      loses Unshippable coverage.
 //   3. (no data)    — Watch, missingData flag, if we can't compute a
 //                      shortfall (no projected ship or no spec).
 //   4. Critical     — shortfallDays > 15
