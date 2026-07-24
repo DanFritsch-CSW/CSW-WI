@@ -2,6 +2,7 @@ import { Component, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import TopNav from './components/TopNav.jsx'
 import PalermosPasswordGate from './components/PalermosPasswordGate.jsx'
+import RecruitingPasswordGate from './components/RecruitingPasswordGate.jsx'
 
 // Build-time mode flag. Set via Netlify env var VITE_APP_MODE.
 //   undefined / 'csw' → full CSW internal app (default)
@@ -102,7 +103,7 @@ export default function App() {
               <Route path="/analytics"            element={<Analytics />}         />
               <Route path="/settings"             element={<Settings />}          />
               <Route path="/dvr"                  element={<DvrTracker />}        />
-              <Route path="/recruiting"           element={<Recruiting />}        />
+              <Route path="/recruiting"           element={<RecruitingPasswordGate><Recruiting /></RecruitingPasswordGate>} />
             </Routes>
           </Suspense>
         </PageErrorBoundary>
