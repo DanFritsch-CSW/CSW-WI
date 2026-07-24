@@ -64,24 +64,40 @@ import {
 // drawer header so the language stays neutral/descriptive.
 //
 // Project code mapping + multi-select (2026-07-07, Hill): Palermo's
-// internal project numbers (PALVI9=247, PALDSD9=243, PALMA9=248) don't
-// exist in Datex/Omni — they're purely Palermo's own bookkeeping. Hill
-// asked that both codes show together everywhere a project appears, that
-// the project filter support picking more than one at once, and that the
-// dashboard default to 247 (PALVI9) only on load. See PROJECT_CODE_MAP /
-// formatProjectLabel in src/lib/pviShelfLife.js for the mapping itself.
-// The project filter changed from a single <select> to a checkbox
-// multi-select popover; the underlying state is a Set of raw project_lookup
-// codes. An empty Set means "no restriction" (all projects) — Hill can
-// clear the filter down to nothing if she wants to see everything.
+// internal project numbers don't exist in Datex/Omni — they're purely
+// Palermo's own bookkeeping. Hill asked that both codes show together
+// everywhere a project appears, that the project filter support picking
+// more than one at once, and that the dashboard default to 247 (PALVI9)
+// only on load. See PROJECT_CODE_MAP / formatProjectLabel in
+// src/lib/pviShelfLife.js for the mapping itself. The project filter
+// changed from a single <select> to a checkbox multi-select popover; the
+// underlying state is a Set of raw project_lookup codes. An empty Set
+// means "no restriction" (all projects) — Hill can clear the filter down
+// to nothing if she wants to see everything.
+//
+// Updated 2026-07-07 (same thread, Dean's clarification): two more
+// project_lookup codes exist that were previously missing everywhere —
+// PALVI5 (Palermo's number 240) and PALDSD5 (243, same number as
+// PALDSD9). Added to PROJECT_LOOKUPS below so they show up in the
+// multi-select; the Netlify function's server-side allowlist and
+// pviShelfLife.js's PROJECT_CODE_MAP were updated in companion commits so
+// these lots actually reach the client at all.
+//
+// Verdict-stage rewrite (2026-07-07, Hill: "our categories are too
+// wonky"): Expired/Unshippable/Critical/At Risk/Watch definitions were
+// overhauled in src/lib/pviShelfLife.js (verdictForLot) — this component
+// doesn't encode any of that logic itself, it just renders whatever stage
+// comes back on each row, so no changes were needed here beyond the badge
+// additions below for the new 'project_override' spec source (243's
+// forced 30-day requirement).
 
 const STAGES_FOR_TABS = ['expired', 'unshippable', 'critical', 'at_risk', 'watch']
 
 // Raw Omni project_lookup codes this dashboard knows about. Order here
-// drives both the multi-select popover and CSV/email — kept in the same
-// order as PROJECT_CODE_MAP was documented to Hill (247, 243, 248 order
-// would read oddly since PALVI9/247 is the default/primary project).
-const PROJECT_LOOKUPS = ['PALVI9', 'PALDSD9', 'PALMA9']
+// drives both the multi-select popover and CSV/email. Grouped by Palermo's
+// number so the two 243 codes (DSD) sit next to each other: 247 (PALVI9),
+// 240 (PALVI5), 243 (PALDSD9 + PALDSD5), 248 (PALMA9).
+const PROJECT_LOOKUPS = ['PALVI9', 'PALVI5', 'PALDSD9', 'PALDSD5', 'PALMA9']
 
 // Default project selection on load. Hill: "default filters to 247 for
 // project... (don't select expired or unshippable as default)." Stage
@@ -925,11 +941,17 @@ function SortableTh({ sortKey, align, sortConfig, onSort, title, children, onRes
 
 // ── Row ───────────────────────────────────────────────────────────────────
 
+// Spec-source badge — small colored tag next to "req Xd" showing where the
+// required-shelf-life number came from. Added 'project_override' 2026-07-07
+// for Hill's "for all items in 243, the required days should be 30" rule —
+// distinct color (matches Palermo's DSD red) since it's a business-rule
+// override rather than a derived-from-data source like the other four.
 const SPEC_SOURCE_BADGE = {
   material_spec:    { label: 'spec',    color: '#3a7a3a' },
   allocation:       { label: 'alloc',   color: '#5b9bd5' },
   material_history: { label: 'hist',    color: '#c88a2a' },
   default_96:       { label: 'default', color: '#999' },
+  project_override: { label: 'proj',    color: '#8b1a1a' },
 }
 
 function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
@@ -1030,7 +1052,8 @@ function ShelfLifeRow({ row, latestNote, isSelected, onSelect, onCopy }) {
                   row.spec_source === 'material_spec'   ? 'Ops-curated material spec' :
                   row.spec_source === 'allocation'      ? 'From allocation customer spec' :
                   row.spec_source === 'material_history' ? 'Strictest customer across 365-day history' :
-                  row.spec_source === 'default_96'      ? 'Default (no material spec, no history)' : ''
+                  row.spec_source === 'default_96'      ? 'Default (no material spec, no history)' :
+                  row.spec_source === 'project_override' ? "Project override — 243 (DSD) is fixed at 30 days per Hill" : ''
                 }>
                   {specBadge.label}
                 </span>
