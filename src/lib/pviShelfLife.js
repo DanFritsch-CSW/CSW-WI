@@ -10,7 +10,7 @@
 //   getShelfLifeDays(canonical)
 //   velocityConfidence(shipments30d)
 //   projectFefo({ lots, pendingOrders, velocity, materialShipHistory, materialSpecs, canonicalIndex })
-//   verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays })
+//   verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays, shortfallDays, projectNumber })
 //   formatLotForEmail(row)
 //   bulkCopyForEmail(rows)
 //   DISPOSITION_OPTIONS, DISPOSITION_META  (per-lot Tag catalog, 2026-07-07)
@@ -39,26 +39,38 @@ export const DEFAULT_STAGES = new Set(['at_risk', 'critical'])
 // and unmapped allocations, NOT to internal_transfer.
 export const DEFAULT_UNSHIPPED_SHELF_LIFE_DAYS = 96
 
-// ── Palermo's internal project numbers (2026-07-07, Hill) ───────────────
+// ── Palermo's internal project numbers (2026-07-07, Hill + Dean) ────────
 //
 // Palermo's tracks these projects by an internal numeric ID that does NOT
 // exist anywhere in Datex/Omni — it's purely their own bookkeeping
 // convention. Hill asked that both the Omni project_lookup code AND
-// Palermo's number show together everywhere a project appears (filter
-// dropdown, row cells, CSV export, drawer, email copy) so her team doesn't
-// have to mentally translate between the two systems.
+// Palermo's number show together everywhere a project appears.
 //
-// PALVI9  → 247  (Palermo's Value/PVI project)
-// PALDSD9 → 243  (Palermo's DSD project)
-// PALMA9  → 248  (Palermo's MA project)
+// Dean's clarification (2026-07-07, in response to "243 is what again?"):
+//   PALVI9  = 247
+//   PALVI5  = 240
+//   PALDSD5 = 243
+//   PALDSD9 = 243
+// So project number 243 ("DSD") covers TWO project_lookup codes
+// (PALDSD5 and PALDSD9) — this is why the unshippable-threshold and
+// required-days-override logic below key off the NUMBER, not the raw
+// lookup, wherever Hill's rule is stated in terms of "243"/"247"/"248".
+//
+// PALVI5/PALDSD5 were previously missing from both this map AND the
+// Netlify function's PVI_PROJECT_LOOKUPS allowlist (see
+// netlify/functions/pvi-shelf-life.cjs) — their lots never reached the
+// client at all before this fix.
 //
 // This mapping is display-only. It never reaches Datex/Omni/MotherDuck —
 // project_lookup (the Omni-side code) remains the actual filter/query key
 // throughout the app; PROJECT_CODE_MAP only decorates the label shown to
-// the user.
+// the user (except where explicitly noted below, e.g. the 243 required-
+// days override, which intentionally keys off the derived NUMBER).
 export const PROJECT_CODE_MAP = {
   PALVI9:  '247',
+  PALVI5:  '240',
   PALDSD9: '243',
+  PALDSD5: '243',
   PALMA9:  '248',
 }
 
@@ -71,6 +83,49 @@ export function formatProjectLabel(projectLookup) {
   if (!projectLookup) return null
   const code = PROJECT_CODE_MAP[projectLookup]
   return code ? `${projectLookup} \u00b7 ${code}` : projectLookup
+}
+
+// ── Verdict tuning (2026-07-07, Hill: "our categories are too wonky") ───
+//
+// Hill's Slack rewrite of the five verdict stages, replacing the old
+// ratio-based (daysToCodeAtShip / shelfLifeDays) approach entirely:
+//
+//   Expired      — Days to Code is negative                      (today)
+//   Unshippable  — Days to Code < 30 for 243, < 90 for 247,
+//                  < 5 for 248                                    (today)
+//   Critical     — projected ship is under req by MORE than 15 days
+//   At Risk      — projected ship is under req by 0–15 days
+//   Watch        — leave as is (everything else: has buffer, or we
+//                  don't have enough data to say)
+//
+// Two things worth flagging:
+//   1. "Days to Code" for Unshippable is explicitly TODAY's count, not
+//      at-projected-ship — same as Expired. This is a real behavior change
+//      from the old rule (which used daysToCodeAtShip <= 0). It reframes
+//      Unshippable from "will be past code by the time it ships" to "this
+//      project's customer won't even consider it beyond this floor,
+//      regardless of when it's projected to actually move."
+//   2. Hill only gave thresholds for 243/247/248. PALVI5 (240) has no
+//      stated threshold — falls back to the old at-ship <= 0 definition
+//      via UNSHIPPABLE_FALLBACK. Worth confirming a 240 threshold with
+//      Hill if PALVI5 lots start showing up in this stage unexpectedly.
+const UNSHIPPABLE_DAYS_TO_CODE_THRESHOLD_BY_PROJECT_NUMBER = {
+  '243': 30,
+  '247': 90,
+  '248': 5,
+}
+
+// Critical/At Risk split point on shortfall_days (shelfLifeDays required −
+// daysToCodeAtShip; positive = lands under spec at projected ship).
+const CRITICAL_SHORTFALL_THRESHOLD_DAYS = 15
+
+// "for all items in 243, the required days should be 30" — Hill, same
+// message. Unconditional override: whatever the normal spec-resolution
+// chain (ops-edited material spec > allocation > 365-day history > 96-day
+// default) would have produced, project number 243 always gets 30. Keyed
+// by NUMBER (not project_lookup) since both PALDSD5 and PALDSD9 map to it.
+const REQUIRED_DAYS_OVERRIDE_BY_PROJECT_NUMBER = {
+  '243': 30,
 }
 
 // ── PVI Lot Dispositions (2026-07-07, Hill request) ─────────────────────
@@ -334,6 +389,24 @@ export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory
       }
     }
 
+    // Project number derived from project_lookup — used both for display
+    // (formatProjectLabel elsewhere) and for the two Hill rules below that
+    // key off the NUMBER rather than the raw lookup code (since 243 covers
+    // both PALDSD5 and PALDSD9).
+    const projectNumber = lot.project_lookup ? (PROJECT_CODE_MAP[lot.project_lookup] || null) : null
+
+    // Required-days override (2026-07-07, Hill): "for all items in 243,
+    // the required days should be 30." Unconditional — replaces whatever
+    // the spec-resolution chain above produced. Applied here, before
+    // shortfall/verdict calculation, so everything downstream (shortfall
+    // days, verdict stage, Vs. spec column, email copy) reflects the
+    // overridden requirement automatically.
+    const requiredOverride = projectNumber ? REQUIRED_DAYS_OVERRIDE_BY_PROJECT_NUMBER[projectNumber] : null
+    if (requiredOverride != null) {
+      shelfLifeDays = requiredOverride
+      specSource   = 'project_override'
+    }
+
     const expIso = lot.expiration_date_iso
     const expMs = expIso ? Date.parse(expIso) : null
     const daysToCodeToday = expMs != null
@@ -352,7 +425,7 @@ export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory
     const shortfallDays = (shelfLifeDays && daysToCodeAtShip != null)
       ? shelfLifeDays - daysToCodeAtShip
       : null
-    const verdict = verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays })
+    const verdict = verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays, shortfallDays, projectNumber })
 
     const displayPrimary = primary
       ? { ...primary, canonical: displayCanonical || primary.canonical }
@@ -378,26 +451,52 @@ export function projectFefo({ lots, pendingOrders, velocity, materialShipHistory
   return rows
 }
 
-export function verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays }) {
+// verdictForLot — rewritten 2026-07-07 per Hill ("our categories are too
+// wonky right now"). Priority order, first match wins:
+//
+//   1. Expired      — daysToCodeToday < 0
+//   2. Unshippable  — daysToCodeToday < per-project threshold (243/247/248
+//                      per UNSHIPPABLE_DAYS_TO_CODE_THRESHOLD_BY_PROJECT_NUMBER).
+//                      Projects with no defined threshold (e.g. PALVI5/240,
+//                      or no project at all) fall back to the pre-existing
+//                      "at or past projected ship" definition so nothing
+//                      silently loses Unshippable coverage while Hill's
+//                      thresholds only cover three of the five known
+//                      project numbers.
+//   3. (no data)    — Watch, missingData flag, if we can't compute a
+//                      shortfall (no projected ship or no spec).
+//   4. Critical     — shortfallDays > 15
+//   5. At Risk      — 0 <= shortfallDays <= 15
+//   6. Watch        — shortfallDays < 0 (has buffer) — "leave as is"
+export function verdictForLot({ daysToCodeToday, daysToCodeAtShip, shelfLifeDays, shortfallDays, projectNumber }) {
   if (daysToCodeToday != null && daysToCodeToday < 0) {
     return { stage: 'expired', ...STAGE_META.expired }
   }
-  if (daysToCodeAtShip == null) {
-    return { stage: 'watch', ...STAGE_META.watch, missingData: true }
-  }
-  if (daysToCodeAtShip <= 0) {
+
+  const unshippableThreshold = projectNumber
+    ? UNSHIPPABLE_DAYS_TO_CODE_THRESHOLD_BY_PROJECT_NUMBER[projectNumber]
+    : undefined
+  if (unshippableThreshold != null) {
+    if (daysToCodeToday != null && daysToCodeToday < unshippableThreshold) {
+      return { stage: 'unshippable', ...STAGE_META.unshippable }
+    }
+  } else if (daysToCodeAtShip != null && daysToCodeAtShip <= 0) {
+    // Fallback for projects Hill didn't give an explicit threshold for.
     return { stage: 'unshippable', ...STAGE_META.unshippable }
   }
-  if (!shelfLifeDays || shelfLifeDays <= 0) {
-    if (daysToCodeToday != null && daysToCodeToday < 30) {
-      return { stage: 'critical', ...STAGE_META.critical, noShelfLifeCfg: true }
-    }
-    return { stage: 'watch', ...STAGE_META.watch, noShelfLifeCfg: true }
+
+  if (daysToCodeAtShip == null || shortfallDays == null) {
+    return { stage: 'watch', ...STAGE_META.watch, missingData: true }
   }
-  const ratio = daysToCodeAtShip / shelfLifeDays
-  if (ratio < 0.5) return { stage: 'critical', ...STAGE_META.critical, ratio }
-  if (ratio < 1.0) return { stage: 'at_risk',  ...STAGE_META.at_risk,  ratio }
-  return { stage: 'watch', ...STAGE_META.watch, ratio }
+
+  if (shortfallDays > CRITICAL_SHORTFALL_THRESHOLD_DAYS) {
+    return { stage: 'critical', ...STAGE_META.critical }
+  }
+  if (shortfallDays >= 0) {
+    return { stage: 'at_risk', ...STAGE_META.at_risk }
+  }
+  // shortfallDays < 0 → has buffer beyond spec. Leave as Watch per Hill.
+  return { stage: 'watch', ...STAGE_META.watch }
 }
 
 const SPEC_SOURCE_LABEL = {
@@ -405,6 +504,7 @@ const SPEC_SOURCE_LABEL = {
   allocation:       'from allocation',
   material_history: 'from 365-day history',
   default_96:       'default (no history)',
+  project_override: 'project override (243 fixed at 30d)',
 }
 
 export function formatLotForEmail(row) {
