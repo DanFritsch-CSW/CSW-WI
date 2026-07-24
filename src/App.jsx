@@ -17,6 +17,7 @@ const Analytics          = lazy(() => import('./pages/Analytics.jsx'))
 const Settings           = lazy(() => import('./pages/Settings.jsx'))
 const PalermosStandalone = lazy(() => import('./pages/PalermosStandalone.jsx'))
 const DvrTracker         = lazy(() => import('./pages/DvrTracker.jsx'))
+const Recruiting         = lazy(() => import('./pages/Recruiting.jsx'))
 
 function PageLoading() {
   return (
@@ -101,6 +102,7 @@ export default function App() {
               <Route path="/analytics"            element={<Analytics />}         />
               <Route path="/settings"             element={<Settings />}          />
               <Route path="/dvr"                  element={<DvrTracker />}        />
+              <Route path="/recruiting"           element={<Recruiting />}        />
             </Routes>
           </Suspense>
         </PageErrorBoundary>
