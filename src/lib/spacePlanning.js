@@ -921,15 +921,38 @@ export function findCustomerStackMode(projectName, customerStackingRows) {
   return match ? match.stack_mode : 'single'
 }
 
+// Computes the stacking-adjusted "effective" occupied count for ONE aisle —
+// the same halving rule as computeEffectiveRoomOccupancy below, scoped to a
+// single aisle's live occupants. Added 2026-07-25 (same day) per Dan's ask
+// for a per-aisle utilization figure in the Aisle Rack Geometry table, not
+// just a room-level rollup — this is the piece that made that possible.
+// computeEffectiveRoomOccupancy now calls this per aisle internally instead
+// of duplicating the halving logic.
+//
+// Returns { rawLps, effectiveLps } — rawLps is the simple sum of occupant
+// LPs (matches what fetchLivePerAisleOccupancy reports for this aisle),
+// effectiveLps is the stacking-adjusted count to compare against
+// aislePositionsRange(aisle).min for a per-aisle utilization percentage.
+export function computeEffectiveAisleOccupancy(aisle, occupants, customerStackingRows) {
+  const aisleDoubleCapable = (aisle.max_stack_per_tier ?? 1) > 1
+  let rawLps = 0
+  let effectiveLps = 0
+  for (const occ of (occupants || [])) {
+    rawLps += occ.lps
+    const mode = findCustomerStackMode(occ.projectName, customerStackingRows)
+    effectiveLps += (aisleDoubleCapable && mode === 'double') ? occ.lps / 2 : occ.lps
+  }
+  return { rawLps, effectiveLps }
+}
+
 // Computes the stacking-adjusted "effective" occupied count for a room, to
 // be compared against roomAislePositions(aisles).min as capacity. Walks each
-// aisle's live occupants (from fetchLivePerAisleOccupancy), halves an
-// occupant's LP count only when the aisle can double-stack AND that
-// occupant's resolved stack mode is 'double'; otherwise counts 1:1. Any
-// portion of the room's live LP total not accounted for by aisle-level
-// occupancy (aisles missing a Datex link, or timing gaps between the two
-// live queries) is added back at face value (1:1) — conservative, since we
-// can't confirm double-stacking for LPs we can't attribute to a specific aisle.
+// aisle's live occupants (from fetchLivePerAisleOccupancy) via
+// computeEffectiveAisleOccupancy above. Any portion of the room's live LP
+// total not accounted for by aisle-level occupancy (aisles missing a Datex
+// link, or timing gaps between the two live queries) is added back at face
+// value (1:1) — conservative, since we can't confirm double-stacking for
+// LPs we can't attribute to a specific aisle.
 //
 // Returns a plain number (not null) — 0 if there's nothing to compute from.
 export function computeEffectiveRoomOccupancy(aisles, occupancyByAisleId, customerStackingRows, liveLps) {
@@ -938,12 +961,9 @@ export function computeEffectiveRoomOccupancy(aisles, occupancyByAisleId, custom
   for (const aisle of (aisles || [])) {
     if (aisle.datex_aisle_location_id == null) continue
     const occupants = occupancyByAisleId?.get(Number(aisle.datex_aisle_location_id)) || []
-    const aisleDoubleCapable = (aisle.max_stack_per_tier ?? 1) > 1
-    for (const occ of occupants) {
-      mappedLpTotal += occ.lps
-      const mode = findCustomerStackMode(occ.projectName, customerStackingRows)
-      effectiveUsed += (aisleDoubleCapable && mode === 'double') ? occ.lps / 2 : occ.lps
-    }
+    const { rawLps, effectiveLps } = computeEffectiveAisleOccupancy(aisle, occupants, customerStackingRows)
+    mappedLpTotal += rawLps
+    effectiveUsed += effectiveLps
   }
   const unaccounted = Math.max(0, (liveLps ?? 0) - mappedLpTotal)
   return effectiveUsed + unaccounted
