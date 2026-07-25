@@ -8,7 +8,8 @@ import {
   fetchLivePerRoomActuals, fetchLivePerRoomProjectBreakdown, updateRoomCapacity,
   fetchCustomerStacking, addCustomerStacking, updateCustomerStacking, deleteCustomerStacking,
   fetchKnownCustomersForFacility,
-  fetchRoomAisles, updateRoomAisle, addRoomAisle, deleteRoomAisle, aislePositions,
+  updateRoomAisle, addRoomAisle, deleteRoomAisle, aislePositions,
+  fetchAislesForRooms, roomAislePositions,
 } from '../../lib/spacePlanning.js'
 
 // Phase 2 — Network/ALL view is read-only.
@@ -482,11 +483,16 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
   const [breakdownLoading, setBreakdownLoading] = useState(true)
   const [expandedRoomId, setExpandedRoomId] = useState(null)
 
-  // Aisle rack geometry (Phase 4a) — fetched lazily per room on first expand,
-  // not all-at-once on mount. Datex-derived, not live-refreshed on a timer —
-  // this is manual config that only changes when the physical racking does.
+  // Aisle rack geometry (Phase 4a) — fetched eagerly for every room in the
+  // facility on load (not lazily per-expand). Needed up front because room
+  // capacity is now computed from aisle data (Dan's catch, 2026-07-24: the
+  // room-level Slots × Stack field was pure redundancy once aisles could
+  // sum to the real number themselves), and that capacity has to show in
+  // the collapsed row, not just inside the expanded drill-down. Datex-derived
+  // for bay_count, otherwise manual — not live-refreshed on a timer, since
+  // this is config that only changes when the physical racking does.
   const [aislesByRoomId, setAislesByRoomId] = useState(new Map()) // roomId -> aisle rows
-  const [aislesLoadingRoomId, setAislesLoadingRoomId] = useState(null)
+  const [aislesLoading, setAislesLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
@@ -525,23 +531,26 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
     return () => { cancelled = true }
   }, [facility])
 
-  // Fetches aisle geometry for a room the first time it's expanded — cached
-  // in aislesByRoomId after that (no refetch on re-collapse/re-expand unless
-  // an edit happens, since this is manual config, not something that goes
-  // stale on its own).
-  function ensureAislesLoaded(roomId) {
-    if (aislesByRoomId.has(roomId)) return
-    setAislesLoadingRoomId(roomId)
-    fetchRoomAisles(roomId)
-      .then(aisles => {
-        setAislesByRoomId(prev => new Map(prev).set(roomId, aisles))
-      })
+  // Fetches aisle geometry for every room in this facility in one query,
+  // whenever the room list changes (facility switch, or initial load).
+  useEffect(() => {
+    let cancelled = false
+    if (facilityRooms.length === 0) {
+      setAislesByRoomId(new Map())
+      setAislesLoading(false)
+      return
+    }
+    setAislesLoading(true)
+    fetchAislesForRooms(facilityRooms.map(r => r.id))
+      .then(map => { if (!cancelled) setAislesByRoomId(map) })
       .catch(err => {
-        console.warn('fetchRoomAisles unexpected error:', err)
-        setAislesByRoomId(prev => new Map(prev).set(roomId, []))
+        if (cancelled) return
+        console.warn('fetchAislesForRooms unexpected error:', err)
+        setAislesByRoomId(new Map())
       })
-      .finally(() => setAislesLoadingRoomId(null))
-  }
+      .finally(() => { if (!cancelled) setAislesLoading(false) })
+    return () => { cancelled = true }
+  }, [facilityRooms])
 
   // Attach live LP count to each seeded room row. Rooms without a
   // datex_top_location_id show '—' for live LPs.
@@ -616,15 +625,9 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
           breakdown={breakdown}
           breakdownLoading={breakdownLoading}
           expandedRoomId={expandedRoomId}
-          onToggleExpand={roomId => {
-            setExpandedRoomId(prev => {
-              const next = prev === roomId ? null : roomId
-              if (next != null) ensureAislesLoaded(next)
-              return next
-            })
-          }}
+          onToggleExpand={roomId => setExpandedRoomId(prev => prev === roomId ? null : roomId)}
           aislesByRoomId={aislesByRoomId}
-          aislesLoadingRoomId={aislesLoadingRoomId}
+          aislesLoading={aislesLoading}
           onAislesChanged={(roomId, nextAisles) => {
             setAislesByRoomId(prev => new Map(prev).set(roomId, nextAisles))
           }}
@@ -644,14 +647,15 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         Per-room count is the physical active LP total (all non-archived license plates
         in each room, warehouse-scoped). The Network scorecard uses a project-joined
         count that filters out internal/unassigned LPs, so the two totals will differ.
-        Click any Slots × Stack cell to set capacity — it saves immediately, no separate
-        Settings page needed. Utilization uses the physical LP count against that capacity.
-        Click a room's name to see which projects are occupying it right now and how many
-        LPs each holds, plus this room's aisle rack geometry (bays × deep × tiers × max
-        stack per tier — manual config except bay count, which is live-derivable from Datex
-        since every bay is a real distinct location container). Positions shown there are
-        the rack's physical ceiling for the WHOLE aisle, not yet adjusted for what any
-        specific customer's product can actually support.
+        Once a room has aisle rack geometry configured, its capacity is computed as the
+        sum of its aisles' positions automatically — no manual entry needed, and no
+        separate "set capacity" step. Rooms without aisle geometry yet still use a manual
+        Slots × Stack entry (click to edit) as a placeholder until they're characterized.
+        Utilization always uses whichever capacity is active for that room. Click a room's
+        name to see which projects are occupying it right now and how many LPs each holds,
+        plus its aisle rack geometry (bays × deep × tiers × max stack per tier — manual
+        config except bay count, which is live-derivable from Datex since every bay is a
+        real distinct location container).
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -1005,7 +1009,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoadingRoomId, onAislesChanged }) {
+function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, onAislesChanged }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -1045,7 +1049,7 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
         <div>Room</div>
         <div>Zone</div>
         <div style={{ textAlign: 'right' }}>Live LPs</div>
-        <div style={{ textAlign: 'right' }}>Slots × Stack</div>
+        <div style={{ textAlign: 'right' }}>Capacity</div>
         <div style={{ textAlign: 'right' }}>Util</div>
         <div style={{ textAlign: 'right' }}>Datex ID</div>
       </div>
@@ -1062,7 +1066,7 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
           expanded={expandedRoomId === row.id}
           onToggleExpand={onToggleExpand}
           aisles={aislesByRoomId.get(row.id)}
-          aislesLoading={aislesLoadingRoomId === row.id}
+          aislesLoading={aislesLoading}
           onAislesChanged={onAislesChanged}
         />
       ))}
@@ -1092,7 +1096,9 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
 
 function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, onAislesChanged }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
-  const cap = (row.slots || 0) * (row.stack || 0)
+  const aisleCalc = roomAislePositions(aisles)
+  const hasAisleData = aisleCalc.aisleCount > 0
+  const cap = hasAisleData ? aisleCalc.total : (row.slots || 0) * (row.stack || 0)
   const util = cap > 0 && row.live_lps != null ? (row.live_lps / cap) * 100 : null
   const band = utilBand(util)
   const canExpand = row.datex_top_location_id != null
@@ -1148,7 +1154,13 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
         }}>
           {liveLoading ? '…' : (row.live_lps != null ? fmtInt(row.live_lps) : '—')}
         </div>
-        <CapacityCell room={row} onRoomUpdated={onRoomUpdated} />
+        {aislesLoading ? (
+          <div style={{ textAlign: 'right', fontSize: 11, color: 'var(--text-dim)' }}>…</div>
+        ) : hasAisleData ? (
+          <ComputedCapacityCell aisleCalc={aisleCalc} />
+        ) : (
+          <CapacityCell room={row} onRoomUpdated={onRoomUpdated} />
+        )}
         <div style={{
           textAlign: 'right',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
@@ -1508,6 +1520,33 @@ function AisleAddRow({ roomId, existingLabels, onAdded, onCancel }) {
         Cancel
       </button>
       {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</span>}
+    </div>
+  )
+}
+
+// Read-only capacity cell shown once a room has aisle geometry configured —
+// replaces the manual Slots × Stack cell entirely (Dan's catch, 2026-07-24:
+// there's no reason to hand-enter a room total when the aisles underneath
+// it already have real, computable positions). Sums roomAislePositions'
+// total and flags aisles still missing geometry so the number reads as a
+// floor, not a final total, until every aisle is characterized.
+function ComputedCapacityCell({ aisleCalc }) {
+  const { total, aisleCount, incompleteCount } = aisleCalc
+  return (
+    <div style={{ textAlign: 'right' }}>
+      <div style={{
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        fontSize: 12, color: 'var(--text-primary)',
+      }}>
+        {fmtInt(total)}
+      </div>
+      <div style={{
+        fontSize: 9,
+        color: incompleteCount > 0 ? 'var(--amber, #a07818)' : 'var(--text-dim)',
+      }}>
+        {aisleCount} aisle{aisleCount === 1 ? '' : 's'}
+        {incompleteCount > 0 ? ` · ${incompleteCount} unconfirmed` : ''}
+      </div>
     </div>
   )
 }
