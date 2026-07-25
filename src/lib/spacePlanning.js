@@ -574,6 +574,61 @@ export function aislePositions(aisle) {
   return aisle.deep * aisle.tiers * stack * aisle.bay_count
 }
 
+// Bulk fetch — all aisles for every room in a facility, in one query. Used
+// so room-level capacity (see roomAislePositions below) can be computed for
+// every visible room row, not just the one currently expanded. Returns a
+// Map<room_id, aisle[]> — rooms with no configured aisles simply have no
+// entry (caller should treat "missing key" the same as "empty array": no
+// aisle data yet, fall back to the manual Slots × Stack field).
+export async function fetchAislesForRooms(roomIds) {
+  if (!supabase || !roomIds?.length) return new Map()
+  const { data, error } = await supabase
+    .from('space_room_aisles')
+    .select('*')
+    .in('room_id', roomIds)
+    .order('aisle_label')
+  if (error) { console.error('fetchAislesForRooms:', error); return new Map() }
+  const byRoomId = new Map()
+  for (const aisle of (data ?? [])) {
+    const list = byRoomId.get(aisle.room_id) || []
+    list.push(aisle)
+    byRoomId.set(aisle.room_id, list)
+  }
+  return byRoomId
+}
+
+// Room-level capacity computed as the sum of its aisles' positions — this is
+// what replaced the room-level manual Slots × Stack entry once a room has
+// aisle geometry configured (Dan's catch, 2026-07-24: the room-level field
+// was pure redundancy once aisles could compute the real number themselves).
+// Aisles with incomplete geometry (aislePositions returns null — e.g. an
+// aisle whose stack capability isn't confirmed yet) are excluded from the
+// sum rather than silently treated as zero, and reported separately so the
+// UI can flag the total as a floor, not a final number.
+//
+// Returns { total, completeCount, incompleteCount, aisleCount }. Caller
+// should treat aisleCount === 0 as "no aisle data for this room" — fall back
+// to the manual room-level capacity field entirely, not to this function's
+// total (which would be 0 and read as "room holds nothing").
+export function roomAislePositions(aisles) {
+  if (!aisles || aisles.length === 0) {
+    return { total: 0, completeCount: 0, incompleteCount: 0, aisleCount: 0 }
+  }
+  let total = 0
+  let completeCount = 0
+  let incompleteCount = 0
+  for (const aisle of aisles) {
+    const p = aislePositions(aisle)
+    if (p == null) {
+      incompleteCount += 1
+    } else {
+      total += p
+      completeCount += 1
+    }
+  }
+  return { total, completeCount, incompleteCount, aisleCount: aisles.length }
+}
+
 // Real project/customer list for a facility, sourced from the same
 // fetchActiveInventory path the Network scorecard uses — guarantees the
 // stacking-notes dropdown links to actual Datex project names instead of
