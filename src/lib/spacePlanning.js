@@ -656,6 +656,183 @@ export function roomAislePositions(aisles) {
   return { min, max, completeCount, incompleteCount, aisleCount: aisles.length }
 }
 
+// ─── Phase 4b — Live per-aisle occupancy (visibility only, 2026-07-25) ───────────
+//
+// Which customers/projects are physically occupying each aisle right now,
+// by LP count. Confirmed live before building: aisles routinely mix MULTIPLE
+// customers together (F8's G aisle has 5 different projects with active
+// LPs) — there's no way to know which specific bay a given customer's
+// product sits in, only which aisle-container as a whole. This is exactly
+// why aisle/room capacity stays a min–max RANGE (see aislePositionsRange /
+// roomAislePositions above) rather than resolving to one number — that
+// would need bay-level tracking this app doesn't have. Dan's explicit scope
+// for this round: show occupancy + let him record material stacking
+// exceptions; do NOT attempt to auto-resolve capacity from this data yet.
+//
+// Returns:
+//   {
+//     byAisleLocationId: Map<datex_aisle_location_id: number, [{ projectName, lps }]>,
+//     fetchedAt, elapsedMs, error, source: 'live' | 'error'
+//   }
+export async function fetchLivePerAisleOccupancy(facility) {
+  const t0 = Date.now()
+  if (!PHASE3_FACILITIES.has(facility)) {
+    return {
+      byAisleLocationId: new Map(),
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      error: `Facility '${facility}' not yet scoped for per-aisle occupancy`,
+      source: 'error',
+    }
+  }
+  try {
+    const res = await fetch('/.netlify/functions/space-per-aisle-projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ facility }),
+    })
+    if (!res.ok) {
+      let body = {}
+      try { body = await res.json() } catch { /* non-json */ }
+      throw new Error(body.error || `space-per-aisle-projects ${res.status}`)
+    }
+    const { perAisle, fetchedAt, elapsedMs } = await res.json()
+    const byAisleLocationId = new Map()
+    for (const [aisleId, projects] of Object.entries(perAisle || {})) {
+      byAisleLocationId.set(Number(aisleId), projects)
+    }
+    return {
+      byAisleLocationId,
+      fetchedAt: fetchedAt || new Date().toISOString(),
+      elapsedMs: elapsedMs ?? (Date.now() - t0),
+      error: null,
+      source: 'live',
+    }
+  } catch (e) {
+    console.warn('fetchLivePerAisleOccupancy failed:', e.message)
+    return {
+      byAisleLocationId: new Map(),
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      error: e.message,
+      source: 'error',
+    }
+  }
+}
+
+// Live materials with on-hand inventory for one customer — powers the
+// material-exception dropdown so it's always current as customers add/retire
+// materials over time, same "live list, not free text" pattern as
+// fetchKnownCustomersForFacility. Scoped per customer (not a facility-wide
+// dump) since a single project can carry 100+ materials total.
+//
+// Returns array of { materialName, lookupCode, lps } on success (sorted by
+// lps descending), or null on failure — callers should treat null as "fall
+// back to manual text entry", same convention as fetchKnownCustomersForFacility.
+export async function fetchMaterialsForCustomer(facility, customerName) {
+  if (!PHASE3_FACILITIES.has(facility)) return null
+  try {
+    const res = await fetch('/.netlify/functions/space-materials-for-project', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ facility, projectName: customerName }),
+    })
+    if (!res.ok) {
+      let body = {}
+      try { body = await res.json() } catch { /* non-json */ }
+      throw new Error(body.error || `space-materials-for-project ${res.status}`)
+    }
+    const { materials } = await res.json()
+    return materials || []
+  } catch (e) {
+    console.warn('fetchMaterialsForCustomer failed:', e.message)
+    return null
+  }
+}
+
+// ─── Material stacking exceptions (Phase 4b) ─────────────────────────────────────
+//
+// Customer-level stacking (space_customer_stacking, above) is a default —
+// but Dan's reminder (2026-07-25): "only select customer and potentially
+// select materials are able to be double stacked" — some customers have
+// specific materials that break from their own default (e.g. a customer
+// that's generally double-stack-capable might have one fragile SKU that
+// isn't). This table records those as EXCEPTIONS layered on top of the
+// customer default, not a full replacement — most materials for a customer
+// simply inherit the customer-level stack_mode and never need an entry here.
+//
+// Lives in space_material_stacking: facility, customer_name, material_name,
+// material_lookup_code, stack_mode ('single'|'double'), notes, timestamps.
+// UNIQUE(facility, customer_name, material_name).
+//
+// Scalability note: this table only ever grows with real exceptions Dan
+// actually enters — there's no seeding or bulk generation, keeping it small
+// and manageable as customers and their material catalogs change over time.
+
+export async function fetchMaterialStacking(facility) {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('space_material_stacking')
+    .select('*')
+    .eq('facility', facility)
+    .order('customer_name')
+    .order('material_name')
+  if (error) { console.error('fetchMaterialStacking:', error); return [] }
+  return data ?? []
+}
+
+// Insert a new material stacking exception. Returns { success, row } or
+// { success: false, error }. Fails on duplicate (facility, customer_name,
+// material_name) — caller should use updateMaterialStacking to edit instead.
+export async function addMaterialStacking(facility, { customerName, materialName, lookupCode, stackMode, notes }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { data, error } = await supabase
+    .from('space_material_stacking')
+    .insert({
+      facility,
+      customer_name: customerName.trim(),
+      material_name: materialName.trim(),
+      material_lookup_code: lookupCode || null,
+      stack_mode: stackMode,
+      notes: notes?.trim() || null,
+    })
+    .select()
+    .single()
+  if (error) {
+    console.error('addMaterialStacking:', error)
+    return { success: false, error: error.code === '23505' ? 'That material already has an exception for this customer' : error.message }
+  }
+  return { success: true, row: data }
+}
+
+export async function updateMaterialStacking(id, { stackMode, notes }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const patch = { updated_at: new Date().toISOString() }
+  if (stackMode != null) patch.stack_mode = stackMode
+  if (notes !== undefined) patch.notes = notes?.trim() || null
+  const { data, error } = await supabase
+    .from('space_material_stacking')
+    .update(patch)
+    .eq('id', id)
+    .select()
+    .single()
+  if (error) {
+    console.error('updateMaterialStacking:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true, row: data }
+}
+
+export async function deleteMaterialStacking(id) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { error } = await supabase.from('space_material_stacking').delete().eq('id', id)
+  if (error) {
+    console.error('deleteMaterialStacking:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true }
+}
+
 // Real project/customer list for a facility, sourced from the same
 // fetchActiveInventory path the Network scorecard uses — guarantees the
 // stacking-notes dropdown links to actual Datex project names instead of
