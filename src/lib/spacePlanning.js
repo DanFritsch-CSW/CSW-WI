@@ -589,6 +589,12 @@ export function aislePositions(aisle) {
 // the actual customer mix — check Customer Stacking Notes for who's flagged
 // as double-stack-capable. When max_stack_per_tier is 1 (or unset), min===max
 // since there's no ambiguity — the aisle can only ever be single-stacked.
+//
+// NOTE 2026-07-25: this is still the underlying range concept, but the UI no
+// longer DISPLAYS a range for capacity/utilization — Dan's call: use `min`
+// (single-stack floor) as the sole denominator, and adjust the numerator
+// instead (see computeEffectiveRoomOccupancy below). `min` from this function
+// remains the source of truth for that fixed denominator.
 export function aislePositionsRange(aisle) {
   if (aisle.deep == null || aisle.tiers == null || aisle.bay_count == null) return null
   const base = aisle.deep * aisle.tiers * aisle.bay_count
@@ -630,11 +636,12 @@ export async function fetchAislesForRooms(roomIds) {
 //
 // Returns { min, max, completeCount, incompleteCount, aisleCount }. `min`/`max`
 // are the same range concept as aislePositionsRange, summed across every
-// complete aisle — min is the single-stack-everywhere floor, max is the
-// rack-ceiling-everywhere assumption. Caller should treat aisleCount === 0
-// as "no aisle data for this room" — fall back to the manual room-level
-// capacity field entirely, not to min/max (which would both be 0 and read
-// as "room holds nothing").
+// complete aisle — min is the single-stack-everywhere floor (this is what the
+// UI now uses as ROOM CAPACITY, flat, no range — Dan's call 2026-07-25), max
+// is the rack-ceiling-everywhere assumption (kept for reference, no longer
+// displayed). Caller should treat aisleCount === 0 as "no aisle data for this
+// room" — fall back to the manual room-level capacity field entirely, not to
+// min/max (which would both be 0 and read as "room holds nothing").
 export function roomAislePositions(aisles) {
   if (!aisles || aisles.length === 0) {
     return { min: 0, max: 0, completeCount: 0, incompleteCount: 0, aisleCount: 0 }
@@ -668,6 +675,14 @@ export function roomAislePositions(aisles) {
 // would need bay-level tracking this app doesn't have. Dan's explicit scope
 // for this round: show occupancy + let him record material stacking
 // exceptions; do NOT attempt to auto-resolve capacity from this data yet.
+//
+// UPDATE 2026-07-25 later same day: this occupancy data is now ALSO the
+// input to computeEffectiveRoomOccupancy below, which resolves room
+// utilization to a single stacking-adjusted number per Dan's request — the
+// "do NOT auto-resolve capacity" scope note above referred to the earlier,
+// broader ask; this narrower calculation (customer-level only, see that
+// function's docs for exactly what it does and doesn't account for) is what
+// Dan asked for next.
 //
 // Returns:
 //   {
@@ -831,6 +846,67 @@ export async function deleteMaterialStacking(id) {
     return { success: false, error: error.message }
   }
   return { success: true }
+}
+
+// ─── Effective room occupancy — stacking-adjusted, single denominator ───────────
+//
+// Dan's call (2026-07-25): no range for capacity or utilization. Capacity is
+// simply the single-stack floor (roomAislePositions(aisles).min) — a hard
+// physical minimum true regardless of who's stored where. Utilization's
+// NUMERATOR is adjusted instead: LPs get counted as HALF a position only
+// when BOTH (a) they're physically sitting in an aisle whose rack can
+// double-stack, AND (b) that occupant is actually flagged double-stack —
+// otherwise they count as a full position. This is exactly Dan's example:
+// a double-stack-capable customer whose LPs land in a single-stack aisle
+// (B/C/D/E) gets no halving credit there, because the rack physically can't
+// support it regardless of what that customer's product could do elsewhere.
+//
+// Matching a live Datex project name (e.g. "Jones Dairy Farm - CSW-Madison")
+// against space_customer_stacking.customer_name uses the same case-
+// insensitive PREFIX match as space-materials-for-project.cjs, since that
+// table often stores a shortened name. Unmatched projects default to
+// 'single' — conservative, never invents double-stack credit for a customer
+// with no recorded stacking mode.
+//
+// KNOWN LIMITATION: this only resolves stack mode at the CUSTOMER level.
+// space_material_stacking exceptions aren't factored in here, because the
+// per-aisle occupancy data (fetchLivePerAisleOccupancy) is per-PROJECT, not
+// per-material — there's no per-aisle-per-material breakdown to apply a
+// material-level override against. Would need a further backend query
+// (per-aisle-per-material occupancy) to close this gap.
+export function findCustomerStackMode(projectName, customerStackingRows) {
+  if (!projectName || !customerStackingRows?.length) return 'single'
+  const upper = projectName.toUpperCase()
+  const match = customerStackingRows.find(r => upper.startsWith((r.customer_name || '').toUpperCase()))
+  return match ? match.stack_mode : 'single'
+}
+
+// Computes the stacking-adjusted "effective" occupied count for a room, to
+// be compared against roomAislePositions(aisles).min as capacity. Walks each
+// aisle's live occupants (from fetchLivePerAisleOccupancy), halves an
+// occupant's LP count only when the aisle can double-stack AND that
+// occupant's resolved stack mode is 'double'; otherwise counts 1:1. Any
+// portion of the room's live LP total not accounted for by aisle-level
+// occupancy (aisles missing a Datex link, or timing gaps between the two
+// live queries) is added back at face value (1:1) — conservative, since we
+// can't confirm double-stacking for LPs we can't attribute to a specific aisle.
+//
+// Returns a plain number (not null) — 0 if there's nothing to compute from.
+export function computeEffectiveRoomOccupancy(aisles, occupancyByAisleId, customerStackingRows, liveLps) {
+  let effectiveUsed = 0
+  let mappedLpTotal = 0
+  for (const aisle of (aisles || [])) {
+    if (aisle.datex_aisle_location_id == null) continue
+    const occupants = occupancyByAisleId?.get(Number(aisle.datex_aisle_location_id)) || []
+    const aisleDoubleCapable = (aisle.max_stack_per_tier ?? 1) > 1
+    for (const occ of occupants) {
+      mappedLpTotal += occ.lps
+      const mode = findCustomerStackMode(occ.projectName, customerStackingRows)
+      effectiveUsed += (aisleDoubleCapable && mode === 'double') ? occ.lps / 2 : occ.lps
+    }
+  }
+  const unaccounted = Math.max(0, (liveLps ?? 0) - mappedLpTotal)
+  return effectiveUsed + unaccounted
 }
 
 // Real project/customer list for a facility, sourced from the same
