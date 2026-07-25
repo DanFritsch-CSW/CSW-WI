@@ -12,6 +12,7 @@ import {
   fetchAislesForRooms, roomAislePositions,
   fetchLivePerAisleOccupancy,
   fetchMaterialStacking,
+  computeEffectiveRoomOccupancy,
 } from '../../lib/spacePlanning.js'
 import { AisleOccupancyPanel, MaterialStackingSubsection } from './SpaceStackingExceptions.jsx'
 
@@ -506,6 +507,14 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
   const [aisleOccupancy, setAisleOccupancy] = useState(null) // { byAisleLocationId, ... } | null
   const [aisleOccupancyLoading, setAisleOccupancyLoading] = useState(true)
 
+  // Customer stacking rows (Dan's call, 2026-07-25) — fetched here too, in
+  // addition to CustomerStackingSection's own copy, so RoomRow can resolve
+  // each occupant's stack mode when computing effective room occupancy.
+  // Small/cheap read; duplicating it avoids a bigger prop-drilling refactor
+  // through CustomerStackingSection, which stays independent.
+  const [customerStackingRows, setCustomerStackingRows] = useState([])
+  const [customerStackingLoading, setCustomerStackingLoading] = useState(true)
+
   useEffect(() => {
     let cancelled = false
     setLiveLoading(true)
@@ -579,6 +588,19 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         })
       })
       .finally(() => { if (!cancelled) setAisleOccupancyLoading(false) })
+    return () => { cancelled = true }
+  }, [facility])
+
+  useEffect(() => {
+    let cancelled = false
+    setCustomerStackingLoading(true)
+    fetchCustomerStacking(facility)
+      .then(data => { if (!cancelled) setCustomerStackingRows(data) })
+      .catch(err => {
+        if (cancelled) return
+        console.warn('fetchCustomerStacking (FacilityRoomView) unexpected error:', err)
+      })
+      .finally(() => { if (!cancelled) setCustomerStackingLoading(false) })
     return () => { cancelled = true }
   }, [facility])
 
@@ -660,6 +682,8 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
           aislesLoading={aislesLoading}
           aisleOccupancy={aisleOccupancy}
           aisleOccupancyLoading={aisleOccupancyLoading}
+          customerStackingRows={customerStackingRows}
+          customerStackingLoading={customerStackingLoading}
           onAislesChanged={(roomId, nextAisles) => {
             setAislesByRoomId(prev => new Map(prev).set(roomId, nextAisles))
           }}
@@ -679,18 +703,22 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         Per-room count is the physical active LP total (all non-archived license plates
         in each room, warehouse-scoped). The Network scorecard uses a project-joined
         count that filters out internal/unassigned LPs, so the two totals will differ.
-        Once a room has aisle rack geometry configured, its capacity is computed as a
-        RANGE (single-stack floor – double-stack ceiling) summed from its aisles — not
-        a single number, since max stack per tier is what the rack physically allows,
-        not a guarantee that whatever's stored there actually gets double-stacked. Only
-        specific customers can do that — see Customer Stacking Notes below for who's
-        flagged. Rooms without aisle geometry yet still use a manual Slots × Stack entry
-        (click to edit) as a placeholder until they're characterized. Utilization uses
-        the ceiling end of the range (optimistic) until per-aisle occupancy is tracked.
-        Click a room's name to see which projects are occupying it right now and how
-        many LPs each holds, plus its aisle rack geometry (bays × deep × tiers × max
-        stack per tier — manual config except bay count, which is live-derivable from
-        Datex since every bay is a real distinct location container).
+        Once a room has aisle rack geometry configured, its capacity is a single fixed
+        number — the single-stack floor summed from its aisles — true regardless of who's
+        stored where. Utilization is adjusted instead: an occupant's LPs only count as
+        half a position when they're BOTH physically sitting in an aisle whose rack can
+        double-stack AND that occupant is flagged double-stack in Customer Stacking Notes
+        below — a double-stack-capable customer whose product lands in a single-stack
+        aisle gets no credit there, since the rack can't support it regardless of what
+        their product could do elsewhere. Unmatched or unmapped customers count 1:1
+        (conservative — never assumes double-stacking it can't confirm). This is
+        customer-level only; material-level exceptions aren't factored into this specific
+        calculation yet. Rooms without aisle geometry yet still use a manual Slots × Stack
+        entry (click to edit) as a placeholder until they're characterized. Click a room's
+        name to see which projects are occupying it right now and how many LPs each holds,
+        plus its aisle rack geometry (bays × deep × tiers × max stack per tier — manual
+        config except bay count, which is live-derivable from Datex). Click an aisle's
+        label to see which customers are physically in it right now.
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -1117,7 +1145,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
+function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -1177,6 +1205,8 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
           aislesLoading={aislesLoading}
           aisleOccupancy={aisleOccupancy}
           aisleOccupancyLoading={aisleOccupancyLoading}
+          customerStackingRows={customerStackingRows}
+          customerStackingLoading={customerStackingLoading}
           onAislesChanged={onAislesChanged}
         />
       ))}
@@ -1204,12 +1234,19 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
   )
 }
 
-function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
+function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const aisleCalc = roomAislePositions(aisles)
   const hasAisleData = aisleCalc.aisleCount > 0
-  const cap = hasAisleData ? aisleCalc.max : (row.slots || 0) * (row.stack || 0)
-  const util = cap > 0 && row.live_lps != null ? (row.live_lps / cap) * 100 : null
+  // Capacity is a flat single number — the single-stack floor — not a range
+  // (Dan's call, 2026-07-25). Utilization's numerator is adjusted instead:
+  // see computeEffectiveRoomOccupancy in spacePlanning.js for exactly how.
+  const cap = hasAisleData ? aisleCalc.min : (row.slots || 0) * (row.stack || 0)
+  const occupancyReady = hasAisleData && !aisleOccupancyLoading && !customerStackingLoading && !aisleOccupancy?.error
+  const effectiveUsed = occupancyReady
+    ? computeEffectiveRoomOccupancy(aisles, aisleOccupancy?.byAisleLocationId, customerStackingRows, row.live_lps)
+    : row.live_lps // fall back to raw LP count while occupancy/stacking data is still loading or errored
+  const util = cap > 0 && effectiveUsed != null ? (effectiveUsed / cap) * 100 : null
   const band = utilBand(util)
   const canExpand = row.datex_top_location_id != null
   return (
@@ -1365,14 +1402,14 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // per tier. bay_count is live-derivable from Datex (confirmed 2026-07-24 —
 // every bay is a real distinct location container); deep/tiers/max_stack_per_tier
 // stay manual (Datex has none of that). Edited in place the same way the
-// room-level Slots × Stack cell works. POSITIONS shows a RANGE (min–max) when
-// max_stack_per_tier > 1, not a single figure — added 2026-07-24 per Dan's
-// second catch: max_stack is the rack's physical ceiling, not a guarantee that
-// whatever's stored there is actually double-stacked. Only specific customers
-// (see Customer Stacking Notes below) can do that. min = single-stack floor,
-// max = full-double-stack ceiling; real usable capacity is somewhere between,
-// depending on who's actually occupying the aisle (not yet tracked at the
-// aisle level — that's Phase 4b, live per-aisle occupancy, not built yet).
+// room-level Slots × Stack cell works. POSITIONS shows the single-stack floor
+// only (aislePositionsRange(aisle).min) — not a range (Dan's call, 2026-07-25:
+// capacity is one fixed number; the stacking adjustment lives in the room's
+// utilization NUMERATOR instead, via computeEffectiveRoomOccupancy, which
+// only credits an occupant's LPs at half-weight when they're BOTH in a
+// double-stack-capable aisle AND actually flagged double-stack — see
+// Customer Stacking Notes below for who's flagged, and click an aisle's
+// label to see who's physically occupying it right now).
 function AisleGeometrySection({ roomId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
 
@@ -1600,7 +1637,7 @@ function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, onUpdate
         {aisle.max_stack_per_tier ?? '—'}
       </div>
       <div style={{ ...centeredCellStyle(range != null), fontWeight: range != null ? 600 : 400 }}>
-        {range != null ? (range.min !== range.max ? `${fmtInt(range.min)}–${fmtInt(range.max)}` : fmtInt(range.max)) : '—'}
+        {range != null ? fmtInt(range.min) : '—'}
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontStyle: aisle.notes ? 'normal' : 'italic' }}>
         {aisle.notes || (aisle.deep == null ? 'needs geometry input' : '')}
@@ -1674,24 +1711,20 @@ function AisleAddRow({ roomId, existingLabels, onAdded, onCancel }) {
 // Read-only capacity cell shown once a room has aisle geometry configured —
 // replaces the manual Slots × Stack cell entirely (Dan's catch, 2026-07-24:
 // there's no reason to hand-enter a room total when the aisles underneath
-// it already have real, computable positions). Shows a RANGE, not a single
-// figure — a second catch the same day: the old single number assumed every
-// occupant of a double-stack-capable aisle actually double-stacks, but only
-// specific customers (per Customer Stacking Notes below) can physically do
-// that. min = single-stack-everywhere floor, max = rack-ceiling-everywhere
-// (only true if every occupant could double-stack). Real usable capacity is
-// somewhere in between depending on who's actually stored there. Also flags
-// aisles still missing geometry so the range reads as provisional, not final.
+// it already have real, computable positions). Shows a single flat number —
+// the single-stack floor (aisleCalc.min) — not a range. Dan's call
+// (2026-07-25): capacity should be one fixed denominator; the stacking
+// adjustment happens in the utilization NUMERATOR instead (see
+// computeEffectiveRoomOccupancy), not by widening the capacity itself.
 function ComputedCapacityCell({ aisleCalc }) {
-  const { min, max, aisleCount, incompleteCount } = aisleCalc
-  const isRange = min !== max
+  const { min, aisleCount, incompleteCount } = aisleCalc
   return (
     <div style={{ textAlign: 'right' }}>
       <div style={{
         fontFamily: 'var(--font-mono, ui-monospace, monospace)',
         fontSize: 12, color: 'var(--text-primary)',
       }}>
-        {isRange ? `${fmtInt(min)} – ${fmtInt(max)}` : fmtInt(max)}
+        {fmtInt(min)}
       </div>
       <div style={{
         fontSize: 9,
@@ -1699,7 +1732,6 @@ function ComputedCapacityCell({ aisleCalc }) {
       }}>
         {aisleCount} aisle{aisleCount === 1 ? '' : 's'}
         {incompleteCount > 0 ? ` · ${incompleteCount} unconfirmed` : ''}
-        {isRange && incompleteCount === 0 ? ' · depends on stacking' : ''}
       </div>
     </div>
   )
