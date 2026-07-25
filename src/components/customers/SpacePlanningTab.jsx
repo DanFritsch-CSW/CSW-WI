@@ -647,10 +647,11 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         Click any Slots × Stack cell to set capacity — it saves immediately, no separate
         Settings page needed. Utilization uses the physical LP count against that capacity.
         Click a room's name to see which projects are occupying it right now and how many
-        LPs each holds, plus this room's aisle rack geometry (deep × tiers × max stack per
-        tier — manual config, Datex has no rack dimension data). Positions shown there are
-        the rack's physical ceiling, not yet adjusted for what any specific customer's
-        product can actually support.
+        LPs each holds, plus this room's aisle rack geometry (bays × deep × tiers × max
+        stack per tier — manual config except bay count, which is live-derivable from Datex
+        since every bay is a real distinct location container). Positions shown there are
+        the rack's physical ceiling for the WHOLE aisle, not yet adjusted for what any
+        specific customer's product can actually support.
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -1236,12 +1237,14 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
   )
 }
 
-// Rack geometry per aisle within this room — deep × tiers × max stack per
-// tier. Manual config (Datex has none of this), edited in place the same
-// way the room-level Slots × Stack cell works. Computed "positions" column
-// is the rack CEILING (aislePositions helper) — not yet adjusted for any
-// particular customer's actual stacking behavior (that's the capacity-math
-// phase, not built yet).
+// Rack geometry per aisle within this room — bays × deep × tiers × max stack
+// per tier. bay_count is live-derivable from Datex (confirmed 2026-07-24 —
+// every bay is a real distinct location container); deep/tiers/max_stack_per_tier
+// stay manual (Datex has none of that). Edited in place the same way the
+// room-level Slots × Stack cell works. Computed "positions" column is the
+// rack CEILING for the whole aisle (aislePositions helper) — not yet
+// adjusted for any particular customer's actual stacking behavior (that's
+// the capacity-math phase, not built yet).
 function AisleGeometrySection({ roomId, aisles, loading, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
 
@@ -1281,15 +1284,16 @@ function AisleGeometrySection({ roomId, aisles, loading, onAislesChanged }) {
       {!loading && aisles && aisles.length > 0 && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '0.6fr 0.6fr 0.6fr 0.6fr 0.9fr 1.6fr 0.5fr',
+          gridTemplateColumns: '0.5fr 0.55fr 0.55fr 0.55fr 0.7fr 1fr 1.5fr 0.5fr',
           rowGap: 4, columnGap: 10,
           fontSize: 12, alignItems: 'center',
         }}>
           <AisleHeaderCell>AISLE</AisleHeaderCell>
-          <AisleHeaderCell align="right">DEEP</AisleHeaderCell>
-          <AisleHeaderCell align="right">TIERS</AisleHeaderCell>
-          <AisleHeaderCell align="right">MAX STACK</AisleHeaderCell>
-          <AisleHeaderCell align="right">POSITIONS</AisleHeaderCell>
+          <AisleHeaderCell align="center">BAYS</AisleHeaderCell>
+          <AisleHeaderCell align="center">DEEP</AisleHeaderCell>
+          <AisleHeaderCell align="center">TIERS</AisleHeaderCell>
+          <AisleHeaderCell align="center">MAX STACK</AisleHeaderCell>
+          <AisleHeaderCell align="center">POSITIONS</AisleHeaderCell>
           <AisleHeaderCell>NOTES</AisleHeaderCell>
           <AisleHeaderCell />
           {aisles.map(aisle => (
@@ -1332,6 +1336,7 @@ function AisleHeaderCell({ children, align }) {
 
 function AisleRow({ aisle, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(false)
+  const [bayCount, setBayCount] = useState(aisle.bay_count ?? '')
   const [deep, setDeep] = useState(aisle.deep ?? '')
   const [tiers, setTiers] = useState(aisle.tiers ?? '')
   const [maxStack, setMaxStack] = useState(aisle.max_stack_per_tier ?? '')
@@ -1346,6 +1351,7 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
     setSaving(true)
     setErr(null)
     const result = await updateRoomAisle(aisle.id, {
+      bayCount: bayCount === '' ? null : bayCount,
       deep: deep === '' ? null : deep,
       tiers: tiers === '' ? null : tiers,
       maxStackPerTier: maxStack === '' ? null : maxStack,
@@ -1361,6 +1367,7 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
   }
 
   function cancel() {
+    setBayCount(aisle.bay_count ?? '')
     setDeep(aisle.deep ?? '')
     setTiers(aisle.tiers ?? '')
     setMaxStack(aisle.max_stack_per_tier ?? '')
@@ -1381,28 +1388,38 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
     }
   }
 
+  // justifySelf centers each input within its grid cell — the previous version
+  // left inputs anchored to the left edge of a wider column than the input
+  // itself, which read as "off-centered" against the column headers above.
   const numInputStyle = {
-    width: 42, fontSize: 12, padding: '2px 4px',
+    width: 44, fontSize: 12, padding: '2px 4px',
     fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-    border: '1px solid var(--border)', borderRadius: 4, textAlign: 'right',
+    border: '1px solid var(--border)', borderRadius: 4,
+    textAlign: 'center', justifySelf: 'center',
   }
+  const centeredCellStyle = (hasValue) => ({
+    textAlign: 'center', justifySelf: 'center',
+    fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+    color: hasValue ? 'var(--text-primary)' : 'var(--text-dim)',
+  })
 
   if (editing) {
     return (
       <>
         <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{aisle.aisle_label}</div>
+        <input type="number" min="0" value={bayCount} onChange={e => setBayCount(e.target.value)} disabled={saving} style={numInputStyle} />
         <input type="number" min="0" value={deep} onChange={e => setDeep(e.target.value)} disabled={saving} style={numInputStyle} />
         <input type="number" min="0" value={tiers} onChange={e => setTiers(e.target.value)} disabled={saving} style={numInputStyle} />
         <input type="number" min="0" value={maxStack} onChange={e => setMaxStack(e.target.value)} disabled={saving} style={numInputStyle} />
-        <div style={{ textAlign: 'right', color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>—</div>
+        <div style={{ textAlign: 'center', justifySelf: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>—</div>
         <input
           value={notes}
           onChange={e => setNotes(e.target.value)}
           placeholder="Notes (optional)"
           disabled={saving}
-          style={{ fontSize: 12, padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4 }}
+          style={{ fontSize: 12, padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, width: '100%', boxSizing: 'border-box' }}
         />
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, justifySelf: 'end' }}>
           <button type="button" onClick={save} disabled={saving} style={smallBtnStyle('var(--green, #1a8a52)')}>
             {saving ? '…' : 'Save'}
           </button>
@@ -1420,22 +1437,25 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
   return (
     <>
       <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{aisle.aisle_label}</div>
-      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: aisle.deep != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+      <div style={centeredCellStyle(aisle.bay_count != null)}>
+        {aisle.bay_count ?? '—'}
+      </div>
+      <div style={centeredCellStyle(aisle.deep != null)}>
         {aisle.deep ?? '—'}
       </div>
-      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: aisle.tiers != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+      <div style={centeredCellStyle(aisle.tiers != null)}>
         {aisle.tiers ?? '—'}
       </div>
-      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: aisle.max_stack_per_tier != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+      <div style={centeredCellStyle(aisle.max_stack_per_tier != null)}>
         {aisle.max_stack_per_tier ?? '—'}
       </div>
-      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontWeight: positions != null ? 600 : 400, color: positions != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+      <div style={{ ...centeredCellStyle(positions != null), fontWeight: positions != null ? 600 : 400 }}>
         {positions != null ? fmtInt(positions) : '—'}
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontStyle: aisle.notes ? 'normal' : 'italic' }}>
         {aisle.notes || (aisle.deep == null ? 'needs geometry input' : '')}
       </div>
-      <div style={{ display: 'flex', gap: 4 }}>
+      <div style={{ display: 'flex', gap: 4, justifySelf: 'end' }}>
         <button type="button" onClick={() => setEditing(true)} style={smallBtnStyle('var(--text-secondary)')}>Edit</button>
         <button type="button" onClick={handleDelete} disabled={deleting} style={smallBtnStyle('var(--red, #c0392b)')}>
           {deleting ? '…' : 'X'}
