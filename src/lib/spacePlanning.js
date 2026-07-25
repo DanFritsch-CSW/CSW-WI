@@ -312,6 +312,74 @@ export async function fetchLivePerRoomActuals(facility) {
   }
 }
 
+// ─── Phase 3 — Live per-room, per-project drill-down ─────────────────────────────
+//
+// Companion to fetchLivePerRoomActuals: within a room, which projects/customers
+// are occupying it right now, with a pallet-equivalent estimate (not raw LP
+// count — a single deep-lane location can hold 100+ LPs of one project, so LP
+// count alone is a poor proxy for physical space consumed).
+//
+// IMPORTANT data-quality note (confirmed live, see space-per-room-projects.cjs
+// header comment for the full story): ~1/3 of on-hand LPs at MAD carry a
+// pallet_tie=1/pallet_high=1 default that is NOT a real pallet config — those
+// cases are reported under `casesNoPalletData` per project instead of a
+// garbage pallet estimate. `estPallets` only reflects materials with a real
+// (tie×high > 1) packaging config on file.
+//
+// Returns:
+//   {
+//     byRoomId:  Map<room_id: number, [{ projectName, lps, estPallets, casesNoPalletData }]>,
+//     fetchedAt: ISO timestamp string,
+//     elapsedMs: number,
+//     error:     string | null,
+//     source:    'live' | 'error',
+//   }
+export async function fetchLivePerRoomProjectBreakdown(facility) {
+  const t0 = Date.now()
+  if (!PHASE3_FACILITIES.has(facility)) {
+    return {
+      byRoomId: new Map(),
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      error: `Facility '${facility}' not yet scoped for per-room breakdown`,
+      source: 'error',
+    }
+  }
+  try {
+    const res = await fetch('/.netlify/functions/space-per-room-projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ facility }),
+    })
+    if (!res.ok) {
+      let body = {}
+      try { body = await res.json() } catch { /* non-json */ }
+      throw new Error(body.error || `space-per-room-projects ${res.status}`)
+    }
+    const { perRoom, fetchedAt, elapsedMs } = await res.json()
+    const byRoomId = new Map()
+    for (const [roomId, projects] of Object.entries(perRoom || {})) {
+      byRoomId.set(Number(roomId), projects)
+    }
+    return {
+      byRoomId,
+      fetchedAt: fetchedAt || new Date().toISOString(),
+      elapsedMs: elapsedMs ?? (Date.now() - t0),
+      error: null,
+      source: 'live',
+    }
+  } catch (e) {
+    console.warn('fetchLivePerRoomProjectBreakdown failed:', e.message)
+    return {
+      byRoomId: new Map(),
+      fetchedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - t0,
+      error: e.message,
+      source: 'error',
+    }
+  }
+}
+
 // ─── Customer stacking reference (in-tab, MAD only for now) ─────────────────────
 //
 // Manual reference list: which customers' product double-stacks vs single-stacks
