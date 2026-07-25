@@ -8,7 +8,7 @@ import {
   fetchLivePerRoomActuals, fetchLivePerRoomProjectBreakdown, updateRoomCapacity,
   fetchCustomerStacking, addCustomerStacking, updateCustomerStacking, deleteCustomerStacking,
   fetchKnownCustomersForFacility,
-  updateRoomAisle, addRoomAisle, deleteRoomAisle, aislePositions,
+  updateRoomAisle, addRoomAisle, deleteRoomAisle, aislePositionsRange,
   fetchAislesForRooms, roomAislePositions,
 } from '../../lib/spacePlanning.js'
 
@@ -647,15 +647,18 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         Per-room count is the physical active LP total (all non-archived license plates
         in each room, warehouse-scoped). The Network scorecard uses a project-joined
         count that filters out internal/unassigned LPs, so the two totals will differ.
-        Once a room has aisle rack geometry configured, its capacity is computed as the
-        sum of its aisles' positions automatically — no manual entry needed, and no
-        separate "set capacity" step. Rooms without aisle geometry yet still use a manual
-        Slots × Stack entry (click to edit) as a placeholder until they're characterized.
-        Utilization always uses whichever capacity is active for that room. Click a room's
-        name to see which projects are occupying it right now and how many LPs each holds,
-        plus its aisle rack geometry (bays × deep × tiers × max stack per tier — manual
-        config except bay count, which is live-derivable from Datex since every bay is a
-        real distinct location container).
+        Once a room has aisle rack geometry configured, its capacity is computed as a
+        RANGE (single-stack floor – double-stack ceiling) summed from its aisles — not
+        a single number, since max stack per tier is what the rack physically allows,
+        not a guarantee that whatever's stored there actually gets double-stacked. Only
+        specific customers can do that — see Customer Stacking Notes below for who's
+        flagged. Rooms without aisle geometry yet still use a manual Slots × Stack entry
+        (click to edit) as a placeholder until they're characterized. Utilization uses
+        the ceiling end of the range (optimistic) until per-aisle occupancy is tracked.
+        Click a room's name to see which projects are occupying it right now and how
+        many LPs each holds, plus its aisle rack geometry (bays × deep × tiers × max
+        stack per tier — manual config except bay count, which is live-derivable from
+        Datex since every bay is a real distinct location container).
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -1098,7 +1101,7 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const aisleCalc = roomAislePositions(aisles)
   const hasAisleData = aisleCalc.aisleCount > 0
-  const cap = hasAisleData ? aisleCalc.total : (row.slots || 0) * (row.stack || 0)
+  const cap = hasAisleData ? aisleCalc.max : (row.slots || 0) * (row.stack || 0)
   const util = cap > 0 && row.live_lps != null ? (row.live_lps / cap) * 100 : null
   const band = utilBand(util)
   const canExpand = row.datex_top_location_id != null
@@ -1253,10 +1256,14 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // per tier. bay_count is live-derivable from Datex (confirmed 2026-07-24 —
 // every bay is a real distinct location container); deep/tiers/max_stack_per_tier
 // stay manual (Datex has none of that). Edited in place the same way the
-// room-level Slots × Stack cell works. Computed "positions" column is the
-// rack CEILING for the whole aisle (aislePositions helper) — not yet
-// adjusted for any particular customer's actual stacking behavior (that's
-// the capacity-math phase, not built yet).
+// room-level Slots × Stack cell works. POSITIONS shows a RANGE (min–max) when
+// max_stack_per_tier > 1, not a single figure — added 2026-07-24 per Dan's
+// second catch: max_stack is the rack's physical ceiling, not a guarantee that
+// whatever's stored there is actually double-stacked. Only specific customers
+// (see Customer Stacking Notes below) can do that. min = single-stack floor,
+// max = full-double-stack ceiling; real usable capacity is somewhere between,
+// depending on who's actually occupying the aisle (not yet tracked at the
+// aisle level — that's Phase 4b, live per-aisle occupancy, not built yet).
 function AisleGeometrySection({ roomId, aisles, loading, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
 
@@ -1357,7 +1364,7 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
   const [deleting, setDeleting] = useState(false)
   const [err, setErr] = useState(null)
 
-  const positions = aislePositions(aisle)
+  const range = aislePositionsRange(aisle)
 
   async function save() {
     setSaving(true)
@@ -1461,8 +1468,8 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
       <div style={centeredCellStyle(aisle.max_stack_per_tier != null)}>
         {aisle.max_stack_per_tier ?? '—'}
       </div>
-      <div style={{ ...centeredCellStyle(positions != null), fontWeight: positions != null ? 600 : 400 }}>
-        {positions != null ? fmtInt(positions) : '—'}
+      <div style={{ ...centeredCellStyle(range != null), fontWeight: range != null ? 600 : 400 }}>
+        {range != null ? (range.min !== range.max ? `${fmtInt(range.min)}–${fmtInt(range.max)}` : fmtInt(range.max)) : '—'}
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontStyle: aisle.notes ? 'normal' : 'italic' }}>
         {aisle.notes || (aisle.deep == null ? 'needs geometry input' : '')}
@@ -1527,18 +1534,24 @@ function AisleAddRow({ roomId, existingLabels, onAdded, onCancel }) {
 // Read-only capacity cell shown once a room has aisle geometry configured —
 // replaces the manual Slots × Stack cell entirely (Dan's catch, 2026-07-24:
 // there's no reason to hand-enter a room total when the aisles underneath
-// it already have real, computable positions). Sums roomAislePositions'
-// total and flags aisles still missing geometry so the number reads as a
-// floor, not a final total, until every aisle is characterized.
+// it already have real, computable positions). Shows a RANGE, not a single
+// figure — a second catch the same day: the old single number assumed every
+// occupant of a double-stack-capable aisle actually double-stacks, but only
+// specific customers (per Customer Stacking Notes below) can physically do
+// that. min = single-stack-everywhere floor, max = rack-ceiling-everywhere
+// (only true if every occupant could double-stack). Real usable capacity is
+// somewhere in between depending on who's actually stored there. Also flags
+// aisles still missing geometry so the range reads as provisional, not final.
 function ComputedCapacityCell({ aisleCalc }) {
-  const { total, aisleCount, incompleteCount } = aisleCalc
+  const { min, max, aisleCount, incompleteCount } = aisleCalc
+  const isRange = min !== max
   return (
     <div style={{ textAlign: 'right' }}>
       <div style={{
         fontFamily: 'var(--font-mono, ui-monospace, monospace)',
         fontSize: 12, color: 'var(--text-primary)',
       }}>
-        {fmtInt(total)}
+        {isRange ? `${fmtInt(min)} – ${fmtInt(max)}` : fmtInt(max)}
       </div>
       <div style={{
         fontSize: 9,
@@ -1546,6 +1559,7 @@ function ComputedCapacityCell({ aisleCalc }) {
       }}>
         {aisleCount} aisle{aisleCount === 1 ? '' : 's'}
         {incompleteCount > 0 ? ` · ${incompleteCount} unconfirmed` : ''}
+        {isRange && incompleteCount === 0 ? ' · depends on stacking' : ''}
       </div>
     </div>
   )
