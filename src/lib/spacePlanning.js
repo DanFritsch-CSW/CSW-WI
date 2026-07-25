@@ -456,6 +456,111 @@ export async function deleteCustomerStacking(id) {
   return { success: true }
 }
 
+// ─── Phase 4a — Aisle rack geometry config (in-tab, mirrors capacity editor) ──────
+//
+// Capacity per room isn't uniform — different aisles have different rack
+// geometry (deep × tiers) and different physical stacking ceilings (some
+// aisles allow double-stacking totes per tier, some don't, regardless of
+// what a customer's product could otherwise support). Datex has zero data
+// on any of this (confirmed live, 2026-07-24: location_container dimension
+// fields and child_footprint/child_stack_height are null for every aisle
+// container checked) — this is manual rack-construction knowledge that only
+// changes when the physical racking changes.
+//
+// New live capability discovered 2026-07-24: Datex DOES expose aisle-level
+// location containers below the room level (e.g. F8 → A/B/C/D/E/F/G/H/J
+// aisle containers → individual bay locations underneath). The earlier
+// 2026-07-05 recon only checked room-level, so this wasn't previously known.
+// `datex_aisle_location_id` links each row to that real Datex aisle
+// container, enabling live per-aisle occupancy in a later phase.
+//
+// Lives in space_room_aisles: room_id (FK), aisle_label, datex_aisle_location_id
+// (nullable — set when the aisle has a known Datex container),
+// deep/tiers/max_stack_per_tier (nullable — rack geometry, entered manually),
+// notes. UNIQUE(room_id, aisle_label).
+
+export async function fetchRoomAisles(roomId) {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('space_room_aisles')
+    .select('*')
+    .eq('room_id', roomId)
+    .order('aisle_label')
+  if (error) { console.error('fetchRoomAisles:', error); return [] }
+  return data ?? []
+}
+
+// Updates rack geometry for one aisle row. Returns { success, aisle } or
+// { success: false, error }. Clamps deep/tiers/max_stack_per_tier to
+// non-negative integers when provided; null clears a field (e.g. "not yet
+// characterized" stays null until someone fills it in — distinct from 0).
+export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, notes }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const clampOrNull = v => (v == null || v === '') ? null : Math.max(0, Math.round(Number(v)))
+  const patch = { updated_at: new Date().toISOString() }
+  if (deep !== undefined) patch.deep = clampOrNull(deep)
+  if (tiers !== undefined) patch.tiers = clampOrNull(tiers)
+  if (maxStackPerTier !== undefined) patch.max_stack_per_tier = clampOrNull(maxStackPerTier)
+  if (notes !== undefined) patch.notes = notes?.trim() || null
+  const { data, error } = await supabase
+    .from('space_room_aisles')
+    .update(patch)
+    .eq('id', aisleId)
+    .select()
+    .single()
+  if (error) {
+    console.error('updateRoomAisle:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true, aisle: data }
+}
+
+// Add a new aisle row (e.g. a room getting a new aisle characterized for
+// the first time). Rejects duplicate (room_id, aisle_label) with a friendly
+// message. Geometry fields optional at creation — can be filled in after.
+export async function addRoomAisle(roomId, { aisleLabel, datexAisleLocationId, deep, tiers, maxStackPerTier, notes }) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { data, error } = await supabase
+    .from('space_room_aisles')
+    .insert({
+      room_id: roomId,
+      aisle_label: aisleLabel.trim(),
+      datex_aisle_location_id: datexAisleLocationId ?? null,
+      deep: deep ?? null,
+      tiers: tiers ?? null,
+      max_stack_per_tier: maxStackPerTier ?? null,
+      notes: notes?.trim() || null,
+    })
+    .select()
+    .single()
+  if (error) {
+    console.error('addRoomAisle:', error)
+    return { success: false, error: error.code === '23505' ? 'That aisle already exists for this room' : error.message }
+  }
+  return { success: true, aisle: data }
+}
+
+export async function deleteRoomAisle(aisleId) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { error } = await supabase.from('space_room_aisles').delete().eq('id', aisleId)
+  if (error) {
+    console.error('deleteRoomAisle:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true }
+}
+
+// Pure helper — theoretical pallet-equivalent positions for one aisle,
+// assuming its rack physically allows double-stacking (max_stack_per_tier).
+// This is the RACK CEILING, not adjusted for any particular customer's
+// actual stacking behavior — see the capacity-math phase for the
+// customer-adjusted version (MIN of rack ceiling and customer stack mode).
+export function aislePositions(aisle) {
+  if (aisle.deep == null || aisle.tiers == null) return null
+  const stack = aisle.max_stack_per_tier ?? 1
+  return aisle.deep * aisle.tiers * stack
+}
+
 // Real project/customer list for a facility, sourced from the same
 // fetchActiveInventory path the Network scorecard uses — guarantees the
 // stacking-notes dropdown links to actual Datex project names instead of
