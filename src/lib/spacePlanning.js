@@ -498,7 +498,12 @@ export async function fetchRoomAisles(roomId) {
 // { success: false, error }. Clamps deep/tiers/max_stack_per_tier/bayCount to
 // non-negative integers when provided; null clears a field (e.g. "not yet
 // characterized" stays null until someone fills it in — distinct from 0).
-export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, bayCount, notes }) {
+// datexAisleLocationId added 2026-07-25 — was previously write-only-at-insert
+// (only addRoomAisle set it), meaning aisles created via the "+ Add aisle"
+// UI button had no way to ever get linked, since that flow never passes a
+// Datex id. This is what fetchRoomAisleDatexMapping + the "Link Datex
+// aisles" UI action uses to fill it in after the fact.
+export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, bayCount, notes, datexAisleLocationId }) {
   if (!supabase) return { success: false, error: 'Supabase not configured' }
   const clampOrNull = v => (v == null || v === '') ? null : Math.max(0, Math.round(Number(v)))
   const patch = { updated_at: new Date().toISOString() }
@@ -507,6 +512,7 @@ export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, b
   if (maxStackPerTier !== undefined) patch.max_stack_per_tier = clampOrNull(maxStackPerTier)
   if (bayCount !== undefined) patch.bay_count = clampOrNull(bayCount)
   if (notes !== undefined) patch.notes = notes?.trim() || null
+  if (datexAisleLocationId !== undefined) patch.datex_aisle_location_id = clampOrNull(datexAisleLocationId)
   const { data, error } = await supabase
     .from('space_room_aisles')
     .update(patch)
@@ -732,6 +738,40 @@ export async function fetchLivePerAisleOccupancy(facility) {
       error: e.message,
       source: 'error',
     }
+  }
+}
+
+// Looks up a room's direct child Datex aisle containers (Phase 4a fix,
+// 2026-07-25) — powers the "Link Datex aisles" action in AisleGeometrySection.
+// Returns each aisle container's short_name, which matches this project's
+// aisle_label convention exactly (confirmed live on F7: short_name='E','F',
+// 'G'... one-to-one with the aisle labels Dan already typed in). The client
+// matches by label and bulk-updates via updateRoomAisle, instead of needing
+// a hand-run SQL UPDATE every time a new room's aisles get added — which is
+// exactly the gap that let F7's 9 aisles sit unlinked (all datex_aisle_
+// location_id = null) until Dan noticed utilization wasn't adjusting.
+//
+// Returns array of { locationContainerId, shortName, name } on success, or
+// null on failure — caller should treat null as "couldn't look this up,
+// tell the person to try again or link manually."
+export async function fetchRoomAisleDatexMapping(facility, roomDatexLocationId) {
+  if (!PHASE3_FACILITIES.has(facility) || roomDatexLocationId == null) return null
+  try {
+    const res = await fetch('/.netlify/functions/space-room-aisle-mapping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ facility, roomDatexLocationId }),
+    })
+    if (!res.ok) {
+      let body = {}
+      try { body = await res.json() } catch { /* non-json */ }
+      throw new Error(body.error || `space-room-aisle-mapping ${res.status}`)
+    }
+    const { aisles } = await res.json()
+    return aisles || []
+  } catch (e) {
+    console.warn('fetchRoomAisleDatexMapping failed:', e.message)
+    return null
   }
 }
 
