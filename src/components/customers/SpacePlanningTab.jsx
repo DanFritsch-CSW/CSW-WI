@@ -13,6 +13,7 @@ import {
   fetchLivePerAisleOccupancy,
   fetchMaterialStacking,
   computeEffectiveRoomOccupancy,
+  fetchRoomAisleDatexMapping,
 } from '../../lib/spacePlanning.js'
 import { AisleOccupancyPanel, MaterialStackingSubsection } from './SpaceStackingExceptions.jsx'
 
@@ -673,6 +674,7 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
           rows={rows}
           liveLoading={liveLoading}
           isLive={isLive}
+          facility={facility}
           onRoomUpdated={onRoomUpdated}
           breakdown={breakdown}
           breakdownLoading={breakdownLoading}
@@ -1145,7 +1147,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
+function RoomTable({ rows, liveLoading, isLive, facility, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -1196,6 +1198,7 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
           liveLoading={liveLoading}
           isLive={isLive}
           gridTemplate={GRID}
+          facility={facility}
           onRoomUpdated={onRoomUpdated}
           breakdown={breakdown}
           breakdownLoading={breakdownLoading}
@@ -1234,7 +1237,7 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
   )
 }
 
-function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
+function RoomRow({ row, liveLoading, isLive, gridTemplate, facility, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const aisleCalc = roomAislePositions(aisles)
   const hasAisleData = aisleCalc.aisleCount > 0
@@ -1335,6 +1338,8 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
           />
           <AisleGeometrySection
             roomId={row.id}
+            facility={facility}
+            roomDatexLocationId={row.datex_top_location_id}
             aisles={aisles}
             loading={aislesLoading}
             aisleOccupancy={aisleOccupancy}
@@ -1410,8 +1415,59 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // double-stack-capable aisle AND actually flagged double-stack — see
 // Customer Stacking Notes below for who's flagged, and click an aisle's
 // label to see who's physically occupying it right now).
-function AisleGeometrySection({ roomId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
+//
+// "Link Datex aisles" button (added 2026-07-25) fixes a real gap: aisles
+// added via "+ Add aisle" only ever set aisle_label, with no field to enter
+// datex_aisle_location_id — so every UI-added aisle silently had no Datex
+// link, which meant computeEffectiveRoomOccupancy could never apply the
+// stacking adjustment for that room (confirmed on F7: 9 aisles, all
+// unlinked, utilization identical to the raw unadjusted ratio). This button
+// looks up the room's real aisle containers and bulk-links by label match.
+function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
+  const [linking, setLinking] = useState(false)
+  const [linkResult, setLinkResult] = useState(null) // { linked, unmatched } | { error } | null
+
+  // "Link Datex aisles" — fixes the gap that let F7's 9 aisles sit with
+  // datex_aisle_location_id = null indefinitely (2026-07-25): aisles added
+  // via "+ Add aisle" only ever set aisle_label, with no way to enter the
+  // Datex link at creation time. This looks up the room's real aisle
+  // containers and matches by label (case-insensitive) against short_name —
+  // confirmed live to be a reliable 1:1 match — bulk-linking every unlinked
+  // aisle in one pass instead of requiring a hand-run SQL UPDATE.
+  async function handleLinkDatexAisles() {
+    if (!roomDatexLocationId) {
+      setLinkResult({ error: 'This room has no Datex room mapping — cannot look up aisle containers.' })
+      return
+    }
+    setLinking(true)
+    setLinkResult(null)
+    const mapping = await fetchRoomAisleDatexMapping(facility, roomDatexLocationId)
+    if (mapping == null) {
+      setLinking(false)
+      setLinkResult({ error: "Couldn't look up Datex aisle containers — try again." })
+      return
+    }
+    const byShortName = new Map(mapping.map(m => [m.shortName.toUpperCase(), m]))
+    let linked = 0
+    const unmatched = []
+    let nextAisles = aisles || []
+    for (const aisle of (aisles || [])) {
+      if (aisle.datex_aisle_location_id != null) continue // already linked, leave alone
+      const match = byShortName.get(aisle.aisle_label.toUpperCase())
+      if (!match) { unmatched.push(aisle.aisle_label); continue }
+      const result = await updateRoomAisle(aisle.id, { datexAisleLocationId: match.locationContainerId })
+      if (result.success) {
+        linked += 1
+        nextAisles = nextAisles.map(a => a.id === aisle.id ? result.aisle : a)
+      } else {
+        unmatched.push(aisle.aisle_label)
+      }
+    }
+    onAislesChanged(roomId, nextAisles)
+    setLinking(false)
+    setLinkResult({ linked, unmatched })
+  }
 
   return (
     <div style={{
@@ -1428,11 +1484,27 @@ function AisleGeometrySection({ roomId, aisles, loading, aisleOccupancy, aisleOc
           Aisle rack geometry
         </span>
         {!loading && !adding && (
-          <button type="button" onClick={() => setAdding(true)} style={smallBtnStyle('var(--text-secondary)')}>
-            + Add aisle
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button type="button" onClick={handleLinkDatexAisles} disabled={linking} style={smallBtnStyle('var(--blue, #2a72b8)')}>
+              {linking ? 'Linking…' : 'Link Datex aisles'}
+            </button>
+            <button type="button" onClick={() => setAdding(true)} style={smallBtnStyle('var(--text-secondary)')}>
+              + Add aisle
+            </button>
+          </div>
         )}
       </div>
+
+      {linkResult && (
+        <div style={{
+          fontSize: 11, marginBottom: 6,
+          color: linkResult.error ? 'var(--red, #c0392b)' : 'var(--text-secondary)',
+        }}>
+          {linkResult.error
+            ? linkResult.error
+            : `Linked ${linkResult.linked} aisle${linkResult.linked === 1 ? '' : 's'} to Datex.${linkResult.unmatched.length ? ` No match found for: ${linkResult.unmatched.join(', ')}.` : ''}`}
+        </div>
+      )}
 
       {loading && (
         <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '6px 0' }}>
