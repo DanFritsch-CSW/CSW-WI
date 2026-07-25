@@ -1425,13 +1425,17 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // customerStackingRows).effectiveLps ÷ this aisle's single-stack floor.
 // Needs a Datex link + loaded occupancy data; shows '—' otherwise.
 //
-// "Link Datex aisles" button (added 2026-07-25) fixes a real gap: aisles
-// added via "+ Add aisle" only ever set aisle_label, with no field to enter
-// datex_aisle_location_id — so every UI-added aisle silently had no Datex
-// link, which meant computeEffectiveRoomOccupancy could never apply the
-// stacking adjustment for that room (confirmed on F7: 9 aisles, all
-// unlinked, utilization identical to the raw unadjusted ratio). This button
-// looks up the room's real aisle containers and bulk-links by label match.
+// "Link Datex aisles" button (added 2026-07-25, matching hardened same day
+// after F6 exposed a gap) fixes a real gap: aisles added via "+ Add aisle"
+// only ever set aisle_label, with no field to enter datex_aisle_location_id
+// — so every UI-added aisle silently had no Datex link, which meant
+// computeEffectiveRoomOccupancy could never apply the stacking adjustment
+// for that room (confirmed on F7: 9 aisles, all unlinked, utilization
+// identical to the raw unadjusted ratio). This button looks up the room's
+// real aisle containers and bulk-links by label match — see
+// handleLinkDatexAisles below for the two-pass matching (short_name exact
+// match, falling back to parsing location_container_name) needed once F6
+// showed Datex's short_name convention isn't consistent across rooms.
 function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
   const [linking, setLinking] = useState(false)
@@ -1441,9 +1445,27 @@ function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, l
   // datex_aisle_location_id = null indefinitely (2026-07-25): aisles added
   // via "+ Add aisle" only ever set aisle_label, with no way to enter the
   // Datex link at creation time. This looks up the room's real aisle
-  // containers and matches by label (case-insensitive) against short_name —
-  // confirmed live to be a reliable 1:1 match — bulk-linking every unlinked
-  // aisle in one pass instead of requiring a hand-run SQL UPDATE.
+  // containers and matches by label, in two passes:
+  //   1. Exact short_name match (case-insensitive) — the convention F7/F8
+  //      follow (short_name is the bare letter).
+  //   2. Fallback: parse the trailing label out of location_container_name
+  //      (pattern "{...} {LABEL} Aisle") — needed for F6, where short_name
+  //      is inconsistent (duplicates the full name instead of shortening
+  //      it, e.g. "F6 A Aisle" instead of "A"). Confirmed live 2026-07-25:
+  //      F6 only matched Y/Z via short_name on the first version of this
+  //      function, silently leaving A/B/C/D unlinked with no error shown.
+  //   Pass 1 always wins over pass 2 for a given label, so F6's duplicate
+  //   "F6 Y Aisle"/"F6 Z Aisle" containers (same broken short_name pattern
+  //   as A-D) never get picked over the canonical "Y Aisle"/"Z Aisle"
+  //   containers that already resolve cleanly via short_name.
+  function extractLabelFromName(name) {
+    if (!name) return null
+    const words = name.trim().split(/\s+/)
+    if (words.length < 2) return null
+    if (words[words.length - 1].toLowerCase() !== 'aisle') return null
+    return words[words.length - 2]
+  }
+
   async function handleLinkDatexAisles() {
     if (!roomDatexLocationId) {
       setLinkResult({ error: 'This room has no Datex room mapping — cannot look up aisle containers.' })
@@ -1458,12 +1480,20 @@ function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, l
       return
     }
     const byShortName = new Map(mapping.map(m => [m.shortName.toUpperCase(), m]))
+    const byParsedName = new Map()
+    for (const m of mapping) {
+      const label = extractLabelFromName(m.name)
+      if (label && !byParsedName.has(label.toUpperCase())) {
+        byParsedName.set(label.toUpperCase(), m)
+      }
+    }
     let linked = 0
     const unmatched = []
     let nextAisles = aisles || []
     for (const aisle of (aisles || [])) {
       if (aisle.datex_aisle_location_id != null) continue // already linked, leave alone
-      const match = byShortName.get(aisle.aisle_label.toUpperCase())
+      const upperLabel = aisle.aisle_label.toUpperCase()
+      const match = byShortName.get(upperLabel) || byParsedName.get(upperLabel)
       if (!match) { unmatched.push(aisle.aisle_label); continue }
       const result = await updateRoomAisle(aisle.id, { datexAisleLocationId: match.locationContainerId })
       if (result.success) {
