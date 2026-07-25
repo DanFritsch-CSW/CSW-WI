@@ -3,7 +3,6 @@ import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
-import RevisionsTab from '../components/customers/RevisionsTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
@@ -12,8 +11,8 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // refresh-safe, matching the rest of the app's URL-as-state pattern.
 //
 // Tab order:
-//   Space Planning → Customer Onboarding → LoadProof / DVRS →
-//   FEFO Rotation → Revisions → PVI At Risk Inventory
+//   LoadProof / DVRS → FEFO Rotation → PVI At Risk Inventory →
+//   Space Planning → Customer Onboarding
 //
 // LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
 // for Caledonia and Kenosha. Seeded with last-30-day open incidents from
@@ -23,19 +22,10 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // PVI tab rename (2026-07-07, Hill Slack 9:12 AM): "change the app title
 // to Palermo's At Risk Inventory Manager."
 //
-// Revisions sub-tab (2026-07-09): tracks Front conversations tagged
-// "Revision"/"Revisions" (order-revision misses).
+// Revisions sub-tab removed 2026-07-24 per Dan's request (front-end +
+// nav entry point removed; the backing files/schema/netlify.toml entry
+// still need manual cleanup — see the corresponding changelog entry).
 const SUB_TABS = [
-  {
-    id: 'space',
-    label: 'Space Planning',
-    subtitle: 'Space planning, allocations & utilization across the network',
-  },
-  {
-    id: 'onboarding',
-    label: 'Customer Onboarding',
-    subtitle: 'New-customer onboarding checklist · single source of truth',
-  },
   {
     id: 'dvr',
     label: 'LoadProof / DVRS',
@@ -47,21 +37,26 @@ const SUB_TABS = [
     subtitle: 'Pre-ship FEFO rotation verification · live from Datex / Omni',
   },
   {
-    id: 'revisions',
-    label: 'Revisions',
-    subtitle: 'Order-revision misses tracked from Front · synced every 15 min',
-  },
-  {
     id: 'pvi',
     label: 'PVI At Risk Inventory',
     subtitle: "Palermo's At Risk Inventory Manager · per-lot disposition & owner tracking",
+  },
+  {
+    id: 'space',
+    label: 'Space Planning',
+    subtitle: 'Space planning, allocations & utilization across the network',
+  },
+  {
+    id: 'onboarding',
+    label: 'Customer Onboarding',
+    subtitle: 'New-customer onboarding checklist · single source of truth',
   },
 ]
 
 export default function Customers() {
   const [searchParams, setSearchParams] = useSearchParams()
   const rawTab = searchParams.get('tab')
-  const subTab = SUB_TABS.find(t => t.id === rawTab)?.id || 'space'
+  const subTab = SUB_TABS.find(t => t.id === rawTab)?.id || 'dvr'
   const activeTab = SUB_TABS.find(t => t.id === subTab)
 
   const handleTabClick = (id) => {
@@ -134,12 +129,11 @@ export default function Customers() {
 
       {/* Sub-tab content */}
       <div style={{ padding: '24px' }}>
-        {subTab === 'space'      && <SpacePlanningTab />}
-        {subTab === 'onboarding' && <OnboardingTab />}
         {subTab === 'dvr'        && <DvrTab />}
         {subTab === 'fefo'       && <FefoRotationTab />}
-        {subTab === 'revisions'  && <RevisionsTab />}
         {subTab === 'pvi'        && <PviShelfLife />}
+        {subTab === 'space'      && <SpacePlanningTab />}
+        {subTab === 'onboarding' && <OnboardingTab />}
       </div>
     </div>
   )
