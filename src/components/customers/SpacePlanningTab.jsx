@@ -13,6 +13,7 @@ import {
   fetchLivePerAisleOccupancy,
   fetchMaterialStacking,
   computeEffectiveRoomOccupancy,
+  computeEffectiveAisleOccupancy,
   fetchRoomAisleDatexMapping,
 } from '../../lib/spacePlanning.js'
 import { AisleOccupancyPanel, MaterialStackingSubsection } from './SpaceStackingExceptions.jsx'
@@ -719,8 +720,9 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         entry (click to edit) as a placeholder until they're characterized. Click a room's
         name to see which projects are occupying it right now and how many LPs each holds,
         plus its aisle rack geometry (bays × deep × tiers × max stack per tier — manual
-        config except bay count, which is live-derivable from Datex). Click an aisle's
-        label to see which customers are physically in it right now.
+        config except bay count, which is live-derivable from Datex, and each aisle's own
+        UTIL — the same stacking-adjusted concept, scoped to just that aisle). Click an
+        aisle's label to see which customers are physically in it right now.
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -1344,6 +1346,7 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, facility, onRoomUpdat
             loading={aislesLoading}
             aisleOccupancy={aisleOccupancy}
             aisleOccupancyLoading={aisleOccupancyLoading}
+            customerStackingRows={customerStackingRows}
             onAislesChanged={onAislesChanged}
           />
         </>
@@ -1416,6 +1419,12 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // Customer Stacking Notes below for who's flagged, and click an aisle's
 // label to see who's physically occupying it right now).
 //
+// UTIL column (added 2026-07-25 per Dan's ask) shows the same stacking-
+// adjusted utilization concept as the room-level number, scoped to just
+// this aisle — computeEffectiveAisleOccupancy(aisle, occupants,
+// customerStackingRows).effectiveLps ÷ this aisle's single-stack floor.
+// Needs a Datex link + loaded occupancy data; shows '—' otherwise.
+//
 // "Link Datex aisles" button (added 2026-07-25) fixes a real gap: aisles
 // added via "+ Add aisle" only ever set aisle_label, with no field to enter
 // datex_aisle_location_id — so every UI-added aisle silently had no Datex
@@ -1423,7 +1432,7 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // stacking adjustment for that room (confirmed on F7: 9 aisles, all
 // unlinked, utilization identical to the raw unadjusted ratio). This button
 // looks up the room's real aisle containers and bulk-links by label match.
-function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
+function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
   const [linking, setLinking] = useState(false)
   const [linkResult, setLinkResult] = useState(null) // { linked, unmatched } | { error } | null
@@ -1521,7 +1530,7 @@ function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, l
       {!loading && aisles && aisles.length > 0 && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '0.5fr 0.55fr 0.55fr 0.55fr 0.7fr 1fr 1.5fr 0.5fr',
+          gridTemplateColumns: '0.5fr 0.55fr 0.55fr 0.55fr 0.7fr 1fr 0.6fr 1.3fr 0.5fr',
           rowGap: 4, columnGap: 10,
           fontSize: 12, alignItems: 'center',
         }}>
@@ -1531,6 +1540,7 @@ function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, l
           <AisleHeaderCell align="center">TIERS</AisleHeaderCell>
           <AisleHeaderCell align="center">MAX STACK</AisleHeaderCell>
           <AisleHeaderCell align="center">POSITIONS</AisleHeaderCell>
+          <AisleHeaderCell align="center">UTIL</AisleHeaderCell>
           <AisleHeaderCell>NOTES</AisleHeaderCell>
           <AisleHeaderCell />
           {aisles.map(aisle => (
@@ -1540,6 +1550,7 @@ function AisleGeometrySection({ roomId, facility, roomDatexLocationId, aisles, l
               occupants={aisle.datex_aisle_location_id != null ? aisleOccupancy?.byAisleLocationId?.get(Number(aisle.datex_aisle_location_id)) : undefined}
               occupancyLoading={aisleOccupancyLoading}
               occupancyError={aisleOccupancy?.error}
+              customerStackingRows={customerStackingRows}
               onUpdated={updated => onAislesChanged(roomId, aisles.map(a => a.id === updated.id ? updated : a))}
               onDeleted={id => onAislesChanged(roomId, aisles.filter(a => a.id !== id))}
             />
@@ -1574,7 +1585,7 @@ function AisleHeaderCell({ children, align }) {
   )
 }
 
-function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, onUpdated, onDeleted }) {
+function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, customerStackingRows, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [bayCount, setBayCount] = useState(aisle.bay_count ?? '')
@@ -1587,6 +1598,18 @@ function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, onUpdate
   const [err, setErr] = useState(null)
 
   const range = aislePositionsRange(aisle)
+
+  // Per-aisle utilization (added 2026-07-25 per Dan's ask, while already
+  // expanding a room's Aisle Rack Geometry — same stacking-adjusted logic
+  // as the room-level number, just scoped to this one aisle's live
+  // occupants. Needs a Datex link + loaded occupancy data to compute;
+  // otherwise shows '—' (or '…' while occupancy is still loading).
+  const hasDatexMapping = aisle.datex_aisle_location_id != null
+  const aisleUtilReady = hasDatexMapping && !occupancyLoading && !occupancyError && range != null && range.min > 0
+  const aisleUtil = aisleUtilReady
+    ? (computeEffectiveAisleOccupancy(aisle, occupants || [], customerStackingRows).effectiveLps / range.min) * 100
+    : null
+  const aisleBand = utilBand(aisleUtil)
 
   async function save() {
     setSaving(true)
@@ -1653,6 +1676,7 @@ function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, onUpdate
         <input type="number" min="0" value={tiers} onChange={e => setTiers(e.target.value)} disabled={saving} style={numInputStyle} />
         <input type="number" min="0" value={maxStack} onChange={e => setMaxStack(e.target.value)} disabled={saving} style={numInputStyle} />
         <div style={{ textAlign: 'center', justifySelf: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>—</div>
+        <div style={{ textAlign: 'center', justifySelf: 'center', color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>—</div>
         <input
           value={notes}
           onChange={e => setNotes(e.target.value)}
@@ -1710,6 +1734,15 @@ function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, onUpdate
       </div>
       <div style={{ ...centeredCellStyle(range != null), fontWeight: range != null ? 600 : 400 }}>
         {range != null ? fmtInt(range.min) : '—'}
+      </div>
+      <div style={{
+        textAlign: 'center', justifySelf: 'center',
+        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+        fontSize: 12,
+        fontWeight: aisleUtil != null ? 600 : 400,
+        color: aisleUtil != null ? aisleBand.color : 'var(--text-dim)',
+      }}>
+        {occupancyLoading ? '…' : (aisleUtil != null ? fmtPct(aisleUtil) : '—')}
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontStyle: aisle.notes ? 'normal' : 'italic' }}>
         {aisle.notes || (aisle.deep == null ? 'needs geometry input' : '')}
