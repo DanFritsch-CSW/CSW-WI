@@ -574,6 +574,28 @@ export function aislePositions(aisle) {
   return aisle.deep * aisle.tiers * stack * aisle.bay_count
 }
 
+// Range version — added 2026-07-24 same day, per Dan's catch: the single
+// "positions" number above silently assumes EVERY occupant of a double-stack-
+// capable aisle actually double-stacks, which isn't true. Only specific
+// customers (and sometimes specific materials) can physically double-stack —
+// that's exactly what space_customer_stacking records. But that table is
+// customer-level, not aisle-level, and there's no live per-aisle occupancy
+// yet (Phase 4b, not built) to know WHICH customer is sitting in WHICH aisle
+// right now. Rather than keep publishing a falsely precise single figure,
+// this returns a range: `min` assumes single-stack everywhere (the floor —
+// true regardless of who's actually in the aisle), `max` assumes the rack's
+// full double-stack ceiling is used throughout (the same number aislePositions
+// returns). Real usable capacity sits somewhere between the two depending on
+// the actual customer mix — check Customer Stacking Notes for who's flagged
+// as double-stack-capable. When max_stack_per_tier is 1 (or unset), min===max
+// since there's no ambiguity — the aisle can only ever be single-stacked.
+export function aislePositionsRange(aisle) {
+  if (aisle.deep == null || aisle.tiers == null || aisle.bay_count == null) return null
+  const base = aisle.deep * aisle.tiers * aisle.bay_count
+  const stack = aisle.max_stack_per_tier ?? 1
+  return { min: base, max: base * stack }
+}
+
 // Bulk fetch — all aisles for every room in a facility, in one query. Used
 // so room-level capacity (see roomAislePositions below) can be computed for
 // every visible room row, not just the one currently expanded. Returns a
@@ -601,32 +623,37 @@ export async function fetchAislesForRooms(roomIds) {
 // what replaced the room-level manual Slots × Stack entry once a room has
 // aisle geometry configured (Dan's catch, 2026-07-24: the room-level field
 // was pure redundancy once aisles could compute the real number themselves).
-// Aisles with incomplete geometry (aislePositions returns null — e.g. an
+// Aisles with incomplete geometry (aislePositionsRange returns null — e.g. an
 // aisle whose stack capability isn't confirmed yet) are excluded from the
 // sum rather than silently treated as zero, and reported separately so the
 // UI can flag the total as a floor, not a final number.
 //
-// Returns { total, completeCount, incompleteCount, aisleCount }. Caller
-// should treat aisleCount === 0 as "no aisle data for this room" — fall back
-// to the manual room-level capacity field entirely, not to this function's
-// total (which would be 0 and read as "room holds nothing").
+// Returns { min, max, completeCount, incompleteCount, aisleCount }. `min`/`max`
+// are the same range concept as aislePositionsRange, summed across every
+// complete aisle — min is the single-stack-everywhere floor, max is the
+// rack-ceiling-everywhere assumption. Caller should treat aisleCount === 0
+// as "no aisle data for this room" — fall back to the manual room-level
+// capacity field entirely, not to min/max (which would both be 0 and read
+// as "room holds nothing").
 export function roomAislePositions(aisles) {
   if (!aisles || aisles.length === 0) {
-    return { total: 0, completeCount: 0, incompleteCount: 0, aisleCount: 0 }
+    return { min: 0, max: 0, completeCount: 0, incompleteCount: 0, aisleCount: 0 }
   }
-  let total = 0
+  let min = 0
+  let max = 0
   let completeCount = 0
   let incompleteCount = 0
   for (const aisle of aisles) {
-    const p = aislePositions(aisle)
-    if (p == null) {
+    const range = aislePositionsRange(aisle)
+    if (range == null) {
       incompleteCount += 1
     } else {
-      total += p
+      min += range.min
+      max += range.max
       completeCount += 1
     }
   }
-  return { total, completeCount, incompleteCount, aisleCount: aisles.length }
+  return { min, max, completeCount, incompleteCount, aisleCount: aisles.length }
 }
 
 // Real project/customer list for a facility, sourced from the same
