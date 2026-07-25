@@ -10,7 +10,10 @@ import {
   fetchKnownCustomersForFacility,
   updateRoomAisle, addRoomAisle, deleteRoomAisle, aislePositionsRange,
   fetchAislesForRooms, roomAislePositions,
+  fetchLivePerAisleOccupancy,
+  fetchMaterialStacking,
 } from '../../lib/spacePlanning.js'
+import { AisleOccupancyPanel, MaterialStackingSubsection } from './SpaceStackingExceptions.jsx'
 
 // Phase 2 — Network/ALL view is read-only.
 // Phase 2.5 — Network/ALL view actuals come from live Datex LP counts when
@@ -494,6 +497,15 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
   const [aislesByRoomId, setAislesByRoomId] = useState(new Map()) // roomId -> aisle rows
   const [aislesLoading, setAislesLoading] = useState(true)
 
+  // Live per-aisle occupancy (Phase 4b, 2026-07-25) — which customers are
+  // physically in each aisle right now, by LP count. Visibility only per
+  // Dan's scope call: this does NOT feed into capacity math (aisles mix
+  // multiple customers, confirmed live — no way to resolve to one number
+  // without bay-level tracking). Fetched once per facility, independent
+  // lifecycle from geometry (aislesByRoomId) since it's a heavier query.
+  const [aisleOccupancy, setAisleOccupancy] = useState(null) // { byAisleLocationId, ... } | null
+  const [aisleOccupancyLoading, setAisleOccupancyLoading] = useState(true)
+
   useEffect(() => {
     let cancelled = false
     setLiveLoading(true)
@@ -551,6 +563,24 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
       .finally(() => { if (!cancelled) setAislesLoading(false) })
     return () => { cancelled = true }
   }, [facilityRooms])
+
+  useEffect(() => {
+    let cancelled = false
+    setAisleOccupancyLoading(true)
+    fetchLivePerAisleOccupancy(facility)
+      .then(res => { if (!cancelled) setAisleOccupancy(res) })
+      .catch(err => {
+        if (cancelled) return
+        console.warn('fetchLivePerAisleOccupancy unexpected error:', err)
+        setAisleOccupancy({
+          byAisleLocationId: new Map(),
+          fetchedAt: new Date().toISOString(), elapsedMs: 0,
+          error: err?.message || 'unknown', source: 'error',
+        })
+      })
+      .finally(() => { if (!cancelled) setAisleOccupancyLoading(false) })
+    return () => { cancelled = true }
+  }, [facility])
 
   // Attach live LP count to each seeded room row. Rooms without a
   // datex_top_location_id show '—' for live LPs.
@@ -628,6 +658,8 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
           onToggleExpand={roomId => setExpandedRoomId(prev => prev === roomId ? null : roomId)}
           aislesByRoomId={aislesByRoomId}
           aislesLoading={aislesLoading}
+          aisleOccupancy={aisleOccupancy}
+          aisleOccupancyLoading={aisleOccupancyLoading}
           onAislesChanged={(roomId, nextAisles) => {
             setAislesByRoomId(prev => new Map(prev).set(roomId, nextAisles))
           }}
@@ -675,6 +707,22 @@ function CustomerStackingSection({ facility }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // Material-level stacking exceptions (Phase 4b, 2026-07-25) — layered on
+  // top of the customer-level default above. Fetched once per facility (not
+  // per-customer) since the table is small by design (only real exceptions
+  // Dan enters, no seeding), then grouped client-side by customer_name.
+  const [materialRows, setMaterialRows] = useState([])
+  const [materialsLoading, setMaterialsLoading] = useState(true)
+  const materialsByCustomer = useMemo(() => {
+    const map = new Map()
+    for (const m of materialRows) {
+      const list = map.get(m.customer_name) || []
+      list.push(m)
+      map.set(m.customer_name, list)
+    }
+    return map
+  }, [materialRows])
+
   // Live customer/project list for the dropdown — same source as the Network
   // scorecard, so names always match real Datex projects. status: 'loading' |
   // 'ready' | 'error'. 'error' triggers a manual-text fallback in the add row.
@@ -689,6 +737,19 @@ function CustomerStackingSection({ facility }) {
   }
 
   useEffect(() => { load() }, [facility])
+
+  useEffect(() => {
+    let cancelled = false
+    setMaterialsLoading(true)
+    fetchMaterialStacking(facility)
+      .then(data => { if (!cancelled) setMaterialRows(data) })
+      .catch(err => {
+        if (cancelled) return
+        console.warn('fetchMaterialStacking unexpected error:', err)
+      })
+      .finally(() => { if (!cancelled) setMaterialsLoading(false) })
+    return () => { cancelled = true }
+  }, [facility])
 
   useEffect(() => {
     let cancelled = false
@@ -732,6 +793,15 @@ function CustomerStackingSection({ facility }) {
               <StackingRow
                 key={row.id}
                 row={row}
+                facility={facility}
+                materials={materialsByCustomer.get(row.customer_name) || []}
+                materialsLoading={materialsLoading}
+                onMaterialsChanged={nextList => {
+                  setMaterialRows(prev => [
+                    ...prev.filter(m => m.customer_name !== row.customer_name),
+                    ...nextList,
+                  ])
+                }}
                 onUpdated={updated => setRows(prev => prev.map(r => r.id === updated.id ? updated : r))}
                 onDeleted={id => setRows(prev => prev.filter(r => r.id !== id))}
               />
@@ -749,7 +819,7 @@ function CustomerStackingSection({ facility }) {
   )
 }
 
-function StackModeBadge({ mode }) {
+export function StackModeBadge({ mode }) {
   const isDouble = mode === 'double'
   return (
     <span style={{
@@ -765,8 +835,9 @@ function StackModeBadge({ mode }) {
   )
 }
 
-function StackingRow({ row, onUpdated, onDeleted }) {
+function StackingRow({ row, facility, materials, materialsLoading, onMaterialsChanged, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const [stackMode, setStackMode] = useState(row.stack_mode)
   const [notes, setNotes] = useState(row.notes || '')
   const [saving, setSaving] = useState(false)
@@ -836,21 +907,55 @@ function StackingRow({ row, onUpdated, onDeleted }) {
   }
 
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
-      padding: '10px 14px',
-      borderBottom: '1px solid var(--border-subtle, #eceff5)',
-      fontSize: 13,
-    }}>
-      <div style={{ flex: '1 1 180px', fontWeight: 600, color: 'var(--text-primary)' }}>{row.customer_name}</div>
-      <StackModeBadge mode={row.stack_mode} />
-      <div style={{ flex: '1 1 200px', fontSize: 12, color: 'var(--text-secondary)' }}>{row.notes || '—'}</div>
-      <button type="button" onClick={() => setEditing(true)} style={smallBtnStyle('var(--text-secondary)')}>Edit</button>
-      <button type="button" onClick={handleDelete} disabled={deleting} style={smallBtnStyle('var(--red, #c0392b)')}>
-        {deleting ? '…' : 'Delete'}
-      </button>
-      {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</span>}
-    </div>
+    <Fragment>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 14px',
+        borderBottom: expanded ? 'none' : '1px solid var(--border-subtle, #eceff5)',
+        fontSize: 13,
+      }}>
+        <button
+          type="button"
+          onClick={() => setExpanded(v => !v)}
+          title="Click to see/add material-level stacking exceptions for this customer"
+          style={{
+            flex: '1 1 180px', display: 'flex', alignItems: 'center', gap: 5,
+            fontWeight: 600, color: 'var(--text-primary)',
+            background: 'none', border: 'none', padding: 0,
+            font: 'inherit', textAlign: 'left', cursor: 'pointer',
+          }}
+        >
+          <span style={{
+            display: 'inline-block', width: 8, fontSize: 9,
+            color: 'var(--text-dim)',
+            transform: expanded ? 'rotate(90deg)' : 'none',
+            transition: 'transform 0.1s ease',
+          }}>▶</span>
+          {row.customer_name}
+        </button>
+        <StackModeBadge mode={row.stack_mode} />
+        <div style={{ flex: '1 1 200px', fontSize: 12, color: 'var(--text-secondary)' }}>{row.notes || '—'}</div>
+        {materials.length > 0 && (
+          <span style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+            {materials.length} material exception{materials.length === 1 ? '' : 's'}
+          </span>
+        )}
+        <button type="button" onClick={() => setEditing(true)} style={smallBtnStyle('var(--text-secondary)')}>Edit</button>
+        <button type="button" onClick={handleDelete} disabled={deleting} style={smallBtnStyle('var(--red, #c0392b)')}>
+          {deleting ? '…' : 'Delete'}
+        </button>
+        {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</span>}
+      </div>
+      {expanded && (
+        <MaterialStackingSubsection
+          facility={facility}
+          customerName={row.customer_name}
+          materials={materials}
+          loading={materialsLoading}
+          onMaterialsChanged={onMaterialsChanged}
+        />
+      )}
+    </Fragment>
   )
 }
 
@@ -944,7 +1049,7 @@ function StackingAddRow({ facility, existingNames, customerOptions, onAdded }) {
   )
 }
 
-function StackModeToggle({ value, onChange, disabled }) {
+export function StackModeToggle({ value, onChange, disabled }) {
   return (
     <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' }}>
       {['single', 'double'].map(mode => {
@@ -971,7 +1076,7 @@ function StackModeToggle({ value, onChange, disabled }) {
   )
 }
 
-function smallBtnStyle(color, filled) {
+export function smallBtnStyle(color, filled) {
   return {
     fontSize: 11, fontWeight: 600,
     padding: '4px 10px',
@@ -1012,7 +1117,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, onAislesChanged }) {
+function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -1070,6 +1175,8 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
           onToggleExpand={onToggleExpand}
           aisles={aislesByRoomId.get(row.id)}
           aislesLoading={aislesLoading}
+          aisleOccupancy={aisleOccupancy}
+          aisleOccupancyLoading={aisleOccupancyLoading}
           onAislesChanged={onAislesChanged}
         />
       ))}
@@ -1097,7 +1204,7 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
   )
 }
 
-function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, onAislesChanged }) {
+function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const aisleCalc = roomAislePositions(aisles)
   const hasAisleData = aisleCalc.aisleCount > 0
@@ -1193,6 +1300,8 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
             roomId={row.id}
             aisles={aisles}
             loading={aislesLoading}
+            aisleOccupancy={aisleOccupancy}
+            aisleOccupancyLoading={aisleOccupancyLoading}
             onAislesChanged={onAislesChanged}
           />
         </>
@@ -1264,7 +1373,7 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
 // max = full-double-stack ceiling; real usable capacity is somewhere between,
 // depending on who's actually occupying the aisle (not yet tracked at the
 // aisle level — that's Phase 4b, live per-aisle occupancy, not built yet).
-function AisleGeometrySection({ roomId, aisles, loading, onAislesChanged }) {
+function AisleGeometrySection({ roomId, aisles, loading, aisleOccupancy, aisleOccupancyLoading, onAislesChanged }) {
   const [adding, setAdding] = useState(false)
 
   return (
@@ -1319,6 +1428,9 @@ function AisleGeometrySection({ roomId, aisles, loading, onAislesChanged }) {
             <AisleRow
               key={aisle.id}
               aisle={aisle}
+              occupants={aisle.datex_aisle_location_id != null ? aisleOccupancy?.byAisleLocationId?.get(Number(aisle.datex_aisle_location_id)) : undefined}
+              occupancyLoading={aisleOccupancyLoading}
+              occupancyError={aisleOccupancy?.error}
               onUpdated={updated => onAislesChanged(roomId, aisles.map(a => a.id === updated.id ? updated : a))}
               onDeleted={id => onAislesChanged(roomId, aisles.filter(a => a.id !== id))}
             />
@@ -1353,8 +1465,9 @@ function AisleHeaderCell({ children, align }) {
   )
 }
 
-function AisleRow({ aisle, onUpdated, onDeleted }) {
+function AisleRow({ aisle, occupants, occupancyLoading, occupancyError, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const [bayCount, setBayCount] = useState(aisle.bay_count ?? '')
   const [deep, setDeep] = useState(aisle.deep ?? '')
   const [tiers, setTiers] = useState(aisle.tiers ?? '')
@@ -1455,7 +1568,25 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
 
   return (
     <>
-      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{aisle.aisle_label}</div>
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        title="Click to see which customers are physically in this aisle right now"
+        style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          fontWeight: 600, color: 'var(--text-primary)',
+          background: 'none', border: 'none', padding: 0,
+          font: 'inherit', textAlign: 'left', cursor: 'pointer',
+        }}
+      >
+        <span style={{
+          display: 'inline-block', width: 8, fontSize: 9,
+          color: 'var(--text-dim)',
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.1s ease',
+        }}>▶</span>
+        {aisle.aisle_label}
+      </button>
       <div style={centeredCellStyle(aisle.bay_count != null)}>
         {aisle.bay_count ?? '—'}
       </div>
@@ -1483,9 +1614,18 @@ function AisleRow({ aisle, onUpdated, onDeleted }) {
       {err && (
         <div style={{ gridColumn: '1 / -1', fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</div>
       )}
+      {expanded && (
+        <AisleOccupancyPanel
+          occupants={occupants}
+          loading={occupancyLoading}
+          error={occupancyError}
+          hasDatexMapping={aisle.datex_aisle_location_id != null}
+        />
+      )}
     </>
   )
 }
+
 
 function AisleAddRow({ roomId, existingLabels, onAdded, onCancel }) {
   const [label, setLabel] = useState('')
