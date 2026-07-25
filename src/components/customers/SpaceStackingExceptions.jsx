@@ -70,6 +70,13 @@ export function MaterialStackingSubsection({ facility, customerName, materials, 
   const [adding, setAdding] = useState(false)
   const [options, setOptions] = useState({ status: 'idle', list: [] }) // idle | loading | ready | error
 
+  // customerName here is space_customer_stacking.customer_name, which may be
+  // a shortened name (e.g. "Jones Dairy Farm") rather than the full Datex
+  // project_name ("Jones Dairy Farm - CSW-Madison") for rows added before
+  // this feature existed. The backend matches on prefix (ILIKE), not exact
+  // equality (fixed 2026-07-25 — an exact match was silently returning zero
+  // rows for these older entries, which this component then wrongly reported
+  // as a load failure rather than "no live materials found").
   function ensureOptionsLoaded() {
     if (options.status !== 'idle') return
     setOptions({ status: 'loading', list: [] })
@@ -280,7 +287,11 @@ function MaterialStackingAddRow({ facility, customerName, existingNames, options
         </select>
       ) : (
         <span style={{ flex: '1 1 220px', fontSize: 11, color: 'var(--amber, #a07818)' }}>
-          {options.status === 'loading' ? 'Loading live material list…' : "Couldn't load live material list — enter manually"}
+          {options.status === 'loading'
+            ? 'Loading live material list…'
+            : options.status === 'error'
+              ? "Couldn't load live material list — enter manually"
+              : `No live materials with on-hand inventory found for "${customerName}" — enter manually`}
         </span>
       )}
       {useManual && (
