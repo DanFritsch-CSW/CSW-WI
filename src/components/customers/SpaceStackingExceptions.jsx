@@ -197,7 +197,14 @@ function MaterialStackingRow({ row, onUpdated, onDeleted }) {
   if (editing) {
     return (
       <>
-        <div style={{ color: 'var(--text-primary)' }}>{row.material_name}</div>
+        <div style={{ color: 'var(--text-primary)' }}>
+          {row.material_lookup_code && (
+            <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 11 }}>
+              {row.material_lookup_code}{' '}
+            </span>
+          )}
+          {row.material_name}
+        </div>
         <StackModeToggle value={stackMode} onChange={setStackMode} disabled={saving} />
         <input
           value={notes}
@@ -219,7 +226,14 @@ function MaterialStackingRow({ row, onUpdated, onDeleted }) {
 
   return (
     <>
-      <div style={{ color: 'var(--text-primary)' }}>{row.material_name}</div>
+      <div style={{ color: 'var(--text-primary)' }}>
+        {row.material_lookup_code && (
+          <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 11 }}>
+            {row.material_lookup_code}{' '}
+          </span>
+        )}
+        {row.material_name}
+      </div>
       <StackModeBadge mode={row.stack_mode} />
       <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{row.notes || '—'}</div>
       <div style={{ display: 'flex', gap: 4 }}>
@@ -281,7 +295,9 @@ function MaterialStackingAddRow({ facility, customerName, existingNames, options
         >
           <option value="">Select material…</option>
           {options.list.map(o => (
-            <option key={o.materialName} value={o.materialName}>{o.materialName} ({fmtInt(o.lps)} LPs)</option>
+            <option key={o.materialName} value={o.materialName}>
+              {o.lookupCode ? `${o.lookupCode} — ` : ''}{o.materialName} ({fmtInt(o.lps)} LPs)
+            </option>
           ))}
           <option value={MATERIAL_OTHER_OPTION}>Other / not listed…</option>
         </select>
