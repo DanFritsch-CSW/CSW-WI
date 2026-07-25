@@ -18,11 +18,14 @@
 //                        fetchedAt, elapsedMs, source: 'motherduck', warehouseId }
 //
 // Currently MAD-only, same scope/whitelist as space-per-room.cjs.
-// projectName is free text from the live Datex project list (not from a
-// fixed enum) — single-quotes are escaped before interpolation into the SQL
-// string to avoid breaking the query (this project's queries are built via
-// string interpolation throughout, not parameterized statements, since the
-// DuckDB Node driver used here doesn't support bound params for `conn.all`).
+// projectName is free text from the live Datex project list OR a shortened
+// customer name typed into space_customer_stacking before this feature
+// existed — matched via case-insensitive PREFIX match (ILIKE), not exact
+// equality (see comment above the SQL below for why). Single-quotes are
+// escaped before interpolation into the SQL string to avoid breaking the
+// query (this project's queries are built via string interpolation
+// throughout, not parameterized statements, since the DuckDB Node driver
+// used here doesn't support bound params for `conn.all`).
 
 process.env.HOME = process.env.HOME || '/tmp'
 
@@ -78,6 +81,18 @@ exports.handler = async (event) => {
 
   const safeProjectName = escapeSqlString(projectName)
 
+  // Prefix match (ILIKE, case-insensitive), not exact equality — confirmed
+  // live 2026-07-25 that space_customer_stacking.customer_name entries often
+  // store a shortened name (e.g. "Jones Dairy Farm") rather than the full
+  // Datex project_name ("Jones Dairy Farm - CSW-Madison"), since that table
+  // predates this feature and some rows were typed in manually. An exact
+  // match on those rows silently returns zero materials — not a fetch
+  // failure, but the UI can't tell the difference without this fix. Verified
+  // safe against cross-facility collisions: even when a customer name prefix
+  // matches multiple facilities' project variants (e.g. "Colony Brands"
+  // matches CAL/KEN/MAD variants), the warehouse_id filter below already
+  // scopes results to this facility's own project, since a differently-
+  // faciliated project's materials won't have any LPs in this warehouse.
   const sql = `
     SELECT
       m.material_name,
@@ -91,7 +106,7 @@ exports.handler = async (event) => {
     JOIN production_db.silver.datex_slv_projects p ON p.project_id = m.project_id
     WHERE lp.archived = false
       AND lp.warehouse_id = ${warehouseId}
-      AND p.project_name = '${safeProjectName}'
+      AND p.project_name ILIKE '${safeProjectName}%'
     GROUP BY m.material_name, m.lookup_code
     ORDER BY lps DESC
   `
