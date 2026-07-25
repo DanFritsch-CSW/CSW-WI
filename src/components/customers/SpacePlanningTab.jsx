@@ -610,10 +610,8 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         count that filters out internal/unassigned LPs, so the two totals will differ.
         Click any Slots × Stack cell to set capacity — it saves immediately, no separate
         Settings page needed. Utilization uses the physical LP count against that capacity.
-        Click a room's name to see which projects are occupying it right now — shown as
-        an estimated pallet count (case qty ÷ tie×high) rather than raw LP count, since one
-        location can hold many LPs. Materials without a real pallet configuration on file
-        show as a case count instead of a pallet estimate (flagged per project).
+        Click a room's name to see which projects are occupying it right now and how many
+        LPs each holds.
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -1138,12 +1136,14 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
 }
 
 // Drill-down panel shown under a room row when expanded — which projects are
-// occupying this room right now, pallet-equivalent where a real tie×high
-// config exists, raw case count (flagged) otherwise. See
-// fetchLivePerRoomProjectBreakdown / space-per-room-projects.cjs for the
-// data-quality note on why some materials fall back to a case count.
+// occupying this room right now, and how many LPs each holds. Sorted by LP
+// count descending (server response is ordered by pallet estimate, which we
+// no longer display, so we re-sort here).
 function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
-  const projects = breakdown?.byRoomId?.get(Number(roomId)) || []
+  const projects = useMemo(() => {
+    const list = breakdown?.byRoomId?.get(Number(roomId)) || []
+    return [...list].sort((a, b) => b.lps - a.lps)
+  }, [breakdown, roomId])
   return (
     <div style={{
       padding: '4px 14px 12px 30px',
@@ -1168,24 +1168,16 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
       {!breakdownLoading && !breakdown?.error && projects.length > 0 && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '1.6fr 0.7fr 0.8fr 0.9fr',
+          gridTemplateColumns: '2fr 0.8fr',
           rowGap: 4, columnGap: 10,
           fontSize: 12,
         }}>
           <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em' }}>PROJECT</div>
           <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', textAlign: 'right' }}>LPs</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', textAlign: 'right' }}>EST. PALLETS</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', textAlign: 'right' }}>NO PALLET DATA</div>
           {projects.map((p, i) => (
             <Fragment key={`${p.projectName}-${i}`}>
               <div style={{ color: 'var(--text-primary)' }}>{p.projectName}</div>
               <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: 'var(--text-secondary)' }}>{fmtInt(p.lps)}</div>
-              <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: p.estPallets > 0 ? 'var(--text-primary)' : 'var(--text-dim)' }}>
-                {p.estPallets > 0 ? p.estPallets.toLocaleString('en-US') : '—'}
-              </div>
-              <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: p.casesNoPalletData > 0 ? 'var(--amber, #a07818)' : 'var(--text-dim)' }}>
-                {p.casesNoPalletData > 0 ? `${fmtInt(p.casesNoPalletData)} cases` : '—'}
-              </div>
             </Fragment>
           ))}
         </div>
