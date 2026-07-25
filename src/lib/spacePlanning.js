@@ -477,7 +477,11 @@ export async function deleteCustomerStacking(id) {
 // Lives in space_room_aisles: room_id (FK), aisle_label, datex_aisle_location_id
 // (nullable — set when the aisle has a known Datex container),
 // deep/tiers/max_stack_per_tier (nullable — rack geometry, entered manually),
-// notes. UNIQUE(room_id, aisle_label).
+// bay_count (nullable — number of physical bay positions in the aisle, e.g.
+// F8's C aisle runs F8C01 through F8C57 = 57 bays; unlike deep/tiers/stack
+// this IS live-derivable from Datex, since each bay is a real distinct
+// location container — confirmed 2026-07-24 by counting distinct bay numbers
+// under each aisle container, not guessed), notes. UNIQUE(room_id, aisle_label).
 
 export async function fetchRoomAisles(roomId) {
   if (!supabase) return []
@@ -491,16 +495,17 @@ export async function fetchRoomAisles(roomId) {
 }
 
 // Updates rack geometry for one aisle row. Returns { success, aisle } or
-// { success: false, error }. Clamps deep/tiers/max_stack_per_tier to
+// { success: false, error }. Clamps deep/tiers/max_stack_per_tier/bayCount to
 // non-negative integers when provided; null clears a field (e.g. "not yet
 // characterized" stays null until someone fills it in — distinct from 0).
-export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, notes }) {
+export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, bayCount, notes }) {
   if (!supabase) return { success: false, error: 'Supabase not configured' }
   const clampOrNull = v => (v == null || v === '') ? null : Math.max(0, Math.round(Number(v)))
   const patch = { updated_at: new Date().toISOString() }
   if (deep !== undefined) patch.deep = clampOrNull(deep)
   if (tiers !== undefined) patch.tiers = clampOrNull(tiers)
   if (maxStackPerTier !== undefined) patch.max_stack_per_tier = clampOrNull(maxStackPerTier)
+  if (bayCount !== undefined) patch.bay_count = clampOrNull(bayCount)
   if (notes !== undefined) patch.notes = notes?.trim() || null
   const { data, error } = await supabase
     .from('space_room_aisles')
@@ -518,7 +523,7 @@ export async function updateRoomAisle(aisleId, { deep, tiers, maxStackPerTier, n
 // Add a new aisle row (e.g. a room getting a new aisle characterized for
 // the first time). Rejects duplicate (room_id, aisle_label) with a friendly
 // message. Geometry fields optional at creation — can be filled in after.
-export async function addRoomAisle(roomId, { aisleLabel, datexAisleLocationId, deep, tiers, maxStackPerTier, notes }) {
+export async function addRoomAisle(roomId, { aisleLabel, datexAisleLocationId, deep, tiers, maxStackPerTier, bayCount, notes }) {
   if (!supabase) return { success: false, error: 'Supabase not configured' }
   const { data, error } = await supabase
     .from('space_room_aisles')
@@ -529,6 +534,7 @@ export async function addRoomAisle(roomId, { aisleLabel, datexAisleLocationId, d
       deep: deep ?? null,
       tiers: tiers ?? null,
       max_stack_per_tier: maxStackPerTier ?? null,
+      bay_count: bayCount ?? null,
       notes: notes?.trim() || null,
     })
     .select()
@@ -551,14 +557,21 @@ export async function deleteRoomAisle(aisleId) {
 }
 
 // Pure helper — theoretical pallet-equivalent positions for one aisle,
-// assuming its rack physically allows double-stacking (max_stack_per_tier).
-// This is the RACK CEILING, not adjusted for any particular customer's
-// actual stacking behavior — see the capacity-math phase for the
-// customer-adjusted version (MIN of rack ceiling and customer stack mode).
+// assuming its rack physically allows double-stacking (max_stack_per_tier),
+// across every bay in the aisle. This is the RACK CEILING for the WHOLE
+// AISLE, not adjusted for any particular customer's actual stacking
+// behavior — see the capacity-math phase for the customer-adjusted version
+// (MIN of rack ceiling and customer stack mode).
+//
+// bay_count matters here: deep×tiers alone is the capacity of ONE bay
+// opening, not the whole aisle. An aisle like F8's C (2 deep × 7 tiers ×
+// 57 bays) has 57x the positions of a single bay — omitting bay_count was
+// exactly the gap Dan caught (2026-07-24): the UI showed per-bay geometry
+// but never multiplied out to the aisle's real total.
 export function aislePositions(aisle) {
-  if (aisle.deep == null || aisle.tiers == null) return null
+  if (aisle.deep == null || aisle.tiers == null || aisle.bay_count == null) return null
   const stack = aisle.max_stack_per_tier ?? 1
-  return aisle.deep * aisle.tiers * stack
+  return aisle.deep * aisle.tiers * stack * aisle.bay_count
 }
 
 // Real project/customer list for a facility, sourced from the same
