@@ -8,6 +8,7 @@ import {
   fetchLivePerRoomActuals, fetchLivePerRoomProjectBreakdown, updateRoomCapacity,
   fetchCustomerStacking, addCustomerStacking, updateCustomerStacking, deleteCustomerStacking,
   fetchKnownCustomersForFacility,
+  fetchRoomAisles, updateRoomAisle, addRoomAisle, deleteRoomAisle, aislePositions,
 } from '../../lib/spacePlanning.js'
 
 // Phase 2 — Network/ALL view is read-only.
@@ -481,6 +482,12 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
   const [breakdownLoading, setBreakdownLoading] = useState(true)
   const [expandedRoomId, setExpandedRoomId] = useState(null)
 
+  // Aisle rack geometry (Phase 4a) — fetched lazily per room on first expand,
+  // not all-at-once on mount. Datex-derived, not live-refreshed on a timer —
+  // this is manual config that only changes when the physical racking does.
+  const [aislesByRoomId, setAislesByRoomId] = useState(new Map()) // roomId -> aisle rows
+  const [aislesLoadingRoomId, setAislesLoadingRoomId] = useState(null)
+
   useEffect(() => {
     let cancelled = false
     setLiveLoading(true)
@@ -517,6 +524,24 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
       .finally(() => { if (!cancelled) setBreakdownLoading(false) })
     return () => { cancelled = true }
   }, [facility])
+
+  // Fetches aisle geometry for a room the first time it's expanded — cached
+  // in aislesByRoomId after that (no refetch on re-collapse/re-expand unless
+  // an edit happens, since this is manual config, not something that goes
+  // stale on its own).
+  function ensureAislesLoaded(roomId) {
+    if (aislesByRoomId.has(roomId)) return
+    setAislesLoadingRoomId(roomId)
+    fetchRoomAisles(roomId)
+      .then(aisles => {
+        setAislesByRoomId(prev => new Map(prev).set(roomId, aisles))
+      })
+      .catch(err => {
+        console.warn('fetchRoomAisles unexpected error:', err)
+        setAislesByRoomId(prev => new Map(prev).set(roomId, []))
+      })
+      .finally(() => setAislesLoadingRoomId(null))
+  }
 
   // Attach live LP count to each seeded room row. Rooms without a
   // datex_top_location_id show '—' for live LPs.
@@ -591,7 +616,18 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
           breakdown={breakdown}
           breakdownLoading={breakdownLoading}
           expandedRoomId={expandedRoomId}
-          onToggleExpand={roomId => setExpandedRoomId(prev => prev === roomId ? null : roomId)}
+          onToggleExpand={roomId => {
+            setExpandedRoomId(prev => {
+              const next = prev === roomId ? null : roomId
+              if (next != null) ensureAislesLoaded(next)
+              return next
+            })
+          }}
+          aislesByRoomId={aislesByRoomId}
+          aislesLoadingRoomId={aislesLoadingRoomId}
+          onAislesChanged={(roomId, nextAisles) => {
+            setAislesByRoomId(prev => new Map(prev).set(roomId, nextAisles))
+          }}
         />
       </div>
 
@@ -611,7 +647,10 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         Click any Slots × Stack cell to set capacity — it saves immediately, no separate
         Settings page needed. Utilization uses the physical LP count against that capacity.
         Click a room's name to see which projects are occupying it right now and how many
-        LPs each holds.
+        LPs each holds, plus this room's aisle rack geometry (deep × tiers × max stack per
+        tier — manual config, Datex has no rack dimension data). Positions shown there are
+        the rack's physical ceiling, not yet adjusted for what any specific customer's
+        product can actually support.
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -965,7 +1004,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand }) {
+function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand, aislesByRoomId, aislesLoadingRoomId, onAislesChanged }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -1019,8 +1058,11 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
           onRoomUpdated={onRoomUpdated}
           breakdown={breakdown}
           breakdownLoading={breakdownLoading}
-          expanded={expandedRoomId === row.datex_top_location_id}
+          expanded={expandedRoomId === row.id}
           onToggleExpand={onToggleExpand}
+          aisles={aislesByRoomId.get(row.id)}
+          aislesLoading={aislesLoadingRoomId === row.id}
+          onAislesChanged={onAislesChanged}
         />
       ))}
       {/* Total row */}
@@ -1047,7 +1089,7 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakd
   )
 }
 
-function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand }) {
+function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, onAislesChanged }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const cap = (row.slots || 0) * (row.stack || 0)
   const util = cap > 0 && row.live_lps != null ? (row.live_lps / cap) * 100 : null
@@ -1065,7 +1107,7 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
       }}>
         <button
           type="button"
-          onClick={() => canExpand && onToggleExpand(row.datex_top_location_id)}
+          onClick={() => canExpand && onToggleExpand(row.id)}
           disabled={!canExpand}
           title={canExpand ? 'Click to see which projects occupy this room' : 'No Datex room mapping'}
           style={{
@@ -1125,11 +1167,19 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakd
         </div>
       </div>
       {expanded && (
-        <ProjectBreakdownPanel
-          roomId={row.datex_top_location_id}
-          breakdown={breakdown}
-          breakdownLoading={breakdownLoading}
-        />
+        <>
+          <ProjectBreakdownPanel
+            roomId={row.datex_top_location_id}
+            breakdown={breakdown}
+            breakdownLoading={breakdownLoading}
+          />
+          <AisleGeometrySection
+            roomId={row.id}
+            aisles={aisles}
+            loading={aislesLoading}
+            onAislesChanged={onAislesChanged}
+          />
+        </>
       )}
     </div>
   )
@@ -1182,6 +1232,262 @@ function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+// Rack geometry per aisle within this room — deep × tiers × max stack per
+// tier. Manual config (Datex has none of this), edited in place the same
+// way the room-level Slots × Stack cell works. Computed "positions" column
+// is the rack CEILING (aislePositions helper) — not yet adjusted for any
+// particular customer's actual stacking behavior (that's the capacity-math
+// phase, not built yet).
+function AisleGeometrySection({ roomId, aisles, loading, onAislesChanged }) {
+  const [adding, setAdding] = useState(false)
+
+  return (
+    <div style={{
+      padding: '10px 14px 14px 30px',
+      borderBottom: '1px solid var(--border-subtle, #eceff5)',
+      background: 'var(--bg1, #fff)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <span style={{
+          fontSize: 10, color: 'var(--text-dim)',
+          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          letterSpacing: '0.06em', textTransform: 'uppercase',
+        }}>
+          Aisle rack geometry
+        </span>
+        {!loading && !adding && (
+          <button type="button" onClick={() => setAdding(true)} style={smallBtnStyle('var(--text-secondary)')}>
+            + Add aisle
+          </button>
+        )}
+      </div>
+
+      {loading && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '6px 0' }}>
+          Loading aisle geometry…
+        </div>
+      )}
+
+      {!loading && aisles && aisles.length === 0 && !adding && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '6px 0' }}>
+          No aisles configured for this room yet.
+        </div>
+      )}
+
+      {!loading && aisles && aisles.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '0.6fr 0.6fr 0.6fr 0.6fr 0.9fr 1.6fr 0.5fr',
+          rowGap: 4, columnGap: 10,
+          fontSize: 12, alignItems: 'center',
+        }}>
+          <AisleHeaderCell>AISLE</AisleHeaderCell>
+          <AisleHeaderCell align="right">DEEP</AisleHeaderCell>
+          <AisleHeaderCell align="right">TIERS</AisleHeaderCell>
+          <AisleHeaderCell align="right">MAX STACK</AisleHeaderCell>
+          <AisleHeaderCell align="right">POSITIONS</AisleHeaderCell>
+          <AisleHeaderCell>NOTES</AisleHeaderCell>
+          <AisleHeaderCell />
+          {aisles.map(aisle => (
+            <AisleRow
+              key={aisle.id}
+              aisle={aisle}
+              onUpdated={updated => onAislesChanged(roomId, aisles.map(a => a.id === updated.id ? updated : a))}
+              onDeleted={id => onAislesChanged(roomId, aisles.filter(a => a.id !== id))}
+            />
+          ))}
+        </div>
+      )}
+
+      {adding && (
+        <AisleAddRow
+          roomId={roomId}
+          existingLabels={(aisles || []).map(a => a.aisle_label.toLowerCase())}
+          onAdded={aisle => {
+            onAislesChanged(roomId, [...(aisles || []), aisle].sort((a, b) => a.aisle_label.localeCompare(b.aisle_label)))
+            setAdding(false)
+          }}
+          onCancel={() => setAdding(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+function AisleHeaderCell({ children, align }) {
+  return (
+    <div style={{
+      fontSize: 10, color: 'var(--text-dim)',
+      fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+      letterSpacing: '0.06em', textAlign: align || 'left',
+    }}>
+      {children}
+    </div>
+  )
+}
+
+function AisleRow({ aisle, onUpdated, onDeleted }) {
+  const [editing, setEditing] = useState(false)
+  const [deep, setDeep] = useState(aisle.deep ?? '')
+  const [tiers, setTiers] = useState(aisle.tiers ?? '')
+  const [maxStack, setMaxStack] = useState(aisle.max_stack_per_tier ?? '')
+  const [notes, setNotes] = useState(aisle.notes || '')
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [err, setErr] = useState(null)
+
+  const positions = aislePositions(aisle)
+
+  async function save() {
+    setSaving(true)
+    setErr(null)
+    const result = await updateRoomAisle(aisle.id, {
+      deep: deep === '' ? null : deep,
+      tiers: tiers === '' ? null : tiers,
+      maxStackPerTier: maxStack === '' ? null : maxStack,
+      notes,
+    })
+    setSaving(false)
+    if (result.success) {
+      onUpdated(result.aisle)
+      setEditing(false)
+    } else {
+      setErr(result.error)
+    }
+  }
+
+  function cancel() {
+    setDeep(aisle.deep ?? '')
+    setTiers(aisle.tiers ?? '')
+    setMaxStack(aisle.max_stack_per_tier ?? '')
+    setNotes(aisle.notes || '')
+    setEditing(false)
+    setErr(null)
+  }
+
+  async function handleDelete() {
+    if (!window.confirm(`Remove aisle "${aisle.aisle_label}"?`)) return
+    setDeleting(true)
+    const result = await deleteRoomAisle(aisle.id)
+    setDeleting(false)
+    if (result.success) {
+      onDeleted(aisle.id)
+    } else {
+      setErr(result.error)
+    }
+  }
+
+  const numInputStyle = {
+    width: 42, fontSize: 12, padding: '2px 4px',
+    fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+    border: '1px solid var(--border)', borderRadius: 4, textAlign: 'right',
+  }
+
+  if (editing) {
+    return (
+      <>
+        <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{aisle.aisle_label}</div>
+        <input type="number" min="0" value={deep} onChange={e => setDeep(e.target.value)} disabled={saving} style={numInputStyle} />
+        <input type="number" min="0" value={tiers} onChange={e => setTiers(e.target.value)} disabled={saving} style={numInputStyle} />
+        <input type="number" min="0" value={maxStack} onChange={e => setMaxStack(e.target.value)} disabled={saving} style={numInputStyle} />
+        <div style={{ textAlign: 'right', color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>—</div>
+        <input
+          value={notes}
+          onChange={e => setNotes(e.target.value)}
+          placeholder="Notes (optional)"
+          disabled={saving}
+          style={{ fontSize: 12, padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4 }}
+        />
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button type="button" onClick={save} disabled={saving} style={smallBtnStyle('var(--green, #1a8a52)')}>
+            {saving ? '…' : 'Save'}
+          </button>
+          <button type="button" onClick={cancel} disabled={saving} style={smallBtnStyle('var(--text-dim)')}>
+            X
+          </button>
+        </div>
+        {err && (
+          <div style={{ gridColumn: '1 / -1', fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</div>
+        )}
+      </>
+    )
+  }
+
+  return (
+    <>
+      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{aisle.aisle_label}</div>
+      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: aisle.deep != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+        {aisle.deep ?? '—'}
+      </div>
+      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: aisle.tiers != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+        {aisle.tiers ?? '—'}
+      </div>
+      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: aisle.max_stack_per_tier != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+        {aisle.max_stack_per_tier ?? '—'}
+      </div>
+      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontWeight: positions != null ? 600 : 400, color: positions != null ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+        {positions != null ? fmtInt(positions) : '—'}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontStyle: aisle.notes ? 'normal' : 'italic' }}>
+        {aisle.notes || (aisle.deep == null ? 'needs geometry input' : '')}
+      </div>
+      <div style={{ display: 'flex', gap: 4 }}>
+        <button type="button" onClick={() => setEditing(true)} style={smallBtnStyle('var(--text-secondary)')}>Edit</button>
+        <button type="button" onClick={handleDelete} disabled={deleting} style={smallBtnStyle('var(--red, #c0392b)')}>
+          {deleting ? '…' : 'X'}
+        </button>
+      </div>
+      {err && (
+        <div style={{ gridColumn: '1 / -1', fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</div>
+      )}
+    </>
+  )
+}
+
+function AisleAddRow({ roomId, existingLabels, onAdded, onCancel }) {
+  const [label, setLabel] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+
+  async function handleAdd() {
+    const trimmed = label.trim()
+    if (!trimmed) return
+    if (existingLabels.includes(trimmed.toLowerCase())) {
+      setErr('That aisle already exists for this room')
+      return
+    }
+    setSaving(true)
+    setErr(null)
+    const result = await addRoomAisle(roomId, { aisleLabel: trimmed })
+    setSaving(false)
+    if (result.success) {
+      onAdded(result.aisle)
+    } else {
+      setErr(result.error)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+      <input
+        value={label}
+        onChange={e => setLabel(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+        placeholder="Aisle label (e.g. K)"
+        disabled={saving}
+        style={{ width: 140, fontSize: 13, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4 }}
+      />
+      <button type="button" onClick={handleAdd} disabled={saving || !label.trim()} style={smallBtnStyle('var(--brand, #a07818)', true)}>
+        {saving ? 'Adding…' : '+ Add'}
+      </button>
+      <button type="button" onClick={onCancel} disabled={saving} style={smallBtnStyle('var(--text-dim)')}>
+        Cancel
+      </button>
+      {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)' }}>{err}</span>}
     </div>
   )
 }
