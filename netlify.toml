@@ -88,10 +88,6 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
-[functions."revision-sync"]
-  schedule = "*/15 * * * *"
-  timeout = 26
-
 [functions."cmm-outbound-draft-create"]
   schedule = "*/15 * * * *"
   timeout = 26
