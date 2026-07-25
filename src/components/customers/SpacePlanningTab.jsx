@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FACILITY_DOTS, FACILITY_NAMES, FACILITIES, PHASE3_FACILITIES,
   ZONES, utilBand, facilityCapacity, facilityActual, facilityUtil,
   networkCapacity, networkActual, networkUtil, isFacilityLive,
   fmtInt, fmtPct, fmtTime,
   fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
-  fetchLivePerRoomActuals, updateRoomCapacity,
+  fetchLivePerRoomActuals, fetchLivePerRoomProjectBreakdown, updateRoomCapacity,
   fetchCustomerStacking, addCustomerStacking, updateCustomerStacking, deleteCustomerStacking,
   fetchKnownCustomersForFacility,
 } from '../../lib/spacePlanning.js'
@@ -473,6 +473,14 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
   const [liveResult, setLiveResult] = useState(null)   // { byRoomId, total, fetchedAt, elapsedMs, error, source } | null
   const [liveLoading, setLiveLoading] = useState(true)
 
+  // Per-room, per-project drill-down (pallet-equivalent). Independent fetch
+  // lifecycle from the room-total query above — this one does a heavier join
+  // across licenseplatecontents/lots/materials/projects, so it shouldn't
+  // block the room table from rendering its totals first.
+  const [breakdown, setBreakdown] = useState(null)     // { byRoomId, fetchedAt, elapsedMs, error, source } | null
+  const [breakdownLoading, setBreakdownLoading] = useState(true)
+  const [expandedRoomId, setExpandedRoomId] = useState(null)
+
   useEffect(() => {
     let cancelled = false
     setLiveLoading(true)
@@ -488,6 +496,25 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         })
       })
       .finally(() => { if (!cancelled) setLiveLoading(false) })
+    return () => { cancelled = true }
+  }, [facility])
+
+  useEffect(() => {
+    let cancelled = false
+    setBreakdownLoading(true)
+    setExpandedRoomId(null) // collapse any open drill-down on facility change
+    fetchLivePerRoomProjectBreakdown(facility)
+      .then(res => { if (!cancelled) setBreakdown(res) })
+      .catch(err => {
+        if (cancelled) return
+        console.warn('fetchLivePerRoomProjectBreakdown unexpected error:', err)
+        setBreakdown({
+          byRoomId: new Map(),
+          fetchedAt: new Date().toISOString(), elapsedMs: 0,
+          error: err?.message || 'unknown', source: 'error',
+        })
+      })
+      .finally(() => { if (!cancelled) setBreakdownLoading(false) })
     return () => { cancelled = true }
   }, [facility])
 
@@ -556,7 +583,16 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
       {/* Per-room table */}
       <div>
         <SectionLabel>ROOMS</SectionLabel>
-        <RoomTable rows={rows} liveLoading={liveLoading} isLive={isLive} onRoomUpdated={onRoomUpdated} />
+        <RoomTable
+          rows={rows}
+          liveLoading={liveLoading}
+          isLive={isLive}
+          onRoomUpdated={onRoomUpdated}
+          breakdown={breakdown}
+          breakdownLoading={breakdownLoading}
+          expandedRoomId={expandedRoomId}
+          onToggleExpand={roomId => setExpandedRoomId(prev => prev === roomId ? null : roomId)}
+        />
       </div>
 
       {/* Footnote about counting semantics */}
@@ -574,6 +610,10 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         count that filters out internal/unassigned LPs, so the two totals will differ.
         Click any Slots × Stack cell to set capacity — it saves immediately, no separate
         Settings page needed. Utilization uses the physical LP count against that capacity.
+        Click a room's name to see which projects are occupying it right now — shown as
+        an estimated pallet count (case qty ÷ tie×high) rather than raw LP count, since one
+        location can hold many LPs. Materials without a real pallet configuration on file
+        show as a case count instead of a pallet estimate (flagged per project).
       </div>
 
       {/* Customer stacking reference — manual, not tied to a specific room */}
@@ -927,7 +967,7 @@ function PerRoomFreshnessBanner({ liveLoading, liveResult }) {
   )
 }
 
-function RoomTable({ rows, liveLoading, isLive, onRoomUpdated }) {
+function RoomTable({ rows, liveLoading, isLive, onRoomUpdated, breakdown, breakdownLoading, expandedRoomId, onToggleExpand }) {
   if (!rows.length) {
     return (
       <div style={{
@@ -979,6 +1019,10 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated }) {
           isLive={isLive}
           gridTemplate={GRID}
           onRoomUpdated={onRoomUpdated}
+          breakdown={breakdown}
+          breakdownLoading={breakdownLoading}
+          expanded={expandedRoomId === row.datex_top_location_id}
+          onToggleExpand={onToggleExpand}
         />
       ))}
       {/* Total row */}
@@ -1005,58 +1049,147 @@ function RoomTable({ rows, liveLoading, isLive, onRoomUpdated }) {
   )
 }
 
-function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated }) {
+function RoomRow({ row, liveLoading, isLive, gridTemplate, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand }) {
   const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const cap = (row.slots || 0) * (row.stack || 0)
   const util = cap > 0 && row.live_lps != null ? (row.live_lps / cap) * 100 : null
   const band = utilBand(util)
+  const canExpand = row.datex_top_location_id != null
+  return (
+    <div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: gridTemplate,
+        padding: '10px 14px',
+        borderBottom: expanded ? 'none' : '1px solid var(--border-subtle, #eceff5)',
+        fontSize: 13,
+        alignItems: 'center',
+      }}>
+        <button
+          type="button"
+          onClick={() => canExpand && onToggleExpand(row.datex_top_location_id)}
+          disabled={!canExpand}
+          title={canExpand ? 'Click to see which projects occupy this room' : 'No Datex room mapping'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            fontWeight: 600, color: 'var(--text-primary)',
+            background: 'none', border: 'none', padding: 0,
+            font: 'inherit', textAlign: 'left',
+            cursor: canExpand ? 'pointer' : 'default',
+          }}
+        >
+          {canExpand && (
+            <span style={{
+              display: 'inline-block', width: 10, fontSize: 10,
+              color: 'var(--text-dim)',
+              transform: expanded ? 'rotate(90deg)' : 'none',
+              transition: 'transform 0.1s ease',
+            }}>▶</span>
+          )}
+          {row.name}
+        </button>
+        <div>
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            fontSize: 11, color: 'var(--text-secondary)',
+          }}>
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: zoneInfo.color, display: 'inline-block',
+            }} />
+            {zoneInfo.label}
+          </span>
+        </div>
+        <div style={{
+          textAlign: 'right',
+          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          color: isLive ? 'var(--text-primary)' : 'var(--text-dim)',
+        }}>
+          {liveLoading ? '…' : (row.live_lps != null ? fmtInt(row.live_lps) : '—')}
+        </div>
+        <CapacityCell room={row} onRoomUpdated={onRoomUpdated} />
+        <div style={{
+          textAlign: 'right',
+          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          fontSize: 12,
+          fontWeight: util != null ? 600 : 400,
+          color: util != null ? band.color : 'var(--text-dim)',
+        }}>
+          {util != null ? fmtPct(util) : '—'}
+        </div>
+        <div style={{
+          textAlign: 'right',
+          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          fontSize: 11,
+          color: 'var(--text-dim)',
+        }}>
+          {row.datex_top_location_id ?? '—'}
+        </div>
+      </div>
+      {expanded && (
+        <ProjectBreakdownPanel
+          roomId={row.datex_top_location_id}
+          breakdown={breakdown}
+          breakdownLoading={breakdownLoading}
+        />
+      )}
+    </div>
+  )
+}
+
+// Drill-down panel shown under a room row when expanded — which projects are
+// occupying this room right now, pallet-equivalent where a real tie×high
+// config exists, raw case count (flagged) otherwise. See
+// fetchLivePerRoomProjectBreakdown / space-per-room-projects.cjs for the
+// data-quality note on why some materials fall back to a case count.
+function ProjectBreakdownPanel({ roomId, breakdown, breakdownLoading }) {
+  const projects = breakdown?.byRoomId?.get(Number(roomId)) || []
   return (
     <div style={{
-      display: 'grid',
-      gridTemplateColumns: gridTemplate,
-      padding: '10px 14px',
+      padding: '4px 14px 12px 30px',
       borderBottom: '1px solid var(--border-subtle, #eceff5)',
-      fontSize: 13,
-      alignItems: 'center',
+      background: 'var(--bg2, #f8f9fb)',
     }}>
-      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{row.name}</div>
-      <div>
-        <span style={{
-          display: 'inline-flex', alignItems: 'center', gap: 5,
-          fontSize: 11, color: 'var(--text-secondary)',
+      {breakdownLoading && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '6px 0' }}>
+          Loading project breakdown…
+        </div>
+      )}
+      {!breakdownLoading && breakdown?.error && (
+        <div style={{ fontSize: 11, color: 'var(--red, #c0392b)', padding: '6px 0' }}>
+          Couldn't load project breakdown — {breakdown.error}
+        </div>
+      )}
+      {!breakdownLoading && !breakdown?.error && projects.length === 0 && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '6px 0' }}>
+          No occupied projects found for this room.
+        </div>
+      )}
+      {!breakdownLoading && !breakdown?.error && projects.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '1.6fr 0.7fr 0.8fr 0.9fr',
+          rowGap: 4, columnGap: 10,
+          fontSize: 12,
         }}>
-          <span style={{
-            width: 6, height: 6, borderRadius: '50%',
-            background: zoneInfo.color, display: 'inline-block',
-          }} />
-          {zoneInfo.label}
-        </span>
-      </div>
-      <div style={{
-        textAlign: 'right',
-        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        color: isLive ? 'var(--text-primary)' : 'var(--text-dim)',
-      }}>
-        {liveLoading ? '…' : (row.live_lps != null ? fmtInt(row.live_lps) : '—')}
-      </div>
-      <CapacityCell room={row} onRoomUpdated={onRoomUpdated} />
-      <div style={{
-        textAlign: 'right',
-        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        fontSize: 12,
-        fontWeight: util != null ? 600 : 400,
-        color: util != null ? band.color : 'var(--text-dim)',
-      }}>
-        {util != null ? fmtPct(util) : '—'}
-      </div>
-      <div style={{
-        textAlign: 'right',
-        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        fontSize: 11,
-        color: 'var(--text-dim)',
-      }}>
-        {row.datex_top_location_id ?? '—'}
-      </div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em' }}>PROJECT</div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', textAlign: 'right' }}>LPs</div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', textAlign: 'right' }}>EST. PALLETS</div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono, ui-monospace, monospace)', letterSpacing: '0.06em', textAlign: 'right' }}>NO PALLET DATA</div>
+          {projects.map((p, i) => (
+            <Fragment key={`${p.projectName}-${i}`}>
+              <div style={{ color: 'var(--text-primary)' }}>{p.projectName}</div>
+              <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: 'var(--text-secondary)' }}>{fmtInt(p.lps)}</div>
+              <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: p.estPallets > 0 ? 'var(--text-primary)' : 'var(--text-dim)' }}>
+                {p.estPallets > 0 ? p.estPallets.toLocaleString('en-US') : '—'}
+              </div>
+              <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: p.casesNoPalletData > 0 ? 'var(--amber, #a07818)' : 'var(--text-dim)' }}>
+                {p.casesNoPalletData > 0 ? `${fmtInt(p.casesNoPalletData)} cases` : '—'}
+              </div>
+            </Fragment>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
