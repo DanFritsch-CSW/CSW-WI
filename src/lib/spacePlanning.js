@@ -969,6 +969,43 @@ export function computeEffectiveRoomOccupancy(aisles, occupancyByAisleId, custom
   return effectiveUsed + unaccounted
 }
 
+// Updates a room's temperature zone (freezer/cooler/dry/deep — see ZONES).
+// Added 2026-07-25 per Dan's ask — previously zone was seed-only, with no
+// way to change it once a room was created. Same click-to-edit pattern as
+// updateRoomCapacity: single field, single save, no separate form.
+export async function updateRoomZone(roomId, zone) {
+  if (!supabase) return { success: false, error: 'Supabase not configured' }
+  const { data, error } = await supabase
+    .from('space_rooms')
+    .update({ zone, updated_at: new Date().toISOString() })
+    .eq('id', roomId)
+    .select()
+    .single()
+  if (error) {
+    console.error('updateRoomZone:', error)
+    return { success: false, error: error.message }
+  }
+  return { success: true, room: data }
+}
+
+// Shared capacity + stacking-adjusted usage calc for one room — extracted
+// 2026-07-25 from what was inline logic in RoomRow, so the same formula can
+// also drive a facility-wide zone utilization rollup (Freezer/Cooler/Dry)
+// without duplicating it. No behavior change from the original inline
+// version: cap is the aisle-based single-stack floor when aisle geometry
+// exists, else the manual slots × stack fallback; effectiveUsed is the
+// stacking-adjusted count when aisle occupancy + customer stacking data are
+// both loaded and error-free, else the raw live LP count.
+export function computeRoomCapacityUsage(row, aisles, occupancyByAisleId, customerStackingRows, occupancyReady) {
+  const aisleCalc = roomAislePositions(aisles)
+  const hasAisleData = aisleCalc.aisleCount > 0
+  const cap = hasAisleData ? aisleCalc.min : (row.slots || 0) * (row.stack || 0)
+  const effectiveUsed = (hasAisleData && occupancyReady)
+    ? computeEffectiveRoomOccupancy(aisles, occupancyByAisleId, customerStackingRows, row.live_lps)
+    : row.live_lps
+  return { cap, effectiveUsed, hasAisleData, aisleCalc }
+}
+
 // Real project/customer list for a facility, sourced from the same
 // fetchActiveInventory path the Network scorecard uses — guarantees the
 // stacking-notes dropdown links to actual Datex project names instead of
