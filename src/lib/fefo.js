@@ -20,8 +20,18 @@
 
 export const FEFO_PROJECTS = [
   {
+    // CORRECTED 2026-07-26: `proj` was 59, which doesn't exist as a Datex
+    // project_id at all (confirmed via silver.datex_slv_projects — Fair
+    // Oaks Farms is actually project_id=60; 61 below, Fair Oaks Farms West,
+    // was already correct). Found while validating a MotherDuck feasibility
+    // check for the FEFO lot-reallocation-alert feature — a query scoped to
+    // project_id=59 silently returned zero rows. Confirmed via repo-wide
+    // search that this `proj` field is NOT read anywhere in the query path
+    // (fefo-orders.cjs looks up the Datex project by `datexProjectName`
+    // string match, not by this id) — this was stale/unused reference data,
+    // not a live bug, but fixing it since it already cost time once.
     id: 'faioa5', code: 'FAIOA5', name: 'Fair Oaks Farms',
-    proj: 59,  dateFormat: 'YDDDHHMMSS', dateSemantic: 'pack',
+    proj: 60,  dateFormat: 'YDDDHHMMSS', dateSemantic: 'pack',
     color: '#e07b4d', facility: 'ken',
     datexProjectName: 'FAIR OAKS FARMS',
   },
