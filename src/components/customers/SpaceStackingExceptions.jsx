@@ -1,7 +1,8 @@
 import { Fragment, useMemo, useState } from 'react'
 import {
-  fmtInt,
+  fmtInt, fmtPct, utilBand, ZONES,
   fetchMaterialsForCustomer, addMaterialStacking, updateMaterialStacking, deleteMaterialStacking,
+  updateRoomZone, computeRoomCapacityUsage,
 } from '../../lib/spacePlanning.js'
 import { smallBtnStyle, StackModeBadge, StackModeToggle } from './SpacePlanningTab.jsx'
 
@@ -24,6 +25,13 @@ import { smallBtnStyle, StackModeBadge, StackModeToggle } from './SpacePlanningT
 //     customer default and never need an entry here. Live material dropdown
 //     (fetchMaterialsForCustomer) keeps this scalable as customers add/retire
 //     materials over time — no hardcoded lists, no seeding.
+//   - ZoneCell / ZoneUtilizationSummary — added 2026-07-25 per Dan's ask for
+//     (a) editing a room's temperature zone through the UI (previously
+//     seed-only, no edit path) and (b) a collective utilization rollup by
+//     zone (Freezer/Cooler/Dry/Deep Freeze) at the top of the facility view.
+//     Both reuse computeRoomCapacityUsage from spacePlanning.js — the exact
+//     same cap/effectiveUsed formula RoomRow uses per-room, just grouped and
+//     summed by zone here instead of displayed per-room.
 
 export function AisleOccupancyPanel({ occupants, loading, error, hasDatexMapping }) {
   const sorted = useMemo(() => [...(occupants || [])].sort((a, b) => b.lps - a.lps), [occupants])
@@ -334,6 +342,156 @@ function MaterialStackingAddRow({ facility, customerName, existingNames, options
       </button>
       <button type="button" onClick={onCancel} disabled={saving} style={smallBtnStyle('var(--text-dim)')}>Cancel</button>
       {err && <span style={{ fontSize: 11, color: 'var(--red, #c0392b)', flexBasis: '100%' }}>{err}</span>}
+    </div>
+  )
+}
+
+// Click-to-edit temperature zone cell, replacing what was a static display-
+// only zone label in RoomRow. Same immediate-save pattern as CapacityCell's
+// click-to-edit, but simpler — a single <select> with no separate Save/Cancel,
+// since there's only one value to change. Room's `zone` field previously had
+// no edit path in the app at all — it was seed-only.
+export function ZoneCell({ room, onRoomUpdated }) {
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+  const zoneInfo = ZONES[room.zone] || { label: room.zone || '—', color: 'var(--text-dim)' }
+
+  async function handleChange(e) {
+    const nextZone = e.target.value
+    if (nextZone === room.zone) { setEditing(false); return }
+    setSaving(true)
+    setErr(null)
+    const result = await updateRoomZone(room.id, nextZone)
+    setSaving(false)
+    if (result.success) {
+      onRoomUpdated?.(room.id, { zone: nextZone })
+      setEditing(false)
+    } else {
+      setErr(result.error || 'Save failed')
+    }
+  }
+
+  if (editing) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <select
+          autoFocus
+          defaultValue={room.zone}
+          disabled={saving}
+          onChange={handleChange}
+          onBlur={() => !saving && setEditing(false)}
+          style={{ fontSize: 11, padding: '2px 4px', border: '1px solid var(--border)', borderRadius: 4, background: '#fff' }}
+        >
+          {Object.values(ZONES).map(z => (
+            <option key={z.id} value={z.id}>{z.label}</option>
+          ))}
+        </select>
+        {err && <span style={{ fontSize: 9, color: 'var(--red, #c0392b)' }}>{err}</span>}
+      </div>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      title="Click to change temperature zone"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 5,
+        fontSize: 11, color: 'var(--text-secondary)',
+        background: 'none', border: '1px dashed transparent', borderRadius: 4,
+        padding: '2px 4px', cursor: 'pointer', font: 'inherit',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border)' }}
+      onMouseLeave={e => { e.currentTarget.style.borderColor = 'transparent' }}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: zoneInfo.color, display: 'inline-block' }} />
+      {zoneInfo.label}
+    </button>
+  )
+}
+
+// Collective utilization by temperature zone, shown at the top of the
+// facility view (before the per-room table) — Dan's ask, 2026-07-25:
+// "Freezer 83%, Cooler 75%, Dry 95%" at a glance, without scanning every
+// room row. Sums each room's cap/effectiveUsed (via computeRoomCapacityUsage
+// — the identical formula RoomRow already uses per-room) grouped by
+// row.zone, then divides. Rooms with cap<=0 (no capacity data at all yet)
+// are excluded from the sum rather than counted as 0/0. Gated behind the
+// same liveLoading/aislesLoading flags the per-room table uses, so this
+// doesn't show a misleadingly low number while data is still arriving.
+export function ZoneUtilizationSummary({ rows, aislesByRoomId, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, aislesLoading, liveLoading }) {
+  const loading = liveLoading || aislesLoading
+
+  const zoneTotals = useMemo(() => {
+    if (loading) return null
+    const totals = new Map()
+    for (const row of rows) {
+      const aisles = aislesByRoomId.get(row.id)
+      const occupancyReady = !aisleOccupancyLoading && !customerStackingLoading && !aisleOccupancy?.error
+      const { cap, effectiveUsed } = computeRoomCapacityUsage(row, aisles, aisleOccupancy?.byAisleLocationId, customerStackingRows, occupancyReady)
+      if (cap <= 0) continue
+      const t = totals.get(row.zone) || { cap: 0, used: 0 }
+      t.cap += cap
+      t.used += (effectiveUsed ?? 0)
+      totals.set(row.zone, t)
+    }
+    return totals
+  }, [rows, aislesByRoomId, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, loading])
+
+  const label = (
+    <div style={{
+      fontSize: 10, color: 'var(--text-dim)',
+      fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+      letterSpacing: '0.1em', textTransform: 'uppercase',
+    }}>
+      Zone utilization
+    </div>
+  )
+
+  if (loading) {
+    return (
+      <div>
+        {label}
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>Loading…</div>
+      </div>
+    )
+  }
+
+  const zoneKeys = Object.keys(ZONES).filter(z => zoneTotals.has(z))
+  if (zoneKeys.length === 0) return null
+
+  return (
+    <div>
+      {label}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
+        {zoneKeys.map(z => {
+          const { cap, used } = zoneTotals.get(z)
+          const util = cap > 0 ? (used / cap) * 100 : null
+          const band = utilBand(util)
+          const zoneInfo = ZONES[z]
+          return (
+            <div key={z} style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '8px 14px', minWidth: 140,
+              background: 'var(--bg2, #f8f9fb)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--r-md, 8px)',
+            }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: zoneInfo.color, display: 'inline-block' }} />
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>{zoneInfo.label}</span>
+              <span style={{
+                marginLeft: 'auto', fontSize: 16, fontWeight: 600,
+                fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+                color: band.color,
+              }}>
+                {fmtPct(util)}
+              </span>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
