@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import NotifySettingsPanel from '../NotifySettingsPanel.jsx'
+import FefoReallocationAlertSettings from './FefoReallocationAlerts.jsx'
 import {
   FEFO_PROJECTS, AUTO_LOAD_PROJECT_IDS, getProject, dateVerb,
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
@@ -294,88 +295,14 @@ function FefoNotifySettings() {
   )
 }
 
-// FefoReallocationAlertSettings — added 2026-07-26 per Dean/Bry's Slack
-// feedback (relayed via Dan): flag when a batch/lot allocated to an order
-// gets cancelled and reallocated to a DIFFERENT (usually newer) lot without
-// the office being notified — the exact gap that let the 7/22-vs-7/23 date
-// code mixup ship before anyone caught it. Scoped to all FEFO projects
-// EXCEPT JDF (Dan's explicit call, 2026-07-26) — JDF is a backward-looking
-// closed-order retrospective audit, not a live allocation feed, so the
-// "was allocated, got cancelled, got reallocated" event doesn't apply to it
-// the same way.
-//
-// Deliberately a SEPARATE settings section from FefoNotifySettings above,
-// not folded into it — this posts an urgent, real-time alert (fires on a
-// short poll, e.g. every 5-15 min, whenever the detection function finds a
-// new cancel+reallocate event), not a once-a-day status digest. Mixing the
-// two risked exactly the kind of miss Bry described: routine nightly noise
-// burying something that needs same-day eyes.
-//
-// Reuses the same NotifySettingsPanel component and prepick_notify_settings
-// table (dashboard_type=`fefo_realloc_<projectId>`, composite key with
-// facility — 8 rows seeded 2026-07-26, all active=false pending the Front
-// conversation ID). functionName points at 'fefo-lot-reallocation-alert',
-// a Netlify function NOT YET BUILT as of this commit — the MotherDuck
-// feasibility check (can a cancelled task + its replacement allocation
-// actually be joined back to the same order/line in datex_slv_tasks) was
-// still in progress when this UI shipped. The panel's Save/Enabled toggle
-// and conversation-ID field work today; "Send test alert now" will 404
-// until the backend function exists.
-//
-// Known UI mismatch, called out here rather than silently building around
-// it: NotifySettingsPanel's "Send time" and "Send on: days" controls exist
-// for once-daily digests and don't really apply to a continuously-polling
-// alert. Rather than fork the shared component (risking the 6 other digests
-// that depend on it), this reuses it as-is and says so explicitly in the
-// digestDescription text below — only the Front conversation ID and
-// Enabled toggle are meaningful here.
-function FefoReallocationAlertSettings() {
-  const [open, setOpen] = useState(false)
-  const btnStyle = {
-    background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 4,
-    color: 'var(--text-primary)', fontSize: 11, fontFamily: 'var(--font-mono)',
-    padding: '4px 10px', cursor: 'pointer',
-  }
-  const projects = FEFO_PROJECTS.filter(p => !p.closedOrders) // excludes JDF
-  return (
-    <div>
-      <button type="button" style={btnStyle} onClick={() => setOpen(o => !o)}>
-        {open ? 'Hide lot reallocation alerts' : 'FEFO lot reallocation alerts (per customer)'}
-      </button>
-      {open && (
-        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 4 }}>
-            Urgent, real-time alert — not a daily digest. Fires the moment a batch allocated to an order
-            is cancelled and a different lot gets allocated in its place. Not yet live (detection query
-            still being validated); the settings below are ready for when it ships.
-          </div>
-          {projects.map(p => (
-            <div key={p.id} style={{
-              border: '1px solid var(--border)', borderLeft: `3px solid ${p.color}`,
-              borderRadius: 'var(--r-md, 8px)', padding: '8px 12px',
-            }}>
-              <div style={{
-                fontSize: 11, fontWeight: 600, color: p.color,
-                fontFamily: 'var(--font-mono, ui-monospace, monospace)', marginBottom: 4,
-              }}>{p.code} · {p.name}</div>
-              <NotifySettingsPanel
-                facility={p.facility}
-                dashboardType={`fefo_realloc_${p.id}`}
-                functionName="fefo-lot-reallocation-alert"
-                manualTestBody={{ dashboardType: `fefo_realloc_${p.id}` }}
-                contentDateLabel="right now"
-                showSkipToNextValidDay={false}
-                digestDescription={
-                  `Posts an urgent alert for ${p.name} the moment a lot allocated to an order gets cancelled and replaced with a different lot. This runs continuously (short poll, not a set time) — the Send time / Send on controls above don't apply here; only the Front conversation ID and Enabled toggle matter.`
-                }
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
+// FefoReallocationAlertSettings now lives in ./FefoReallocationAlerts.jsx —
+// see that file's header comment for the full history (Dean/Bry's ask,
+// scope to all-FEFO-except-JDF, why it's a separate section from
+// FefoNotifySettings, and the 2026-07-26 correction replacing a misleading
+// NotifySettingsPanel reuse with a purpose-built minimal panel). Moved out
+// of this file 2026-07-26 to keep FefoRotationTab.jsx under this project's
+// documented fragile-push size threshold (~50-60KB) — same pattern as
+// SpacePlanningTab.jsx/SpaceStackingExceptions.jsx.
 
 function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh, isClosedOrders, closedDay, onClosedDayChange, closedDayCount }) {
   return (
