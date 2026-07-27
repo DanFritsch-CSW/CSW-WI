@@ -77,6 +77,17 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# FEFO Lot Reallocation Alert -- added 2026-07-26. Deliberately a SEPARATE,
+# slower tick (*/30, not */15) from the other digests above -- this is a
+# real-time alert on FEFO verdict transitions (see the function's file
+# header for the full design/pivot story), not a once-daily status digest,
+# so it doesn't need the same responsiveness as the scheduled-send-time
+# digests. timeout matches fefo-orders.cjs's own 26s since this function
+# calls that one internally per project.
+[functions."fefo-lot-reallocation-alert"]
+  schedule = "*/30 * * * *"
+  timeout = 26
+
 [functions."wr-pickcheck-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
