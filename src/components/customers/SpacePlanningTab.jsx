@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FACILITY_DOTS, FACILITY_NAMES, FACILITIES, PHASE3_FACILITIES,
-  ZONES, utilBand, facilityCapacity, facilityActual, facilityUtil,
+  utilBand, facilityCapacity, facilityActual, facilityUtil,
   networkCapacity, networkActual, networkUtil, isFacilityLive,
   fmtInt, fmtPct, fmtTime,
   fetchSpaceRooms, fetchSpaceCustomerPositions, fetchLiveActualsPerFacility,
@@ -16,7 +16,7 @@ import {
   computeEffectiveAisleOccupancy,
   fetchRoomAisleDatexMapping,
 } from '../../lib/spacePlanning.js'
-import { AisleOccupancyPanel, MaterialStackingSubsection } from './SpaceStackingExceptions.jsx'
+import { AisleOccupancyPanel, MaterialStackingSubsection, ZoneCell, ZoneUtilizationSummary } from './SpaceStackingExceptions.jsx'
 
 // Phase 2 — Network/ALL view is read-only.
 // Phase 2.5 — Network/ALL view actuals come from live Datex LP counts when
@@ -668,6 +668,18 @@ function FacilityRoomView({ facility, rooms, onRoomUpdated }) {
         />
       </SummaryRow>
 
+      {/* Collective utilization by temperature zone (Dan's ask, 2026-07-25) */}
+      <ZoneUtilizationSummary
+        rows={rows}
+        aislesByRoomId={aislesByRoomId}
+        aisleOccupancy={aisleOccupancy}
+        aisleOccupancyLoading={aisleOccupancyLoading}
+        customerStackingRows={customerStackingRows}
+        customerStackingLoading={customerStackingLoading}
+        aislesLoading={aislesLoading}
+        liveLoading={liveLoading}
+      />
+
       {/* Per-room table */}
       <div>
         <SectionLabel>ROOMS</SectionLabel>
@@ -1240,7 +1252,6 @@ function RoomTable({ rows, liveLoading, isLive, facility, onRoomUpdated, breakdo
 }
 
 function RoomRow({ row, liveLoading, isLive, gridTemplate, facility, onRoomUpdated, breakdown, breakdownLoading, expanded, onToggleExpand, aisles, aislesLoading, aisleOccupancy, aisleOccupancyLoading, customerStackingRows, customerStackingLoading, onAislesChanged }) {
-  const zoneInfo = ZONES[row.zone] || { label: row.zone || '—', color: 'var(--text-dim)' }
   const aisleCalc = roomAislePositions(aisles)
   const hasAisleData = aisleCalc.aisleCount > 0
   // Capacity is a flat single number — the single-stack floor — not a range
@@ -1288,16 +1299,7 @@ function RoomRow({ row, liveLoading, isLive, gridTemplate, facility, onRoomUpdat
           {row.name}
         </button>
         <div>
-          <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 5,
-            fontSize: 11, color: 'var(--text-secondary)',
-          }}>
-            <span style={{
-              width: 6, height: 6, borderRadius: '50%',
-              background: zoneInfo.color, display: 'inline-block',
-            }} />
-            {zoneInfo.label}
-          </span>
+          <ZoneCell room={row} onRoomUpdated={onRoomUpdated} />
         </div>
         <div style={{
           textAlign: 'right',
