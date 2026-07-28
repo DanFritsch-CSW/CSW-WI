@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { upsertAssignment } from '../lib/supabase.js'
+import { CAL2_DOCK_MAP } from '../lib/constants.js'
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10)
@@ -30,11 +31,39 @@ function computeShiftHours(startStr, endStr) {
   return Math.round(hours * 100) / 100
 }
 
+// CAL-only: if the typed name matches a known CAL2_DOCK_MAP entry (e.g. a
+// regular dock worker occasionally entered as a temp), pre-select the side
+// that person normally works instead of leaving it on the default. Purely
+// a convenience default — still fully overridable via the Side dropdown.
+function dockMapSideForName(name) {
+  const laneId = CAL2_DOCK_MAP[name.trim()]
+  if (!laneId) return null
+  return laneId.startsWith('side12') ? 'side12' : 'side35'
+}
+
 export default function AddTempModal({ facility, planDate, onAdd, onClose }) {
+  const isCal = facility === 'cal'
+
   const [name,      setName]      = useState('')
   const [startTime, setStartTime] = useState('')
   const [endTime,   setEndTime]   = useState('')
+  // CAL v2 splits every active lane into side12_*/side35_* (see
+  // LANES_CAL2 in constants.js) — a temp with a plain 'shift1'/'mid'/
+  // 'shift2'/'shift3' lane doesn't match any real CAL lane id, so it
+  // silently never renders on the roster board (though it's still a
+  // real row in roster_assignments, which is why hourly/staffed-count
+  // views that read the table directly still saw it). Only relevant
+  // for CAL; every other facility uses the plain lane ids as-is.
+  const [side,      setSide]      = useState('side12')
   const [saving,    setSaving]    = useState(false)
+
+  function handleNameChange(value) {
+    setName(value)
+    if (isCal) {
+      const matchedSide = dockMapSideForName(value)
+      if (matchedSide) setSide(matchedSide)
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -45,7 +74,8 @@ export default function AddTempModal({ facility, planDate, onAdd, onClose }) {
     const date         = planDate || todayISO()
     const startDecimal = timeToDecimal(startTime)
     const shiftHours   = computeShiftHours(startTime, endTime)
-    const lane         = laneFromStart(startDecimal)
+    const baseLane     = laneFromStart(startDecimal)
+    const lane         = isCal ? `${side}_${baseLane}` : baseLane
 
     const assignment = {
       facility,
@@ -86,12 +116,22 @@ export default function AddTempModal({ facility, planDate, onAdd, onClose }) {
             <input
               className="modal-input"
               value={name}
-              onChange={e => setName(e.target.value)}
+              onChange={e => handleNameChange(e.target.value)}
               placeholder="Full name"
               autoFocus
               required
             />
           </label>
+
+          {isCal && (
+            <label className="modal-label">
+              Side
+              <select className="modal-select" value={side} onChange={e => setSide(e.target.value)}>
+                <option value="side12">1-2 Side</option>
+                <option value="side35">3.5 Side</option>
+              </select>
+            </label>
+          )}
 
           <div style={{ display: 'flex', gap: '12px' }}>
             <label className="modal-label" style={{ flex: 1 }}>
