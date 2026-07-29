@@ -915,11 +915,12 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         </div>
       )}
 
-      {isDaily && isMad && (
+      {isDaily && (isMad || isWr || facility.id === 'ec') && (
         <NotifySettingsPanel
-          facility="mad"
+          facility={facility.id}
           dashboardType="daily_ops"
           functionName="dailyops-digest-run"
+          manualTestBody={{ facility: facility.id }}
           digestDescription="Posts three images to Front — the Total Appointments card, the Projects table, and the Shift Roster — as separate comments."
         />
       )}
