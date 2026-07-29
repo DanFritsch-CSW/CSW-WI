@@ -8,8 +8,22 @@
 // configurable-time + Mon-Fri-day-filter + manual-test pattern exactly —
 // see that file's header for the full mechanism (netlify.toml ticks this
 // every 15 min; the function checks current America/Chicago time against
-// prepick_notify_settings.notify_hour/notify_minute for
-// facility='mad'/dashboard_type='daily_ops').
+// prepick_notify_settings.notify_hour/notify_minute for each facility's
+// own daily_ops row).
+//
+// ── Extended to WR + EC — 2026-07-29 ──────────────────────────────────────
+// Originally MAD-only (facility/label/color hardcoded). Generalized per
+// Dan's request to also post separate Daily Ops digests for Wisconsin
+// Rapids and Eau Claire, each to its own Front conversation thread — the
+// underlying prepick_notify_settings table already keyed on
+// (facility, dashboard_type), so this only needed code changes, no schema
+// change. Mirrors the fefo-digest-run.cjs pattern: ONE Netlify function
+// loops every facility with an active daily_ops row on the scheduled tick;
+// a manual test POST now requires {facility: 'mad'|'wr'|'ec'} in the body
+// to say which one to run (previously implicit, since only MAD existed).
+// FACILITY_CONFIGS below is the single place to add a 4th/5th facility
+// later (CAL/KEN) if ever wanted — everything else (rendering, labor calc,
+// Supabase reads) is already facility-parameterized.
 //
 // ── Why images instead of text — 2026-07-14 ──────────────────────────────
 // Dan's ask was specifically a visual snapshot of the Total Appointments
@@ -32,15 +46,16 @@
 // (projectHpa, see FacilityPanel.jsx perHourReq). This digest does NOT
 // replicate that — Labor Req Total here is simply
 // round(totalAppts * facility_settings.hours_per_appt, 1), matching the
-// live number only when no per-project override is in effect for MAD.
-// Flagged rather than silently guessed around; revisit if MAD ever gets
-// a per-project HPA override configured.
+// live number only when no per-project override is in effect for that
+// facility. Flagged rather than silently guessed around; revisit if MAD,
+// WR, or EC ever gets a per-project HPA override configured.
 //
 // ── Known simplification — facility-level break assumptions only ────────
 // Per-employee break-schedule overrides (breaksMap in laborCalc.js) are
 // NOT applied here — every employee uses facility_settings.break_hour_1-8.
 // Small numeric drift possible for facilities/days with active per-employee
-// overrides; not expected to matter for MAD's typical roster.
+// overrides; not expected to matter for any of the 3 facilities' typical
+// rosters.
 //
 // ── Known simplification — carryover 3rd-shift tail employees excluded ──
 // Carryover tiles are computed live from B2E and never persisted to
@@ -54,9 +69,14 @@ const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
 const FRONT_TOKEN = process.env.FRONT_API_TOKEN
 const SITE_URL = process.env.URL || process.env.DEPLOY_URL
 
-const FACILITY_ID = 'mad'
-const FACILITY_LABEL = 'Madison'
-const FACILITY_COLOR = '#4d9de0'
+// Per-facility label/color — mirrors src/lib/constants.js FACILITIES.
+// Add an entry here (and nowhere else) to extend this digest to another
+// facility later.
+const FACILITY_CONFIGS = {
+  mad: { label: 'Madison', color: '#4d9de0' },
+  wr:  { label: 'Wisconsin Rapids', color: '#d4b84a' },
+  ec:  { label: 'Eau Claire', color: '#c084fc' },
+}
 
 // Theme colors — matches src/index.css root variables (light theme).
 const THEME = {
@@ -106,11 +126,6 @@ function centralNowParts() {
   }).formatToParts(new Date())
   const get = t => Number(parts.find(p => p.type === t).value)
   return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour') % 24, minute: get('minute') }
-}
-
-function centralTodayISO() {
-  const { year, month, day } = centralNowParts()
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
 function isNotifyTimeMatch(notifyHour, notifyMinute) {
@@ -164,7 +179,7 @@ function r1(n) { return Math.round(n * 10) / 10 }
 
 // ── Labor calc port (subset of src/lib/laborCalc.js needed here — no
 // carryover/breaksMap/laneFilter branches since none apply to a Supabase-
-// only, MAD-only, non-split-view digest read) ────────────────────────────
+// only, single-facility, non-split-view digest read) ────────────────────
 function getBreakMultipliers(settings) {
   return BREAK_DEFAULTS.map((def, i) => (settings?.[`break_hour_${i + 1}`] ?? def) / 100)
 }
@@ -223,15 +238,15 @@ function computeRosterTotals(rosterRows, settings) {
 }
 
 // ── Data assembly ─────────────────────────────────────────────────────────
-async function fetchSnapshotData(date) {
+async function fetchSnapshotData(facilityId, date) {
   const [settingsRows, rosterRows, dropsRows, adjRows, projResp] = await Promise.all([
-    sbFetch(`facility_settings?facility=eq.${FACILITY_ID}&select=*`),
-    sbFetch(`roster_assignments?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=employee_name,lane,shift_start,shift_hours,on_loan_to,from_facility,is_temp`),
-    sbFetch(`project_hourly_drops_forecast?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=project_name,est_drops`),
-    sbFetch(`hourly_labor_adjustments?facility=eq.${FACILITY_ID}&plan_date=eq.${date}&select=adjustment`),
+    sbFetch(`facility_settings?facility=eq.${facilityId}&select=*`),
+    sbFetch(`roster_assignments?facility=eq.${facilityId}&plan_date=eq.${date}&select=employee_name,lane,shift_start,shift_hours,on_loan_to,from_facility,is_temp`),
+    sbFetch(`project_hourly_drops_forecast?facility=eq.${facilityId}&plan_date=eq.${date}&select=project_name,est_drops`),
+    sbFetch(`hourly_labor_adjustments?facility=eq.${facilityId}&plan_date=eq.${date}&select=adjustment`),
     fetch(`${SITE_URL}/.netlify/functions/motherduck-appointments`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'projectData', facilityId: FACILITY_ID, date }),
+      body: JSON.stringify({ mode: 'projectData', facilityId, date }),
     }).then(async r => {
       const t = await r.text()
       let j; try { j = JSON.parse(t) } catch { j = { raw: t } }
@@ -344,7 +359,7 @@ function fmtDelta(v) {
   return v >= 0 ? `+${v}` : `${v}`
 }
 
-function renderTotalAppointmentsCard(data, dateObj) {
+function renderTotalAppointmentsCard(data, dateObj, cfg) {
   const create = loadCanvasLib()
   const W = 640, H = 470
   const canvas = create(W, H)
@@ -361,7 +376,7 @@ function renderTotalAppointmentsCard(data, dateObj) {
 
   ctx.fillStyle = THEME.textSecondary
   ctx.font = FONT(15, true)
-  ctx.fillText(`${FACILITY_LABEL} — Daily Ops`, 32, 44)
+  ctx.fillText(`${cfg.label} — Daily Ops`, 32, 44)
   ctx.font = FONT(13, false)
   ctx.fillStyle = THEME.textDim
   ctx.fillText(formatHeaderDate(dateObj), 32, 64)
@@ -370,13 +385,13 @@ function renderTotalAppointmentsCard(data, dateObj) {
   roundRect(ctx, 32, 82, W - 64, 100, 8)
   ctx.fillStyle = THEME.bg2
   ctx.fill()
-  ctx.strokeStyle = FACILITY_COLOR
+  ctx.strokeStyle = cfg.color
   ctx.lineWidth = 2
   ctx.stroke()
   ctx.fillStyle = THEME.textSecondary
   ctx.font = FONT(13, true)
   ctx.fillText('TOTAL APPOINTMENTS', 52, 112)
-  ctx.fillStyle = FACILITY_COLOR
+  ctx.fillStyle = cfg.color
   ctx.font = FONT(48, true)
   ctx.fillText(String(data.totalAppts), 52, 165)
 
@@ -418,7 +433,7 @@ function renderTotalAppointmentsCard(data, dateObj) {
   return canvas.toBuffer('image/png')
 }
 
-function renderProjectsTable(data, dateObj) {
+function renderProjectsTable(data, dateObj, cfg) {
   const create = loadCanvasLib()
   const rows = data.dailyProjectRows
   const ROW_H = 30
@@ -439,7 +454,7 @@ function renderProjectsTable(data, dateObj) {
 
   ctx.fillStyle = THEME.textSecondary
   ctx.font = FONT(15, true)
-  ctx.fillText(`${FACILITY_LABEL} — Projects`, 32, 44)
+  ctx.fillText(`${cfg.label} — Projects`, 32, 44)
   ctx.font = FONT(13, false)
   ctx.fillStyle = THEME.textDim
   ctx.fillText(formatHeaderDate(dateObj), 32, 64)
@@ -478,7 +493,7 @@ function renderProjectsTable(data, dateObj) {
     ctx.fillText(r.inb || '—', colX.inb, rowY + 4)
     ctx.fillText(r.out || '—', colX.out, rowY + 4)
     ctx.font = FONT(13, true)
-    ctx.fillStyle = FACILITY_COLOR
+    ctx.fillStyle = cfg.color
     ctx.fillText(String(r.total || '—'), colX.tot, rowY + 4)
   })
 
@@ -543,7 +558,7 @@ function groupRosterByLane(rosterRows) {
   return groups
 }
 
-function renderShiftRoster(rosterRows, dateObj) {
+function renderShiftRoster(rosterRows, dateObj, cfg) {
   const create = loadCanvasLib()
   const groups = groupRosterByLane(rosterRows)
 
@@ -567,7 +582,7 @@ function renderShiftRoster(rosterRows, dateObj) {
 
   ctx.fillStyle = THEME.textSecondary
   ctx.font = FONT(15, true)
-  ctx.fillText(`${FACILITY_LABEL} — Shift Roster`, PAD, 32)
+  ctx.fillText(`${cfg.label} — Shift Roster`, PAD, 32)
   ctx.font = FONT(13, false)
   ctx.fillStyle = THEME.textDim
   ctx.fillText(formatHeaderDate(dateObj), PAD, 52)
@@ -613,7 +628,7 @@ function renderShiftRoster(rosterRows, dateObj) {
       const cardW = COL_W - 12
 
       // Left accent strip color: PTO lane green, FROM-loan blue, TEMP yellow, else facility color
-      let accent = FACILITY_COLOR
+      let accent = cfg.color
       if (col.key === 'pto') accent = THEME.green
       else if (row.from_facility) accent = '#4d9de0'
       else if (row.is_temp) accent = '#d4b84a'
@@ -687,8 +702,8 @@ function renderShiftRoster(rosterRows, dateObj) {
 // App link added 2026-07-14 (later same day, per Dan) — the first
 // comment's caption also includes a direct link to the live app for the
 // exact facility+date being summarized (https://csw-wi.netlify.app/?fac=
-// mad&date=YYYY-MM-DD), so someone reading the digest in Front can jump
-// straight to the matching live view. Query params match exactly what
+// {facilityId}&date=YYYY-MM-DD), so someone reading the digest in Front can
+// jump straight to the matching live view. Query params match exactly what
 // LaborPlanning.jsx reads via useSearchParams (`fac`, `date`) — confirmed
 // against that file before wiring this up. Only on the first comment
 // (not repeated on the other two), consistent with the just-add-it-once
@@ -709,18 +724,20 @@ async function postImageComment(conversationId, pngBuffer, filename, caption) {
   return json
 }
 
-async function runDigest({ isManualTest }) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase env not configured')
-  if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
-  if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
+// Runs the digest for exactly one facility. Returns { ok, skipped?, reason?, ...}
+// — same shape the original single-facility version returned, so a manual
+// test still sees { ok, date, conversationId, ...counts } directly.
+async function runDigestForFacility(facilityId, { isManualTest }) {
+  const cfg = FACILITY_CONFIGS[facilityId]
+  if (!cfg) return { ok: false, reason: `Unknown facility '${facilityId}' — must be one of ${Object.keys(FACILITY_CONFIGS).join(', ')}` }
 
   const settingsRows = await sbFetch(
-    `prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date,skip_to_next_valid_day`
+    `prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.daily_ops&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date,skip_to_next_valid_day`
   )
   const settings = settingsRows?.[0]
   const conversationId = settings?.front_conversation_id
   if (!conversationId) {
-    return { ok: false, reason: 'No front_conversation_id configured for Madison Daily Ops in prepick_notify_settings' }
+    return { ok: false, reason: `No front_conversation_id configured for ${cfg.label} Daily Ops in prepick_notify_settings` }
   }
 
   let dateObj = tomorrowCentral()
@@ -765,15 +782,15 @@ async function runDigest({ isManualTest }) {
     }
   }
 
-  const data = await fetchSnapshotData(date)
-  const cardPng = renderTotalAppointmentsCard(data, dateObj)
-  const tablePng = renderProjectsTable(data, dateObj)
-  const rosterPng = renderShiftRoster(data.rosterRows, dateObj)
+  const data = await fetchSnapshotData(facilityId, date)
+  const cardPng = renderTotalAppointmentsCard(data, dateObj, cfg)
+  const tablePng = renderProjectsTable(data, dateObj, cfg)
+  const rosterPng = renderShiftRoster(data.rosterRows, dateObj, cfg)
 
   const headerDate = formatHeaderDate(dateObj)
   const cardResult = await postImageComment(
     conversationId, cardPng, 'total-appointments.png',
-    `${headerDate}\nhttps://csw-wi.netlify.app/?fac=${FACILITY_ID}&date=${date}\nLabor Planning`
+    `${headerDate}\nhttps://csw-wi.netlify.app/?fac=${facilityId}&date=${date}\nLabor Planning`
   )
   const tableResult = await postImageComment(
     conversationId, tablePng, 'projects.png',
@@ -785,7 +802,7 @@ async function runDigest({ isManualTest }) {
   )
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.mad&dashboard_type=eq.daily_ops`, { last_sent_date: date })
+    await sbPatch(`prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.daily_ops`, { last_sent_date: date })
   }
 
   return {
@@ -793,6 +810,38 @@ async function runDigest({ isManualTest }) {
     cardCommentId: cardResult.id, tableCommentId: tableResult.id, rosterCommentId: rosterResult.id,
     totalAppts: data.totalAppts, projectCount: data.dailyProjectRows.length,
   }
+}
+
+async function runDigest({ isManualTest, facility }) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase env not configured')
+  if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
+  if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
+
+  // Manual test: exactly one facility, required in the POST body — the
+  // NotifySettingsPanel on each facility's Daily Ops tab passes
+  // manualTestBody={{facility: facility.id}} so "Send test digest now"
+  // always tests the right one, even though all 3 facilities share this
+  // one function.
+  if (isManualTest) {
+    if (!facility || !FACILITY_CONFIGS[facility]) {
+      return { ok: false, reason: `Manual test requires a valid "facility" in the POST body (one of: ${Object.keys(FACILITY_CONFIGS).join(', ')})` }
+    }
+    return runDigestForFacility(facility, { isManualTest: true })
+  }
+
+  // Scheduled tick: loop every configured facility, same shape as
+  // fefo-digest-run.cjs looping every fefo_* project row. A failure for
+  // one facility (e.g. its own motherduck-appointments call throws)
+  // doesn't stop the others from sending.
+  const results = []
+  for (const facilityId of Object.keys(FACILITY_CONFIGS)) {
+    try {
+      results.push({ facility: facilityId, ...(await runDigestForFacility(facilityId, { isManualTest: false })) })
+    } catch (err) {
+      results.push({ facility: facilityId, ok: false, reason: err.message })
+    }
+  }
+  return { ok: true, results }
 }
 
 exports.handler = async function (event) {
@@ -803,8 +852,16 @@ exports.handler = async function (event) {
     return { statusCode: 405, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'POST only (or scheduled invocation)' }) }
   }
 
+  let facility = null
+  if (isManualTest) {
+    try {
+      const body = event.body ? JSON.parse(event.body) : {}
+      facility = body.facility || null
+    } catch { /* leave null — runDigest reports the missing-facility error */ }
+  }
+
   try {
-    const result = await runDigest({ isManualTest })
+    const result = await runDigest({ isManualTest, facility })
     return { statusCode: result.ok ? 200 : 500, headers: NO_CACHE_HEADERS, body: JSON.stringify({ success: result.ok, ...result }) }
   } catch (err) {
     return { statusCode: 502, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: err.message }) }
