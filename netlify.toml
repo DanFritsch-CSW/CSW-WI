@@ -92,6 +92,19 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# Madison Dock Counts digest -- added 2026-07-30. Same tick/timeout as
+# every other prepick_notify_settings-backed digest, but the settings row
+# is seeded/left with active=false -- Dan's ask was on-demand pull for
+# now, with the ability to flip this on later from the Dock Counts tab's
+# Notify Settings panel. This registration just means the tick is ready
+# to actually fire once he does; it's a no-op every 15 min until then.
+[functions."dockcounts-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+[functions."motherduck-dock-counts"]
+  timeout = 26
+
 [functions."wr-secondary-repl"]
   timeout = 26
 
