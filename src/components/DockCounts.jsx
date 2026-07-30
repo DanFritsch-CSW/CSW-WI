@@ -23,10 +23,18 @@ import { fetchDockCounts, DOCK_ROWS, buildDockCountsMessage } from '../lib/dockC
 // it should post the 3 images AND this dock-count breakdown together, to
 // the SAME Front conversation. The posting logic now lives entirely in
 // dailyops-digest-run.cjs (a 4th text comment, Madison-only, right after
-// the Shift Roster image) — this component is purely the live on-demand
-// view now, with no notify controls of its own. "Enabling the digest" for
-// Dock Counts just means checking Enabled on the Daily Ops NotifySettingsPanel
-// directly above this section.
+// the Shift Roster image).
+//
+// Placement — REVISED AGAIN 2026-07-30 (same day, follow-up feedback):
+// Dan's actual ask was for this to live INSIDE the Daily Ops
+// NotifySettingsPanel's own collapsible dropdown, not as a separate
+// always-visible section sitting below it on the page. Now passed as
+// `children` to that NotifySettingsPanel (see FacilityPanel.jsx) — it
+// only renders when the "Notify settings" panel itself is expanded,
+// sharing that exact open/closed state rather than having its own.
+// Styled to sit flush inside the panel (no independent border/heading of
+// its own — NotifySettingsPanel's existing divider above `children`
+// already separates it from the Save/Send-test-now controls).
 //
 // "Alex and Troy will be here to help" (staffing note in Dan's example
 // message) has no data source in this app (nothing ties an employee to
@@ -80,14 +88,12 @@ export default function DockCounts() {
   }
 
   return (
-    <div style={{ padding: '16px 4px', borderTop: '1px solid var(--border)', marginTop: 8 }}>
-      <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Dock Counts</div>
-      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14, maxWidth: 680 }}>
+    <div>
+      <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Dock Counts (posted with this digest)</div>
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 12, maxWidth: 620 }}>
         Inbound/outbound load counts by dock (Dock 8, East, West), counted the same way the ops manager
         does — by which dock/location the appointment is scheduled at, not the appointment's own
-        inbound/outbound type. This same breakdown posts automatically as part of the Daily Ops digest
-        above (right after the Shift Roster image) whenever that digest is enabled — no separate toggle
-        needed here.
+        inbound/outbound type. Posted as an extra Front comment whenever this digest sends.
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
