@@ -77,6 +77,15 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# FEFO nightly digest MANUAL TEST -- added 2026-07-30. No `schedule` entry
+# on purpose: Netlify blocks direct HTTP invocation of any function that
+# HAS a schedule (confirmed via Netlify docs + reproduced live -- see
+# lib/fefo-digest-shared.cjs's header for the full story), which is why
+# "Send test digest now" started 403ing. This sibling function has no
+# schedule so the browser can POST to it directly.
+[functions."fefo-digest-test"]
+  timeout = 26
+
 # FEFO Lot Reallocation Alert -- added 2026-07-26. Deliberately a SEPARATE,
 # slower tick (*/30, not */15) from the other digests above -- this is a
 # real-time alert on FEFO verdict transitions (see the function's file
@@ -86,6 +95,11 @@
 # calls that one internally per project.
 [functions."fefo-lot-reallocation-alert"]
   schedule = "*/30 * * * *"
+  timeout = 26
+
+# FEFO Lot Reallocation Alert MANUAL TEST -- added 2026-07-30, same reason
+# and pattern as fefo-digest-test above: no schedule, so direct POST works.
+[functions."fefo-lot-reallocation-alert-test"]
   timeout = 26
 
 [functions."wr-pickcheck-digest-run"]
