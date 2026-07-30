@@ -144,6 +144,24 @@ export async function fetchLiveOtt(facility, quarter) {
   return res.json()
 }
 
+// Live Case Pick Accuracy pull (WR only) — added 2026-07-30. Direct
+// MotherDuck query against audit_app.shipment_container_discrepancies —
+// see motherduck-case-pick-accuracy.cjs header for the full formula
+// replication and the facility-scope investigation (this source table has
+// no facility column; confirmed empirically it's WR-only already).
+export async function fetchLiveCasePickAccuracy(quarter) {
+  const res = await fetch('/.netlify/functions/motherduck-case-pick-accuracy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility: 'wr', quarter }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Case Pick Accuracy pull failed (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
 // --- Attainment math ---
 // Anchor = 0% attainment. target_100 = 100% attainment. target_120 =
 // 120% attainment (extends beyond target_100, capped at 120). Direction
