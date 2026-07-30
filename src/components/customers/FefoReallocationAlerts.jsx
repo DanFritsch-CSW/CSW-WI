@@ -53,10 +53,13 @@ import { FEFO_PROJECTS } from '../../lib/fefo.js'
 // reads and writes, so those columns keep whatever the row's DB defaults
 // already are rather than being blanked out or faked in the UI.
 //
-// functionName still points at 'fefo-lot-reallocation-alert' — the Netlify
-// function itself is NOT YET BUILT as of this commit (detection query still
-// being validated across all 7 projects). Save/Enabled toggle work today;
-// "Send test alert now" will 404 until that function ships.
+// functionName points at fefo-lot-reallocation-alert-test (2026-07-30, was
+// fefo-lot-reallocation-alert) — Netlify blocks direct HTTP invocation of
+// any function carrying a `schedule`, which is what
+// fefo-lot-reallocation-alert.cjs still has (it's the scheduled ~30-min
+// tick). See lib/fefo-realloc-shared.cjs's header for the full story —
+// same fix as the nightly digest's test button. The scheduled check itself
+// is unaffected; only where the manual-test button points.
 export default function FefoReallocationAlertSettings() {
   const [open, setOpen] = useState(false)
   const btnStyle = {
@@ -76,8 +79,7 @@ export default function FefoReallocationAlertSettings() {
             Urgent, real-time alert — not a daily digest, and not on a schedule you set. Checks every
             ~30 min and fires the moment a batch allocated to an order is cancelled and a different lot
             (crossing the same critical/warning age thresholds as the tab above) gets allocated in its
-            place. Not yet live — detection query still being validated; the settings below are ready
-            for when it ships.
+            place.
           </div>
           {projects.map(p => (
             <div key={p.id} style={{
@@ -91,7 +93,7 @@ export default function FefoReallocationAlertSettings() {
               <RealtimeAlertPanel
                 facility={p.facility}
                 dashboardType={`fefo_realloc_${p.id}`}
-                functionName="fefo-lot-reallocation-alert"
+                functionName="fefo-lot-reallocation-alert-test"
                 manualTestBody={{ dashboardType: `fefo_realloc_${p.id}` }}
                 description={`Posts an urgent alert for ${p.name} the moment a lot allocated to an order gets cancelled and replaced with a different lot.`}
               />
