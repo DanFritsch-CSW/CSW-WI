@@ -48,6 +48,13 @@
 // (last_sent_date rolled back) so the next 15-min tick can still retry
 // today rather than silently going dark for the rest of the day.
 //
+// ── Dock Counts folded in — 2026-07-30 ────────────────────────────────────
+// Originally shipped as its own separate digest with its own Notify
+// Settings toggle. Dan's feedback: one trigger only — when this digest
+// fires, it should post the 3 images AND the dock-count breakdown
+// together, to the same conversation. Now a 4th (text) Front comment,
+// Madison-only. See the "Dock Counts" section further down for detail.
+//
 // ── Why images instead of text — 2026-07-14 ──────────────────────────────
 // Dan's ask was specifically a visual snapshot of the Total Appointments
 // stat card and the Projects table (the two panels at the top of the
@@ -768,6 +775,63 @@ async function postImageComment(conversationId, pngBuffer, filename, caption) {
   return json
 }
 
+// ── Dock Counts — folded into this digest 2026-07-30 ─────────────────────
+// Originally its own separate digest (dockcounts-digest-run.cjs) with its
+// own Notify Settings row. Dan's feedback: he wants ONE trigger — when the
+// Daily Ops digest fires, it should post the 3 images AND the dock-count
+// breakdown together, to the same Front conversation, not a second
+// independent on/off toggle. So this now runs as a 4th Front comment
+// inside runDigestForFacility, gated to facility==='mad' only (Dock 8/
+// East/West docks are Madison-specific — no equivalent at WR/EC).
+// dockcounts-digest-run.cjs and its prepick_notify_settings row
+// (facility='mad', dashboard_type='dock_counts') are now orphaned —
+// left in place (no file-delete tool) but no longer registered on a
+// schedule; see netlify.toml.
+//
+// Counting method (dock location name, not appointment type) is
+// unchanged from motherduck-dock-counts.cjs's original header — this just
+// calls that same function internally, same as every other digest proxies
+// its own live-data function rather than duplicating the query here.
+const DOCK_ROWS = [
+  { key: 'dock8', label: 'Dock 8' },
+  { key: 'east', label: 'East' },
+  { key: 'west', label: 'West' },
+]
+
+function padStr(str, len) { return String(str).padEnd(len, ' ') }
+
+function buildDockCountsComment(dockCountsJson) {
+  const docks = dockCountsJson.docks || {}
+  const lines = []
+  lines.push('Dock Counts')
+  lines.push('')
+  lines.push('```')
+  lines.push(`${padStr('', 10)}IN    OUT`)
+  for (const row of DOCK_ROWS) {
+    const d = docks[row.key] || { in: 0, out: 0 }
+    lines.push(`${padStr(row.label, 10)}${padStr(d.in, 6)}${d.out}`)
+  }
+  lines.push('```')
+  if (docks.other && (docks.other.in > 0 || docks.other.out > 0)) {
+    lines.push('')
+    lines.push(`Note: ${docks.other.in + docks.other.out} load(s) at an unrecognized dock/location.`)
+  }
+  return lines.join('\n')
+}
+
+async function postTextComment(conversationId, body) {
+  const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ body }),
+  })
+  const text = await res.text()
+  let json
+  try { json = JSON.parse(text) } catch { json = { raw: text } }
+  if (!res.ok) throw new Error(`Front API error posting dock counts comment: ${JSON.stringify(json)}`)
+  return json
+}
+
 // Runs the digest for exactly one facility. Returns { ok, skipped?, reason?, ...}
 // — same shape the original single-facility version returned, so a manual
 // test still sees { ok, date, conversationId, ...counts } directly.
@@ -865,9 +929,31 @@ async function runDigestForFacility(facilityId, { isManualTest }) {
       `Shift Roster`
     )
 
+    // Dock Counts — Madison only, non-fatal: a failure here shouldn't
+    // undo/fail the 3 images that already posted successfully above.
+    let dockCountsCommentId = null
+    let dockCountsError = null
+    if (facilityId === 'mad') {
+      try {
+        const dockRes = await fetch(`${SITE_URL}/.netlify/functions/motherduck-dock-counts`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date }),
+        })
+        const dockText = await dockRes.text()
+        let dockJson
+        try { dockJson = JSON.parse(dockText) } catch { dockJson = { raw: dockText } }
+        if (!dockRes.ok) throw new Error(`motherduck-dock-counts failed: ${JSON.stringify(dockJson)}`)
+        const dockComment = await postTextComment(conversationId, buildDockCountsComment(dockJson))
+        dockCountsCommentId = dockComment.id
+      } catch (err) {
+        dockCountsError = err.message
+      }
+    }
+
     return {
       ok: true, date, conversationId,
       cardCommentId: cardResult.id, tableCommentId: tableResult.id, rosterCommentId: rosterResult.id,
+      dockCountsCommentId, dockCountsError,
       totalAppts: data.totalAppts, projectCount: data.dailyProjectRows.length,
     }
   } catch (err) {
