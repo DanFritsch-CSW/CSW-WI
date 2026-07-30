@@ -95,6 +95,9 @@
 [functions."wr-secondary-repl"]
   timeout = 26
 
+[functions."motherduck-ott"]
+  timeout = 26
+
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
