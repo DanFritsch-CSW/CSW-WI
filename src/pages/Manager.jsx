@@ -131,8 +131,8 @@ function FacilityScorecard({ facility }) {
   const [bonusDraft, setBonusDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
-  const [ottPull, setOttPull] = useState({ loading: false, result: null, error: null })
-  const [cpaPull, setCpaPull] = useState({ loading: false, result: null, error: null })
+  const [ottPull, setOttPull] = useState({ loading: false, lastPulledAt: null, error: null })
+  const [cpaPull, setCpaPull] = useState({ loading: false, lastPulledAt: null, error: null })
 
   useEffect(() => {
     let cancelled = false
@@ -169,31 +169,39 @@ function FacilityScorecard({ facility }) {
     }
   }, [])
 
+  // Pulled values are written straight into the scorecard's Actual cells
+  // (the source of truth the person actually reads) via handleFieldChange,
+  // same path as a manual edit. We only keep a lastPulledAt timestamp here
+  // for a small "updated at" confirmation — not a second copy of the
+  // numbers, since duplicating them next to the button was confusing
+  // (Dan's feedback 2026-07-30: expected the numbers to land in the Actual
+  // column, not a separate readout — they did land there, the redundant
+  // readout was just visual noise on top of that).
   async function pullLiveOtt() {
-    setOttPull({ loading: true, result: null, error: null })
+    setOttPull({ loading: true, lastPulledAt: null, error: null })
     try {
       const data = await fetchLiveOtt(facility, quarter)
       const ott2Metric = metrics.find((m) => m.metric_key === 'ott2')
       const ott3Metric = metrics.find((m) => m.metric_key === 'ott3')
       if (ott2Metric && data.ott2.pct != null) await handleFieldChange(ott2Metric, 'actual', data.ott2.pct)
       if (ott3Metric && data.ott3.pct != null) await handleFieldChange(ott3Metric, 'actual', data.ott3.pct)
-      setOttPull({ loading: false, result: data, error: null })
+      setOttPull({ loading: false, lastPulledAt: data.fetchedAt, error: null })
     } catch (e) {
-      setOttPull({ loading: false, result: null, error: e.message })
+      setOttPull({ loading: false, lastPulledAt: null, error: e.message })
     }
   }
 
   async function pullLiveCasePickAccuracy() {
-    setCpaPull({ loading: true, result: null, error: null })
+    setCpaPull({ loading: true, lastPulledAt: null, error: null })
     try {
       const data = await fetchLiveCasePickAccuracy(quarter)
       const cpaMetric = metrics.find((m) => m.metric_key === 'case_pick')
       if (cpaMetric && data.casePickAccuracy.pct != null) {
         await handleFieldChange(cpaMetric, 'actual', data.casePickAccuracy.pct)
       }
-      setCpaPull({ loading: false, result: data, error: null })
+      setCpaPull({ loading: false, lastPulledAt: data.fetchedAt, error: null })
     } catch (e) {
-      setCpaPull({ loading: false, result: null, error: e.message })
+      setCpaPull({ loading: false, lastPulledAt: null, error: e.message })
     }
   }
 
@@ -268,15 +276,15 @@ function FacilityScorecard({ facility }) {
               </button>
             )}
             {ottPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{ottPull.error}</span>}
-            {ottPull.result && (
-              <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                OTT-2hr {ottPull.result.ott2.pct}% (n={ottPull.result.ott2.denominator}) · OTT-3hr {ottPull.result.ott3.pct}% (n={ottPull.result.ott3.denominator}) — as of {new Date(ottPull.result.fetchedAt).toLocaleTimeString()}
+            {ottPull.lastPulledAt && (
+              <span style={{ fontSize: 11, color: 'var(--green)' }}>
+                ✓ OTT updated {new Date(ottPull.lastPulledAt).toLocaleTimeString()}
               </span>
             )}
             {cpaPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{cpaPull.error}</span>}
-            {cpaPull.result && (
-              <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                Case Pick Accuracy {cpaPull.result.casePickAccuracy.pct}% ({cpaPull.result.containers} containers) — as of {new Date(cpaPull.result.fetchedAt).toLocaleTimeString()}
+            {cpaPull.lastPulledAt && (
+              <span style={{ fontSize: 11, color: 'var(--green)' }}>
+                ✓ Case Pick Accuracy updated {new Date(cpaPull.lastPulledAt).toLocaleTimeString()}
               </span>
             )}
           </div>
