@@ -61,7 +61,6 @@ const WR_TABS = [
 // logic in the isMad branch below.
 const MAD_TABS = [
   { id: 'ops', label: 'Daily Ops' }, { id: 'prepick', label: 'Pre-Pick Status' }, { id: 'putaways', label: 'JDF Putaways' },
-  { id: 'dockcounts', label: 'Dock Counts' },
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
@@ -232,7 +231,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   // WR's non-warehouse tabs and MAD's Pre-Pick Status tab). Gating on this
   // keeps a stale rosterBusy reading from permanently blocking date
   // navigation on those sub-views.
-  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && (madTab === 'prepick' || madTab === 'putaways' || madTab === 'dockcounts'))
+  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && (madTab === 'prepick' || madTab === 'putaways'))
 
   useEffect(() => {
     onBusyChange?.(phasesBusy || (rosterBoardVisible && rosterBusy))
@@ -927,6 +926,8 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         />
       )}
 
+      {isDaily && isMad && <DockCounts />}
+
       {isDaily && (
         <>
           <div className="collapsible-section">
@@ -1105,8 +1106,6 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
           ? <PrePickStatus facilityId={facility.id} planDate={planDate} />
           : isDaily && madTab === 'putaways'
           ? <JdfPutaways />
-          : isDaily && madTab === 'dockcounts'
-          ? <DockCounts />
           : warehouseContent}
       </div>
     )
