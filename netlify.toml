@@ -98,6 +98,9 @@
 [functions."motherduck-ott"]
   timeout = 26
 
+[functions."motherduck-case-pick-accuracy"]
+  timeout = 26
+
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
