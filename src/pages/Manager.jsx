@@ -169,6 +169,21 @@ function FacilityScorecard({ facility }) {
     }
   }, [])
 
+  // Last Quarter box needs its own edit path (separate from handleFieldChange
+  // above, which targets the current-quarter `metrics` state) — this is
+  // what lets Dean punch in Q2's real actuals once they're finalized rather
+  // than seeing the row is just a read-only historical snapshot. Added
+  // 2026-07-30 after Dan flagged Q2 wasn't accepting input even though the
+  // targets had been copied over correctly.
+  const handleLastFieldChange = useCallback(async (metric, field, value) => {
+    setLastMetrics((prev) => prev.map((m) => (m.id === metric.id ? { ...m, [field]: value } : m)))
+    try {
+      await updateMetric(metric.id, { [field]: value })
+    } catch (e) {
+      setErr(e.message)
+    }
+  }, [])
+
   // Pulled values are written straight into the scorecard's Actual cells
   // (the source of truth the person actually reads) via handleFieldChange,
   // same path as a manual edit. We only keep a lastPulledAt timestamp here
@@ -292,13 +307,16 @@ function FacilityScorecard({ facility }) {
         <ScorecardTable metrics={metrics} editable onFieldChange={handleFieldChange} />
       </div>
 
-      {/* Last quarter comparison, read-only */}
+      {/* Last quarter comparison — targets/weights carried over from
+          current quarter, actuals left blank for Dean to fill in once Q2
+          closes out. Editable (not read-only) so that entry is actually
+          possible — see handleLastFieldChange above. */}
       <div className="chart-card">
         <div className="chart-header">
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{lastQuarter} (Last Quarter)</span>
         </div>
         {lastMetrics && lastMetrics.length > 0 ? (
-          <ScorecardTable metrics={lastMetrics} editable={false} onFieldChange={() => {}} />
+          <ScorecardTable metrics={lastMetrics} editable onFieldChange={handleLastFieldChange} />
         ) : (
           <div style={{ color: 'var(--text-secondary)', fontSize: 12, padding: '8px 0' }}>
             No data recorded for {lastQuarter} yet.
