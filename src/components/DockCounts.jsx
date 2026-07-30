@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { fetchDockCounts, DOCK_ROWS, buildDockCountsMessage } from '../lib/dockCounts.js'
-import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 
 // Madison Dock Counts — added 2026-07-30 per Dan's ops manager's daily
 // manual message ("Looking ahead to tomorrow, Dock 8 has N inbound and N
@@ -17,13 +16,17 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 // NotifySettingsPanel, gated `isDaily && isMad` — no MAD_TABS entry, no
 // separate route.
 //
-// Scope, per Dan's explicit call: ON-DEMAND PULL for now, not an automated
-// nightly digest — this fetches live on mount/date-change/refresh-click
-// only. The NotifySettingsPanel below is fully wired (Front conversation
-// ID, send time, Mon-Fri toggle) exactly like every other MAD digest, but
-// the underlying prepick_notify_settings row is left/seeded with
-// active=false, so nothing fires on a schedule until Dan checks Enabled
-// himself — that's the "ability to toggle it back on" he asked for.
+// Notify settings — REMOVED (also 2026-07-30, same follow-up): this used
+// to render its own NotifySettingsPanel (dashboardType="dock_counts"),
+// implying a second independent Front conversation/toggle. Dan's
+// clarification: he wants ONE trigger — when the Daily Ops digest fires,
+// it should post the 3 images AND this dock-count breakdown together, to
+// the SAME Front conversation. The posting logic now lives entirely in
+// dailyops-digest-run.cjs (a 4th text comment, Madison-only, right after
+// the Shift Roster image) — this component is purely the live on-demand
+// view now, with no notify controls of its own. "Enabling the digest" for
+// Dock Counts just means checking Enabled on the Daily Ops NotifySettingsPanel
+// directly above this section.
 //
 // "Alex and Troy will be here to help" (staffing note in Dan's example
 // message) has no data source in this app (nothing ties an employee to
@@ -82,8 +85,9 @@ export default function DockCounts() {
       <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14, maxWidth: 680 }}>
         Inbound/outbound load counts by dock (Dock 8, East, West), counted the same way the ops manager
         does — by which dock/location the appointment is scheduled at, not the appointment's own
-        inbound/outbound type. Pulled on demand; use Notify Settings below to turn on an automated
-        nightly Front post instead.
+        inbound/outbound type. This same breakdown posts automatically as part of the Daily Ops digest
+        above (right after the Shift Roster image) whenever that digest is enabled — no separate toggle
+        needed here.
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
@@ -97,14 +101,6 @@ export default function DockCounts() {
         </button>
         {copyMsg && <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{copyMsg}</span>}
       </div>
-
-      <NotifySettingsPanel
-        facility="mad"
-        dashboardType="dock_counts"
-        functionName="dockcounts-digest-run"
-        digestDescription="Posts the same dock-count breakdown shown below as a Front comment."
-        contentDateLabel="tomorrow"
-      />
 
       {error && (
         <div style={{
