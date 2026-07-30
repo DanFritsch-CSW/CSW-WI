@@ -251,6 +251,12 @@ export default function FefoRotationTab() {
 // upcoming business day. contentDateLabel/digestDescription are branched
 // per-project below to reflect that; the underlying settings row mechanics
 // (Front conversation, send time, Enabled toggle) are identical either way.
+//
+// functionName points at fefo-digest-test (2026-07-30, was fefo-digest-run)
+// — Netlify blocks direct HTTP invocation of any function carrying a
+// `schedule`, which is what fefo-digest-run.cjs still has. See
+// lib/fefo-digest-shared.cjs's header for the full story. The scheduled
+// send itself is unaffected — only where the manual-test button points.
 function FefoNotifySettings() {
   const [open, setOpen] = useState(false)
   const btnStyle = {
@@ -277,7 +283,7 @@ function FefoNotifySettings() {
               <NotifySettingsPanel
                 facility={p.facility}
                 dashboardType={`fefo_${p.id}`}
-                functionName="fefo-digest-run"
+                functionName="fefo-digest-test"
                 manualTestBody={{ dashboardType: `fefo_${p.id}` }}
                 contentDateLabel={p.closedOrders ? 'the most recent closed business day' : 'the next business day'}
                 showSkipToNextValidDay={false}
