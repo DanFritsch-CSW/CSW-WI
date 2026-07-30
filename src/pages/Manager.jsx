@@ -226,13 +226,17 @@ function FacilityScorecard({ facility }) {
 
       {/* Current quarter scorecard */}
       <div className="chart-card" style={{ marginBottom: 20 }}>
-        <div className="chart-header"><span className="chart-title">{quarter} Scorecard</span></div>
+        <div className="chart-header">
+          <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{quarter} Scorecard</span>
+        </div>
         <ScorecardTable metrics={metrics} editable onFieldChange={handleFieldChange} />
       </div>
 
       {/* Last quarter comparison, read-only */}
       <div className="chart-card">
-        <div className="chart-header"><span className="chart-title">{lastQuarter} (Last Quarter)</span></div>
+        <div className="chart-header">
+          <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{lastQuarter} (Last Quarter)</span>
+        </div>
         {lastMetrics && lastMetrics.length > 0 ? (
           <ScorecardTable metrics={lastMetrics} editable={false} onFieldChange={() => {}} />
         ) : (
