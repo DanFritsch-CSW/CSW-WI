@@ -2,15 +2,23 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { fetchDockCounts, DOCK_ROWS, buildDockCountsMessage } from '../lib/dockCounts.js'
 import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 
-// Madison Dock Counts tab — added 2026-07-30 per Dan's ops manager's daily
+// Madison Dock Counts — added 2026-07-30 per Dan's ops manager's daily
 // manual message ("Looking ahead to tomorrow, Dock 8 has N inbound and N
 // outbound loads..."). Counting method (dock location name, not
 // appointment type) is documented in motherduck-dock-counts.cjs's header —
 // confirmed against the ops manager's own East/West example counts before
 // shipping.
 //
+// Placement — REVISED same day per Dan's feedback: originally shipped as
+// its own MAD_TABS entry ("Dock Counts" tab); Dan didn't like a separate
+// tab and wanted this folded into the Daily Ops tab instead, next to its
+// existing Notify Settings section. Now rendered inline inside
+// FacilityPanel.jsx's `warehouseContent`, directly under the daily_ops
+// NotifySettingsPanel, gated `isDaily && isMad` — no MAD_TABS entry, no
+// separate route.
+//
 // Scope, per Dan's explicit call: ON-DEMAND PULL for now, not an automated
-// nightly digest — this tab fetches live on open/date-change/refresh-click
+// nightly digest — this fetches live on mount/date-change/refresh-click
 // only. The NotifySettingsPanel below is fully wired (Front conversation
 // ID, send time, Mon-Fri toggle) exactly like every other MAD digest, but
 // the underlying prepick_notify_settings row is left/seeded with
@@ -69,14 +77,12 @@ export default function DockCounts() {
   }
 
   return (
-    <div style={{ padding: '16px 4px' }}>
-      <div style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
-        Madison · on-demand pull
-      </div>
+    <div style={{ padding: '16px 4px', borderTop: '1px solid var(--border)', marginTop: 8 }}>
+      <div className="section-label" style={{ marginTop: 0, marginBottom: 6 }}>Dock Counts</div>
       <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14, maxWidth: 680 }}>
         Inbound/outbound load counts by dock (Dock 8, East, West), counted the same way the ops manager
         does — by which dock/location the appointment is scheduled at, not the appointment's own
-        inbound/outbound type. Pulled on demand only; use Notify Settings below to turn on an automated
+        inbound/outbound type. Pulled on demand; use Notify Settings below to turn on an automated
         nightly Front post instead.
       </div>
 
