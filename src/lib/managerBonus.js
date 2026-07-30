@@ -126,6 +126,24 @@ export async function upsertSettings(facility, quarter, annualTargetBonus) {
   if (error) throw error
 }
 
+// Live OTT pull (2hr v2 + 3hr all) — added 2026-07-30. Direct MotherDuck
+// query, not proxied through Omni's API (see motherduck-ott.cjs header for
+// the full field-level replication of Omni's own calculation logic, and
+// why the 'v2' 2hr variant specifically was chosen — confirmed with Dan
+// that's the version the team actually uses on their dashboards).
+export async function fetchLiveOtt(facility, quarter) {
+  const res = await fetch('/.netlify/functions/motherduck-ott', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility, quarter }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`OTT pull failed (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
 // --- Attainment math ---
 // Anchor = 0% attainment. target_100 = 100% attainment. target_120 =
 // 120% attainment (extends beyond target_100, capped at 120). Direction
