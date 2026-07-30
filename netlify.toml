@@ -92,16 +92,13 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
-# Madison Dock Counts digest -- added 2026-07-30. Same tick/timeout as
-# every other prepick_notify_settings-backed digest, but the settings row
-# is seeded/left with active=false -- Dan's ask was on-demand pull for
-# now, with the ability to flip this on later from the Dock Counts tab's
-# Notify Settings panel. This registration just means the tick is ready
-# to actually fire once he does; it's a no-op every 15 min until then.
-[functions."dockcounts-digest-run"]
-  schedule = "*/15 * * * *"
-  timeout = 26
-
+# Madison Dock Counts backend -- added 2026-07-30. Still used by the
+# on-demand Dock Counts view AND by dailyops-digest-run.cjs (which now
+# posts the same breakdown as a 4th Front comment on its own schedule).
+# dockcounts-digest-run.cjs itself is no longer registered here -- Dan's
+# follow-up ask was one trigger only (the Daily Ops digest), not a
+# separate schedule/toggle for Dock Counts. That function file is left in
+# place (no file-delete tool) but is now dead/unregistered.
 [functions."motherduck-dock-counts"]
   timeout = 26
 
