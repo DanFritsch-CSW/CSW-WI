@@ -25,6 +25,29 @@
 // later (CAL/KEN) if ever wanted — everything else (rendering, labor calc,
 // Supabase reads) is already facility-parameterized.
 //
+// ── Fixed double-send race condition — 2026-07-30 ─────────────────────────
+// Dan reported WR/EC/MAD occasionally posting the same digest twice in one
+// night. Root cause: this function now does 3x the work it used to (loops
+// 3 facilities, 3 rendered images + 3 Front API posts each = up to 9
+// sequential network calls per tick), which runs it much closer to
+// Netlify's 26s function timeout than the original MAD-only version ever
+// did. The old dedupe was check-then-act: read last_sent_date, send all 3
+// images, THEN patch last_sent_date at the very end. If a tick times out
+// (or a prior invocation is still mid-flight when the next 15-min tick
+// fires) before that final patch lands, a second invocation reads the same
+// stale last_sent_date, sees it doesn't match today, and sends a second
+// full set of images before the first invocation's patch ever completes —
+// a classic TOCTOU race, not a fluke.
+// Fixed by claiming the send atomically BEFORE rendering/posting anything:
+// the PATCH to last_sent_date is now a conditional update (only succeeds if
+// last_sent_date isn't already today), and its result tells us whether we
+// actually won the claim. Two overlapping invocations can no longer both
+// pass the check — only whichever one's PATCH lands first gets 3 images
+// through; the loser sees 0 rows affected and skips cleanly. If the actual
+// render/send work throws after a successful claim, the claim is reverted
+// (last_sent_date rolled back) so the next 15-min tick can still retry
+// today rather than silently going dark for the rest of the day.
+//
 // ── Why images instead of text — 2026-07-14 ──────────────────────────────
 // Dan's ask was specifically a visual snapshot of the Total Appointments
 // stat card and the Projects table (the two panels at the top of the
@@ -117,6 +140,27 @@ async function sbPatch(path, body) {
     body: JSON.stringify(body),
   })
   if (!res.ok) { const t = await res.text(); throw new Error(t) }
+}
+
+// Same as sbPatch, but returns the updated row(s) (Prefer: return=representation)
+// instead of nothing — used for the atomic last_sent_date claim below, where
+// the caller needs to know whether its PATCH actually matched a row (won
+// the claim) or matched zero rows (someone else already claimed this send
+// window first). See 2026-07-30 header note.
+async function sbPatchClaim(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: 'PATCH',
+    headers: {
+      apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json', Prefer: 'return=representation',
+    },
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  let json
+  try { json = text ? JSON.parse(text) : [] } catch { json = [] }
+  if (!res.ok) throw new Error(typeof json === 'string' ? json : JSON.stringify(json))
+  return Array.isArray(json) ? json : []
 }
 
 function centralNowParts() {
@@ -767,9 +811,23 @@ async function runDigestForFacility(facilityId, { isManualTest }) {
   }
   const date = isoDate(dateObj)
 
-  // Content-date (not fire-date) is the dedupe key so the lookahead case
-  // above doesn't re-send the same Monday digest again on Saturday and
-  // Sunday nights too.
+  // ── Atomic send-claim — fixes 2026-07-30 double-send bug ──────────────
+  // Previously this was check-then-act: read last_sent_date, send all 3
+  // images, THEN patch last_sent_date at the very end. Two overlapping
+  // invocations (a timeout-triggered retry, or a scheduled tick firing
+  // while a prior invocation is still mid-flight — very plausible now
+  // that this loops 3 facilities x 3 image posts per tick) could both
+  // read the same stale last_sent_date and both send a full set of
+  // images before either one's patch landed. Fixed by claiming the send
+  // BEFORE doing any of the actual work: the PATCH below only matches a
+  // row (and only then do we proceed) if last_sent_date isn't already
+  // today. Whichever invocation's PATCH lands first wins the claim; the
+  // other sees zero rows affected and skips cleanly instead of also
+  // sending. `or=(last_sent_date.is.null,...)` is required because
+  // PostgREST's `neq` filter does not match NULL rows (SQL NULL <> x is
+  // NULL, not true) — without it, a facility's very first-ever send would
+  // never be able to claim anything.
+  let previousLastSentDate = null
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Digest disabled' }
     const notifyHour = settings.notify_hour ?? 22
@@ -777,38 +835,52 @@ async function runDigestForFacility(facilityId, { isManualTest }) {
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
       return { ok: true, skipped: true, reason: 'Not the configured send time yet' }
     }
-    if (settings.last_sent_date === date) {
-      return { ok: true, skipped: true, reason: 'Already sent for this date' }
+    previousLastSentDate = settings.last_sent_date ?? null
+    const claimed = await sbPatchClaim(
+      `prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.daily_ops&or=(last_sent_date.is.null,last_sent_date.neq.${date})`,
+      { last_sent_date: date }
+    )
+    if (!claimed.length) {
+      return { ok: true, skipped: true, reason: 'Already sent for this date (claimed by another invocation)' }
     }
   }
 
-  const data = await fetchSnapshotData(facilityId, date)
-  const cardPng = renderTotalAppointmentsCard(data, dateObj, cfg)
-  const tablePng = renderProjectsTable(data, dateObj, cfg)
-  const rosterPng = renderShiftRoster(data.rosterRows, dateObj, cfg)
+  try {
+    const data = await fetchSnapshotData(facilityId, date)
+    const cardPng = renderTotalAppointmentsCard(data, dateObj, cfg)
+    const tablePng = renderProjectsTable(data, dateObj, cfg)
+    const rosterPng = renderShiftRoster(data.rosterRows, dateObj, cfg)
 
-  const headerDate = formatHeaderDate(dateObj)
-  const cardResult = await postImageComment(
-    conversationId, cardPng, 'total-appointments.png',
-    `${headerDate}\nhttps://csw-wi.netlify.app/?fac=${facilityId}&date=${date}\nLabor Planning`
-  )
-  const tableResult = await postImageComment(
-    conversationId, tablePng, 'projects.png',
-    `Projects - Total Appts`
-  )
-  const rosterResult = await postImageComment(
-    conversationId, rosterPng, 'shift-roster.png',
-    `Shift Roster`
-  )
+    const headerDate = formatHeaderDate(dateObj)
+    const cardResult = await postImageComment(
+      conversationId, cardPng, 'total-appointments.png',
+      `${headerDate}\nhttps://csw-wi.netlify.app/?fac=${facilityId}&date=${date}\nLabor Planning`
+    )
+    const tableResult = await postImageComment(
+      conversationId, tablePng, 'projects.png',
+      `Projects - Total Appts`
+    )
+    const rosterResult = await postImageComment(
+      conversationId, rosterPng, 'shift-roster.png',
+      `Shift Roster`
+    )
 
-  if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.daily_ops`, { last_sent_date: date })
-  }
-
-  return {
-    ok: true, date, conversationId,
-    cardCommentId: cardResult.id, tableCommentId: tableResult.id, rosterCommentId: rosterResult.id,
-    totalAppts: data.totalAppts, projectCount: data.dailyProjectRows.length,
+    return {
+      ok: true, date, conversationId,
+      cardCommentId: cardResult.id, tableCommentId: tableResult.id, rosterCommentId: rosterResult.id,
+      totalAppts: data.totalAppts, projectCount: data.dailyProjectRows.length,
+    }
+  } catch (err) {
+    // Revert the claim so a real failure (not a race) can still retry on
+    // the next 15-min tick today, instead of silently going dark because
+    // last_sent_date already says "sent" for a send that never happened.
+    if (!isManualTest) {
+      await sbPatch(
+        `prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.daily_ops`,
+        { last_sent_date: previousLastSentDate }
+      ).catch(() => {}) // best-effort revert — don't mask the original error
+    }
+    throw err
   }
 }
 
