@@ -3,7 +3,7 @@ import { FACILITY_LIST } from '../lib/constants.js'
 import {
   currentQuarter, priorQuarter, fetchScorecard, fetchSettings,
   seedQuarterIfMissing, updateMetric, upsertSettings, computeAttainment,
-  computeOverallAttainment, fetchLiveOtt,
+  computeOverallAttainment, fetchLiveOtt, fetchLiveCasePickAccuracy,
 } from '../lib/managerBonus.js'
 
 const FACILITY_COLOR_VAR = { cal: 'var(--cal)', ken: 'var(--ken)', mad: 'var(--mad)', wr: 'var(--wr)', ec: 'var(--ec)' }
@@ -132,6 +132,7 @@ function FacilityScorecard({ facility }) {
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
   const [ottPull, setOttPull] = useState({ loading: false, result: null, error: null })
+  const [cpaPull, setCpaPull] = useState({ loading: false, result: null, error: null })
 
   useEffect(() => {
     let cancelled = false
@@ -179,6 +180,20 @@ function FacilityScorecard({ facility }) {
       setOttPull({ loading: false, result: data, error: null })
     } catch (e) {
       setOttPull({ loading: false, result: null, error: e.message })
+    }
+  }
+
+  async function pullLiveCasePickAccuracy() {
+    setCpaPull({ loading: true, result: null, error: null })
+    try {
+      const data = await fetchLiveCasePickAccuracy(quarter)
+      const cpaMetric = metrics.find((m) => m.metric_key === 'case_pick')
+      if (cpaMetric && data.casePickAccuracy.pct != null) {
+        await handleFieldChange(cpaMetric, 'actual', data.casePickAccuracy.pct)
+      }
+      setCpaPull({ loading: false, result: data, error: null })
+    } catch (e) {
+      setCpaPull({ loading: false, result: null, error: e.message })
     }
   }
 
@@ -247,10 +262,21 @@ function FacilityScorecard({ facility }) {
             <button className="b2e-sync-btn" onClick={pullLiveOtt} disabled={ottPull.loading}>
               {ottPull.loading ? 'Pulling…' : '🔄 Pull Live OTT'}
             </button>
+            {facility === 'wr' && (
+              <button className="b2e-sync-btn" onClick={pullLiveCasePickAccuracy} disabled={cpaPull.loading}>
+                {cpaPull.loading ? 'Pulling…' : '🔄 Pull Live Case Pick Accuracy'}
+              </button>
+            )}
             {ottPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{ottPull.error}</span>}
             {ottPull.result && (
               <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
                 OTT-2hr {ottPull.result.ott2.pct}% (n={ottPull.result.ott2.denominator}) · OTT-3hr {ottPull.result.ott3.pct}% (n={ottPull.result.ott3.denominator}) — as of {new Date(ottPull.result.fetchedAt).toLocaleTimeString()}
+              </span>
+            )}
+            {cpaPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{cpaPull.error}</span>}
+            {cpaPull.result && (
+              <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                Case Pick Accuracy {cpaPull.result.casePickAccuracy.pct}% ({cpaPull.result.containers} containers) — as of {new Date(cpaPull.result.fetchedAt).toLocaleTimeString()}
               </span>
             )}
           </div>
