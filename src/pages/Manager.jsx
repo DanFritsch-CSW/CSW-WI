@@ -3,7 +3,7 @@ import { FACILITY_LIST } from '../lib/constants.js'
 import {
   currentQuarter, priorQuarter, fetchScorecard, fetchSettings,
   seedQuarterIfMissing, updateMetric, upsertSettings, computeAttainment,
-  computeOverallAttainment,
+  computeOverallAttainment, fetchLiveOtt,
 } from '../lib/managerBonus.js'
 
 const FACILITY_COLOR_VAR = { cal: 'var(--cal)', ken: 'var(--ken)', mad: 'var(--mad)', wr: 'var(--wr)', ec: 'var(--ec)' }
@@ -131,6 +131,7 @@ function FacilityScorecard({ facility }) {
   const [bonusDraft, setBonusDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
+  const [ottPull, setOttPull] = useState({ loading: false, result: null, error: null })
 
   useEffect(() => {
     let cancelled = false
@@ -166,6 +167,20 @@ function FacilityScorecard({ facility }) {
       setErr(e.message)
     }
   }, [])
+
+  async function pullLiveOtt() {
+    setOttPull({ loading: true, result: null, error: null })
+    try {
+      const data = await fetchLiveOtt(facility, quarter)
+      const ott2Metric = metrics.find((m) => m.metric_key === 'ott2')
+      const ott3Metric = metrics.find((m) => m.metric_key === 'ott3')
+      if (ott2Metric && data.ott2.pct != null) await handleFieldChange(ott2Metric, 'actual', data.ott2.pct)
+      if (ott3Metric && data.ott3.pct != null) await handleFieldChange(ott3Metric, 'actual', data.ott3.pct)
+      setOttPull({ loading: false, result: data, error: null })
+    } catch (e) {
+      setOttPull({ loading: false, result: null, error: e.message })
+    }
+  }
 
   async function saveBonus() {
     setSaving(true)
@@ -226,8 +241,19 @@ function FacilityScorecard({ facility }) {
 
       {/* Current quarter scorecard */}
       <div className="chart-card" style={{ marginBottom: 20 }}>
-        <div className="chart-header">
+        <div className="chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{quarter} Scorecard</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button className="b2e-sync-btn" onClick={pullLiveOtt} disabled={ottPull.loading}>
+              {ottPull.loading ? 'Pulling…' : '🔄 Pull Live OTT'}
+            </button>
+            {ottPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{ottPull.error}</span>}
+            {ottPull.result && (
+              <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                OTT-2hr {ottPull.result.ott2.pct}% (n={ottPull.result.ott2.denominator}) · OTT-3hr {ottPull.result.ott3.pct}% (n={ottPull.result.ott3.denominator}) — as of {new Date(ottPull.result.fetchedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
         </div>
         <ScorecardTable metrics={metrics} editable onFieldChange={handleFieldChange} />
       </div>
