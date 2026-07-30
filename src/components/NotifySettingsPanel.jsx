@@ -87,7 +87,18 @@ function resolvedTimeLabel(h, m) {
 // since "skip to next valid day" only makes sense when content date is
 // offset from the fire date (the appointment-based digests). Defaults to
 // true so existing callers are unaffected.
-export default function NotifySettingsPanel({ facility, dashboardType, functionName, digestDescription, manualTestBody = {}, contentDateLabel = 'tomorrow', showSkipToNextValidDay = true }) {
+//
+// children (added 2026-07-30, Dock Counts fold-in) — optional extra
+// content rendered INSIDE this same collapsible dropdown, below the
+// Save/Send-test-now controls. Added because Dan wanted Dock Counts to
+// live inside the Daily Ops digest's own "Notify settings" dropdown
+// (same expand/collapse, same conversation/toggle) rather than as a
+// separate always-visible section on the page. Only rendered when the
+// panel is open, so it shares the exact same collapsed/expanded state as
+// the rest of the panel — no separate open/close state to keep in sync.
+// Every other caller simply omits this prop and gets identical behavior
+// to before.
+export default function NotifySettingsPanel({ facility, dashboardType, functionName, digestDescription, manualTestBody = {}, contentDateLabel = 'tomorrow', showSkipToNextValidDay = true, children }) {
   const [open, setOpen] = useState(false)
   const [conversationId, setConversationId] = useState('')
   const [conversationIdSaved, setConversationIdSaved] = useState('')
@@ -280,6 +291,12 @@ export default function NotifySettingsPanel({ facility, dashboardType, functionN
           <div style={{ marginTop: 8, color: 'var(--text-dim)', lineHeight: 1.5 }}>
             {digestDescription} Fires automatically at the time above (Central) on the checked days, when Enabled is checked — the day checked is the date being summarized ({contentDateLabel}), not the night it sends. "Send test digest now" fires immediately for {contentDateLabel}'s date regardless of the time/day/enabled settings.
           </div>
+
+          {children && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-subtle)' }}>
+              {children}
+            </div>
+          )}
         </div>
       )}
     </div>
