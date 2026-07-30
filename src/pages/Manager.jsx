@@ -121,6 +121,56 @@ function ScorecardTable({ metrics, editable, onFieldChange }) {
   )
 }
 
+// Pulls live OTT (and Case Pick Accuracy for WR) for one quarter's metric
+// list and writes any hits straight into Supabase via updateMetric, then
+// reports the updates back through `applyLocal` so the caller can patch
+// its own state. Used for BOTH the current quarter and last quarter —
+// OTT/Case Pick Accuracy are objectively computable from real historical
+// data regardless of whether the quarter is still open, so there's no
+// reason a closed quarter should sit with a stale/blank number waiting on
+// a manual pull that no longer exists as a button (Dan's ask 2026-07-30:
+// remove the button, auto-pull on open — and pull it for Q2 too, since
+// that's a completed quarter and the data has been sitting there the
+// whole time).
+async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal) {
+  if (!metricsList || metricsList.length === 0) return { ok: true, pulledAt: null }
+  const errors = []
+  let pulledAt = null
+
+  try {
+    const ott = await fetchLiveOtt(facility, quarterStr)
+    const ott2 = metricsList.find((m) => m.metric_key === 'ott2')
+    const ott3 = metricsList.find((m) => m.metric_key === 'ott3')
+    if (ott2 && ott.ott2.pct != null) {
+      applyLocal(ott2.id, 'actual', ott.ott2.pct)
+      await updateMetric(ott2.id, { actual: ott.ott2.pct })
+    }
+    if (ott3 && ott.ott3.pct != null) {
+      applyLocal(ott3.id, 'actual', ott.ott3.pct)
+      await updateMetric(ott3.id, { actual: ott.ott3.pct })
+    }
+    pulledAt = ott.fetchedAt
+  } catch (e) {
+    errors.push(`OTT: ${e.message}`)
+  }
+
+  if (facility === 'wr') {
+    try {
+      const cpa = await fetchLiveCasePickAccuracy(quarterStr)
+      const cpaMetric = metricsList.find((m) => m.metric_key === 'case_pick')
+      if (cpaMetric && cpa.casePickAccuracy.pct != null) {
+        applyLocal(cpaMetric.id, 'actual', cpa.casePickAccuracy.pct)
+        await updateMetric(cpaMetric.id, { actual: cpa.casePickAccuracy.pct })
+      }
+      pulledAt = cpa.fetchedAt
+    } catch (e) {
+      errors.push(`Case Pick Accuracy: ${e.message}`)
+    }
+  }
+
+  return { ok: errors.length === 0, pulledAt, error: errors.length ? errors.join('; ') : null }
+}
+
 function FacilityScorecard({ facility }) {
   const quarter = currentQuarter()
   const lastQuarter = priorQuarter(quarter)
@@ -131,8 +181,7 @@ function FacilityScorecard({ facility }) {
   const [bonusDraft, setBonusDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
-  const [ottPull, setOttPull] = useState({ loading: false, lastPulledAt: null, error: null })
-  const [cpaPull, setCpaPull] = useState({ loading: false, lastPulledAt: null, error: null })
+  const [liveSync, setLiveSync] = useState({ loading: false, pulledAt: null, error: null })
 
   useEffect(() => {
     let cancelled = false
@@ -140,6 +189,7 @@ function FacilityScorecard({ facility }) {
     setLastMetrics(null)
     setSettings(null)
     setErr(null)
+    setLiveSync({ loading: true, pulledAt: null, error: null })
     ;(async () => {
       try {
         await seedQuarterIfMissing(facility, quarter)
@@ -153,8 +203,28 @@ function FacilityScorecard({ facility }) {
         setLastMetrics(last)
         setSettings(sett)
         setBonusDraft(sett?.annual_target_bonus != null ? String(sett.annual_target_bonus) : '')
+
+        // Auto-pull live OTT/Case Pick Accuracy for both quarters, no
+        // button, no waiting on the person to click anything.
+        const [curRes, lastRes] = await Promise.all([
+          autoPullLiveMetrics(facility, quarter, cur, (id, field, value) => {
+            if (cancelled) return
+            setMetrics((prev) => prev.map((m) => (m.id === id ? { ...m, [field]: value } : m)))
+          }),
+          autoPullLiveMetrics(facility, lastQuarter, last, (id, field, value) => {
+            if (cancelled) return
+            setLastMetrics((prev) => prev.map((m) => (m.id === id ? { ...m, [field]: value } : m)))
+          }),
+        ])
+        if (cancelled) return
+        const combinedError = [curRes.error, lastRes.error].filter(Boolean).join(' | ') || null
+        const latestPulledAt = [curRes.pulledAt, lastRes.pulledAt].filter(Boolean).sort().pop() || null
+        setLiveSync({ loading: false, pulledAt: latestPulledAt, error: combinedError })
       } catch (e) {
-        if (!cancelled) setErr(e.message)
+        if (!cancelled) {
+          setErr(e.message)
+          setLiveSync({ loading: false, pulledAt: null, error: null })
+        }
       }
     })()
     return () => { cancelled = true }
@@ -171,10 +241,8 @@ function FacilityScorecard({ facility }) {
 
   // Last Quarter box needs its own edit path (separate from handleFieldChange
   // above, which targets the current-quarter `metrics` state) — this is
-  // what lets Dean punch in Q2's real actuals once they're finalized rather
-  // than seeing the row is just a read-only historical snapshot. Added
-  // 2026-07-30 after Dan flagged Q2 wasn't accepting input even though the
-  // targets had been copied over correctly.
+  // what lets Dean punch in Q2's real actuals (for the metrics that aren't
+  // auto-pulled — Takt, OSDs, Discretionary) once they're finalized.
   const handleLastFieldChange = useCallback(async (metric, field, value) => {
     setLastMetrics((prev) => prev.map((m) => (m.id === metric.id ? { ...m, [field]: value } : m)))
     try {
@@ -183,42 +251,6 @@ function FacilityScorecard({ facility }) {
       setErr(e.message)
     }
   }, [])
-
-  // Pulled values are written straight into the scorecard's Actual cells
-  // (the source of truth the person actually reads) via handleFieldChange,
-  // same path as a manual edit. We only keep a lastPulledAt timestamp here
-  // for a small "updated at" confirmation — not a second copy of the
-  // numbers, since duplicating them next to the button was confusing
-  // (Dan's feedback 2026-07-30: expected the numbers to land in the Actual
-  // column, not a separate readout — they did land there, the redundant
-  // readout was just visual noise on top of that).
-  async function pullLiveOtt() {
-    setOttPull({ loading: true, lastPulledAt: null, error: null })
-    try {
-      const data = await fetchLiveOtt(facility, quarter)
-      const ott2Metric = metrics.find((m) => m.metric_key === 'ott2')
-      const ott3Metric = metrics.find((m) => m.metric_key === 'ott3')
-      if (ott2Metric && data.ott2.pct != null) await handleFieldChange(ott2Metric, 'actual', data.ott2.pct)
-      if (ott3Metric && data.ott3.pct != null) await handleFieldChange(ott3Metric, 'actual', data.ott3.pct)
-      setOttPull({ loading: false, lastPulledAt: data.fetchedAt, error: null })
-    } catch (e) {
-      setOttPull({ loading: false, lastPulledAt: null, error: e.message })
-    }
-  }
-
-  async function pullLiveCasePickAccuracy() {
-    setCpaPull({ loading: true, lastPulledAt: null, error: null })
-    try {
-      const data = await fetchLiveCasePickAccuracy(quarter)
-      const cpaMetric = metrics.find((m) => m.metric_key === 'case_pick')
-      if (cpaMetric && data.casePickAccuracy.pct != null) {
-        await handleFieldChange(cpaMetric, 'actual', data.casePickAccuracy.pct)
-      }
-      setCpaPull({ loading: false, lastPulledAt: data.fetchedAt, error: null })
-    } catch (e) {
-      setCpaPull({ loading: false, lastPulledAt: null, error: e.message })
-    }
-  }
 
   async function saveBonus() {
     setSaving(true)
@@ -281,36 +313,24 @@ function FacilityScorecard({ facility }) {
       <div className="chart-card" style={{ marginBottom: 20 }}>
         <div className="chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{quarter} Scorecard</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button className="b2e-sync-btn" onClick={pullLiveOtt} disabled={ottPull.loading}>
-              {ottPull.loading ? 'Pulling…' : '🔄 Pull Live OTT'}
-            </button>
-            {facility === 'wr' && (
-              <button className="b2e-sync-btn" onClick={pullLiveCasePickAccuracy} disabled={cpaPull.loading}>
-                {cpaPull.loading ? 'Pulling…' : '🔄 Pull Live Case Pick Accuracy'}
-              </button>
-            )}
-            {ottPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{ottPull.error}</span>}
-            {ottPull.lastPulledAt && (
-              <span style={{ fontSize: 11, color: 'var(--green)' }}>
-                ✓ OTT updated {new Date(ottPull.lastPulledAt).toLocaleTimeString()}
-              </span>
-            )}
-            {cpaPull.error && <span style={{ fontSize: 11, color: 'var(--red)' }}>{cpaPull.error}</span>}
-            {cpaPull.lastPulledAt && (
-              <span style={{ fontSize: 11, color: 'var(--green)' }}>
-                ✓ Case Pick Accuracy updated {new Date(cpaPull.lastPulledAt).toLocaleTimeString()}
-              </span>
-            )}
-          </div>
+          <span style={{ fontSize: 11, color: liveSync.error ? 'var(--red)' : 'var(--text-dim)' }}>
+            {liveSync.loading
+              ? 'Syncing live OTT…'
+              : liveSync.error
+                ? `Live sync issue: ${liveSync.error}`
+                : liveSync.pulledAt
+                  ? `Live data synced ${new Date(liveSync.pulledAt).toLocaleTimeString()}`
+                  : null}
+          </span>
         </div>
         <ScorecardTable metrics={metrics} editable onFieldChange={handleFieldChange} />
       </div>
 
       {/* Last quarter comparison — targets/weights carried over from
-          current quarter, actuals left blank for Dean to fill in once Q2
-          closes out. Editable (not read-only) so that entry is actually
-          possible — see handleLastFieldChange above. */}
+          current quarter; OTT/Case Pick Accuracy auto-pulled same as the
+          current quarter (real historical data, not manual); Takt/OSDs/
+          Discretionary left blank for Dean to fill in. Editable so entry
+          is actually possible. */}
       <div className="chart-card">
         <div className="chart-header">
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{lastQuarter} (Last Quarter)</span>
