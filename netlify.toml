@@ -65,12 +65,29 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# Pre-Pick Status digest MANUAL TEST -- added 2026-07-31, same reason and
+# pattern as fefo-digest-test: no schedule, so direct POST works (fixes
+# 403 on "Send test digest now" -- see lib/prepick-digest-shared.cjs).
+[functions."prepick-digest-test"]
+  timeout = 26
+
 [functions."wr-cases-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
+# WR Cases To Pick digest MANUAL TEST -- added 2026-07-31, same reason and
+# pattern as above (fixes 403 -- see lib/wr-cases-digest-shared.cjs).
+[functions."wr-cases-digest-test"]
+  timeout = 26
+
 [functions."dailyops-digest-run"]
   schedule = "*/15 * * * *"
+  timeout = 26
+
+# Daily Ops digest MANUAL TEST -- added 2026-07-31, same reason and
+# pattern as above (fixes 403 -- see lib/dailyops-digest-shared.cjs).
+# Requires {facility} in the POST body (loops all facilities on schedule).
+[functions."dailyops-digest-test"]
   timeout = 26
 
 [functions."fefo-digest-run"]
@@ -106,6 +123,12 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# WR Pick Location Lot Check digest MANUAL TEST -- added 2026-07-31, same
+# reason and pattern as above (fixes 403 -- see
+# lib/wr-pickcheck-digest-shared.cjs).
+[functions."wr-pickcheck-digest-test"]
+  timeout = 26
+
 # Madison Dock Counts backend -- added 2026-07-30. Still used by the
 # on-demand Dock Counts view AND by dailyops-digest-run.cjs (which now
 # posts the same breakdown as a 4th Front comment on its own schedule).
@@ -132,8 +155,21 @@
   schedule = "*/15 * * * *"
   timeout = 26
 
+# WR Secondary Replenishments digest MANUAL TEST -- added 2026-07-31, same
+# reason and pattern as above (fixes 403 -- see
+# lib/wr-secondary-repl-digest-shared.cjs).
+[functions."wr-secondary-repl-digest-test"]
+  timeout = 26
+
 [functions."cmm-outbound-draft-create"]
   schedule = "*/15 * * * *"
+  timeout = 26
+
+# CMM Outbound Appts draft creation MANUAL TEST -- added 2026-07-31, same
+# reason and pattern as above (fixes 403 on "Create Draft Now (test)" --
+# see lib/cmm-outbound-draft-shared.cjs). Requires {facility} in the POST
+# body (defaults to 'cal', the only facility wired up today).
+[functions."cmm-outbound-draft-create-test"]
   timeout = 26
 
 # LoadProof / DVRS open-incidents daily digest -- added 2026-07-19, same
@@ -146,6 +182,11 @@
 # Notify Settings panel.
 [functions."dvr-digest-run"]
   schedule = "*/15 * * * *"
+  timeout = 26
+
+# LoadProof/DVRS digest MANUAL TEST -- added 2026-07-31, same reason and
+# pattern as above (fixes 403 -- see lib/dvr-digest-shared.cjs).
+[functions."dvr-digest-test"]
   timeout = 26
 
 [[edge_functions]]
