@@ -11,7 +11,6 @@ import JdfPutaways from '../components/JdfPutaways.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
 import WrPickCheck from '../components/WrPickCheck.jsx'
 import WrSecondaryRepl from '../components/WrSecondaryRepl.jsx'
-import DockCounts from '../components/DockCounts.jsx'
 import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
@@ -922,10 +921,12 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
           dashboardType="daily_ops"
           functionName="dailyops-digest-run"
           manualTestBody={{ facility: facility.id }}
-          digestDescription="Posts three images to Front — the Total Appointments card, the Projects table, and the Shift Roster — as separate comments."
-        >
-          {isMad && <DockCounts />}
-        </NotifySettingsPanel>
+          digestDescription={
+            isMad
+              ? 'Posts four comments to Front — the Total Appointments card, the Projects table, and the Shift Roster as images, plus a Dock Counts text box (Dock 8/East/West inbound/outbound).'
+              : 'Posts three images to Front — the Total Appointments card, the Projects table, and the Shift Roster — as separate comments.'
+          }
+        />
       )}
 
       {isDaily && (
