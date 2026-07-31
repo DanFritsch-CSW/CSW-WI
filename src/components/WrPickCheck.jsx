@@ -120,7 +120,7 @@ export default function WrPickCheck() {
       <NotifySettingsPanel
         facility="wr"
         dashboardType="pick_check"
-        functionName="wr-pickcheck-digest-run"
+        functionName="wr-pickcheck-digest-test"
         digestDescription="Posts a comment on this Front conversation summarizing current pick-location compliance and aging flags."
         contentDateLabel="today"
         showSkipToNextValidDay={false}
