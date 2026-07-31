@@ -899,7 +899,7 @@ function CmmOutboundApptsEditor() {
           teammates.filter(t => selectedDiscussion.has(t.teammate_id))
         ),
       ])
-      const res = await triggerDigestTest('cmm-outbound-draft-create', { facility: CMM_FACILITY })
+      const res = await triggerDigestTest('cmm-outbound-draft-create-test', { facility: CMM_FACILITY })
       if (res?.success) {
         setTestState('ok')
         setTestDetail(`Draft created: "${res.subject}" — ${res.apptCount} appt(s), ${res.toCount} TO / ${res.ccCount} CC, ${res.followerCount} follower(s).`)
