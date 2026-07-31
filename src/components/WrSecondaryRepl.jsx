@@ -33,7 +33,12 @@ import '../styles/wr-secondary-repl.css'
 // WrCasesToPick/PrePickStatus/FEFO — facility='wr', dashboardType=
 // 'secondary_repl', contentDateLabel="today" (live snapshot, not a
 // forecast), showSkipToNextValidDay={false} (no lookahead concept for a
-// live check). See netlify/functions/wr-secondary-repl-digest-run.cjs.
+// live check). functionName points at wr-secondary-repl-digest-test.cjs
+// (changed 2026-07-31, was wr-secondary-repl-digest-run) — Netlify blocks
+// direct invocation of any function carrying a `schedule`, which is what
+// made "Send test digest now" 403. See
+// netlify/functions/wr-secondary-repl-digest-run.cjs /
+// lib/wr-secondary-repl-digest-shared.cjs for the full story.
 
 const AISLE_ORDER = { A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6 }
 function aisleRank(loc) {
@@ -492,7 +497,7 @@ export default function WrSecondaryRepl() {
         <NotifySettingsPanel
           facility="wr"
           dashboardType="secondary_repl"
-          functionName="wr-secondary-repl-digest-run"
+          functionName="wr-secondary-repl-digest-test"
           digestDescription="Posts a comment on this Front conversation summarizing current bay status (empty positions, critical bays, split bays)."
           contentDateLabel="today"
           showSkipToNextValidDay={false}
