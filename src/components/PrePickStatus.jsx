@@ -43,11 +43,16 @@ import '../styles/prepick-status.css'
  * Notify settings panel (added 2026-07-13, extracted into the shared
  * NotifySettingsPanel component 2026-07-14 so the same UI backs WR's
  * Cases To Pick digest too): lets Dan view/edit which Front conversation
- * the nightly digest (prepick-digest-run.cjs) posts a summary comment to,
- * configure what time it fires (added 2026-07-14 — see that file's header
- * for how a per-row DB time setting works with Netlify's fixed cron), and
- * fire a test send on demand. Stored in prepick_notify_settings
- * (facility='mad', dashboard_type='prepick').
+ * the nightly digest posts a summary comment to, configure what time it
+ * fires (added 2026-07-14 — see prepick-digest-run.cjs's header for how a
+ * per-row DB time setting works with Netlify's fixed cron), and fire a
+ * test send on demand. Stored in prepick_notify_settings (facility='mad',
+ * dashboard_type='prepick'). functionName points at prepick-digest-test.cjs
+ * (changed 2026-07-31, was prepick-digest-run) — Netlify blocks direct
+ * invocation of any function carrying a `schedule`, which is what made
+ * "Send test digest now" 403; the manual-test path now lives in a
+ * sibling function with no schedule. See prepick-digest-run.cjs /
+ * lib/prepick-digest-shared.cjs for the full story.
  *
  * Estimated pallets (added 2026-07-13): computed server-side from material
  * tie/high (silver.datex_slv_materialspackagingslookup), shown as "~N
@@ -113,7 +118,7 @@ export default function PrePickStatus({ facilityId, planDate }) {
       <NotifySettingsPanel
         facility={facilityId}
         dashboardType="prepick"
-        functionName="prepick-digest-run"
+        functionName="prepick-digest-test"
         digestDescription="Nightly digest posts as a comment on this Front conversation, summarizing tomorrow's Madison outbound status."
       />
 
