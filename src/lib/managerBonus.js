@@ -162,6 +162,24 @@ export async function fetchLiveCasePickAccuracy(quarter) {
   return res.json()
 }
 
+// Live OSD $ pull (all facilities) — added 2026-07-31. Direct MotherDuck
+// query against bronze.acumatica_acumatica_gl_tran_detail — see
+// motherduck-osd-dollar.cjs header for the full source/formula
+// investigation (GL 4270 "Damages" only, not 4260 "Leased Equipment";
+// Madison uniquely combines the 'Madison' and 'Radford' GL subaccounts).
+export async function fetchLiveOsdDollar(facility, quarter) {
+  const res = await fetch('/.netlify/functions/motherduck-osd-dollar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility, quarter }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`OSD $ pull failed (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
 // --- Attainment math ---
 // Anchor = 0% attainment. target_100 = 100% attainment. target_120 =
 // 120% attainment (extends beyond target_100, capped at 120). Direction
