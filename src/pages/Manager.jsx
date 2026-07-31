@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { FACILITY_LIST } from '../lib/constants.js'
 import {
-  currentQuarter, priorQuarter, fetchScorecard, fetchSettings,
-  seedQuarterIfMissing, updateMetric, upsertSettings, computeAttainment,
+  currentQuarter, priorQuarter, fetchScorecard,
+  seedQuarterIfMissing, updateMetric, computeAttainment,
   computeOverallAttainment, fetchLiveOtt, fetchLiveCasePickAccuracy,
   fetchLiveOsdDollar,
 } from '../lib/managerBonus.js'
@@ -59,6 +59,59 @@ function EditableCell({ value, unit, onCommit }) {
         color: 'inherit',
       }}
     />
+  )
+}
+
+// Annual Target Bonus calculator — deliberately NOT persisted anywhere.
+// Added 2026-07-28 as a saved-per-facility Supabase field; changed
+// 2026-07-31 per Dean's explicit direction on the Dean<>Dan call: since
+// every facility shares the same page password, a saved target would let
+// any GM/ops manager see every other facility's bonus target just by
+// switching tabs (this came up specifically because Eau Claire's Deb is
+// getting a reduced H1 bonus for performance reasons, and Dean does not
+// want that comparison possible). Fix: nobody's target is ever written to
+// the database. Each person types their own number in to see their own
+// projected payout, and it clears the moment they click away (onBlur) —
+// "it always resets after you tab off" was Dean's exact ask. This is a
+// pure client-side calculator now, no fetchSettings/upsertSettings call
+// in this component at all.
+function BonusCalculator({ overall }) {
+  const [draft, setDraft] = useState('')
+  const bonusNum = draft.trim() === '' ? null : Number(draft)
+  const projectedPayout = overall != null && bonusNum != null && !Number.isNaN(bonusNum)
+    ? (bonusNum * overall) / 100
+    : null
+
+  return (
+    <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
+      <div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
+          Your Annual Target Bonus
+        </div>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => setDraft('')}
+          placeholder="Type your target to see your payout"
+          style={{
+            width: 260, fontFamily: 'var(--font-mono)', fontSize: 13, padding: '6px 10px',
+            borderRadius: 4, border: '1px solid var(--border-subtle)', background: 'var(--bg2, transparent)', color: 'inherit',
+          }}
+        />
+      </div>
+      {projectedPayout != null && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
+            Projected Payout (Overall × Target)
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: attainmentColor(overall) }}>
+            ${projectedPayout.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -191,9 +244,6 @@ function FacilityScorecard({ facility }) {
 
   const [metrics, setMetrics] = useState(null)
   const [lastMetrics, setLastMetrics] = useState(null)
-  const [settings, setSettings] = useState(null)
-  const [bonusDraft, setBonusDraft] = useState('')
-  const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
   const [liveSync, setLiveSync] = useState({ loading: false, pulledAt: null, error: null })
 
@@ -201,22 +251,18 @@ function FacilityScorecard({ facility }) {
     let cancelled = false
     setMetrics(null)
     setLastMetrics(null)
-    setSettings(null)
     setErr(null)
     setLiveSync({ loading: true, pulledAt: null, error: null })
     ;(async () => {
       try {
         await seedQuarterIfMissing(facility, quarter)
-        const [cur, last, sett] = await Promise.all([
+        const [cur, last] = await Promise.all([
           fetchScorecard(facility, quarter),
           fetchScorecard(facility, lastQuarter),
-          fetchSettings(facility, quarter),
         ])
         if (cancelled) return
         setMetrics(cur)
         setLastMetrics(last)
-        setSettings(sett)
-        setBonusDraft(sett?.annual_target_bonus != null ? String(sett.annual_target_bonus) : '')
 
         // Auto-pull live OTT/Case Pick Accuracy/OSD $ for both quarters,
         // no button, no waiting on the person to click anything.
@@ -266,62 +312,14 @@ function FacilityScorecard({ facility }) {
     }
   }, [])
 
-  async function saveBonus() {
-    setSaving(true)
-    try {
-      const n = bonusDraft.trim() === '' ? null : Number(bonusDraft)
-      await upsertSettings(facility, quarter, Number.isNaN(n) ? null : n)
-      setSettings((prev) => ({ ...(prev || {}), annual_target_bonus: n }))
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   if (err) return <div style={{ color: 'var(--red)', fontSize: 13, padding: '12px 0' }}>Error: {err}</div>
   if (!metrics) return <div style={{ color: 'var(--text-secondary)', fontSize: 13, padding: '12px 0' }}>Loading…</div>
 
   const overall = computeOverallAttainment(metrics)
-  const bonusNum = settings?.annual_target_bonus != null ? Number(settings.annual_target_bonus) : null
-  const projectedPayout = overall != null && bonusNum != null ? (bonusNum * overall) / 100 : null
 
   return (
     <div>
-      {/* Annual target bonus + projected payout */}
-      <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
-        <div>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
-            Annual Target Bonus
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={bonusDraft}
-              onChange={(e) => setBonusDraft(e.target.value)}
-              placeholder="e.g. 5000"
-              style={{
-                width: 120, fontFamily: 'var(--font-mono)', fontSize: 13, padding: '6px 10px',
-                borderRadius: 4, border: '1px solid var(--border-subtle)', background: 'var(--bg2, transparent)', color: 'inherit',
-              }}
-            />
-            <button className="b2e-sync-btn" onClick={saveBonus} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-          </div>
-        </div>
-        {projectedPayout != null && (
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
-              Projected Payout (Overall × Target)
-            </div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: attainmentColor(overall) }}>
-              ${projectedPayout.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            </div>
-          </div>
-        )}
-      </div>
+      <BonusCalculator overall={overall} />
 
       {/* Current quarter scorecard */}
       <div className="chart-card" style={{ marginBottom: 20 }}>
