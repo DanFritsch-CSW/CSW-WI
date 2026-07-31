@@ -461,7 +461,7 @@ export default function DvrTracker({ typeSelector = null }) {
               <NotifySettingsPanel
                 facility="all"
                 dashboardType="dvr_incidents"
-                functionName="dvr-digest-run"
+                functionName="dvr-digest-test"
                 contentDateLabel="today"
                 showSkipToNextValidDay={true}
                 digestDescription="Posts a daily summary of open LoadProof / DVRS incidents (all facilities) to this Front conversation. Fires at the configured time on checked days."
