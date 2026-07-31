@@ -14,25 +14,18 @@
 // call, same pattern as every other digest proxying its own live-data
 // function rather than duplicating the MotherDuck query here.
 //
-// ── Message format — simplified 2026-07-15 per Dan's feedback on the
-// first live test ────────────────────────────────────────────────────────
-// Original version led with a summary line (total/primary/secondary
-// counts) then one combined Warehouse+Aging section. Dan wanted it
-// simpler: drop the summary line entirely, three flat call-out sections
-// in a fixed order — same "make the number impossible to miss" bold +
-// divider convention as the Cases To Pick digest's Total Pickline Volume
-// treatment, just applied 3 times:
-//   1. Secondary  — staged in the overhead rack, ready to pull down
-//   2. Warehouse  — genuinely out of position (the real problem number)
-//   3. Aging      — <120d to expiration, for customer communication
-// Warehouse list shows ALL materials now (no "...and N more" cap) — Dan
-// wants this to be the main actionable section, unabridged.
-// Aging list only shows materials NOT already listed under Warehouse —
-// if a material is aging AND out in the warehouse, it only appears once
-// (under Warehouse), since re-listing it under Aging is redundant. The
-// Aging section's headline count still reflects the TOTAL aging count
-// (including ones already shown above); the list beneath is the
-// remainder only, with a note when everything aging is already covered.
+// ── Message format — simplified further 2026-07-31 per Dan's feedback ──
+// Prior version (2026-07-15) still listed every material under each
+// call-out. Dan wanted it cut down to just the header line + count per
+// section, no bullet detail at all — and a 4th call-out added for
+// materials aging under 60 days (in addition to the existing <120d
+// total), since <60d is the tighter/more urgent cut Dan actually watches.
+// Section order: Secondary → Warehouse → Aging (<120d) → Aging (<60d).
+// <60d count = agingCritical (<30d) + agingWarning (30-59d), per the
+// severity bands documented in motherduck-wr-pick-check.cjs (Critical
+// <30d / Warning 30-59d / Watch 60-119d). <120d total is unchanged
+// (Critical+Warning+Watch). No "None right now." filler text anymore —
+// just the count; 0 reads fine on its own in this stripped-down format.
 //
 // Two invocation paths (same convention as every other digest):
 //   1. SCHEDULED (netlify.toml: "*/15 * * * *") — fires when current
@@ -108,67 +101,26 @@ function fmt(n) { return n == null ? '—' : Math.round(n).toLocaleString() }
 function callOutBlock(lines, label) {
   const divider = '─'.repeat(28)
   lines.push(divider)
-  lines.push(`**${label}**`)
+  lines.push(label)
   lines.push(divider)
-  lines.push('')
 }
 
 function buildDigestBody(data, dateObj) {
   const s = data.summary
-  const materials = data.materials || []
   const lines = []
   lines.push(`Pick Location Lot Check — Bernatello's - Wisconsin Rapids`)
   lines.push(APP_URL)
   lines.push('CSW Operations Hub')
   lines.push(`As of: ${formatHeaderDate(dateObj)}`)
-  lines.push('')
 
-  // ── 1. Secondary — staged in the overhead rack, ready to pull down ──
-  const secondaryMaterials = materials.filter(m => m.status === 'secondary')
-  callOutBlock(lines, `${fmt(s.secondary)} MATERIAL${s.secondary === 1 ? '' : 'S'} IN SECONDARY`)
-  if (secondaryMaterials.length) {
-    for (const m of secondaryMaterials) {
-      lines.push(`• ${m.materialName} (${m.materialCode}) — lot ${m.oldestLotCode ?? '—'}, staged at ${m.secondaryLocations ?? '—'}, ready to pull down`)
-    }
-  } else {
-    lines.push('None right now.')
-  }
-  lines.push('')
-
-  // ── 2. Warehouse — genuinely out of position, the main actionable list ──
-  const warehouseMaterials = materials
-    .filter(m => m.status === 'warehouse')
-    .sort((a, b) => (a.daysRemaining ?? 9999) - (b.daysRemaining ?? 9999))
-  callOutBlock(lines, `${fmt(s.warehouse)} MATERIAL${s.warehouse === 1 ? '' : 'S'} OUT IN WAREHOUSE`)
-  if (warehouseMaterials.length) {
-    for (const m of warehouseMaterials) {
-      lines.push(`• ${m.materialName} (${m.materialCode}) — lot ${m.oldestLotCode ?? '—'}, ${m.daysRemaining ?? '—'}d to exp`)
-    }
-  } else {
-    lines.push('None right now.')
-  }
-  lines.push('')
-
-  // ── 3. Aging — <120d to exp, for customer communication. Only lists
-  // materials not already shown under Warehouse above (avoid repeating
-  // the same line twice); headline count is still the TOTAL aging count.
   const agingTotal = (s.agingCritical || 0) + (s.agingWarning || 0) + (s.agingWatch || 0)
-  const warehouseCodes = new Set(warehouseMaterials.map(m => m.materialCode))
-  const agingRemainder = materials
-    .filter(m => m.aging && !warehouseCodes.has(m.materialCode))
-    .sort((a, b) => (a.daysRemaining ?? 9999) - (b.daysRemaining ?? 9999))
-  callOutBlock(lines, `${fmt(agingTotal)} MATERIAL${agingTotal === 1 ? '' : 'S'} AGING (<120d)`)
-  if (agingTotal === 0) {
-    lines.push('None right now.')
-  } else if (agingRemainder.length === 0) {
-    lines.push('All aging materials are already listed under Warehouse above.')
-  } else {
-    for (const m of agingRemainder) {
-      lines.push(`• ${m.materialName} (${m.materialCode}) — ${m.status}, lot ${m.oldestLotCode ?? '—'}, ${m.daysRemaining ?? '—'}d to exp`)
-    }
-  }
+  const agingUnder60 = (s.agingCritical || 0) + (s.agingWarning || 0)
 
-  while (lines.length && lines[lines.length - 1] === '') lines.pop()
+  callOutBlock(lines, `${fmt(s.secondary)} MATERIAL${s.secondary === 1 ? '' : 'S'} IN SECONDARY`)
+  callOutBlock(lines, `${fmt(s.warehouse)} MATERIAL${s.warehouse === 1 ? '' : 'S'} OUT IN WAREHOUSE`)
+  callOutBlock(lines, `${fmt(agingTotal)} MATERIAL${agingTotal === 1 ? '' : 'S'} AGING (<120d)`)
+  callOutBlock(lines, `${fmt(agingUnder60)} MATERIAL${agingUnder60 === 1 ? '' : 'S'} AGING (<60d)`)
+
   return lines.join('\n')
 }
 
