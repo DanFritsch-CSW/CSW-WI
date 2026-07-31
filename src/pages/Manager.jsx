@@ -4,6 +4,7 @@ import {
   currentQuarter, priorQuarter, fetchScorecard, fetchSettings,
   seedQuarterIfMissing, updateMetric, upsertSettings, computeAttainment,
   computeOverallAttainment, fetchLiveOtt, fetchLiveCasePickAccuracy,
+  fetchLiveOsdDollar,
 } from '../lib/managerBonus.js'
 
 const FACILITY_COLOR_VAR = { cal: 'var(--cal)', ken: 'var(--ken)', mad: 'var(--mad)', wr: 'var(--wr)', ec: 'var(--ec)' }
@@ -121,17 +122,18 @@ function ScorecardTable({ metrics, editable, onFieldChange }) {
   )
 }
 
-// Pulls live OTT (and Case Pick Accuracy for WR) for one quarter's metric
-// list and writes any hits straight into Supabase via updateMetric, then
-// reports the updates back through `applyLocal` so the caller can patch
-// its own state. Used for BOTH the current quarter and last quarter —
-// OTT/Case Pick Accuracy are objectively computable from real historical
-// data regardless of whether the quarter is still open, so there's no
-// reason a closed quarter should sit with a stale/blank number waiting on
-// a manual pull that no longer exists as a button (Dan's ask 2026-07-30:
-// remove the button, auto-pull on open — and pull it for Q2 too, since
-// that's a completed quarter and the data has been sitting there the
-// whole time).
+// Pulls live OTT, Case Pick Accuracy (WR only), and OSD $ (all facilities)
+// for one quarter's metric list and writes any hits straight into
+// Supabase via updateMetric, then reports the updates back through
+// `applyLocal` so the caller can patch its own state. Used for BOTH the
+// current quarter and last quarter — these are all objectively computable
+// from real historical data regardless of whether the quarter is still
+// open, so there's no reason a closed quarter should sit with a stale/
+// blank number waiting on a manual pull that no longer exists as a button
+// (Dan's ask 2026-07-30: remove the button, auto-pull on open — and pull
+// it for Q2 too, since that's a completed quarter and the data has been
+// sitting there the whole time). OSD $ added 2026-07-31 following the
+// same pattern once the GL query was verified.
 async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal) {
   if (!metricsList || metricsList.length === 0) return { ok: true, pulledAt: null }
   const errors = []
@@ -166,6 +168,18 @@ async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal
     } catch (e) {
       errors.push(`Case Pick Accuracy: ${e.message}`)
     }
+  }
+
+  try {
+    const osd = await fetchLiveOsdDollar(facility, quarterStr)
+    const osdMetric = metricsList.find((m) => m.metric_key === 'osd_dollar')
+    if (osdMetric && osd.osdDollar.amount != null) {
+      applyLocal(osdMetric.id, 'actual', osd.osdDollar.amount)
+      await updateMetric(osdMetric.id, { actual: osd.osdDollar.amount })
+    }
+    pulledAt = osd.fetchedAt
+  } catch (e) {
+    errors.push(`OSD $: ${e.message}`)
   }
 
   return { ok: errors.length === 0, pulledAt, error: errors.length ? errors.join('; ') : null }
@@ -204,8 +218,8 @@ function FacilityScorecard({ facility }) {
         setSettings(sett)
         setBonusDraft(sett?.annual_target_bonus != null ? String(sett.annual_target_bonus) : '')
 
-        // Auto-pull live OTT/Case Pick Accuracy for both quarters, no
-        // button, no waiting on the person to click anything.
+        // Auto-pull live OTT/Case Pick Accuracy/OSD $ for both quarters,
+        // no button, no waiting on the person to click anything.
         const [curRes, lastRes] = await Promise.all([
           autoPullLiveMetrics(facility, quarter, cur, (id, field, value) => {
             if (cancelled) return
@@ -242,7 +256,7 @@ function FacilityScorecard({ facility }) {
   // Last Quarter box needs its own edit path (separate from handleFieldChange
   // above, which targets the current-quarter `metrics` state) — this is
   // what lets Dean punch in Q2's real actuals (for the metrics that aren't
-  // auto-pulled — Takt, OSDs, Discretionary) once they're finalized.
+  // auto-pulled — Takt, OSD count, Discretionary) once they're finalized.
   const handleLastFieldChange = useCallback(async (metric, field, value) => {
     setLastMetrics((prev) => prev.map((m) => (m.id === metric.id ? { ...m, [field]: value } : m)))
     try {
@@ -315,7 +329,7 @@ function FacilityScorecard({ facility }) {
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{quarter} Scorecard</span>
           <span style={{ fontSize: 11, color: liveSync.error ? 'var(--red)' : 'var(--text-dim)' }}>
             {liveSync.loading
-              ? 'Syncing live OTT…'
+              ? 'Syncing live data…'
               : liveSync.error
                 ? `Live sync issue: ${liveSync.error}`
                 : liveSync.pulledAt
@@ -327,10 +341,10 @@ function FacilityScorecard({ facility }) {
       </div>
 
       {/* Last quarter comparison — targets/weights carried over from
-          current quarter; OTT/Case Pick Accuracy auto-pulled same as the
-          current quarter (real historical data, not manual); Takt/OSDs/
-          Discretionary left blank for Dean to fill in. Editable so entry
-          is actually possible. */}
+          current quarter; OTT/Case Pick Accuracy/OSD $ auto-pulled same as
+          the current quarter (real historical data, not manual); Takt/OSD
+          count/Discretionary left blank for Dean to fill in. Editable so
+          entry is actually possible. */}
       <div className="chart-card">
         <div className="chart-header">
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{lastQuarter} (Last Quarter)</span>
