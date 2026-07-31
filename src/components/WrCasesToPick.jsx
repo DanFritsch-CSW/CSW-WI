@@ -17,9 +17,12 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 // the Madison PrePick Status") — same shared NotifySettingsPanel component
 // PrePickStatus.jsx uses, backed by prepick_notify_settings
 // (facility='wr', dashboard_type='cases_to_pick'). Posts a nightly digest
-// comment to a configured Front conversation at a configurable time — see
-// netlify/functions/wr-cases-digest-run.cjs and NotifySettingsPanel.jsx
-// for the mechanics.
+// comment to a configured Front conversation at a configurable time —
+// functionName points at wr-cases-digest-test.cjs (changed 2026-07-31,
+// was wr-cases-digest-run) since Netlify blocks direct invocation of any
+// function carrying a `schedule`, which is what made "Send test digest
+// now" 403. See wr-cases-digest-run.cjs / lib/wr-cases-digest-shared.cjs
+// for the full story, and NotifySettingsPanel.jsx for the UI mechanics.
 
 function fmt(n) {
   if (n == null) return '—'
@@ -65,7 +68,7 @@ export default function WrCasesToPick({ planDate }) {
       <NotifySettingsPanel
         facility="wr"
         dashboardType="cases_to_pick"
-        functionName="wr-cases-digest-run"
+        functionName="wr-cases-digest-test"
         digestDescription="Nightly digest posts as a comment on this Front conversation, summarizing tomorrow's Bernatello's WR Cases To Pick numbers."
       />
 
