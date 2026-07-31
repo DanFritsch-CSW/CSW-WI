@@ -919,7 +919,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         <NotifySettingsPanel
           facility={facility.id}
           dashboardType="daily_ops"
-          functionName="dailyops-digest-run"
+          functionName="dailyops-digest-test"
           manualTestBody={{ facility: facility.id }}
           digestDescription={
             isMad
