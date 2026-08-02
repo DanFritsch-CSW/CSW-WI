@@ -31,6 +31,22 @@ function fmtDate(d) {
   return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
 }
 
+// created_sys_user comes through as-is from Datex — sometimes a domain login
+// (FOOTPRINT\csw-xxxxx), sometimes an email (name@csw-wi.com), and sometimes
+// "SmartUp API" (automated creation, not a person). Strip the FOOTPRINT\
+// prefix for readability but don't otherwise normalize, so a real distinction
+// (who typed this vs. what system created it) stays visible rather than
+// getting collapsed into one generic "creator" string.
+function fmtCreatedBy(u) {
+  if (!u) return '—';
+  return u.replace(/^FOOTPRINT\\/i, '');
+}
+
+function isSystemCreated(u) {
+  if (!u) return false;
+  return /smartup/i.test(u) || /api/i.test(u);
+}
+
 function StatCard({ label, value, color }) {
   return (
     <div
@@ -196,6 +212,7 @@ export default function ExpCheckTab() {
                   <th style={{ padding: '6px 8px' }}>EXP Date (system)</th>
                   <th style={{ padding: '6px 8px' }}>Expected EXP</th>
                   <th style={{ padding: '6px 8px' }}>Diff (days)</th>
+                  <th style={{ padding: '6px 8px' }}>Created By</th>
                   <th style={{ padding: '6px 8px' }}>Verdict</th>
                 </tr>
               </thead>
@@ -224,6 +241,24 @@ export default function ExpCheckTab() {
                     >
                       {l.diffDays ?? '—'}
                     </td>
+                    <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>
+                      {fmtCreatedBy(l.createdBy)}
+                      {isSystemCreated(l.createdBy) && (
+                        <span
+                          style={{
+                            marginLeft: 6,
+                            fontSize: 10,
+                            padding: '1px 5px',
+                            borderRadius: 8,
+                            background: 'var(--bg2, #1a1d24)',
+                            border: '1px solid var(--border, #2a2e38)',
+                            color: 'var(--text-secondary, #9aa1ac)',
+                          }}
+                        >
+                          system
+                        </span>
+                      )}
+                    </td>
                     <td style={{ padding: '6px 8px' }}>
                       <VerdictBadge verdict={l.verdict} />
                     </td>
@@ -231,7 +266,7 @@ export default function ExpCheckTab() {
                 ))}
                 {visible.length === 0 && (
                   <tr>
-                    <td colSpan={9} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
+                    <td colSpan={10} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
                       Nothing in this bucket for the selected window.
                     </td>
                   </tr>
