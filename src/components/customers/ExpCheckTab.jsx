@@ -1,9 +1,10 @@
 // src/components/customers/ExpCheckTab.jsx
 //
-// EXP Check (Pretzilla) — math-reconciliation view.
-// Flags vendor lots where expiration_date doesn't reconcile with
-// manufacture_date + material.shelf_life_span. See motherduck-exp-check.cjs
-// for exactly what this does and doesn't catch.
+// EXP Check — math-reconciliation view. Multi-customer (added 2026-08-02):
+// Pretzilla and Bernatello's, selectable via the customer dropdown. See
+// motherduck-exp-check.cjs for exactly what this does and doesn't catch,
+// and for real per-customer findings (Bernatello's non-food SKU exclusion,
+// the Madison Bernatello's inactivity, etc.).
 //
 // Dismiss/restore (added 2026-08-02, Dan's ask): lots ending in "A"
 // (relabeled) — or really any flagged lot — can be dismissed for a chosen
@@ -14,7 +15,7 @@
 // into view rather than disappearing for good. See expCheckDismissals.js.
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { fetchExpCheck } from '../../lib/expCheck';
+import { fetchExpCheck, EXP_CHECK_CUSTOMERS } from '../../lib/expCheck';
 import { fetchDismissals, dismissLot, undismissLot } from '../../lib/expCheckDismissals';
 
 const VERDICT_LABEL = {
@@ -31,7 +32,7 @@ const VERDICT_COLOR = {
   clean: '#3bb273',
 };
 
-const FACILITY_LABEL = { ken: 'Kenosha', cal: 'Caledonia', mad: 'Madison' };
+const FACILITY_LABEL = { ken: 'Kenosha', cal: 'Caledonia', mad: 'Madison', wr: 'Wisconsin Rapids' };
 
 const DISMISS_DURATIONS = [
   { days: 30, label: '30 days' },
@@ -131,6 +132,7 @@ function DismissControl({ lot, onDismiss, busy }) {
 }
 
 export default function ExpCheckTab() {
+  const [customer, setCustomer] = useState('pretzilla');
   const [data, setData] = useState(null);
   const [dismissals, setDismissals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -139,11 +141,11 @@ export default function ExpCheckTab() {
   const [dayWindow, setDayWindow] = useState(45);
   const [busyKey, setBusyKey] = useState(null);
 
-  const loadLots = useCallback(async (windowDays) => {
+  const loadLots = useCallback(async (windowDays, customerKey) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchExpCheck(windowDays);
+      const result = await fetchExpCheck(windowDays, customerKey);
       setData(result);
     } catch (e) {
       setError(e.message || String(e));
@@ -163,7 +165,7 @@ export default function ExpCheckTab() {
   }, []);
 
   useEffect(() => {
-    loadLots(dayWindow);
+    loadLots(dayWindow, customer);
     loadDismissals();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -177,6 +179,12 @@ export default function ExpCheckTab() {
     }
     return map;
   }, [dismissals]);
+
+  const handleCustomerChange = useCallback((newCustomer) => {
+    setCustomer(newCustomer);
+    setFilter('flagged');
+    loadLots(dayWindow, newCustomer);
+  }, [dayWindow, loadLots]);
 
   const handleDismiss = useCallback(async (lot, days) => {
     const key = dismissKey(lot.lotCode, lot.materialCode);
@@ -223,11 +231,13 @@ export default function ExpCheckTab() {
     return n;
   }, [dismissalMap]);
 
+  const customerLabel = data?.customerLabel || EXP_CHECK_CUSTOMERS.find((c) => c.key === customer)?.label || customer;
+
   return (
     <div style={{ padding: '4px 0' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <h3 style={{ margin: 0, color: 'var(--text-primary, #fff)' }}>EXP Check — Pretzilla</h3>
+          <h3 style={{ margin: 0, color: 'var(--text-primary, #fff)' }}>EXP Check — {customerLabel}</h3>
           <div style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)', marginTop: 4, maxWidth: 640 }}>
             Cross-references each lot's stored expiration date against manufacture date + the
             material's configured shelf life. Catches missing shelf-life setup and math
@@ -237,7 +247,19 @@ export default function ExpCheckTab() {
             comes back automatically once that period passes if it's still unresolved.
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)' }}>
+            Customer{' '}
+            <select
+              value={customer}
+              onChange={(e) => handleCustomerChange(e.target.value)}
+              style={{ background: 'var(--bg2, #1a1d24)', color: 'var(--text-primary, #fff)', border: '1px solid var(--border, #2a2e38)', borderRadius: 4, padding: '2px 6px' }}
+            >
+              {EXP_CHECK_CUSTOMERS.map((c) => (
+                <option key={c.key} value={c.key}>{c.label}</option>
+              ))}
+            </select>
+          </label>
           <label style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)' }}>
             Lots created in last{' '}
             <select
@@ -245,7 +267,7 @@ export default function ExpCheckTab() {
               onChange={(e) => {
                 const v = Number(e.target.value);
                 setDayWindow(v);
-                loadLots(v);
+                loadLots(v, customer);
               }}
               style={{ background: 'var(--bg2, #1a1d24)', color: 'var(--text-primary, #fff)', border: '1px solid var(--border, #2a2e38)', borderRadius: 4, padding: '2px 6px' }}
             >
@@ -256,7 +278,7 @@ export default function ExpCheckTab() {
             </select>
           </label>
           <button
-            onClick={() => { loadLots(dayWindow); loadDismissals(); }}
+            onClick={() => { loadLots(dayWindow, customer); loadDismissals(); }}
             disabled={loading}
             style={{ background: 'var(--bg2, #1a1d24)', color: 'var(--text-primary, #fff)', border: '1px solid var(--border, #2a2e38)', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }}
           >
@@ -408,7 +430,7 @@ export default function ExpCheckTab() {
           </div>
 
           <div style={{ fontSize: 11, color: 'var(--text-secondary, #9aa1ac)', marginTop: 12 }}>
-            As of {new Date(data.fetchedAt).toLocaleString()} · scanning lots created in the last {data.dayWindow} days across all 3 Pretzilla projects (Kenosha, Caledonia, Madison).
+            As of {new Date(data.fetchedAt).toLocaleString()} · scanning {customerLabel} lots created in the last {data.dayWindow} days.
           </div>
         </>
       )}
