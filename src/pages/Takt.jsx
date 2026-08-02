@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FACILITY_LIST } from '../lib/constants.js'
 import { fetchTaktDaily, fetchTaktDailyByFacility } from '../lib/takt.js'
+import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 import '../styles/view-tabs.css'
 
 // Takt — new top-level tab (added 2026-08-02), replacing Recruiting's old
@@ -20,6 +21,14 @@ import '../styles/view-tabs.css'
 // yet (confirmed live 2026-08-02 — some facilities lag a partial day).
 // Facilities with no rows for the selected date show "No data yet"
 // rather than silently falling back to an earlier date.
+//
+// NOTIFY (added 2026-08-02, later same day): one NotifySettingsPanel per
+// facility (drill-down view) plus one facility='all' panel on the main
+// grid for a senior-leadership rollup. Backed by
+// netlify/functions/takt-digest-run.cjs / takt-digest-test.cjs /
+// lib/takt-digest-shared.cjs. Per Dan's explicit call, these digests
+// ALWAYS summarize yesterday's numbers regardless of configured send
+// time — see lib/takt-digest-shared.cjs header for why.
 
 function todayISO() { return new Date().toISOString().slice(0, 10) }
 function addDays(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
@@ -133,7 +142,18 @@ export default function Takt() {
       )}
 
       {!drillFacility ? (
-        <FacilityGrid facilities={facilities} onOpen={openFacility} />
+        <>
+          <NotifySettingsPanel
+            facility="all"
+            dashboardType="takt"
+            functionName="takt-digest-test"
+            manualTestBody={{ facility: 'all' }}
+            contentDateLabel="yesterday"
+            showSkipToNextValidDay={false}
+            digestDescription="Posts a ranked Performance/Efficiency/Utilization summary across all 5 facilities to Front — for senior leadership. Always summarizes yesterday's numbers (regardless of send time) since same-day Takt data usually isn't fully in yet."
+          />
+          <FacilityGrid facilities={facilities} onOpen={openFacility} />
+        </>
       ) : (
         <FacilityDrilldown
           facMeta={facMeta}
@@ -230,6 +250,18 @@ function FacilityDrilldown({ facMeta, facRollup, employees, error, onBack }) {
           </div>
         )}
       </div>
+
+      {facMeta && (
+        <NotifySettingsPanel
+          facility={facMeta.id}
+          dashboardType="takt"
+          functionName="takt-digest-test"
+          manualTestBody={{ facility: facMeta.id }}
+          contentDateLabel="yesterday"
+          showSkipToNextValidDay={false}
+          digestDescription={`Posts ${facMeta.name}'s Performance/Efficiency/Utilization (plus top/lowest performer) to a Front thread. Always summarizes yesterday's numbers (regardless of send time) since same-day Takt data usually isn't fully in yet.`}
+        />
+      )}
 
       {error && (
         <div className="omni-warning-banner">
