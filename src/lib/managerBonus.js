@@ -22,11 +22,11 @@ export const FACILITY_LABELS = {
   ec:  'Eau Claire',
 }
 
-// Default templates used only to seed a brand-new quarter that has no rows
-// yet (e.g. rolling into next quarter). WR drops OSDs — count in favor of
-// Case Pick Accuracy per Dan's 2026-07-28 direction; every other facility
-// keeps the standard 6-metric template. All values here are just starting
-// points — every field is editable in the UI afterward.
+// Default templates used to seed a brand-new quarter AND (as of 2026-08-02)
+// to force-reset Weight/Anchor/100%Target/120%Target back to these exact
+// values on every page load — see resetConfigToTemplate below. WR drops
+// OSDs — count in favor of Case Pick Accuracy per Dan's 2026-07-28
+// direction; every other facility keeps the standard 6-metric template.
 export const DEFAULT_TEMPLATES = {
   standard: [
     { metric_key: 'takt',         label: 'Takt Performance',         unit: '%',     weight: 25,   anchor: 50,   target_100: 80,  target_120: 90,  sort_order: 1 },
@@ -90,7 +90,10 @@ export async function fetchSettings(facility, quarter) {
 // Seeds a facility/quarter with the default template — only used when a
 // brand-new quarter has no rows yet (e.g. rolling forward). Never
 // overwrites existing rows (ON CONFLICT DO NOTHING equivalent via upsert
-// with ignoreDuplicates).
+// with ignoreDuplicates). Superseded in practice by resetConfigToTemplate
+// below (called on every load as of 2026-08-02), but left in place since
+// it also seeds bonus_scorecard_settings — kept for that side effect even
+// though nothing reads annual_target_bonus from it anymore.
 export async function seedQuarterIfMissing(facility, quarter) {
   const template = templateFor(facility)
   const rows = template.map((m) => ({ facility, quarter, ...m }))
@@ -102,6 +105,43 @@ export async function seedQuarterIfMissing(facility, quarter) {
     .from('bonus_scorecard_settings')
     .upsert([{ facility, quarter, annual_target_bonus: null }], { onConflict: 'facility,quarter', ignoreDuplicates: true })
   if (settingsErr) throw settingsErr
+}
+
+// Force-resets Weight/Anchor/100%Target/120%Target (plus label/unit/
+// sort_order) back to the canonical DEFAULT_TEMPLATES values on every
+// call — added 2026-08-02 per Dan: these four config columns are
+// meant to be a stable, shared definition of the scorecard, not
+// something that should silently drift if someone accidentally edits a
+// cell. Called on every page load/tab open for BOTH the current and
+// prior quarter, so any accidental edit gets wiped clean the next time
+// anyone opens the tab, before they'd ever notice it "stuck."
+//
+// Deliberately does NOT touch `actual` — that's real data (live-pulled
+// metrics, or Dean's manual Q2 entries for Discretionary) and must
+// survive this reset untouched. Achieved simply by never including
+// `actual` in the upserted row objects: Supabase's upsert only sets the
+// columns present in the payload, so any column left out (here, `actual`)
+// is left completely alone on conflict — this is standard INSERT ...
+// ON CONFLICT DO UPDATE SET behavior, not a full-row replace.
+export async function resetConfigToTemplate(facility, quarter) {
+  const template = templateFor(facility)
+  const rows = template.map((m) => ({
+    facility,
+    quarter,
+    metric_key: m.metric_key,
+    label: m.label,
+    unit: m.unit,
+    weight: m.weight,
+    anchor: m.anchor,
+    target_100: m.target_100,
+    target_120: m.target_120,
+    sort_order: m.sort_order,
+    updated_at: new Date().toISOString(),
+  }))
+  const { error } = await supabase
+    .from('bonus_scorecard_metrics')
+    .upsert(rows, { onConflict: 'facility,quarter,metric_key' })
+  if (error) throw error
 }
 
 export async function updateMetric(id, patch) {
