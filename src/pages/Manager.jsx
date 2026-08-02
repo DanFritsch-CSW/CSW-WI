@@ -4,7 +4,7 @@ import {
   currentQuarter, priorQuarter, fetchScorecard,
   seedQuarterIfMissing, updateMetric, computeAttainment,
   computeOverallAttainment, fetchLiveOtt, fetchLiveCasePickAccuracy,
-  fetchLiveOsdDollar,
+  fetchLiveOsdDollar, fetchLiveOsdCount,
 } from '../lib/managerBonus.js'
 
 const FACILITY_COLOR_VAR = { cal: 'var(--cal)', ken: 'var(--ken)', mad: 'var(--mad)', wr: 'var(--wr)', ec: 'var(--ec)' }
@@ -175,18 +175,19 @@ function ScorecardTable({ metrics, editable, onFieldChange }) {
   )
 }
 
-// Pulls live OTT, Case Pick Accuracy (WR only), and OSD $ (all facilities)
-// for one quarter's metric list and writes any hits straight into
-// Supabase via updateMetric, then reports the updates back through
-// `applyLocal` so the caller can patch its own state. Used for BOTH the
-// current quarter and last quarter — these are all objectively computable
-// from real historical data regardless of whether the quarter is still
-// open, so there's no reason a closed quarter should sit with a stale/
-// blank number waiting on a manual pull that no longer exists as a button
-// (Dan's ask 2026-07-30: remove the button, auto-pull on open — and pull
-// it for Q2 too, since that's a completed quarter and the data has been
-// sitting there the whole time). OSD $ added 2026-07-31 following the
-// same pattern once the GL query was verified.
+// Pulls live OTT, Case Pick Accuracy (WR only), OSD $ (all facilities),
+// and OSD count (cal/ken/mad/ec) for one quarter's metric list and
+// writes any hits straight into Supabase via updateMetric, then reports
+// the updates back through `applyLocal` so the caller can patch its own
+// state. Used for BOTH the current quarter and last quarter — these are
+// all objectively computable from real historical data regardless of
+// whether the quarter is still open, so there's no reason a closed
+// quarter should sit with a stale/blank number waiting on a manual pull
+// that no longer exists as a button (Dan's ask 2026-07-30: remove the
+// button, auto-pull on open — and pull it for Q2 too, since that's a
+// completed quarter and the data has been sitting there the whole time).
+// OSD $ added 2026-07-31, OSD count added 2026-08-02, both following the
+// same pattern once their respective sources were verified.
 async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal) {
   if (!metricsList || metricsList.length === 0) return { ok: true, pulledAt: null }
   const errors = []
@@ -235,6 +236,22 @@ async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal
     errors.push(`OSD $: ${e.message}`)
   }
 
+  // OSD count — cal/ken/mad (already-synced Silver tables) and ec (direct
+  // SharePoint read); not applicable to wr (no osd_count metric there).
+  if (['cal', 'ken', 'mad', 'ec'].includes(facility)) {
+    try {
+      const osdCount = await fetchLiveOsdCount(facility, quarterStr)
+      const osdCountMetric = metricsList.find((m) => m.metric_key === 'osd_count')
+      if (osdCountMetric && osdCount.osdCount.count != null) {
+        applyLocal(osdCountMetric.id, 'actual', osdCount.osdCount.count)
+        await updateMetric(osdCountMetric.id, { actual: osdCount.osdCount.count })
+      }
+      pulledAt = osdCount.fetchedAt
+    } catch (e) {
+      errors.push(`OSD count: ${e.message}`)
+    }
+  }
+
   return { ok: errors.length === 0, pulledAt, error: errors.length ? errors.join('; ') : null }
 }
 
@@ -264,8 +281,8 @@ function FacilityScorecard({ facility }) {
         setMetrics(cur)
         setLastMetrics(last)
 
-        // Auto-pull live OTT/Case Pick Accuracy/OSD $ for both quarters,
-        // no button, no waiting on the person to click anything.
+        // Auto-pull live OTT/Case Pick Accuracy/OSD $/OSD count for both
+        // quarters, no button, no waiting on the person to click anything.
         const [curRes, lastRes] = await Promise.all([
           autoPullLiveMetrics(facility, quarter, cur, (id, field, value) => {
             if (cancelled) return
@@ -302,7 +319,7 @@ function FacilityScorecard({ facility }) {
   // Last Quarter box needs its own edit path (separate from handleFieldChange
   // above, which targets the current-quarter `metrics` state) — this is
   // what lets Dean punch in Q2's real actuals (for the metrics that aren't
-  // auto-pulled — Takt, OSD count, Discretionary) once they're finalized.
+  // auto-pulled — Takt, Discretionary) once they're finalized.
   const handleLastFieldChange = useCallback(async (metric, field, value) => {
     setLastMetrics((prev) => prev.map((m) => (m.id === metric.id ? { ...m, [field]: value } : m)))
     try {
@@ -339,10 +356,10 @@ function FacilityScorecard({ facility }) {
       </div>
 
       {/* Last quarter comparison — targets/weights carried over from
-          current quarter; OTT/Case Pick Accuracy/OSD $ auto-pulled same as
-          the current quarter (real historical data, not manual); Takt/OSD
-          count/Discretionary left blank for Dean to fill in. Editable so
-          entry is actually possible. */}
+          current quarter; OTT/Case Pick Accuracy/OSD $/OSD count auto-
+          pulled same as the current quarter (real historical data, not
+          manual); Takt/Discretionary left blank for Dean to fill in.
+          Editable so entry is actually possible. */}
       <div className="chart-card">
         <div className="chart-header">
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>{lastQuarter} (Last Quarter)</span>
