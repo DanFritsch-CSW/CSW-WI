@@ -22,10 +22,16 @@
 // fine forever" — it reappears automatically once dismissed_until passes,
 // so a lot that's still genuinely unresolved after that window comes back
 // into view rather than disappearing for good. See expCheckDismissals.js.
+//
+// Notify settings (added 2026-08-02, Dan's ask, "similar to the FEFO
+// tab"): per-project Front digest settings, split into
+// ExpCheckNotifySettings.jsx per this project's file-size-hygiene
+// convention (same reason FefoReallocationAlerts.jsx is its own file).
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { fetchExpCheck, EXP_CHECK_CUSTOMERS } from '../../lib/expCheck';
 import { fetchDismissals, dismissLot, undismissLot } from '../../lib/expCheckDismissals';
+import ExpCheckNotifySettings from './ExpCheckNotifySettings';
 
 const VERDICT_LABEL = {
   mismatch: 'Mismatch',
@@ -336,15 +342,17 @@ export default function ExpCheckTab() {
         </div>
       </div>
 
+      <ExpCheckNotifySettings />
+
       {error && (
-        <div style={{ color: '#e5484d', marginBottom: 12 }}>
+        <div style={{ color: '#e5484d', marginBottom: 12, marginTop: 12 }}>
           {error}
         </div>
       )}
 
       {data && (
         <>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', marginTop: 16 }}>
             <StatCard label="Julian Mismatch" value={data.julianSummary.mismatch} color={JULIAN_COLOR.mismatch} />
             <StatCard label="Clean" value={data.summary.clean} color={VERDICT_COLOR.clean} />
             <StatCard label="EXP Mismatch" value={data.summary.mismatch} color={VERDICT_COLOR.mismatch} />
