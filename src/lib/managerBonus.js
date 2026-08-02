@@ -207,6 +207,28 @@ export async function fetchLiveOsdCount(facility, quarter) {
   return res.json()
 }
 
+// Live Takt Performance pull (all 5 facilities) — added 2026-08-02.
+// Direct MotherDuck query against gold.takt_productivity_v2_agg — see
+// motherduck-takt.cjs header for the FULL validation story: the source
+// table, the weighted-seconds-ratio formula, the null-employee-row
+// exclusion, and the known unresolved residual bias (every facility-month
+// tested came out slightly HIGH vs the real Takt dashboard, worst on
+// Caledonia). Shipped anyway per Dan's explicit decision after the gap
+// was reduced from ~2x-inflated down to single digits — this is "close,
+// confirmed good enough to ship," not "verified exact."
+export async function fetchLiveTakt(facility, quarter) {
+  const res = await fetch('/.netlify/functions/motherduck-takt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facility, quarter }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Takt pull failed (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
 // --- Attainment math ---
 // Anchor = 0% attainment. target_100 = 100% attainment. target_120 =
 // 120% attainment (extends beyond target_100, capped at 120). Direction
