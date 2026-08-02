@@ -3,6 +3,7 @@ import SpacePlanningTab from '../components/customers/SpacePlanningTab.jsx'
 import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
+import ExpCheckTab from '../components/customers/ExpCheckTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
@@ -11,8 +12,8 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // refresh-safe, matching the rest of the app's URL-as-state pattern.
 //
 // Tab order:
-//   LoadProof / DVRS → FEFO Rotation → PVI At Risk Inventory →
-//   Space Planning → Customer Onboarding
+//   LoadProof / DVRS → FEFO Rotation → EXP Check (Pretzilla) →
+//   PVI At Risk Inventory → Space Planning → Customer Onboarding
 //
 // LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
 // for Caledonia and Kenosha. Seeded with last-30-day open incidents from
@@ -25,6 +26,13 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // Revisions sub-tab removed 2026-07-24 per Dan's request (front-end +
 // nav entry point removed; the backing files/schema/netlify.toml entry
 // still need manual cleanup — see the corresponding changelog entry).
+//
+// EXP Check (Pretzilla) tab added 2026-08-02, per Front conversation
+// cnv_186hmlg4 (Pretzilla Lots and Expiration Dates) — Julian/manufacture
+// date entry errors keep slipping through to closed receipts. This is a
+// math-reconciliation view only (EXP vs MFG + shelf life); it does not
+// catch an internally-consistent misread manufacture date — see
+// netlify/functions/motherduck-exp-check.cjs for exactly what it covers.
 const SUB_TABS = [
   {
     id: 'dvr',
@@ -35,6 +43,11 @@ const SUB_TABS = [
     id: 'fefo',
     label: 'FEFO Rotation',
     subtitle: 'Pre-ship FEFO rotation verification · live from Datex / Omni',
+  },
+  {
+    id: 'expcheck',
+    label: 'EXP Check',
+    subtitle: 'Pretzilla · EXP date vs. manufacture date + shelf life reconciliation',
   },
   {
     id: 'pvi',
@@ -131,6 +144,7 @@ export default function Customers() {
       <div style={{ padding: '24px' }}>
         {subTab === 'dvr'        && <DvrTab />}
         {subTab === 'fefo'       && <FefoRotationTab />}
+        {subTab === 'expcheck'   && <ExpCheckTab />}
         {subTab === 'pvi'        && <PviShelfLife />}
         {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingTab />}
