@@ -2,7 +2,6 @@ import { Component, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import TopNav from './components/TopNav.jsx'
 import PalermosPasswordGate from './components/PalermosPasswordGate.jsx'
-import RecruitingPasswordGate from './components/RecruitingPasswordGate.jsx'
 import ManagerPasswordGate from './components/ManagerPasswordGate.jsx'
 import HrPasswordGate from './components/HrPasswordGate.jsx'
 
@@ -20,7 +19,7 @@ const Analytics          = lazy(() => import('./pages/Analytics.jsx'))
 const Settings           = lazy(() => import('./pages/Settings.jsx'))
 const PalermosStandalone = lazy(() => import('./pages/PalermosStandalone.jsx'))
 const DvrTracker         = lazy(() => import('./pages/DvrTracker.jsx'))
-const Recruiting         = lazy(() => import('./pages/Recruiting.jsx'))
+const Takt               = lazy(() => import('./pages/Takt.jsx'))
 const Manager            = lazy(() => import('./pages/Manager.jsx'))
 const Hr                 = lazy(() => import('./pages/Hr.jsx'))
 
@@ -107,7 +106,7 @@ export default function App() {
               <Route path="/analytics"            element={<Analytics />}         />
               <Route path="/settings"             element={<Settings />}          />
               <Route path="/dvr"                  element={<DvrTracker />}        />
-              <Route path="/recruiting"           element={<RecruitingPasswordGate><Recruiting /></RecruitingPasswordGate>} />
+              <Route path="/takt"                 element={<Takt />}              />
               <Route path="/manager"              element={<ManagerPasswordGate><Manager /></ManagerPasswordGate>} />
               <Route path="/hr"                   element={<HrPasswordGate><Hr /></HrPasswordGate>} />
             </Routes>
