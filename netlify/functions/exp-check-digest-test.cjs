@@ -9,12 +9,16 @@
 // regardless of time/day/active, and does not touch last_sent_date — same
 // "test doesn't interfere with the real scheduled send" behavior as every
 // other digest's test button on this project.
+//
+// One row PER CUSTOMER (facility='all') — see
+// lib/exp-check-digest-shared.cjs's header for why this changed from the
+// original per-project design.
 
 const {
-  PROJECT_BY_DASHBOARD_TYPE,
+  CUSTOMER_BY_DASHBOARD_TYPE,
   sbFetch,
   centralTodayDateObj,
-  runForProject,
+  runForCustomer,
 } = require('./lib/exp-check-digest-shared.cjs')
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
@@ -28,14 +32,14 @@ async function runTest(dashboardType) {
   if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
-  const project = PROJECT_BY_DASHBOARD_TYPE.get(dashboardType)
-  if (!project) return { ok: false, reason: `Unknown dashboardType '${dashboardType}'` }
+  const customer = CUSTOMER_BY_DASHBOARD_TYPE.get(dashboardType)
+  if (!customer) return { ok: false, reason: `Unknown dashboardType '${dashboardType}'` }
   const rows = await sbFetch(
-    `prepick_notify_settings?facility=eq.${project.facility}&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
+    `prepick_notify_settings?facility=eq.all&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
   const settingsRow = rows?.[0]
   const dateObj = centralTodayDateObj()
-  return runForProject({ settingsRow, project, dateObj, isManualTest: true })
+  return runForCustomer({ settingsRow, customer, dateObj, isManualTest: true })
 }
 
 exports.handler = async function (event) {
@@ -45,7 +49,7 @@ exports.handler = async function (event) {
   let dashboardType
   try { ({ dashboardType } = JSON.parse(event.body || '{}')) } catch { /* noop */ }
   if (!dashboardType) {
-    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'dashboardType required, e.g. "exp_check_bernatellos_wr"' }) }
+    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'dashboardType required, e.g. "exp_check_bernatellos"' }) }
   }
   try {
     const result = await runTest(dashboardType)

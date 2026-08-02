@@ -9,12 +9,16 @@
 // and only handles the cron tick. "Send test digest now" calls the
 // sibling function exp-check-digest-test.cjs instead, which has no
 // schedule and can be invoked directly.
+//
+// One row PER CUSTOMER (facility='all'), not per Datex project — see
+// lib/exp-check-digest-shared.cjs's header for why this changed from the
+// original per-project design.
 
 const {
-  PROJECT_BY_DASHBOARD_TYPE,
+  CUSTOMER_BY_DASHBOARD_TYPE,
   sbFetch,
   centralTodayDateObj, isNotifyTimeMatch, isoWeekday, isoDate,
-  runForProject,
+  runForCustomer,
 } = require('./lib/exp-check-digest-shared.cjs')
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
@@ -28,10 +32,10 @@ async function runScheduledDigest() {
   if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
-  // Loop every exp_check_* row (across all facilities) — content date is
-  // TODAY for every row (live status check, no forecast lead-time), so
-  // there's no per-project date resolution needed like FEFO's next-
-  // business-day logic.
+  // Loop every exp_check_* row (facility='all' for every row) — content
+  // date is TODAY for all of them (live status check, no forecast lead-
+  // time), so there's no per-row date resolution needed like FEFO's
+  // next-business-day logic.
   const rows = await sbFetch(
     `prepick_notify_settings?dashboard_type=like.exp_check_*&select=facility,dashboard_type,front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
@@ -39,29 +43,29 @@ async function runScheduledDigest() {
   const date = isoDate(dateObj)
   const results = []
   for (const row of (rows || [])) {
-    const project = PROJECT_BY_DASHBOARD_TYPE.get(row.dashboard_type)
-    if (!project) continue
-    if (row.active === false) { results.push({ ok: true, skipped: true, project: project.code, reason: 'Digest disabled' }); continue }
+    const customer = CUSTOMER_BY_DASHBOARD_TYPE.get(row.dashboard_type)
+    if (!customer) continue
+    if (row.active === false) { results.push({ ok: true, skipped: true, customer: customer.label, reason: 'Digest disabled' }); continue }
     const notifyDays = (row.notify_days && row.notify_days.length) ? row.notify_days : [1, 2, 3, 4, 5]
     if (!notifyDays.includes(isoWeekday(dateObj))) {
-      results.push({ ok: true, skipped: true, project: project.code, reason: 'Not a configured send day' })
+      results.push({ ok: true, skipped: true, customer: customer.label, reason: 'Not a configured send day' })
       continue
     }
     const notifyHour = row.notify_hour ?? 8
     const notifyMinute = row.notify_minute ?? 0
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
-      results.push({ ok: true, skipped: true, project: project.code, reason: 'Not the configured send time yet' })
+      results.push({ ok: true, skipped: true, customer: customer.label, reason: 'Not the configured send time yet' })
       continue
     }
     if (row.last_sent_date === date) {
-      results.push({ ok: true, skipped: true, project: project.code, reason: 'Already sent for this date' })
+      results.push({ ok: true, skipped: true, customer: customer.label, reason: 'Already sent for this date' })
       continue
     }
     try {
-      const r = await runForProject({ settingsRow: row, project, dateObj, isManualTest: false })
+      const r = await runForCustomer({ settingsRow: row, customer, dateObj, isManualTest: false })
       results.push(r)
     } catch (e) {
-      results.push({ ok: false, project: project.code, reason: e.message })
+      results.push({ ok: false, customer: customer.label, reason: e.message })
     }
   }
   return { ok: true, results }
