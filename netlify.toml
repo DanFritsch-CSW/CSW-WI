@@ -160,6 +160,13 @@
 [functions."motherduck-takt"]
   timeout = 26
 
+# EXP Check (Pretzilla) -- added 2026-08-02. Plain read-only POST, no
+# schedule (no digest asked for this round) -- same duckdb single-query
+# pattern as the other motherduck-*.cjs functions above, just registered
+# for the standard 26s timeout.
+[functions."motherduck-exp-check"]
+  timeout = 26
+
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
