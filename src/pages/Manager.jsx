@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { FACILITY_LIST } from '../lib/constants.js'
 import {
   currentQuarter, priorQuarter, fetchScorecard,
-  seedQuarterIfMissing, updateMetric, computeAttainment,
+  seedQuarterIfMissing, resetConfigToTemplate, updateMetric, computeAttainment,
   computeOverallAttainment, fetchLiveOtt, fetchLiveCasePickAccuracy,
   fetchLiveOsdDollar, fetchLiveOsdCount, fetchLiveTakt,
 } from '../lib/managerBonus.js'
@@ -312,7 +312,19 @@ function FacilityScorecard({ facility }) {
     setLiveSync({ loading: true, pulledAt: null, error: null })
     ;(async () => {
       try {
+        // Force-reset Weight/Anchor/100%Target/120%Target back to the
+        // canonical template on every load, for both quarters — added
+        // 2026-08-02 per Dan: these config columns should never silently
+        // drift from an accidental edit. `actual` is untouched by this
+        // (see resetConfigToTemplate's own header for why). Runs before
+        // seedQuarterIfMissing only for its bonus_scorecard_settings
+        // side effect; resetConfigToTemplate's own upsert already
+        // handles inserting missing metric rows for a brand-new quarter.
         await seedQuarterIfMissing(facility, quarter)
+        await Promise.all([
+          resetConfigToTemplate(facility, quarter),
+          resetConfigToTemplate(facility, lastQuarter),
+        ])
         const [cur, last] = await Promise.all([
           fetchScorecard(facility, quarter),
           fetchScorecard(facility, lastQuarter),
