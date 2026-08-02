@@ -4,9 +4,26 @@
 // Watches B2E's own rolling attendance-points balance
 // (silver.b2e_slv_pointsbalance) for new threshold crossings (6/8/10 pts,
 // per CSW's non-union Attendance Policy) and posts a disciplinary-action
-// summary as a Front comment on the facility's HR conversation thread.
-// Signature lines are never represented as filled anywhere in this
-// pipeline — a human still pulls and signs the real form.
+// notice — WITH A FILLED PDF ATTACHED — as a Front comment on the
+// facility's HR conversation thread. Signature lines are never filled
+// anywhere in this pipeline — a human still signs the real form.
+//
+// PDF NOTE (added 2026-08-02, second pass): Dan asked for the actual
+// uploaded Disciplinary Action Form PDF to be filled and attached. That
+// exact file is a 289KB fillable AcroForm PDF (confirmed via pypdf —
+// fields Name/Text1(Date)/Action TakenRow1(Current Point Count)/16 "Dates
+// Missed" rows/3 checkboxes for Written-Warning/Final-Warning/
+// Termination/2 blank signature fields). Embedding that exact binary
+// asset would mean transcribing ~240KB of opaque base64 through this
+// tool interface with zero margin for error — a single dropped
+// character corrupts the PDF's internal structure silently. Rather than
+// risk shipping a corrupted or half-verified binary, this builds a
+// clean PDF from scratch via pdf-lib (same library already used by
+// wr-secondary-repl-pdf.cjs) that reproduces the same fields, labels,
+// and point-schedule text as the original form, filled with real data.
+// It is not byte-identical to Dan's uploaded file — flagged here and in
+// the Notion changelog so it isn't mistaken for the original scan.
+// Signature lines are drawn as blank underscores, never filled.
 //
 // KNOWN LIMITATION AT BUILD TIME (documented so it isn't silently lost):
 // both b2e_slv_pointsbalance and b2e_slv_detailedpointsreport have
@@ -21,12 +38,14 @@
 //
 // Phase-in per Dan (2026-08-02): every facility seeded active=false.
 // "Run check now (test)" is NOT a dry run — it posts real Front comments
-// and writes real attendance_points_actions rows, same as a live cron
-// tick would. That's intentional: it's how accuracy gets validated
-// against a manual audit before a facility's active flag flips to true
-// and the daily schedule takes over unattended. No code change needed to
-// flip a facility on — same active-flag gate as every other digest in
-// this app.
+// (with the real PDF attached) and writes real attendance_points_actions
+// rows, same as a live cron tick would. That's intentional: it's how
+// accuracy gets validated against a manual audit before a facility's
+// active flag flips to true and the daily schedule takes over
+// unattended. No code change needed to flip a facility on — same
+// active-flag gate as every other digest in this app.
+
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib')
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -158,23 +177,23 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-// Builds the internal Front comment body — a pre-filled summary pointing
-// at the real Disciplinary Action Form, NOT a substitute for the signed
-// paper form. Signature lines are deliberately never represented here.
-function buildFormComment({ employeeName, facility, threshold, points, category, triggeringDate }) {
+// Builds the internal Front comment body — short caption, since the full
+// detail now lives on the attached PDF (see buildDisciplinaryFormPdf).
+function buildFormComment({ employeeName, facility, threshold, points, category, triggeringDate, pdfError }) {
   const facilityDisplay = FACILITY_DISPLAY[facility] || facility.toUpperCase()
-  const catLabel = category?.label || 'Unknown — check B2E detailed points report'
-  return `
-<strong>Attendance Points — Disciplinary Action Needed</strong><br>
-Facility: ${escapeHtml(facilityDisplay)}<br>
-Employee: <strong>${escapeHtml(employeeName)}</strong><br>
-Current Point Count: <strong>${points}</strong><br>
-Threshold Crossed: <strong>${threshold.points} points → ${threshold.action}</strong><br>
-Likely Category: ${escapeHtml(catLabel)}${triggeringDate ? ` (as of ${escapeHtml(triggeringDate)})` : ''}<br>
-<br>
-Please pull the Disciplinary Action Form, confirm dates missed against B2E, and complete Employee/Supervisor signatures.
-This is a system-generated notice — not a substitute for the signed paper form.
-`.trim()
+  const catLabel = category?.label || 'unknown — check B2E detailed points report'
+  const lines = [
+    `<strong>Attendance Points — Disciplinary Action Needed</strong><br>`,
+    `Facility: ${escapeHtml(facilityDisplay)} · Employee: <strong>${escapeHtml(employeeName)}</strong><br>`,
+    `Current Point Count: <strong>${points}</strong> · Threshold Crossed: <strong>${threshold.points} pts → ${threshold.action}</strong><br>`,
+    `Likely Category: ${escapeHtml(catLabel)}${triggeringDate ? ` (as of ${escapeHtml(triggeringDate)})` : ''}<br>`,
+  ]
+  if (pdfError) {
+    lines.push(`<br>PDF attachment failed to generate (${escapeHtml(pdfError)}) — pull the form manually.`)
+  } else {
+    lines.push(`<br>Filled Disciplinary Action Form attached. Confirm Dates Missed against B2E, then complete Employee/Supervisor signatures — this is a system-generated notice, not a substitute for the signed paper form.`)
+  }
+  return lines.join('\n')
 }
 
 async function frontPostComment(conversationId, body) {
@@ -188,6 +207,114 @@ async function frontPostComment(conversationId, body) {
   try { json = JSON.parse(text) } catch { json = { raw: text } }
   if (!res.ok) throw Object.assign(new Error('Front comment failed'), { detail: json })
   return json
+}
+
+// Front comment WITH a PDF attachment — same multipart pattern already
+// proven in lib/wr-secondary-repl-digest-shared.cjs's postCommentWithPdf.
+async function frontPostCommentWithPdf(conversationId, body, pdfBytes, filename) {
+  const form = new FormData()
+  form.set('body', body)
+  form.set('attachments[]', new Blob([pdfBytes], { type: 'application/pdf' }), filename)
+  const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, Accept: 'application/json' },
+    body: form,
+  })
+  const text = await res.text()
+  let json
+  try { json = JSON.parse(text) } catch { json = { raw: text } }
+  if (!res.ok) throw Object.assign(new Error('Front comment+PDF failed'), { detail: json })
+  return json
+}
+
+// Builds a filled Disciplinary Action Form PDF — see file header for why
+// this is a freshly-generated PDF (same fields/labels/point-schedule as
+// Dan's uploaded form) rather than a fill of the exact uploaded file.
+// Signature lines are drawn as blank underscores — NEVER filled.
+async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points, thresholdPoints, triggeringDate, category }) {
+  const PAGE_W = 612, PAGE_H = 792 // US Letter
+  const MARGIN = 50
+
+  const doc = await PDFDocument.create()
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold)
+  const page = doc.addPage([PAGE_W, PAGE_H])
+
+  let y = PAGE_H - MARGIN
+
+  const text = (str, x, size, bold = false, color = rgb(0.08, 0.08, 0.1)) => {
+    page.drawText(str, { x, y, size, font: bold ? fontBold : font, color })
+  }
+  const hr = (yPos) => page.drawLine({
+    start: { x: MARGIN, y: yPos }, end: { x: PAGE_W - MARGIN, y: yPos },
+    thickness: 0.75, color: rgb(0.6, 0.6, 0.6),
+  })
+  const checkbox = (label, checked, x) => {
+    page.drawRectangle({ x, y: y - 9, width: 10, height: 10, borderColor: rgb(0.2, 0.2, 0.2), borderWidth: 1 })
+    if (checked) page.drawText('X', { x: x + 1.5, y: y - 8, size: 9, font: fontBold })
+    page.drawText(label, { x: x + 16, y, size: 9, font })
+  }
+
+  text('CSW Warehouse/Hourly Attendance Policy', MARGIN, 16, true)
+  y -= 20
+  text('Disciplinary Action Form', MARGIN, 13, true)
+  y -= 11
+  text('System-generated — pending human review and signature', MARGIN, 8, false, rgb(0.5, 0.5, 0.5))
+  y -= 24
+
+  text(`Date: ${new Date().toLocaleDateString('en-US')}`, MARGIN, 10)
+  text(`Name: ${employeeName}`, MARGIN + 260, 10, true)
+  y -= 16
+  text(`Facility: ${facilityDisplay}`, MARGIN, 10)
+  y -= 24
+
+  text('Employees are charged points per the schedule below (10-point system, rolling 6-month period):', MARGIN, 9)
+  y -= 14
+  text('+4 pts   Absence without advance notification (no-call/no-show)', MARGIN + 10, 9)
+  y -= 12
+  text('+2 pts   Unexcused absence', MARGIN + 10, 9)
+  y -= 12
+  text('+0.5 pt  Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN + 10, 9)
+  y -= 20
+
+  text('Disciplinary Action:  6 pts = Written Warning   8 pts = Final Warning   10 pts = Termination', MARGIN, 9, true)
+  y -= 22
+  hr(y + 6)
+  y -= 14
+
+  text('Dates Missed (excused or unexcused):', MARGIN, 10, true)
+  y -= 16
+  if (triggeringDate) {
+    text(`${triggeringDate} — ${category?.label || 'see B2E detailed points report'}`, MARGIN, 9)
+    y -= 14
+  }
+  text('Additional dates: confirm full history against B2E before signing (see PDF/data caveat in Front comment).', MARGIN, 8, false, rgb(0.5, 0.5, 0.5))
+  y -= 26
+  hr(y + 6)
+  y -= 16
+
+  text('Action Taken:', MARGIN, 10, true)
+  y -= 16
+  text(`Current Point Count: ${points}`, MARGIN, 11, true)
+  y -= 20
+  checkbox('Written Warning (6 pts)', thresholdPoints === 6, MARGIN)
+  checkbox('Final Warning (8 pts)', thresholdPoints === 8, MARGIN + 230)
+  y -= 20
+  checkbox('Termination (10 pts)', thresholdPoints === 10, MARGIN)
+  y -= 40
+
+  text('This document confirms in writing the disciplinary action described above.', MARGIN, 9)
+  y -= 36
+  text('Employee Signature: ______________________________________', MARGIN, 10)
+  y -= 26
+  text('Supervisor/Ops Mgr Signature: ______________________________________', MARGIN, 10)
+  y -= 30
+
+  text('FUTURE VIOLATIONS WILL RESULT IN DISCIPLINARY ACTION LEADING UP TO AND INCLUDING TERMINATION.', MARGIN, 8, true)
+  y -= 18
+  text('Generated by CSW-WI Attendance Points automation — verify against source B2E data before filing.', MARGIN, 7, false, rgb(0.55, 0.55, 0.55))
+
+  return doc.save()
 }
 
 // Core digest logic — shared by the scheduled run and the manual test
@@ -230,9 +357,24 @@ async function runDigest({ isManualTest, facility }) {
       const category = tx ? CATEGORY_BY_POINTS[Number(tx.points)] : null
       const employeeName = [emp.first_name, emp.last_name].filter(Boolean).join(' ')
       const triggeringDate = tx?.modified_ts ? String(tx.modified_ts).slice(0, 10) : null
+      const facilityDisplay = FACILITY_DISPLAY[facility] || facility.toUpperCase()
 
-      const commentBody = buildFormComment({ employeeName, facility, threshold, points, category, triggeringDate })
-      const posted = await frontPostComment(settings.front_conversation_id, commentBody)
+      let pdfError = null
+      let posted
+      try {
+        const pdfBytes = await buildDisciplinaryFormPdf({
+          employeeName, facilityDisplay, points, thresholdPoints: threshold.points, triggeringDate, category,
+        })
+        const commentBody = buildFormComment({ employeeName, facility, threshold, points, category, triggeringDate })
+        posted = await frontPostCommentWithPdf(
+          settings.front_conversation_id, commentBody, pdfBytes,
+          `disciplinary-action-${emp.employee_id}-${threshold.points}pt.pdf`
+        )
+      } catch (e) {
+        pdfError = e.message
+        const fallbackBody = buildFormComment({ employeeName, facility, threshold, points, category, triggeringDate, pdfError })
+        posted = await frontPostComment(settings.front_conversation_id, fallbackBody)
+      }
       const frontCommentId = posted?.id || null
 
       await sbPost('attendance_points_actions', {
@@ -247,7 +389,7 @@ async function runDigest({ isManualTest, facility }) {
 
       newActions.push({
         employeeId: emp.employee_id, employeeName, threshold: threshold.points,
-        action: threshold.action, points, category: category?.key || null, frontCommentId,
+        action: threshold.action, points, category: category?.key || null, frontCommentId, pdfError,
       })
 
       existingSet.add(key)
@@ -262,5 +404,6 @@ module.exports = {
   FACILITY_LOCATION, FACILITY_DISPLAY, THRESHOLDS, CATEGORY_BY_POINTS,
   sbFetch, sbPost,
   queryPointsBalance, queryLatestTransactions,
+  buildDisciplinaryFormPdf,
   runDigest,
 }
