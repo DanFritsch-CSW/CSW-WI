@@ -1,6 +1,7 @@
 // netlify/functions/motherduck-exp-check.cjs
 //
-// EXP Check (Pretzilla / Bernatello's) — math-reconciliation only.
+// EXP Check — math-reconciliation only. Multi-customer (added 2026-08-02,
+// Dan's ask to add customers beyond Pretzilla, starting with Bernatello's).
 //
 // What this catches:
 //   - no_shelf_life: material has shelf_life_span = 0 (or null), so Datex has no real
@@ -13,6 +14,8 @@
 //   - relabeled: lookup_code ends in "A" — Pretzilla's convention for a pallet that was
 //     taken back and relabeled with an extended expiration date. NOT an error — flagged
 //     separately for a human to eyeball, per standing convention with Sadie/Billie Jo.
+//     Bernatello's has no equivalent convention observed live (no "A"-suffix lots found),
+//     so this bucket will naturally stay empty for that customer — not a bug.
 //
 // What this does NOT catch (confirmed with Dan, scoped out on purpose):
 //   - A misread Julian code that's internally consistent (MFG entered wrong, but EXP
@@ -21,58 +24,67 @@
 //     case label/BOL can catch that. This tab is math-reconciliation only.
 //
 // Scope: last N days by vendor lot CREATED date (default 45) — NOT all-time. Verified live
-// that scanning all historical lots produces ~9,400 "mismatches" for Pretzilla alone, almost
-// all of which are legitimate: a material's shelf_life_span was changed at some point, and
-// old lots' already-computed EXP correctly reflects whatever shelf life was configured when
+// that scanning all historical Pretzilla lots produces ~9,400 "mismatches" alone, almost all
+// of which are legitimate: a material's shelf_life_span was changed at some point, and old
+// lots' already-computed EXP correctly reflects whatever shelf life was configured when
 // THEY were created, not today's value. Scoping to recent lots avoids drowning real,
 // actionable anomalies in that historical noise.
 //
-// Bernatello's added 2026-08-02 (Dan's ask). Verified live: 282 (Madison, BERNA1) and
-// 320 (Wisconsin Rapids, BERNA3, same project_id already used by the WR Pick Location Lot
-// Check tab). Sanity-checked before shipping: all 163 Bernatello's lots created in the last
-// 45 days reconcile cleanly (0 mismatches) — a real, useful "all clear" result, not a sign
-// the query is broken for this customer.
+// Bernatello's, added 2026-08-02: project_id 282 (Madison, BERNA1) and 320 (Wisconsin
+// Rapids, BERNA3 — same project_id already used by the WR Pick Location Lot Check tab).
+// Two real things found live before shipping:
+//   1. Madison (282) has been inactive since 2025-09-08 (last lot created then) — will
+//      show nothing at the default 45-day window, which is correct/expected, not a bug.
+//   2. Non-food/equipment SKUs (lookup_code starting "99", e.g. "991005" Pizza Oven #421)
+//      carry junk shelf_life_span values (one was 49,050 days — ~134 years), which would
+//      otherwise produce nonsense diff_days. Same exclusion already used in
+//      motherduck-wr-pick-check.cjs (lookup_code NOT ILIKE '99%'). Verified live that zero
+//      Pretzilla materials match this prefix, so applying it globally (not per-customer) is
+//      safe and doesn't accidentally exclude anything real for Pretzilla.
+// Real, recurring pattern also found in Bernatello's data (documented here, not silently
+// dropped): several "HV Tavern Style Breakfast/Supreme" lots consistently show diff_days of
+// exactly -60 across many lots — looks like the material's configured shelf_life_span (240)
+// doesn't match what's actually used for that item, a systematic config issue rather than
+// scattered entry errors. Left as a real `mismatch` — worth a follow-up with Dan on whether
+// that material's shelf_life_span needs correcting in Datex itself.
 //
-// Every project_id currently covered, by customer:
-//   Pretzilla:    230 (Kenosha, PRETZ5), 342 (Kenosha, PRTZL5), 28 (Caledonia FROZEN, PRETZ9),
-//                 145 (Caledonia COOLER, PRTZL9), 297 (Madison, PRETZ1), 336 (Madison Dry, PRETD1)
-//   Bernatello's: 282 (Madison, BERNA1), 320 (Wisconsin Rapids, BERNA3)
-//
-// createdBy (added 2026-08-02): the vendor lot row's own created_sys_user -- who/what
-// created THIS specific vendor lot record. Confirmed live that the same lookup_code can
-// have multiple distinct vendor_lot_id rows over time (re-received/re-created lots sharing
-// a code) -- this is the creator of the exact row being flagged, not necessarily "the one
-// true original creation event" for that lot code across its whole history. Also confirmed
-// live that this field is sometimes a person (e.g. "mdile@csw-wi.com",
-// "FOOTPRINT\\csw-fpservice") and sometimes "SmartUp API" (automated creation, not a
-// person) -- passed through as-is rather than normalized, so the UI can distinguish human
-// vs. system-created rows.
+// createdBy: the vendor lot row's own created_sys_user -- who/what created THIS specific
+// vendor lot record. Confirmed live that the same lookup_code can have multiple distinct
+// vendor_lot_id rows over time (re-received/re-created lots sharing a code) -- this is the
+// creator of the exact row being flagged, not necessarily "the one true original creation
+// event" for that lot code across its whole history. Also confirmed live that this field is
+// sometimes a person (e.g. "mdile@csw-wi.com", "FOOTPRINT\\csw-fpservice") and sometimes
+// "SmartUp API" (automated creation, not a person) -- passed through as-is rather than
+// normalized, so the UI can distinguish human vs. system-created rows.
 
 const duckdb = require('duckdb');
 
-const PROJECT_CUSTOMER = {
-  230: 'Pretzilla',
-  342: 'Pretzilla',
-  28: 'Pretzilla',
-  145: 'Pretzilla',
-  297: 'Pretzilla',
-  336: 'Pretzilla',
-  282: "Bernatello's",
-  320: "Bernatello's",
+const CUSTOMERS = {
+  pretzilla: {
+    label: 'Pretzilla',
+    projectIds: [230, 342, 28, 145, 297, 336],
+  },
+  bernatellos: {
+    label: "Bernatello's",
+    projectIds: [282, 320],
+  },
 };
 
 const PROJECT_FACILITY = {
-  230: 'ken',
-  342: 'ken',
-  28: 'cal',
-  145: 'cal',
-  297: 'mad',
-  336: 'mad',
-  282: 'mad',
-  320: 'wr',
+  230: 'ken', // Pretzilla Kenosha (PRETZ5)
+  342: 'ken', // Pretzilla COOLER Kenosha (PRTZL5)
+  28: 'cal',  // Pretzilla FROZEN Caledonia (PRETZ9)
+  145: 'cal', // Pretzilla COOLER Caledonia (PRTZL9)
+  297: 'mad', // Pretzilla - CSW-Madison (PRETZ1)
+  336: 'mad', // Pretzilla - Dry - CSW-Madison (PRETD1)
+  282: 'mad', // Bernatello's - CSW-Madison (BERNA1)
+  320: 'wr',  // Bernatello's - Wisconsin Rapids (BERNA3)
 };
 
-const ALL_PROJECT_IDS = Object.keys(PROJECT_CUSTOMER).map(Number);
+const PROJECT_CUSTOMER_KEY = {};
+for (const [key, cfg] of Object.entries(CUSTOMERS)) {
+  for (const pid of cfg.projectIds) PROJECT_CUSTOMER_KEY[pid] = key;
+}
 
 function getDb() {
   process.env.HOME = '/tmp';
@@ -85,14 +97,20 @@ exports.handler = async (event) => {
   }
 
   let dayWindow = 45;
+  let customerKey = 'pretzilla';
   try {
     const body = event.body ? JSON.parse(event.body) : {};
     if (body.dayWindow && Number.isFinite(Number(body.dayWindow))) {
       dayWindow = Math.max(1, Math.min(365, Number(body.dayWindow)));
     }
+    if (body.customer && CUSTOMERS[body.customer]) {
+      customerKey = body.customer;
+    }
   } catch (_) {
-    // ignore, use default
+    // ignore, use defaults
   }
+
+  const projectIds = CUSTOMERS[customerKey].projectIds;
 
   const db = getDb();
   const conn = db.connect();
@@ -136,7 +154,8 @@ exports.handler = async (event) => {
       FROM production_db.silver.datex_slv_vendorlots vl
       JOIN production_db.silver.datex_slv_materials m ON vl.material_id = m.material_id
       JOIN production_db.silver.datex_slv_projects p ON m.project_id = p.project_id
-      WHERE p.project_id IN (${ALL_PROJECT_IDS.join(',')})
+      WHERE p.project_id IN (${projectIds.join(',')})
+        AND m.lookup_code NOT ILIKE '99%'
         AND vl.manufacture_date IS NOT NULL
         AND vl.expiration_date IS NOT NULL
         AND vl.created_sys_date_time >= CURRENT_DATE - INTERVAL ${dayWindow} DAY
@@ -152,7 +171,6 @@ exports.handler = async (event) => {
       materialCode: r.material_code,
       materialName: r.material_name,
       facility: PROJECT_FACILITY[r.project_id] || null,
-      customer: PROJECT_CUSTOMER[r.project_id] || null,
       projectName: r.project_name,
       shelfLifeSpan: r.shelf_life_span === null ? null : Number(r.shelf_life_span),
       manufactureDate: r.manufacture_date,
@@ -179,6 +197,8 @@ exports.handler = async (event) => {
         lots,
         summary,
         dayWindow,
+        customer: customerKey,
+        customerLabel: CUSTOMERS[customerKey].label,
         fetchedAt: new Date().toISOString(),
       }),
     };
