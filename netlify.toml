@@ -217,6 +217,31 @@
 [functions."exp-check-digest-test"]
   timeout = 26
 
+# Attendance Points HR automation -- added 2026-08-02. Watches B2E's own
+# rolling points balance (silver.b2e_slv_pointsbalance) for new 6/8/10
+# threshold crossings and posts a disciplinary-action summary to a
+# per-facility Front thread (attendance_points_notify_settings). Seeded
+# active=false for all 5 facilities pending: (1) Front conversation IDs,
+# (2) Data Platform putting the B2E points SFTP sync on a recurring
+# schedule (single historical load as of this build -- see
+# lib/attendance-points-shared.cjs header), (3) a manual validation
+# window via "Run check now (test)" before any facility flips active=true.
+[functions."motherduck-attendance-points"]
+  timeout = 26
+
+[functions."attendance-points-digest-run"]
+  schedule = "30 10 * * *"
+  timeout = 26
+
+# Attendance Points digest MANUAL TEST -- no schedule, so direct POST
+# works (same fix pattern as every other *-digest-test.cjs in this app).
+# Requires {facility} in the POST body. Note: unlike other "test" buttons
+# in this app, this one is NOT a dry run -- it really posts to Front and
+# really logs to attendance_points_actions. That's intentional: it's how
+# Dan validates accuracy before turning a facility's cron on for real.
+[functions."attendance-points-digest-test"]
+  timeout = 26
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
