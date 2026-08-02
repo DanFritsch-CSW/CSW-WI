@@ -160,6 +160,13 @@
 [functions."motherduck-takt"]
   timeout = 26
 
+# Takt tab (top-level, ungated) -- added 2026-08-02. Sibling to
+# motherduck-takt.cjs (Manager tab's quarterly metric) -- same source
+# table/formula, single-day + per-employee grain instead of quarterly.
+# See the function's own header for the full data-lag caveat.
+[functions."motherduck-takt-daily"]
+  timeout = 26
+
 # EXP Check (Pretzilla) -- added 2026-08-02. Plain read-only POST, no
 # schedule (no digest asked for this round) -- same duckdb single-query
 # pattern as the other motherduck-*.cjs functions above, just registered
