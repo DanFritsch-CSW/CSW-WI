@@ -205,6 +205,18 @@
 [functions."dvr-digest-test"]
   timeout = 26
 
+# EXP Check nightly digest -- added 2026-08-02, one settings row PER
+# DATEX PROJECT (mirrors FEFO's per-project pattern, not per-customer).
+# Content date is TODAY (live status check, no forecast lead-time).
+[functions."exp-check-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# EXP Check digest MANUAL TEST -- no schedule, so direct POST works (see
+# lib/exp-check-digest-shared.cjs's header for why this split exists).
+[functions."exp-check-digest-test"]
+  timeout = 26
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
