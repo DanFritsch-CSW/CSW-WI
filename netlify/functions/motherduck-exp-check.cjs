@@ -1,61 +1,87 @@
 // netlify/functions/motherduck-exp-check.cjs
 //
-// EXP Check — math-reconciliation only. Multi-customer (added 2026-08-02,
-// Dan's ask to add customers beyond Pretzilla, starting with Bernatello's).
+// EXP Check — two independent reconciliations, per customer:
 //
-// What this catches:
+//   1. Julian check (added 2026-08-02, Dan's ask): decodes the LOT CODE
+//      ITSELF as a Julian manufacture-date code and compares it to the
+//      manufacture_date already stored in Datex. This is the actual
+//      "did the human read the Julian code off the case label correctly"
+//      check -- catches a misread Julian code even when it's internally
+//      consistent with a correctly-computed EXP (which the EXP check
+//      below cannot catch, since it only checks Datex's own MFG+shelf
+//      life math against Datex's own stored EXP, never against the
+//      physical label).
+//
+//   2. EXP check (original build): does stored expiration_date reconcile
+//      with stored manufacture_date + material.shelf_life_span. Catches
+//      missing shelf-life config and math discrepancies, but NOT a
+//      misread MFG date that's internally consistent with its own EXP.
+//
+// Real discovery that made the Julian check possible: confirmed live that
+// each customer's lot lookup_code IS itself the Julian-encoded manufacture
+// date, not just an arbitrary lot number:
+//   - Pretzilla: 5-digit YYDDD (2-digit year + 3-digit day-of-year), e.g.
+//     "26210" = day 210 of '26 = 7/29/26. Optional trailing "A" for
+//     relabeled lots, stripped before decoding. Verified against 12,127
+//     real lots with shelf_life_span > 0: 99% exact match (0-1 day off,
+//     the 1-day cases look like a UTC/Central day-boundary artifact on
+//     timestamps, not real errors), ~1% real mismatches -- the Julian
+//     misread errors this feature exists to catch.
+//   - Bernatello's: 4-digit YDDD (1-digit year + 3-digit day-of-year,
+//     year base 2020), e.g. "6119" = day 119 of '26 = 4/29/26. Verified
+//     against 1,943 real lots: 96% exact/near match, ~4% real mismatches.
+//   - Both formats confirmed by testing against real stored
+//     manufacture_date values, not assumed from a spec doc.
+//   - Filtered to shelf_life_span > 0 when validating the format, since
+//     packaging/film materials (shelf_life_span = 0) don't follow either
+//     Julian convention at all (their lot codes are internal sequence
+//     numbers, unrelated to a production date) -- including them produced
+//     nonsense multi-year "mismatches" that aren't real.
+//   - The Julian check itself is NOT gated on shelf_life_span > 0 in the
+//     query below (a lot with no shelf life can still have a real,
+//     checkable MFG-vs-lot-code relationship) -- only lots whose
+//     lookup_code actually matches the customer's Julian pattern get a
+//     julianVerdict at all; everything else reports 'not_applicable'.
+//
+// What the Julian check does NOT do: it does not read the physical case
+// label or BOL -- it only has the lot_code Datex already has on file. If
+// BOTH the lot_code and the MFG date were mis-keyed the same wrong way,
+// this still shows a match. That residual case still needs a human
+// comparing against the actual printed label.
+//
+// --- Everything below this line is the original EXP-check design ---
+//
+// What the EXP check catches:
 //   - no_shelf_life: material has shelf_life_span = 0 (or null), so Datex has no real
 //     dating for it at all — EXP silently ends up equal to MFG. This is a data-setup gap,
 //     not a one-off entry mistake (e.g. lookup_code 60613/60624 — packaging/film materials).
 //   - mismatch: expiration_date on the vendor lot doesn't reconcile with
-//     manufacture_date + material.shelf_life_span (more than 1 day off). This is a real
-//     math discrepancy — could mean the MFG date was mis-keyed (Julian misread), or the
-//     lot was manually overridden without a lookup_code "A" suffix.
+//     manufacture_date + material.shelf_life_span (more than 1 day off).
 //   - relabeled: lookup_code ends in "A" — Pretzilla's convention for a pallet that was
 //     taken back and relabeled with an extended expiration date. NOT an error — flagged
-//     separately for a human to eyeball, per standing convention with Sadie/Billie Jo.
-//     Bernatello's has no equivalent convention observed live (no "A"-suffix lots found),
-//     so this bucket will naturally stay empty for that customer — not a bug.
-//
-// What this does NOT catch (confirmed with Dan, scoped out on purpose):
-//   - A misread Julian code that's internally consistent (MFG entered wrong, but EXP
-//     still auto-computes correctly off that wrong MFG date). Datex has no way to know
-//     the MFG date itself is wrong — only a human comparing against the physical
-//     case label/BOL can catch that. This tab is math-reconciliation only.
+//     separately for a human to eyeball. Bernatello's has no equivalent convention observed
+//     live, so this bucket naturally stays empty for that customer — not a bug.
 //
 // Scope: last N days by vendor lot CREATED date (default 45) — NOT all-time. Verified live
-// that scanning all historical Pretzilla lots produces ~9,400 "mismatches" alone, almost all
-// of which are legitimate: a material's shelf_life_span was changed at some point, and old
-// lots' already-computed EXP correctly reflects whatever shelf life was configured when
+// that scanning all historical Pretzilla lots produces ~9,400 EXP "mismatches" alone, almost
+// all of which are legitimate: a material's shelf_life_span was changed at some point, and
+// old lots' already-computed EXP correctly reflects whatever shelf life was configured when
 // THEY were created, not today's value. Scoping to recent lots avoids drowning real,
 // actionable anomalies in that historical noise.
 //
-// Bernatello's, added 2026-08-02: project_id 282 (Madison, BERNA1) and 320 (Wisconsin
-// Rapids, BERNA3 — same project_id already used by the WR Pick Location Lot Check tab).
-// Two real things found live before shipping:
-//   1. Madison (282) has been inactive since 2025-09-08 (last lot created then) — will
-//      show nothing at the default 45-day window, which is correct/expected, not a bug.
-//   2. Non-food/equipment SKUs (lookup_code starting "99", e.g. "991005" Pizza Oven #421)
-//      carry junk shelf_life_span values (one was 49,050 days — ~134 years), which would
-//      otherwise produce nonsense diff_days. Same exclusion already used in
-//      motherduck-wr-pick-check.cjs (lookup_code NOT ILIKE '99%'). Verified live that zero
-//      Pretzilla materials match this prefix, so applying it globally (not per-customer) is
-//      safe and doesn't accidentally exclude anything real for Pretzilla.
-// Real, recurring pattern also found in Bernatello's data (documented here, not silently
-// dropped): several "HV Tavern Style Breakfast/Supreme" lots consistently show diff_days of
-// exactly -60 across many lots — looks like the material's configured shelf_life_span (240)
-// doesn't match what's actually used for that item, a systematic config issue rather than
-// scattered entry errors. Left as a real `mismatch` — worth a follow-up with Dan on whether
-// that material's shelf_life_span needs correcting in Datex itself.
+// Bernatello's, added 2026-08-02: project_id 282 (Madison, BERNA1, inactive since
+// 2025-09-08 -- will show nothing at the default window, expected) and 320 (Wisconsin
+// Rapids, BERNA3, same project_id the WR Pick Location Lot Check tab already uses).
+// Non-food/equipment SKUs (lookup_code prefix "99", e.g. pizza ovens) carry junk
+// shelf_life_span values and are excluded globally (verified zero Pretzilla materials
+// match that prefix, so this is safe for both customers).
 //
 // createdBy: the vendor lot row's own created_sys_user -- who/what created THIS specific
 // vendor lot record. Confirmed live that the same lookup_code can have multiple distinct
 // vendor_lot_id rows over time (re-received/re-created lots sharing a code) -- this is the
 // creator of the exact row being flagged, not necessarily "the one true original creation
-// event" for that lot code across its whole history. Also confirmed live that this field is
-// sometimes a person (e.g. "mdile@csw-wi.com", "FOOTPRINT\\csw-fpservice") and sometimes
-// "SmartUp API" (automated creation, not a person) -- passed through as-is rather than
-// normalized, so the UI can distinguish human vs. system-created rows.
+// event" for that lot code across its whole history. Sometimes a person, sometimes
+// "SmartUp API" -- passed through as-is so the UI can distinguish the two.
 
 const duckdb = require('duckdb');
 
@@ -63,10 +89,14 @@ const CUSTOMERS = {
   pretzilla: {
     label: 'Pretzilla',
     projectIds: [230, 342, 28, 145, 297, 336],
+    // 5-digit YYDDD, optional trailing "A" (relabeled) stripped before decode
+    julian: { totalDigits: 5, yearDigits: 2, yearBase: 2000, allowTrailingA: true },
   },
   bernatellos: {
     label: "Bernatello's",
     projectIds: [282, 320],
+    // 4-digit YDDD, single-digit year
+    julian: { totalDigits: 4, yearDigits: 1, yearBase: 2020, allowTrailingA: false },
   },
 };
 
@@ -81,14 +111,29 @@ const PROJECT_FACILITY = {
   320: 'wr',  // Bernatello's - Wisconsin Rapids (BERNA3)
 };
 
-const PROJECT_CUSTOMER_KEY = {};
-for (const [key, cfg] of Object.entries(CUSTOMERS)) {
-  for (const pid of cfg.projectIds) PROJECT_CUSTOMER_KEY[pid] = key;
-}
-
 function getDb() {
   process.env.HOME = '/tmp';
   return new duckdb.Database(':memory:');
+}
+
+// Builds the SQL fragments for a customer's Julian lot-code format:
+// a boolean "does this lookup_code match the pattern" expression, and a
+// "decoded calendar date" expression (both operate on the raw lot_code
+// column reference passed in).
+function julianSqlFor(colExpr, fmt) {
+  const dayDigits = fmt.totalDigits - fmt.yearDigits;
+  const numericPattern = fmt.allowTrailingA
+    ? `^[0-9]{${fmt.totalDigits}}A?$`
+    : `^[0-9]{${fmt.totalDigits}}$`;
+  // Strip a trailing "A" (if allowed) before parsing year/day substrings.
+  const codeForParse = fmt.allowTrailingA
+    ? `regexp_replace(${colExpr}, 'A$', '')`
+    : colExpr;
+  const yearExpr = `CAST(SUBSTR(${codeForParse}, 1, ${fmt.yearDigits}) AS INTEGER)`;
+  const dayExpr = `CAST(SUBSTR(${codeForParse}, ${fmt.yearDigits + 1}, ${dayDigits}) AS INTEGER)`;
+  const matchExpr = `regexp_matches(${colExpr}, '${numericPattern}')`;
+  const decodedDateExpr = `(DATE '${fmt.yearBase}-01-01' + INTERVAL (${yearExpr}) YEAR + INTERVAL (${dayExpr} - 1) DAY)`;
+  return { matchExpr, decodedDateExpr };
 }
 
 exports.handler = async (event) => {
@@ -110,7 +155,9 @@ exports.handler = async (event) => {
     // ignore, use defaults
   }
 
-  const projectIds = CUSTOMERS[customerKey].projectIds;
+  const customerCfg = CUSTOMERS[customerKey];
+  const projectIds = customerCfg.projectIds;
+  const { matchExpr, decodedDateExpr } = julianSqlFor('vl.lookup_code', customerCfg.julian);
 
   const db = getDb();
   const conn = db.connect();
@@ -141,6 +188,11 @@ exports.handler = async (event) => {
         )                          AS diff_days,
         vl.created_sys_date_time  AS created_sys_date_time,
         vl.created_sys_user       AS created_by,
+        ${matchExpr}               AS julian_applicable,
+        CASE WHEN ${matchExpr} THEN ${decodedDateExpr} ELSE NULL END AS julian_decoded_date,
+        CASE WHEN ${matchExpr} THEN
+          DATE_DIFF('day', ${decodedDateExpr}, CAST(vl.manufacture_date AS DATE))
+        ELSE NULL END              AS julian_diff_days,
         CASE
           WHEN m.shelf_life_span IS NULL OR m.shelf_life_span = 0 THEN 'no_shelf_life'
           WHEN vl.lookup_code ILIKE '%A' THEN 'relabeled'
@@ -166,21 +218,33 @@ exports.handler = async (event) => {
 
     const rows = await runQuery(sql);
 
-    const lots = rows.map((r) => ({
-      lotCode: r.lot_code,
-      materialCode: r.material_code,
-      materialName: r.material_name,
-      facility: PROJECT_FACILITY[r.project_id] || null,
-      projectName: r.project_name,
-      shelfLifeSpan: r.shelf_life_span === null ? null : Number(r.shelf_life_span),
-      manufactureDate: r.manufacture_date,
-      expirationDate: r.expiration_date,
-      expectedExpiration: r.expected_expiration,
-      diffDays: r.diff_days === null ? null : Number(r.diff_days),
-      createdAt: r.created_sys_date_time,
-      createdBy: r.created_by,
-      verdict: r.verdict,
-    }));
+    const lots = rows.map((r) => {
+      const julianApplicable = !!r.julian_applicable;
+      const julianDiff = r.julian_diff_days === null || r.julian_diff_days === undefined ? null : Number(r.julian_diff_days);
+      let julianVerdict = 'not_applicable';
+      if (julianApplicable) {
+        julianVerdict = Math.abs(julianDiff) <= 1 ? 'match' : 'mismatch';
+      }
+      return {
+        lotCode: r.lot_code,
+        materialCode: r.material_code,
+        materialName: r.material_name,
+        facility: PROJECT_FACILITY[r.project_id] || null,
+        projectName: r.project_name,
+        shelfLifeSpan: r.shelf_life_span === null ? null : Number(r.shelf_life_span),
+        manufactureDate: r.manufacture_date,
+        expirationDate: r.expiration_date,
+        expectedExpiration: r.expected_expiration,
+        diffDays: r.diff_days === null ? null : Number(r.diff_days),
+        createdAt: r.created_sys_date_time,
+        createdBy: r.created_by,
+        verdict: r.verdict,
+        julianApplicable,
+        julianDecodedDate: r.julian_decoded_date || null,
+        julianDiffDays: julianDiff,
+        julianVerdict,
+      };
+    });
 
     const summary = lots.reduce(
       (acc, l) => {
@@ -190,15 +254,24 @@ exports.handler = async (event) => {
       { clean: 0, mismatch: 0, no_shelf_life: 0, relabeled: 0 }
     );
 
+    const julianSummary = lots.reduce(
+      (acc, l) => {
+        acc[l.julianVerdict] = (acc[l.julianVerdict] || 0) + 1;
+        return acc;
+      },
+      { match: 0, mismatch: 0, not_applicable: 0 }
+    );
+
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         lots,
         summary,
+        julianSummary,
         dayWindow,
         customer: customerKey,
-        customerLabel: CUSTOMERS[customerKey].label,
+        customerLabel: customerCfg.label,
         fetchedAt: new Date().toISOString(),
       }),
     };
