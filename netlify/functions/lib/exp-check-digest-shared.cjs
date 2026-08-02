@@ -33,6 +33,17 @@
 // dismissing something in the app would silently stop meaning anything
 // once the nightly Front post rolls around.
 //
+// Per-lot detail (added 2026-08-02, Dean's ask via Dan/Front): the digest
+// used to be counts only ("2 Mismatched"). Dean's actual use case needs a
+// name to check against: who created the lot, and the exact date/time
+// (Central, so it matches dock/window camera footage — see the tab's
+// fmtDateTime comment for why the raw UTC timestamp isn't usable as-is).
+// Every flagged category with a count > 0 now lists each lot underneath
+// its count block: lot code, material, created by, created at. Capped at
+// ITEMIZE_CAP lines per category with a "+N more — see the app" fallback,
+// since a real backlog (as opposed to the single-digit counts seen so
+// far) would otherwise make the Front comment unreasonably long.
+//
 // Message format confirmed with Dan (his own drafted example, matched as
 // closely as the owner-level scope allows — his example named a specific
 // project, "Bernatello's - Wisconsin Rapids", from back when this was
@@ -40,14 +51,15 @@
 // line, bare URL (Front auto-linkifies, doesn't render Markdown links —
 // same lesson learned building the FEFO and Daily Ops digests), "CSW
 // Operations Hub" label line, "As of: {date}", then one divider-bracketed
-// count block per category, aggregated across every project owned by
-// that customer, EXCLUDING dismissed lots. Julian Mismatch leads (the
-// check that actually catches a misread Julian code — see motherduck-
-// exp-check.cjs's header), then EXP Mismatch, No Shelf Life, and
-// Relabeled (only shown when > 0 — Bernatello's doesn't use that
-// convention at all). Every shown category always displays its count
-// even at 0, so "all clear" is exactly as visible as a real problem —
-// same convention as every other digest on this project.
+// count block per category (plus itemized lot lines, see above),
+// aggregated across every project owned by that customer, EXCLUDING
+// dismissed lots. Julian Mismatch leads (the check that actually catches
+// a misread Julian code — see motherduck-exp-check.cjs's header), then
+// EXP Mismatch, No Shelf Life, and Relabeled (only shown when > 0 —
+// Bernatello's doesn't use that convention at all). Every shown category
+// always displays its count even at 0, so "all clear" is exactly as
+// visible as a real problem — same convention as every other digest on
+// this project.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -65,6 +77,7 @@ const CUSTOMER_BY_DASHBOARD_TYPE = new Map(EXP_CHECK_CUSTOMERS.map((c) => [`exp_
 const DEFAULT_NOTIFY_DAYS = [1, 2, 3, 4, 5]
 const APP_URL = 'https://csw-wi.netlify.app/customers?tab=expcheck'
 const DEFAULT_DAY_WINDOW = 45
+const ITEMIZE_CAP = 20
 
 async function sbFetch(path) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -122,6 +135,29 @@ function formatHeaderDate(dateObj) {
   return `${WEEKDAYS[dateObj.getUTCDay()]} ${dateObj.getUTCMonth() + 1}/${dateObj.getUTCDate()}/${dateObj.getUTCFullYear()}`
 }
 
+// Exact created date + time, Central — mirrors fmtDateTime in
+// ExpCheckTab.jsx. Datex stores this in UTC (confirmed live), so
+// displaying it as-is would send Dean to the wrong minute of dock/window
+// camera footage.
+function formatCentralDateTime(iso) {
+  if (!iso) return 'unknown time'
+  const dt = new Date(iso)
+  if (Number.isNaN(dt.getTime())) return 'unknown time'
+  return dt.toLocaleString('en-US', {
+    timeZone: 'America/Chicago',
+    month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  })
+}
+
+// createdBy comes through as-is from Datex (domain login, email, or
+// "SmartUp API") — same stripping ExpCheckTab.jsx's fmtCreatedBy does,
+// just the FOOTPRINT\ prefix, nothing else normalized.
+function formatCreatedBy(u) {
+  if (!u) return 'unknown user'
+  return u.replace(/^FOOTPRINT\\/i, '')
+}
+
 function dismissKey(lotCode, materialCode) { return `${lotCode}|${materialCode}` }
 
 // Fetches every active (not-yet-expired) dismissal as a Set of
@@ -154,7 +190,25 @@ function summarize(lots) {
   return { summary, julianSummary }
 }
 
-function buildDigestBody(customerLabel, summary, julianSummary, dateObj) {
+// Renders one lot's detail line: lot code, material, who created it, and
+// when (Central) — this is the line Dean actually needs to go find the
+// right dock/window camera clip.
+function lotLine(l) {
+  return `  • ${l.lotCode} (${l.materialCode}) — created by ${formatCreatedBy(l.createdBy)} at ${formatCentralDateTime(l.createdAt)}`
+}
+
+function itemizedLines(lots) {
+  const shown = lots.slice(0, ITEMIZE_CAP)
+  const out = shown.map(lotLine)
+  if (lots.length > ITEMIZE_CAP) {
+    out.push(`  • +${lots.length - ITEMIZE_CAP} more — see the app for the full list`)
+  }
+  return out
+}
+
+function buildDigestBody(customerLabel, activeLots, dateObj) {
+  const { summary, julianSummary } = summarize(activeLots)
+
   const lines = []
   lines.push(`EXP Check — ${customerLabel}`)
   lines.push(APP_URL)
@@ -169,19 +223,26 @@ function buildDigestBody(customerLabel, summary, julianSummary, dateObj) {
     lines.push(divider)
   }
 
-  const julianMismatch = julianSummary?.mismatch ?? 0
-  const expMismatch = summary?.mismatch ?? 0
-  const noShelfLife = summary?.no_shelf_life ?? 0
-  const relabeled = summary?.relabeled ?? 0
+  const julianMismatchLots = activeLots.filter((l) => l.julianVerdict === 'mismatch')
+  const expMismatchLots = activeLots.filter((l) => l.verdict === 'mismatch')
+  const noShelfLifeLots = activeLots.filter((l) => l.verdict === 'no_shelf_life')
+  const relabeledLots = activeLots.filter((l) => l.verdict === 'relabeled')
 
-  block(julianMismatch, 'Julian Mismatched')
+  block(julianMismatchLots.length, 'Julian Mismatched')
+  if (julianMismatchLots.length > 0) lines.push(...itemizedLines(julianMismatchLots));
   lines.push('')
-  block(expMismatch, 'Mismatched')
+
+  block(expMismatchLots.length, 'Mismatched')
+  if (expMismatchLots.length > 0) lines.push(...itemizedLines(expMismatchLots));
   lines.push('')
-  block(noShelfLife, 'No Shelf Life')
-  if (relabeled > 0) {
+
+  block(noShelfLifeLots.length, 'No Shelf Life')
+  if (noShelfLifeLots.length > 0) lines.push(...itemizedLines(noShelfLifeLots));
+
+  if (relabeledLots.length > 0) {
     lines.push('')
-    block(relabeled, 'Relabeled — Verify Manually')
+    block(relabeledLots.length, 'Relabeled — Verify Manually')
+    lines.push(...itemizedLines(relabeledLots))
   }
 
   return lines.join('\n')
@@ -212,7 +273,7 @@ async function runForCustomer({ settingsRow, customer, dateObj, isManualTest }) 
   const { summary, julianSummary } = summarize(activeLots)
 
   const customerLabel = data?.customerLabel || customer.label
-  const body = buildDigestBody(customerLabel, summary, julianSummary, dateObj)
+  const body = buildDigestBody(customerLabel, activeLots, dateObj)
 
   const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
