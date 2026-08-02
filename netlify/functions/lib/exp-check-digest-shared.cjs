@@ -23,6 +23,16 @@
 // not an appointment-based forecast, so there's no tomorrow-lead-time
 // reason to look ahead.
 //
+// Dismissed lots excluded (added 2026-08-02, Dan's ask): motherduck-exp-
+// check.cjs has no idea a lot's been dismissed — dismissals live entirely
+// in Supabase (exp_check_dismissals), not MotherDuck. So this digest
+// fetches active dismissals itself and recomputes every count AFTER
+// filtering them out, rather than trusting the raw summary/julianSummary
+// the query function returns. A dismissed lot should be just as invisible
+// in the digest as it is in the tab's "Needs Review" view — otherwise
+// dismissing something in the app would silently stop meaning anything
+// once the nightly Front post rolls around.
+//
 // Message format confirmed with Dan (his own drafted example, matched as
 // closely as the owner-level scope allows — his example named a specific
 // project, "Bernatello's - Wisconsin Rapids", from back when this was
@@ -31,13 +41,13 @@
 // same lesson learned building the FEFO and Daily Ops digests), "CSW
 // Operations Hub" label line, "As of: {date}", then one divider-bracketed
 // count block per category, aggregated across every project owned by
-// that customer. Julian Mismatch leads (the check that actually catches
-// a misread Julian code — see motherduck-exp-check.cjs's header), then
-// EXP Mismatch, No Shelf Life, and Relabeled (only shown when > 0 —
-// Bernatello's doesn't use that convention at all). Every shown category
-// always displays its count even at 0, so "all clear" is exactly as
-// visible as a real problem — same convention as every other digest on
-// this project.
+// that customer, EXCLUDING dismissed lots. Julian Mismatch leads (the
+// check that actually catches a misread Julian code — see motherduck-
+// exp-check.cjs's header), then EXP Mismatch, No Shelf Life, and
+// Relabeled (only shown when > 0 — Bernatello's doesn't use that
+// convention at all). Every shown category always displays its count
+// even at 0, so "all clear" is exactly as visible as a real problem —
+// same convention as every other digest on this project.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -112,9 +122,41 @@ function formatHeaderDate(dateObj) {
   return `${WEEKDAYS[dateObj.getUTCDay()]} ${dateObj.getUTCMonth() + 1}/${dateObj.getUTCDate()}/${dateObj.getUTCFullYear()}`
 }
 
-function buildDigestBody(data, customer, dateObj) {
+function dismissKey(lotCode, materialCode) { return `${lotCode}|${materialCode}` }
+
+// Fetches every active (not-yet-expired) dismissal as a Set of
+// "lotCode|materialCode" keys. Best-effort: if this fails for any reason,
+// returns an empty Set (digest still sends, just without excluding
+// dismissals) rather than blocking the whole digest on a Supabase hiccup.
+async function fetchActiveDismissalKeys() {
+  try {
+    const nowIso = new Date().toISOString()
+    const rows = await sbFetch(
+      `exp_check_dismissals?dismissed_until=gt.${encodeURIComponent(nowIso)}&select=lot_code,material_code`
+    )
+    return new Set((rows || []).map((r) => dismissKey(r.lot_code, r.material_code)))
+  } catch (e) {
+    return new Set()
+  }
+}
+
+// Recomputes verdict/julianVerdict counts from a lot list, mirroring the
+// same reduce logic motherduck-exp-check.cjs uses server-side — needed
+// here because we're recounting AFTER filtering out dismissed lots, not
+// trusting the raw summary/julianSummary the query function returned.
+function summarize(lots) {
+  const summary = { clean: 0, mismatch: 0, no_shelf_life: 0, relabeled: 0 }
+  const julianSummary = { match: 0, mismatch: 0, not_applicable: 0 }
+  for (const l of lots) {
+    if (summary[l.verdict] !== undefined) summary[l.verdict] += 1
+    if (julianSummary[l.julianVerdict] !== undefined) julianSummary[l.julianVerdict] += 1
+  }
+  return { summary, julianSummary }
+}
+
+function buildDigestBody(customerLabel, summary, julianSummary, dateObj) {
   const lines = []
-  lines.push(`EXP Check — ${data?.customerLabel || customer.label}`)
+  lines.push(`EXP Check — ${customerLabel}`)
   lines.push(APP_URL)
   lines.push('CSW Operations Hub')
   lines.push(`As of: ${formatHeaderDate(dateObj)}`)
@@ -127,10 +169,10 @@ function buildDigestBody(data, customer, dateObj) {
     lines.push(divider)
   }
 
-  const julianMismatch = data?.julianSummary?.mismatch ?? 0
-  const expMismatch = data?.summary?.mismatch ?? 0
-  const noShelfLife = data?.summary?.no_shelf_life ?? 0
-  const relabeled = data?.summary?.relabeled ?? 0
+  const julianMismatch = julianSummary?.mismatch ?? 0
+  const expMismatch = summary?.mismatch ?? 0
+  const noShelfLife = summary?.no_shelf_life ?? 0
+  const relabeled = summary?.relabeled ?? 0
 
   block(julianMismatch, 'Julian Mismatched')
   lines.push('')
@@ -165,7 +207,12 @@ async function runForCustomer({ settingsRow, customer, dateObj, isManualTest }) 
     return { ok: false, reason: 'motherduck-exp-check failed', detail: data, customer: customer.label }
   }
 
-  const body = buildDigestBody(data, customer, dateObj)
+  const dismissedKeys = await fetchActiveDismissalKeys()
+  const activeLots = (data.lots || []).filter((l) => !dismissedKeys.has(dismissKey(l.lotCode, l.materialCode)))
+  const { summary, julianSummary } = summarize(activeLots)
+
+  const customerLabel = data?.customerLabel || customer.label
+  const body = buildDigestBody(customerLabel, summary, julianSummary, dateObj)
 
   const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
@@ -186,11 +233,12 @@ async function runForCustomer({ settingsRow, customer, dateObj, isManualTest }) 
   return {
     ok: true,
     date,
-    customer: customer.label,
+    customer: customerLabel,
     conversationId,
     commentId: frontJson.id,
-    julianMismatch: data?.julianSummary?.mismatch ?? 0,
-    expMismatch: data?.summary?.mismatch ?? 0,
+    julianMismatch: julianSummary.mismatch,
+    expMismatch: summary.mismatch,
+    dismissedExcluded: dismissedKeys.size,
   }
 }
 
