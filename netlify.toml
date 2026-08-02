@@ -167,6 +167,20 @@
 [functions."motherduck-takt-daily"]
   timeout = 26
 
+# Takt tab Notify digests -- added 2026-08-02, later same day. Backs 6
+# rows in prepick_notify_settings (dashboard_type='takt'): one per
+# facility plus facility='all' for a senior-leadership rollup. Content
+# date is ALWAYS the day before the send (see lib/takt-digest-shared.cjs
+# header) -- sidesteps the same-day data-lag issue on
+# gold.takt_productivity_v2_agg. Same schedule/manual-test split as every
+# other digest in this app.
+[functions."takt-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+[functions."takt-digest-test"]
+  timeout = 26
+
 # EXP Check (Pretzilla) -- added 2026-08-02. Plain read-only POST, no
 # schedule (no digest asked for this round) -- same duckdb single-query
 # pattern as the other motherduck-*.cjs functions above, just registered
