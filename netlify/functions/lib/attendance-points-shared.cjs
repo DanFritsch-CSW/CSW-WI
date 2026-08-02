@@ -8,12 +8,9 @@
 // facility's HR conversation thread. Signature lines are never filled
 // anywhere in this pipeline — a human still signs the real form.
 //
-// PDF NOTE (added 2026-08-02, second pass): Dan asked for the actual
-// uploaded Disciplinary Action Form PDF to be filled and attached. That
-// exact file is a 289KB fillable AcroForm PDF (confirmed via pypdf —
-// fields Name/Text1(Date)/Action TakenRow1(Current Point Count)/16 "Dates
-// Missed" rows/3 checkboxes for Written-Warning/Final-Warning/
-// Termination/2 blank signature fields). Embedding that exact binary
+// PDF NOTE (2026-08-02, second pass): Dan asked for the actual uploaded
+// Disciplinary Action Form PDF to be filled and attached. That exact
+// file is a 289KB fillable AcroForm PDF. Embedding that exact binary
 // asset would mean transcribing ~240KB of opaque base64 through this
 // tool interface with zero margin for error — a single dropped
 // character corrupts the PDF's internal structure silently. Rather than
@@ -21,9 +18,21 @@
 // clean PDF from scratch via pdf-lib (same library already used by
 // wr-secondary-repl-pdf.cjs) that reproduces the same fields, labels,
 // and point-schedule text as the original form, filled with real data.
-// It is not byte-identical to Dan's uploaded file — flagged here and in
-// the Notion changelog so it isn't mistaken for the original scan.
-// Signature lines are drawn as blank underscores, never filled.
+// It is not byte-identical to the original — flagged here and in the
+// Notion changelog so it isn't mistaken for the original scan.
+//
+// PDF NOTE (2026-08-02, third pass): Dan supplied a real completed
+// example (Gary Yeoman docx) showing HOW the form is actually filled out
+// in practice — layout order Date/Name/Position -> Program schedule ->
+// Disciplinary Action -> "ACTION TAKEN:" -> "Dates Missed:" TABLE (each
+// row = transaction type + date + points, not just the single triggering
+// transaction) -> Current Point Count -> 2x2 warning-tier checkbox grid
+// -> signatures on one line. Layout below now matches that example, and
+// "Dates Missed" lists every known B2E transaction for the employee
+// (type/date/points), not just the most recent one — see
+// queryEmployeeTransactions(). "Position" isn't available from any
+// B2E/Supabase source this function has access to yet, so it renders as
+// "—" — flagged as a known gap, not silently guessed.
 //
 // KNOWN LIMITATION AT BUILD TIME (documented so it isn't silently lost):
 // both b2e_slv_pointsbalance and b2e_slv_detailedpointsreport have
@@ -147,26 +156,33 @@ async function queryPointsBalance(facility) {
   }
 }
 
-// Most recent known transaction per employee — used to attribute the
-// triggering category/date on a new threshold hit. See file header:
-// only one historical load exists as of build time, so "most recent" is
-// really "only known" until the daily sync lands. TRY_STRPTIME returns
-// NULL on anything it can't parse rather than erroring the whole query.
-async function queryLatestTransactions(employeeIds) {
+// ALL known point-earning transactions per employee (type/date/points),
+// newest first — this is what populates the "Dates Missed" table on the
+// generated form, matching the real completed-example layout (each row
+// = one B2E transaction, not just the single most-recent one). Filtered
+// to points > 0 (skip any zero/negative adjustment rows). See file
+// header: only one historical load exists in MotherDuck as of build
+// time, so this is the full transaction history available today, not
+// necessarily the full rolling-6-month history once the sync is fixed.
+async function queryEmployeeTransactions(employeeIds) {
   if (!employeeIds.length) return new Map()
   const { db, conn } = openDuck()
   try {
     await run(conn, 'LOAD motherduck')
     const idList = employeeIds.join(',')
     const rows = await all(conn, `
-      SELECT employee_id, points, comment, modified,
+      SELECT employee_id, transaction_type, points, modified,
              TRY_STRPTIME(modified, '%m/%d/%Y %I:%M%p') AS modified_ts
       FROM production_db.silver.b2e_slv_detailedpointsreport
-      WHERE employee_id IN (${idList})
-      QUALIFY ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY modified_ts DESC NULLS LAST) = 1
+      WHERE employee_id IN (${idList}) AND points > 0
+      ORDER BY employee_id, modified_ts DESC NULLS LAST
     `)
     const map = new Map()
-    for (const r of rows || []) map.set(Number(r.employee_id), r)
+    for (const r of rows || []) {
+      const id = Number(r.employee_id)
+      if (!map.has(id)) map.set(id, [])
+      map.get(id).push(r)
+    }
     return map
   } finally {
     try { conn.close(); db.close() } catch (_) {}
@@ -186,12 +202,12 @@ function buildFormComment({ employeeName, facility, threshold, points, category,
     `<strong>Attendance Points — Disciplinary Action Needed</strong><br>`,
     `Facility: ${escapeHtml(facilityDisplay)} · Employee: <strong>${escapeHtml(employeeName)}</strong><br>`,
     `Current Point Count: <strong>${points}</strong> · Threshold Crossed: <strong>${threshold.points} pts → ${threshold.action}</strong><br>`,
-    `Likely Category: ${escapeHtml(catLabel)}${triggeringDate ? ` (as of ${escapeHtml(triggeringDate)})` : ''}<br>`,
+    `Most Recent Category: ${escapeHtml(catLabel)}${triggeringDate ? ` (as of ${escapeHtml(triggeringDate)})` : ''}<br>`,
   ]
   if (pdfError) {
     lines.push(`<br>PDF attachment failed to generate (${escapeHtml(pdfError)}) — pull the form manually.`)
   } else {
-    lines.push(`<br>Filled Disciplinary Action Form attached. Confirm Dates Missed against B2E, then complete Employee/Supervisor signatures — this is a system-generated notice, not a substitute for the signed paper form.`)
+    lines.push(`<br>Filled Disciplinary Action Form attached, including the full dated point history on file. Confirm against B2E, then complete Employee/Supervisor signatures — this is a system-generated notice, not a substitute for the signed paper form.`)
   }
   return lines.join('\n')
 }
@@ -227,11 +243,15 @@ async function frontPostCommentWithPdf(conversationId, body, pdfBytes, filename)
   return json
 }
 
-// Builds a filled Disciplinary Action Form PDF — see file header for why
-// this is a freshly-generated PDF (same fields/labels/point-schedule as
-// Dan's uploaded form) rather than a fill of the exact uploaded file.
-// Signature lines are drawn as blank underscores — NEVER filled.
-async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points, thresholdPoints, triggeringDate, category }) {
+// Builds a filled Disciplinary Action Form PDF. Layout matches the real
+// completed example Dan supplied (Gary Yeoman docx): Date/Name/Position
+// -> Program schedule -> Disciplinary Action -> "ACTION TAKEN:" ->
+// "Dates Missed:" table (every known transaction, not just the latest)
+// -> Current Point Count -> 2x2 warning-tier checkbox grid ->
+// signatures on one line. Signature lines are blank underscores — NEVER
+// filled. "Position" isn't available from any data source this function
+// has today, so it renders as "—".
+async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points, thresholdPoints, transactions }) {
   const PAGE_W = 612, PAGE_H = 792 // US Letter
   const MARGIN = 50
 
@@ -255,63 +275,102 @@ async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points,
     page.drawText(label, { x: x + 16, y, size: 9, font })
   }
 
-  text('CSW Warehouse/Hourly Attendance Policy', MARGIN, 16, true)
-  y -= 20
-  text('Disciplinary Action Form', MARGIN, 13, true)
-  y -= 11
+  // ── Header ──────────────────────────────────────────────
+  text('Attendance Disciplinary Action Form', MARGIN, 15, true)
+  y -= 10
   text('System-generated — pending human review and signature', MARGIN, 8, false, rgb(0.5, 0.5, 0.5))
-  y -= 24
-
-  text(`Date: ${new Date().toLocaleDateString('en-US')}`, MARGIN, 10)
-  text(`Name: ${employeeName}`, MARGIN + 260, 10, true)
-  y -= 16
-  text(`Facility: ${facilityDisplay}`, MARGIN, 10)
-  y -= 24
-
-  text('Employees are charged points per the schedule below (10-point system, rolling 6-month period):', MARGIN, 9)
-  y -= 14
-  text('+4 pts   Absence without advance notification (no-call/no-show)', MARGIN + 10, 9)
-  y -= 12
-  text('+2 pts   Unexcused absence', MARGIN + 10, 9)
-  y -= 12
-  text('+0.5 pt  Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN + 10, 9)
   y -= 20
 
-  text('Disciplinary Action:  6 pts = Written Warning   8 pts = Final Warning   10 pts = Termination', MARGIN, 9, true)
-  y -= 22
+  text(`DATE: ${new Date().toLocaleDateString('en-US')}`, MARGIN, 10, true)
+  text(`NAME: ${employeeName}`, MARGIN + 200, 10, true)
+  y -= 16
+  text(`POSITION: —`, MARGIN, 10, true)
+  text(`FACILITY: ${facilityDisplay}`, MARGIN + 200, 10, true)
+  y -= 20
+
+  // ── Program / point schedule ───────────────────────────
+  text('Program', MARGIN, 10, true)
+  y -= 13
+  text('10-point system in a rolling 6-month period. Employees will be charged points per the schedule below:', MARGIN, 9)
+  y -= 14
+  text('+4 Points   Absence without advanced notification (no-call/no-show)', MARGIN + 10, 9)
+  y -= 12
+  text('+2 Points   Unexcused absence', MARGIN + 10, 9)
+  y -= 12
+  text('+1/2 Point  Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN + 10, 9)
+  y -= 18
+
+  // ── Disciplinary Action ─────────────────────────────────
+  text('Disciplinary Action', MARGIN, 10, true)
+  y -= 13
+  text('When an employee reaches the following points, the corresponding disciplinary action may result:', MARGIN, 9)
+  y -= 13
+  text('6 Points: Written Warning      8 Points: Final Warning      10 Points: Termination', MARGIN + 10, 9, true)
+  y -= 18
+
+  text('THIS IS TO CONFIRM IN WRITING THE DISCIPLINARY ACTION FOR ATTENDANCE', MARGIN, 9, true)
+  y -= 16
   hr(y + 6)
   y -= 14
 
-  text('Dates Missed (excused or unexcused):', MARGIN, 10, true)
-  y -= 16
-  if (triggeringDate) {
-    text(`${triggeringDate} — ${category?.label || 'see B2E detailed points report'}`, MARGIN, 9)
-    y -= 14
+  // ── Action Taken / Dates Missed table ───────────────────
+  text('ACTION TAKEN:', MARGIN, 10, true)
+  y -= 15
+  text('Dates Missed:', MARGIN, 10, true)
+  y -= 14
+
+  const MAX_ROWS = 14
+  const shown = (transactions || []).slice(0, MAX_ROWS)
+  if (shown.length === 0) {
+    text('No individual transaction history available — see B2E detailed points report.', MARGIN + 10, 9, false, rgb(0.5, 0.5, 0.5))
+    y -= 13
+  } else {
+    text('Type', MARGIN + 10, 8, true, rgb(0.4, 0.4, 0.45))
+    text('Date', MARGIN + 140, 8, true, rgb(0.4, 0.4, 0.45))
+    text('Points', MARGIN + 250, 8, true, rgb(0.4, 0.4, 0.45))
+    y -= 11
+    let sum = 0
+    for (const tx of shown) {
+      const dateStr = tx.modified_ts ? String(tx.modified_ts).slice(0, 10) : (tx.modified || '—')
+      const pts = Number(tx.points)
+      sum += pts
+      text(tx.transaction_type || '—', MARGIN + 10, 9)
+      text(dateStr, MARGIN + 140, 9)
+      text(String(pts), MARGIN + 250, 9)
+      y -= 12
+    }
+    if ((transactions || []).length > MAX_ROWS) {
+      text(`+${transactions.length - MAX_ROWS} more — see B2E for full history`, MARGIN + 10, 8, false, rgb(0.5, 0.5, 0.5))
+      y -= 12
+    }
+    if (Math.abs(sum - points) > 0.01) {
+      text(`Note: sum of listed transactions (${sum}) may not exactly match Current Point Count due to the rolling 6-month decay / manual edits — B2E's balance is authoritative.`, MARGIN + 10, 7, false, rgb(0.6, 0.4, 0.1))
+      y -= 12
+    }
   }
-  text('Additional dates: confirm full history against B2E before signing (see PDF/data caveat in Front comment).', MARGIN, 8, false, rgb(0.5, 0.5, 0.5))
-  y -= 26
+  y -= 8
   hr(y + 6)
   y -= 16
 
-  text('Action Taken:', MARGIN, 10, true)
-  y -= 16
   text(`Current Point Count: ${points}`, MARGIN, 11, true)
-  y -= 20
-  checkbox('Written Warning (6 pts)', thresholdPoints === 6, MARGIN)
-  checkbox('Final Warning (8 pts)', thresholdPoints === 8, MARGIN + 230)
-  y -= 20
-  checkbox('Termination (10 pts)', thresholdPoints === 10, MARGIN)
-  y -= 40
+  y -= 22
 
-  text('This document confirms in writing the disciplinary action described above.', MARGIN, 9)
-  y -= 36
-  text('Employee Signature: ______________________________________', MARGIN, 10)
-  y -= 26
-  text('Supervisor/Ops Mgr Signature: ______________________________________', MARGIN, 10)
+  // ── Warning-tier checkbox grid (2x2, matches the real example) ─
+  checkbox('Written Warning (6 pts)', thresholdPoints === 6, MARGIN)
+  checkbox('Final Warning (8 pts)', thresholdPoints === 8, MARGIN + 260)
+  y -= 20
+  checkbox('Termination / Discharge (10 pts)', thresholdPoints === 10, MARGIN)
+  y -= 34
+
+  // ── Signatures ──────────────────────────────────────────
+  text('SIGNATURES', MARGIN, 10, true)
+  y -= 20
+  text('EMPLOYEE: ________________________', MARGIN, 10)
+  text('SUPERVISOR: ________________________', MARGIN + 260, 10)
   y -= 30
 
   text('FUTURE VIOLATIONS WILL RESULT IN DISCIPLINARY ACTION LEADING UP TO AND INCLUDING TERMINATION.', MARGIN, 8, true)
-  y -= 18
+  y -= 16
   text('Generated by CSW-WI Attendance Points automation — verify against source B2E data before filing.', MARGIN, 7, false, rgb(0.55, 0.55, 0.55))
 
   return doc.save()
@@ -335,7 +394,7 @@ async function runDigest({ isManualTest, facility }) {
   if (!balances.length) return { ok: true, newActions: [], reason: 'No active employees with a B2E balance found' }
 
   const employeeIds = balances.map(b => Number(b.employee_id))
-  const latestTx = await queryLatestTransactions(employeeIds)
+  const txByEmployee = await queryEmployeeTransactions(employeeIds)
 
   // Existing actions already recorded for these employees at this
   // facility — dedupe key is (employee_id, facility, threshold_hit), see
@@ -353,17 +412,18 @@ async function runDigest({ isManualTest, facility }) {
       const key = `${emp.employee_id}:${threshold.points}`
       if (existingSet.has(key)) continue
 
-      const tx = latestTx.get(Number(emp.employee_id))
-      const category = tx ? CATEGORY_BY_POINTS[Number(tx.points)] : null
+      const transactions = txByEmployee.get(Number(emp.employee_id)) || []
+      const latestTx = transactions[0] || null
+      const category = latestTx ? CATEGORY_BY_POINTS[Number(latestTx.points)] : null
       const employeeName = [emp.first_name, emp.last_name].filter(Boolean).join(' ')
-      const triggeringDate = tx?.modified_ts ? String(tx.modified_ts).slice(0, 10) : null
+      const triggeringDate = latestTx?.modified_ts ? String(latestTx.modified_ts).slice(0, 10) : null
       const facilityDisplay = FACILITY_DISPLAY[facility] || facility.toUpperCase()
 
       let pdfError = null
       let posted
       try {
         const pdfBytes = await buildDisciplinaryFormPdf({
-          employeeName, facilityDisplay, points, thresholdPoints: threshold.points, triggeringDate, category,
+          employeeName, facilityDisplay, points, thresholdPoints: threshold.points, transactions,
         })
         const commentBody = buildFormComment({ employeeName, facility, threshold, points, category, triggeringDate })
         posted = await frontPostCommentWithPdf(
@@ -403,7 +463,7 @@ module.exports = {
   SUPABASE_URL, SUPABASE_KEY, FRONT_TOKEN, MOTHERDUCK_TOKEN,
   FACILITY_LOCATION, FACILITY_DISPLAY, THRESHOLDS, CATEGORY_BY_POINTS,
   sbFetch, sbPost,
-  queryPointsBalance, queryLatestTransactions,
+  queryPointsBalance, queryEmployeeTransactions,
   buildDisciplinaryFormPdf,
   runDigest,
 }
