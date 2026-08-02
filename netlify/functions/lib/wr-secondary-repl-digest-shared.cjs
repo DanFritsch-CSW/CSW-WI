@@ -16,7 +16,7 @@
 // attachment via wr-secondary-repl-pdf.cjs, the PDF-failure fallback
 // path, etc).
 
-const { buildSecondaryReplPdf } = require('./wr-secondary-repl-pdf.cjs')
+const { buildSecondaryReplPdf } = require('../wr-secondary-repl-pdf.cjs')
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
