@@ -180,6 +180,33 @@ export async function fetchLiveOsdDollar(facility, quarter) {
   return res.json()
 }
 
+// Live OSD — count pull — added 2026-08-02. Two different backends
+// depending on facility, both wired behind this one function so the
+// caller doesn't need to know which:
+//   - cal/ken/mad: motherduck-osd-count.cjs — reads the already-synced
+//     SharePoint Silver tables (a separate data-platform pipeline owns
+//     that sync; this app only reads the copy).
+//   - ec: sharepoint-ec-osd-count.cjs — direct read-only Graph read of
+//     the live SharePoint file, since no Silver table exists yet for EC.
+//   - wr: not applicable — WR's template doesn't have an osd_count metric.
+// Both backends apply the same two rules (confirmed with Dan): only rows
+// where "CSW at Fault?" is true count, and the quarter is defined by
+// "Initial Email Date". This app never writes to any of these trackers.
+export async function fetchLiveOsdCount(facility, quarter) {
+  const endpoint = facility === 'ec' ? '/.netlify/functions/sharepoint-ec-osd-count' : '/.netlify/functions/motherduck-osd-count'
+  const body = facility === 'ec' ? { quarter } : { facility, quarter }
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`OSD count pull failed (${res.status}): ${text.slice(0, 200)}`)
+  }
+  return res.json()
+}
+
 // --- Attainment math ---
 // Anchor = 0% attainment. target_100 = 100% attainment. target_120 =
 // 120% attainment (extends beyond target_100, capped at 120). Direction
