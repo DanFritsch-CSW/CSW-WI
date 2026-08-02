@@ -34,6 +34,16 @@
 //   297 = Pretzilla - CSW-Madison (PRETZ1, facility mad)
 //   336 = Pretzilla - Dry - CSW-Madison (PRETD1, facility mad)
 //   342 = Pretzilla COOLER Kenosha (PRTZL5, facility ken)
+//
+// createdBy (added 2026-08-02, Dan's follow-up ask): the vendor lot row's own
+// created_sys_user -- who/what created THIS specific vendor lot record. Confirmed live
+// that the same lookup_code can have multiple distinct vendor_lot_id rows over time
+// (re-received/re-created lots sharing a code) -- this is the creator of the exact row
+// being flagged, not necessarily "the one true original creation event" for that lot
+// code across its whole history. Also confirmed live that this field is sometimes a
+// person (e.g. "mdile@csw-wi.com", "FOOTPRINT\\csw-fpservice") and sometimes
+// "SmartUp API" (automated creation, not a person) -- passed through as-is rather than
+// normalized, so the UI can distinguish human vs. system-created rows.
 
 const duckdb = require('duckdb');
 
@@ -96,6 +106,7 @@ exports.handler = async (event) => {
           vl.expiration_date
         )                          AS diff_days,
         vl.created_sys_date_time  AS created_sys_date_time,
+        vl.created_sys_user       AS created_by,
         CASE
           WHEN m.shelf_life_span IS NULL OR m.shelf_life_span = 0 THEN 'no_shelf_life'
           WHEN vl.lookup_code ILIKE '%A' THEN 'relabeled'
@@ -132,6 +143,7 @@ exports.handler = async (event) => {
       expectedExpiration: r.expected_expiration,
       diffDays: r.diff_days === null ? null : Number(r.diff_days),
       createdAt: r.created_sys_date_time,
+      createdBy: r.created_by,
       verdict: r.verdict,
     }));
 
