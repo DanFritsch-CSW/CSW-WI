@@ -157,6 +157,9 @@
 [functions."sharepoint-ec-osd-count"]
   timeout = 26
 
+[functions."motherduck-takt"]
+  timeout = 26
+
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
