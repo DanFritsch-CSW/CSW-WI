@@ -23,10 +23,22 @@
 // so a lot that's still genuinely unresolved after that window comes back
 // into view rather than disappearing for good. See expCheckDismissals.js.
 //
+// Stat cards exclude dismissed lots (added 2026-08-02, Dan's ask): the
+// cards used to show raw server counts (data.summary/data.julianSummary),
+// which included lots the person had already dismissed — a dismissed lot
+// stayed invisible in the "Needs Review" list but still inflated the
+// headline numbers, which defeats the point of dismissing something.
+// filteredCounts (below) recomputes every card's count from the same
+// dismissalMap the table already uses, so a dismissed lot disappears from
+// every count except the dedicated "Dismissed" card itself. The nightly
+// Front digest does the equivalent exclusion server-side — see
+// exp-check-digest-shared.cjs.
+//
 // Notify settings (added 2026-08-02, Dan's ask, "similar to the FEFO
-// tab"): per-project Front digest settings, split into
-// ExpCheckNotifySettings.jsx per this project's file-size-hygiene
-// convention (same reason FefoReallocationAlerts.jsx is its own file).
+// tab", then corrected to owner/customer level): per-customer Front
+// digest settings, split into ExpCheckNotifySettings.jsx per this
+// project's file-size-hygiene convention (same reason
+// FefoReallocationAlerts.jsx is its own file).
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { fetchExpCheck, EXP_CHECK_CUSTOMERS } from '../../lib/expCheck';
@@ -228,6 +240,11 @@ export default function ExpCheckTab() {
     return map;
   }, [dismissals]);
 
+  const isActivelyDismissed = useCallback((l) => {
+    const entry = dismissalMap.get(dismissKey(l.lotCode, l.materialCode));
+    return !!(entry && entry.active);
+  }, [dismissalMap]);
+
   const handleCustomerChange = useCallback((newCustomer) => {
     setCustomer(newCustomer);
     setFilter('flagged');
@@ -262,10 +279,6 @@ export default function ExpCheckTab() {
 
   const visible = useMemo(() => {
     if (!data) return [];
-    const isActivelyDismissed = (l) => {
-      const entry = dismissalMap.get(dismissKey(l.lotCode, l.materialCode));
-      return !!(entry && entry.active);
-    };
     // "Needs review" = either check flags it — a lot can be EXP-clean but
     // still have a real Julian-code/MFG mismatch, which is exactly the
     // case this whole feature exists to surface.
@@ -276,13 +289,30 @@ export default function ExpCheckTab() {
     if (filter === 'flagged') return data.lots.filter(needsReview);
     if (filter === 'julian_mismatch') return data.lots.filter((l) => l.julianVerdict === 'mismatch' && !isActivelyDismissed(l));
     return data.lots.filter((l) => l.verdict === filter && !isActivelyDismissed(l));
-  }, [data, filter, dismissalMap]);
+  }, [data, filter, isActivelyDismissed]);
 
   const activeDismissedCount = useMemo(() => {
     let n = 0;
     for (const entry of dismissalMap.values()) if (entry.active) n += 1;
     return n;
   }, [dismissalMap]);
+
+  // Stat-card counts, recomputed with dismissed lots excluded — the raw
+  // data.summary/data.julianSummary from the server has no idea a lot's
+  // been dismissed (dismissals live in Supabase, not MotherDuck), so
+  // trusting those directly would keep showing a dismissed lot in the
+  // headline count even though it's already hidden from Needs Review.
+  const filteredCounts = useMemo(() => {
+    const summary = { clean: 0, mismatch: 0, no_shelf_life: 0, relabeled: 0 };
+    const julianSummary = { match: 0, mismatch: 0, not_applicable: 0 };
+    if (!data) return { summary, julianSummary };
+    for (const l of data.lots) {
+      if (isActivelyDismissed(l)) continue;
+      if (summary[l.verdict] !== undefined) summary[l.verdict] += 1;
+      if (julianSummary[l.julianVerdict] !== undefined) julianSummary[l.julianVerdict] += 1;
+    }
+    return { summary, julianSummary };
+  }, [data, isActivelyDismissed]);
 
   const customerLabel = data?.customerLabel || EXP_CHECK_CUSTOMERS.find((c) => c.key === customer)?.label || customer;
 
@@ -353,11 +383,11 @@ export default function ExpCheckTab() {
       {data && (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', marginTop: 16 }}>
-            <StatCard label="Julian Mismatch" value={data.julianSummary.mismatch} color={JULIAN_COLOR.mismatch} />
-            <StatCard label="Clean" value={data.summary.clean} color={VERDICT_COLOR.clean} />
-            <StatCard label="EXP Mismatch" value={data.summary.mismatch} color={VERDICT_COLOR.mismatch} />
-            <StatCard label="No Shelf Life" value={data.summary.no_shelf_life} color={VERDICT_COLOR.no_shelf_life} />
-            <StatCard label="Relabeled — Verify" value={data.summary.relabeled} color={VERDICT_COLOR.relabeled} />
+            <StatCard label="Julian Mismatch" value={filteredCounts.julianSummary.mismatch} color={JULIAN_COLOR.mismatch} />
+            <StatCard label="Clean" value={filteredCounts.summary.clean} color={VERDICT_COLOR.clean} />
+            <StatCard label="EXP Mismatch" value={filteredCounts.summary.mismatch} color={VERDICT_COLOR.mismatch} />
+            <StatCard label="No Shelf Life" value={filteredCounts.summary.no_shelf_life} color={VERDICT_COLOR.no_shelf_life} />
+            <StatCard label="Relabeled — Verify" value={filteredCounts.summary.relabeled} color={VERDICT_COLOR.relabeled} />
             <StatCard label="Dismissed" value={activeDismissedCount} color="#8b8f99" />
           </div>
 
@@ -376,12 +406,13 @@ export default function ExpCheckTab() {
                 onClick={() => setFilter(key)}
                 style={{
                   background: filter === key ? 'var(--accent, #3b82f6)' : 'var(--bg2, #1a1d24)',
-                  color: '#fff',
+                  color: filter === key ? '#fff' : 'var(--text-primary, #1a1d24)',
                   border: '1px solid var(--border, #2a2e38)',
                   borderRadius: 4,
                   padding: '4px 10px',
                   cursor: 'pointer',
                   fontSize: 12,
+                  fontWeight: filter === key ? 600 : 400,
                 }}
               >
                 {label}
