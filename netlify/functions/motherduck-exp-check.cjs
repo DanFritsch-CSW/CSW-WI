@@ -82,6 +82,12 @@
 // creator of the exact row being flagged, not necessarily "the one true original creation
 // event" for that lot code across its whole history. Sometimes a person, sometimes
 // "SmartUp API" -- passed through as-is so the UI can distinguish the two.
+//
+// projectId (added 2026-08-02, for the per-project Notify digest): optionally scopes the
+// query to exactly ONE project_id instead of a whole customer's project list -- mirrors
+// FEFO's per-project settings-row pattern (one Front conversation per Datex project, not
+// one per customer). Still resolves the right customer's Julian format automatically via
+// PROJECT_TO_CUSTOMER, so the caller only needs to pass projectId, not customer+projectId.
 
 const duckdb = require('duckdb');
 
@@ -110,6 +116,22 @@ const PROJECT_FACILITY = {
   282: 'mad', // Bernatello's - CSW-Madison (BERNA1)
   320: 'wr',  // Bernatello's - Wisconsin Rapids (BERNA3)
 };
+
+const PROJECT_NAME = {
+  230: 'Pretzilla Kenosha',
+  342: 'Pretzilla COOLER Kenosha',
+  28: 'Pretzilla FROZEN Caledonia',
+  145: 'Pretzilla COOLER Caledonia',
+  297: "Pretzilla - CSW-Madison",
+  336: 'Pretzilla - Dry - CSW-Madison',
+  282: "Bernatello's - CSW-Madison",
+  320: "Bernatello's - Wisconsin Rapids",
+};
+
+const PROJECT_TO_CUSTOMER = {};
+for (const [key, cfg] of Object.entries(CUSTOMERS)) {
+  for (const pid of cfg.projectIds) PROJECT_TO_CUSTOMER[pid] = key;
+}
 
 function getDb() {
   process.env.HOME = '/tmp';
@@ -143,6 +165,7 @@ exports.handler = async (event) => {
 
   let dayWindow = 45;
   let customerKey = 'pretzilla';
+  let singleProjectId = null;
   try {
     const body = event.body ? JSON.parse(event.body) : {};
     if (body.dayWindow && Number.isFinite(Number(body.dayWindow))) {
@@ -151,12 +174,16 @@ exports.handler = async (event) => {
     if (body.customer && CUSTOMERS[body.customer]) {
       customerKey = body.customer;
     }
+    if (body.projectId && PROJECT_TO_CUSTOMER[Number(body.projectId)]) {
+      singleProjectId = Number(body.projectId);
+      customerKey = PROJECT_TO_CUSTOMER[singleProjectId];
+    }
   } catch (_) {
     // ignore, use defaults
   }
 
   const customerCfg = CUSTOMERS[customerKey];
-  const projectIds = customerCfg.projectIds;
+  const projectIds = singleProjectId ? [singleProjectId] : customerCfg.projectIds;
   const { matchExpr, decodedDateExpr } = julianSqlFor('vl.lookup_code', customerCfg.julian);
 
   const db = getDb();
@@ -230,6 +257,7 @@ exports.handler = async (event) => {
         materialCode: r.material_code,
         materialName: r.material_name,
         facility: PROJECT_FACILITY[r.project_id] || null,
+        projectId: r.project_id,
         projectName: r.project_name,
         shelfLifeSpan: r.shelf_life_span === null ? null : Number(r.shelf_life_span),
         manufactureDate: r.manufacture_date,
@@ -272,6 +300,8 @@ exports.handler = async (event) => {
         dayWindow,
         customer: customerKey,
         customerLabel: customerCfg.label,
+        projectId: singleProjectId,
+        projectName: singleProjectId ? (PROJECT_NAME[singleProjectId] || lots[0]?.projectName || null) : null,
         fetchedAt: new Date().toISOString(),
       }),
     };
