@@ -62,11 +62,11 @@ function EditableCell({ value, unit, onCommit }) {
   )
 }
 
-// Annual Target Bonus calculator — deliberately NOT persisted anywhere.
-// Added 2026-07-28 as a saved-per-facility Supabase field; changed
-// 2026-07-31 per Dean's explicit direction on the Dean<>Dan call: since
-// every facility shares the same page password, a saved target would let
-// any GM/ops manager see every other facility's bonus target just by
+// Bonus target calculator — deliberately NOT persisted anywhere. Added
+// 2026-07-28 as a saved-per-facility Supabase field; changed 2026-07-31
+// per Dean's explicit direction on the Dean<>Dan call: since every
+// facility shares the same page password, a saved target would let any
+// GM/ops manager see every other facility's bonus target just by
 // switching tabs (this came up specifically because Eau Claire's Deb is
 // getting a reduced H1 bonus for performance reasons, and Dean does not
 // want that comparison possible). Fix: nobody's target is ever written to
@@ -75,6 +75,12 @@ function EditableCell({ value, unit, onCommit }) {
 // "it always resets after you tab off" was Dean's exact ask. This is a
 // pure client-side calculator now, no fetchSettings/upsertSettings call
 // in this component at all.
+//
+// Relabeled from "Annual" to "Quarterly" Target Bonus 2026-08-02 per Dan
+// — bonuses are actually paid out quarterly, not annually, so the number
+// a person types in should already be their quarterly target, not a
+// yearly figure needing further division. Math is unchanged (target ×
+// overall attainment %) — only the label/placeholder text changed.
 function BonusCalculator({ overall }) {
   const [draft, setDraft] = useState('')
   const bonusNum = draft.trim() === '' ? null : Number(draft)
@@ -86,7 +92,7 @@ function BonusCalculator({ overall }) {
     <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
       <div>
         <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
-          Your Annual Target Bonus
+          Your Quarterly Target Bonus
         </div>
         <input
           type="text"
@@ -94,7 +100,7 @@ function BonusCalculator({ overall }) {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => setDraft('')}
-          placeholder="Type your target to see your payout"
+          placeholder="Type your quarterly target to see your payout"
           style={{
             width: 260, fontFamily: 'var(--font-mono)', fontSize: 13, padding: '6px 10px',
             borderRadius: 4, border: '1px solid var(--border-subtle)', background: 'var(--bg2, transparent)', color: 'inherit',
