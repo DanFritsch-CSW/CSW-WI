@@ -34,6 +34,16 @@
 // Front digest does the equivalent exclusion server-side — see
 // exp-check-digest-shared.cjs.
 //
+// Created At column (added 2026-08-02, Dean's ask via Dan): exact
+// created_sys_date_time, not just the date, shown in Central time so it
+// lines up with dock camera footage — Dean's use case is watching video
+// of the window/dock computer at that specific time to see who actually
+// keyed the lot. Central conversion matters here specifically because the
+// underlying timestamp is stored in UTC (confirmed live while building
+// the EXP-vs-MFG check — a lot's created_sys_date_time regularly reads a
+// few hours ahead of local wall-clock time), so displaying it as-is would
+// point Dean at the wrong minute of footage.
+//
 // Notify settings (added 2026-08-02, Dan's ask, "similar to the FEFO
 // tab", then corrected to owner/customer level): per-customer Front
 // digest settings, split into ExpCheckNotifySettings.jsx per this
@@ -89,6 +99,20 @@ function fmtDate(d) {
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return '—';
   return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
+}
+
+// Exact created date + time, converted to Central (America/Chicago) so it
+// matches dock/window camera footage timestamps rather than the raw UTC
+// value Datex stores. See file header for why this matters.
+function fmtDateTime(d) {
+  if (!d) return '—';
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return '—';
+  return dt.toLocaleString('en-US', {
+    timeZone: 'America/Chicago',
+    month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
 }
 
 // created_sys_user comes through as-is from Datex — sometimes a domain login
@@ -434,6 +458,7 @@ export default function ExpCheckTab() {
                   <th style={{ padding: '6px 8px' }}>EXP Date (system)</th>
                   <th style={{ padding: '6px 8px' }}>Expected EXP</th>
                   <th style={{ padding: '6px 8px' }}>Created By</th>
+                  <th style={{ padding: '6px 8px' }}>Created At (Central)</th>
                   <th style={{ padding: '6px 8px' }}>Verdict</th>
                   <th style={{ padding: '6px 8px' }}></th>
                 </tr>
@@ -482,6 +507,9 @@ export default function ExpCheckTab() {
                           </span>
                         )}
                       </td>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)', whiteSpace: 'nowrap' }}>
+                        {fmtDateTime(l.createdAt)}
+                      </td>
                       <td style={{ padding: '6px 8px' }}>
                         <VerdictBadge verdict={l.verdict} />
                       </td>
@@ -508,7 +536,7 @@ export default function ExpCheckTab() {
                 })}
                 {visible.length === 0 && (
                   <tr>
-                    <td colSpan={12} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
+                    <td colSpan={13} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
                       Nothing in this bucket for the selected window.
                     </td>
                   </tr>
