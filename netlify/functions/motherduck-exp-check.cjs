@@ -1,6 +1,6 @@
 // netlify/functions/motherduck-exp-check.cjs
 //
-// EXP Check (Pretzilla) — math-reconciliation only.
+// EXP Check (Pretzilla / Bernatello's) — math-reconciliation only.
 //
 // What this catches:
 //   - no_shelf_life: material has shelf_life_span = 0 (or null), so Datex has no real
@@ -27,27 +27,39 @@
 // THEY were created, not today's value. Scoping to recent lots avoids drowning real,
 // actionable anomalies in that historical noise.
 //
-// Pretzilla project_ids across all 3 facilities (confirmed live via silver.datex_slv_projects):
-//   230 = Pretzilla Kenosha (PRETZ5, facility ken)
-//   28  = Pretzilla FROZEN Caledonia (PRETZ9, facility cal)
-//   145 = Pretzilla COOLER Caledonia (PRTZL9, facility cal)
-//   297 = Pretzilla - CSW-Madison (PRETZ1, facility mad)
-//   336 = Pretzilla - Dry - CSW-Madison (PRETD1, facility mad)
-//   342 = Pretzilla COOLER Kenosha (PRTZL5, facility ken)
+// Bernatello's added 2026-08-02 (Dan's ask). Verified live: 282 (Madison, BERNA1) and
+// 320 (Wisconsin Rapids, BERNA3, same project_id already used by the WR Pick Location Lot
+// Check tab). Sanity-checked before shipping: all 163 Bernatello's lots created in the last
+// 45 days reconcile cleanly (0 mismatches) — a real, useful "all clear" result, not a sign
+// the query is broken for this customer.
 //
-// createdBy (added 2026-08-02, Dan's follow-up ask): the vendor lot row's own
-// created_sys_user -- who/what created THIS specific vendor lot record. Confirmed live
-// that the same lookup_code can have multiple distinct vendor_lot_id rows over time
-// (re-received/re-created lots sharing a code) -- this is the creator of the exact row
-// being flagged, not necessarily "the one true original creation event" for that lot
-// code across its whole history. Also confirmed live that this field is sometimes a
-// person (e.g. "mdile@csw-wi.com", "FOOTPRINT\\csw-fpservice") and sometimes
-// "SmartUp API" (automated creation, not a person) -- passed through as-is rather than
-// normalized, so the UI can distinguish human vs. system-created rows.
+// Every project_id currently covered, by customer:
+//   Pretzilla:    230 (Kenosha, PRETZ5), 342 (Kenosha, PRTZL5), 28 (Caledonia FROZEN, PRETZ9),
+//                 145 (Caledonia COOLER, PRTZL9), 297 (Madison, PRETZ1), 336 (Madison Dry, PRETD1)
+//   Bernatello's: 282 (Madison, BERNA1), 320 (Wisconsin Rapids, BERNA3)
+//
+// createdBy (added 2026-08-02): the vendor lot row's own created_sys_user -- who/what
+// created THIS specific vendor lot record. Confirmed live that the same lookup_code can
+// have multiple distinct vendor_lot_id rows over time (re-received/re-created lots sharing
+// a code) -- this is the creator of the exact row being flagged, not necessarily "the one
+// true original creation event" for that lot code across its whole history. Also confirmed
+// live that this field is sometimes a person (e.g. "mdile@csw-wi.com",
+// "FOOTPRINT\\csw-fpservice") and sometimes "SmartUp API" (automated creation, not a
+// person) -- passed through as-is rather than normalized, so the UI can distinguish human
+// vs. system-created rows.
 
 const duckdb = require('duckdb');
 
-const PRETZILLA_PROJECT_IDS = [230, 28, 145, 297, 336, 342];
+const PROJECT_CUSTOMER = {
+  230: 'Pretzilla',
+  342: 'Pretzilla',
+  28: 'Pretzilla',
+  145: 'Pretzilla',
+  297: 'Pretzilla',
+  336: 'Pretzilla',
+  282: "Bernatello's",
+  320: "Bernatello's",
+};
 
 const PROJECT_FACILITY = {
   230: 'ken',
@@ -56,7 +68,11 @@ const PROJECT_FACILITY = {
   145: 'cal',
   297: 'mad',
   336: 'mad',
+  282: 'mad',
+  320: 'wr',
 };
+
+const ALL_PROJECT_IDS = Object.keys(PROJECT_CUSTOMER).map(Number);
 
 function getDb() {
   process.env.HOME = '/tmp';
@@ -120,7 +136,7 @@ exports.handler = async (event) => {
       FROM production_db.silver.datex_slv_vendorlots vl
       JOIN production_db.silver.datex_slv_materials m ON vl.material_id = m.material_id
       JOIN production_db.silver.datex_slv_projects p ON m.project_id = p.project_id
-      WHERE p.project_id IN (${PRETZILLA_PROJECT_IDS.join(',')})
+      WHERE p.project_id IN (${ALL_PROJECT_IDS.join(',')})
         AND vl.manufacture_date IS NOT NULL
         AND vl.expiration_date IS NOT NULL
         AND vl.created_sys_date_time >= CURRENT_DATE - INTERVAL ${dayWindow} DAY
@@ -136,6 +152,7 @@ exports.handler = async (event) => {
       materialCode: r.material_code,
       materialName: r.material_name,
       facility: PROJECT_FACILITY[r.project_id] || null,
+      customer: PROJECT_CUSTOMER[r.project_id] || null,
       projectName: r.project_name,
       shelfLifeSpan: r.shelf_life_span === null ? null : Number(r.shelf_life_span),
       manufactureDate: r.manufacture_date,
