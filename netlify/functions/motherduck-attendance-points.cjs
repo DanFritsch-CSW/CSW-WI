@@ -5,10 +5,17 @@
 // Front or write attendance_points_actions — that only happens via
 // attendance-points-digest-run.cjs / attendance-points-digest-test.cjs.
 // This is purely what renders the on-screen balances table.
+//
+// Updated 2026-08-02 (PDF-layout pass): queryLatestTransactions ->
+// queryEmployeeTransactions now returns the FULL transaction list per
+// employee (not just the most recent one), since that's what the
+// generated disciplinary form's "Dates Missed" table needs. This
+// endpoint only needs the latest entry for its "Likely Last Category"
+// column, so it just reads index [0] of each employee's array.
 
 const {
   FACILITY_LOCATION, THRESHOLDS, CATEGORY_BY_POINTS,
-  sbFetch, queryPointsBalance, queryLatestTransactions,
+  sbFetch, queryPointsBalance, queryEmployeeTransactions,
 } = require('./lib/attendance-points-shared.cjs')
 
 const NO_CACHE_HEADERS = {
@@ -33,8 +40,8 @@ exports.handler = async (event) => {
   try {
     const balances = await queryPointsBalance(facility)
     const employeeIds = balances.map(b => Number(b.employee_id))
-    const [latestTx, existingRows] = await Promise.all([
-      queryLatestTransactions(employeeIds),
+    const [txByEmployee, existingRows] = await Promise.all([
+      queryEmployeeTransactions(employeeIds),
       employeeIds.length
         ? sbFetch(`attendance_points_actions?employee_id=in.(${employeeIds.join(',')})&facility=eq.${facility}&select=employee_id,threshold_hit`)
         : Promise.resolve([]),
@@ -45,8 +52,9 @@ exports.handler = async (event) => {
       const points = Number(b.points)
       const highestThreshold = [...THRESHOLDS].reverse().find(t => points >= t.points) || null
       const newCrossings = THRESHOLDS.filter(t => points >= t.points && !existingSet.has(`${b.employee_id}:${t.points}`))
-      const tx = latestTx.get(Number(b.employee_id))
-      const category = tx ? CATEGORY_BY_POINTS[Number(tx.points)] : null
+      const transactions = txByEmployee.get(Number(b.employee_id)) || []
+      const latestTx = transactions[0] || null
+      const category = latestTx ? CATEGORY_BY_POINTS[Number(latestTx.points)] : null
       return {
         employeeId: b.employee_id,
         name: [b.first_name, b.last_name].filter(Boolean).join(' '),
@@ -55,6 +63,7 @@ exports.handler = async (event) => {
         currentTier: highestThreshold?.action || null,
         newCrossings: newCrossings.map(t => t.points),
         latestCategory: category?.label || null,
+        transactionCount: transactions.length,
       }
     })
 
