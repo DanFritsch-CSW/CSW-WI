@@ -76,23 +76,29 @@ function EditableCell({ value, unit, onCommit }) {
 // pure client-side calculator now, no fetchSettings/upsertSettings call
 // in this component at all.
 //
-// Relabeled from "Annual" to "Quarterly" Target Bonus 2026-08-02 per Dan
-// — bonuses are actually paid out quarterly, not annually, so the number
-// a person types in should already be their quarterly target, not a
-// yearly figure needing further division. Math is unchanged (target ×
-// overall attainment %) — only the label/placeholder text changed.
+// Went Annual -> Quarterly -> back to Annual-with-quarterly-breakdown
+// across three requests on 2026-08-02: first Dan asked for a straight
+// Quarterly relabel (bonuses ARE paid quarterly), then flagged that the
+// number people actually think in is their ANNUAL target, and asked to
+// see the quarterly amount broken out too rather than replacing one with
+// the other. Current design: input stays labeled Annual (that's the
+// number people know off the top of their head); quarterly target is
+// derived as annual/4, and the projected payout is computed off that
+// quarterly target (not the raw annual figure) — since attainment is
+// tracked and paid per quarter, not per year.
 function BonusCalculator({ overall }) {
   const [draft, setDraft] = useState('')
-  const bonusNum = draft.trim() === '' ? null : Number(draft)
-  const projectedPayout = overall != null && bonusNum != null && !Number.isNaN(bonusNum)
-    ? (bonusNum * overall) / 100
+  const annualNum = draft.trim() === '' ? null : Number(draft)
+  const quarterlyTarget = annualNum != null && !Number.isNaN(annualNum) ? annualNum / 4 : null
+  const projectedPayout = overall != null && quarterlyTarget != null
+    ? (quarterlyTarget * overall) / 100
     : null
 
   return (
     <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
       <div>
         <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
-          Your Quarterly Target Bonus
+          Your Annual Target Bonus
         </div>
         <input
           type="text"
@@ -100,17 +106,27 @@ function BonusCalculator({ overall }) {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => setDraft('')}
-          placeholder="Type your quarterly target to see your payout"
+          placeholder="Type your annual target to see your payout"
           style={{
             width: 260, fontFamily: 'var(--font-mono)', fontSize: 13, padding: '6px 10px',
             borderRadius: 4, border: '1px solid var(--border-subtle)', background: 'var(--bg2, transparent)', color: 'inherit',
           }}
         />
       </div>
+      {quarterlyTarget != null && (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
+            Quarterly Target (Annual ÷ 4)
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: 'var(--text-primary, #fff)' }}>
+            ${quarterlyTarget.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </div>
+        </div>
+      )}
       {projectedPayout != null && (
         <div>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
-            Projected Payout (Overall × Target)
+            Projected Payout (Overall × Quarterly Target)
           </div>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: attainmentColor(overall) }}>
             ${projectedPayout.toLocaleString(undefined, { maximumFractionDigits: 0 })}
