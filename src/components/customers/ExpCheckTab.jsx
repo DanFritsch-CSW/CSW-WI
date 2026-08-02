@@ -1,10 +1,19 @@
 // src/components/customers/ExpCheckTab.jsx
 //
-// EXP Check — math-reconciliation view. Multi-customer (added 2026-08-02):
-// Pretzilla and Bernatello's, selectable via the customer dropdown. See
-// motherduck-exp-check.cjs for exactly what this does and doesn't catch,
-// and for real per-customer findings (Bernatello's non-food SKU exclusion,
-// the Madison Bernatello's inactivity, etc.).
+// EXP Check — two independent reconciliations, per customer (Pretzilla /
+// Bernatello's, selectable via the dropdown). See motherduck-exp-check.cjs
+// for the full story on both checks and per-customer findings.
+//
+// 1. Julian Check (added 2026-08-02, Dan's ask): decodes the LOT CODE
+//    ITSELF as a Julian manufacture-date and compares it to the stored
+//    manufacture_date. This is the actual "did someone misread the Julian
+//    code" check — it catches a bad MFG entry even when EXP was computed
+//    "correctly" off that same bad MFG date, which the EXP Check below
+//    cannot see (it only compares Datex's own stored fields to each
+//    other, never against the physical case label).
+// 2. EXP Check (original build): stored EXP vs. stored MFG + the
+//    material's configured shelf life. Catches missing shelf-life setup
+//    and internal math discrepancies.
 //
 // Dismiss/restore (added 2026-08-02, Dan's ask): lots ending in "A"
 // (relabeled) — or really any flagged lot — can be dismissed for a chosen
@@ -30,6 +39,18 @@ const VERDICT_COLOR = {
   no_shelf_life: '#f5a623',
   relabeled: '#5b9bd5',
   clean: '#3bb273',
+};
+
+const JULIAN_LABEL = {
+  match: 'Matches MFG',
+  mismatch: 'Julian ≠ MFG',
+  not_applicable: 'N/A',
+};
+
+const JULIAN_COLOR = {
+  match: '#3bb273',
+  mismatch: '#e5484d',
+  not_applicable: '#5c6270',
 };
 
 const FACILITY_LABEL = { ken: 'Kenosha', cal: 'Caledonia', mad: 'Madison', wr: 'Wisconsin Rapids' };
@@ -107,6 +128,27 @@ function VerdictBadge({ verdict }) {
   );
 }
 
+function JulianBadge({ verdict }) {
+  const color = JULIAN_COLOR[verdict] || '#888';
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '2px 8px',
+        borderRadius: 12,
+        fontSize: 11,
+        fontWeight: 600,
+        color: verdict === 'not_applicable' ? 'var(--text-secondary, #9aa1ac)' : '#fff',
+        background: verdict === 'not_applicable' ? 'transparent' : color,
+        border: verdict === 'not_applicable' ? '1px solid var(--border, #2a2e38)' : 'none',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {JULIAN_LABEL[verdict] || verdict}
+    </span>
+  );
+}
+
 function DismissControl({ lot, onDismiss, busy }) {
   const [days, setDays] = useState(30);
   return (
@@ -137,7 +179,7 @@ export default function ExpCheckTab() {
   const [dismissals, setDismissals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [filter, setFilter] = useState('flagged'); // 'flagged' | 'all' | 'mismatch' | 'no_shelf_life' | 'relabeled' | 'dismissed'
+  const [filter, setFilter] = useState('flagged'); // 'flagged' | 'all' | 'mismatch' | 'no_shelf_life' | 'relabeled' | 'julian_mismatch' | 'dismissed'
   const [dayWindow, setDayWindow] = useState(45);
   const [busyKey, setBusyKey] = useState(null);
 
@@ -218,10 +260,15 @@ export default function ExpCheckTab() {
       const entry = dismissalMap.get(dismissKey(l.lotCode, l.materialCode));
       return !!(entry && entry.active);
     };
+    // "Needs review" = either check flags it — a lot can be EXP-clean but
+    // still have a real Julian-code/MFG mismatch, which is exactly the
+    // case this whole feature exists to surface.
+    const needsReview = (l) => (l.verdict !== 'clean' || l.julianVerdict === 'mismatch') && !isActivelyDismissed(l);
 
     if (filter === 'dismissed') return data.lots.filter(isActivelyDismissed);
     if (filter === 'all') return data.lots;
-    if (filter === 'flagged') return data.lots.filter((l) => l.verdict !== 'clean' && !isActivelyDismissed(l));
+    if (filter === 'flagged') return data.lots.filter(needsReview);
+    if (filter === 'julian_mismatch') return data.lots.filter((l) => l.julianVerdict === 'mismatch' && !isActivelyDismissed(l));
     return data.lots.filter((l) => l.verdict === filter && !isActivelyDismissed(l));
   }, [data, filter, dismissalMap]);
 
@@ -238,13 +285,15 @@ export default function ExpCheckTab() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <h3 style={{ margin: 0, color: 'var(--text-primary, #fff)' }}>EXP Check — {customerLabel}</h3>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)', marginTop: 4, maxWidth: 640 }}>
-            Cross-references each lot's stored expiration date against manufacture date + the
-            material's configured shelf life. Catches missing shelf-life setup and math
-            discrepancies — does <strong>not</strong> catch a misread manufacture date that's
-            internally consistent (that still needs a human checking against the case
-            label/BOL). Dismiss a lot to clear it off the dashboard for a chosen period — it
-            comes back automatically once that period passes if it's still unresolved.
+          <div style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)', marginTop: 4, maxWidth: 680 }}>
+            Two checks: <strong>Julian Check</strong> decodes each lot's own lot code as a
+            Julian manufacture date and compares it to the stored MFG date — this is the one
+            that actually catches a misread Julian code. <strong>Verdict</strong>
+            cross-references the stored EXP date against MFG + the material's shelf life —
+            catches missing shelf-life setup and internal math discrepancies, but can't tell
+            if the MFG date itself was wrong (that's what Julian Check is for). Dismiss a lot
+            to clear it off the dashboard for a chosen period — it comes back automatically
+            if it's still unresolved after that.
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -296,8 +345,9 @@ export default function ExpCheckTab() {
       {data && (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+            <StatCard label="Julian Mismatch" value={data.julianSummary.mismatch} color={JULIAN_COLOR.mismatch} />
             <StatCard label="Clean" value={data.summary.clean} color={VERDICT_COLOR.clean} />
-            <StatCard label="Mismatch" value={data.summary.mismatch} color={VERDICT_COLOR.mismatch} />
+            <StatCard label="EXP Mismatch" value={data.summary.mismatch} color={VERDICT_COLOR.mismatch} />
             <StatCard label="No Shelf Life" value={data.summary.no_shelf_life} color={VERDICT_COLOR.no_shelf_life} />
             <StatCard label="Relabeled — Verify" value={data.summary.relabeled} color={VERDICT_COLOR.relabeled} />
             <StatCard label="Dismissed" value={activeDismissedCount} color="#8b8f99" />
@@ -307,7 +357,8 @@ export default function ExpCheckTab() {
             {[
               ['flagged', 'Needs Review'],
               ['all', 'All'],
-              ['mismatch', 'Mismatch'],
+              ['julian_mismatch', 'Julian Mismatch'],
+              ['mismatch', 'EXP Mismatch'],
               ['no_shelf_life', 'No Shelf Life'],
               ['relabeled', 'Relabeled'],
               ['dismissed', 'Dismissed'],
@@ -337,11 +388,12 @@ export default function ExpCheckTab() {
                   <th style={{ padding: '6px 8px' }}>Lot</th>
                   <th style={{ padding: '6px 8px' }}>Material</th>
                   <th style={{ padding: '6px 8px' }}>Facility</th>
-                  <th style={{ padding: '6px 8px' }}>Shelf Life (days)</th>
                   <th style={{ padding: '6px 8px' }}>MFG Date</th>
+                  <th style={{ padding: '6px 8px' }}>Julian Decodes To</th>
+                  <th style={{ padding: '6px 8px' }}>Julian Check</th>
+                  <th style={{ padding: '6px 8px' }}>Shelf Life (days)</th>
                   <th style={{ padding: '6px 8px' }}>EXP Date (system)</th>
                   <th style={{ padding: '6px 8px' }}>Expected EXP</th>
-                  <th style={{ padding: '6px 8px' }}>Diff (days)</th>
                   <th style={{ padding: '6px 8px' }}>Created By</th>
                   <th style={{ padding: '6px 8px' }}>Verdict</th>
                   <th style={{ padding: '6px 8px' }}></th>
@@ -361,21 +413,18 @@ export default function ExpCheckTab() {
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>
                         {FACILITY_LABEL[l.facility] || l.facility || '—'}
                       </td>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>{fmtDate(l.manufactureDate)}</td>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>
+                        {l.julianApplicable ? fmtDate(l.julianDecodedDate) : '—'}
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <JulianBadge verdict={l.julianVerdict} />
+                      </td>
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>
                         {l.shelfLifeSpan ?? '—'}
                       </td>
-                      <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>{fmtDate(l.manufactureDate)}</td>
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>{fmtDate(l.expirationDate)}</td>
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>{fmtDate(l.expectedExpiration)}</td>
-                      <td
-                        style={{
-                          padding: '6px 8px',
-                          color: l.diffDays && Math.abs(l.diffDays) > 1 ? '#e5484d' : 'var(--text-secondary, #9aa1ac)',
-                          fontWeight: l.diffDays && Math.abs(l.diffDays) > 1 ? 700 : 400,
-                        }}
-                      >
-                        {l.diffDays ?? '—'}
-                      </td>
                       <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9aa1ac)' }}>
                         {fmtCreatedBy(l.createdBy)}
                         {isSystemCreated(l.createdBy) && (
@@ -420,7 +469,7 @@ export default function ExpCheckTab() {
                 })}
                 {visible.length === 0 && (
                   <tr>
-                    <td colSpan={11} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
+                    <td colSpan={12} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
                       Nothing in this bucket for the selected window.
                     </td>
                   </tr>
