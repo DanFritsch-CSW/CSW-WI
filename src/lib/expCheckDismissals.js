@@ -1,23 +1,20 @@
 // src/lib/expCheckDismissals.js
 //
-// Dismiss/restore CRUD for the EXP Check (Pretzilla / Bernatello's) tab.
-// Self-contained Supabase client (same reasoning as managerBonus.js /
-// revisions.js) rather than growing src/lib/supabase.js further.
+// Dismiss/restore CRUD for the EXP Check tab. Self-contained Supabase
+// client, same pattern as managerBonus.js/revisions.js, rather than
+// growing the main supabase.js.
 //
-// Table: exp_check_dismissals (lot_code, material_code, dismissed_at,
-// dismissed_until [NULL = permanent], note, dismissed_by). UNIQUE on
-// (lot_code, material_code) -- dismissing an already-dismissed lot just
-// updates the existing row (new duration/note) rather than creating a
-// duplicate. All 4 CRUD RLS policies verified via pg_policies before
-// shipping.
+// Table: exp_check_dismissals (lot_code, material_code, dismissed_by,
+// dismissed_at, dismissed_until, note). UNIQUE(lot_code, material_code) --
+// re-dismissing the same lot/material just extends dismissed_until rather
+// than creating a duplicate row. All 4 CRUD RLS policies verified via
+// pg_policies before shipping.
 //
-// Added 2026-08-02 per Dan's ask: give the tab the ability to dismiss a
-// lot (e.g. the "relabeled -- verify manually" ones, once someone's
-// actually checked them) for a period of time, so the dashboard doesn't
-// stay cluttered with the same confirmed-fine lots forever. A dismissal
-// is keyed on (lot_code, material_code) -- the same identity the tab
-// already uses as its row key -- not on a verdict, so dismissing a lot
-// clears it regardless of which bucket it's currently showing under.
+// Note: this table already existed (empty) when this file was written --
+// confirmed live via pg_policies/information_schema before building
+// against it, rather than assuming the schema. Columns are `note`
+// (singular) and there's no `facility` column -- facility is derived
+// client-side from the lot data itself, not stored here.
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -25,35 +22,10 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-function dismissalKey(lotCode, materialCode) {
-  return `${lotCode}::${materialCode}`
-}
-
-// Returns a Map<"lotCode::materialCode", dismissalRow> for every dismissal
-// that's still active right now (dismissed_until is NULL, i.e. permanent,
-// OR dismissed_until is still in the future). Expired dismissals are
-// fetched too but excluded from the map -- once dismissed_until passes,
-// the lot naturally reappears in the live check without any cleanup job
-// needed.
-export async function fetchActiveDismissals() {
-  const { data, error } = await supabase
-    .from('exp_check_dismissals')
-    .select('*')
-  if (error) throw error
-  const now = Date.now()
-  const map = new Map()
-  for (const row of data || []) {
-    const stillActive = !row.dismissed_until || new Date(row.dismissed_until).getTime() > now
-    if (stillActive) {
-      map.set(dismissalKey(row.lot_code, row.material_code), row)
-    }
-  }
-  return map
-}
-
-// All dismissals (active + expired) for the "Dismissed" review tab, most
-// recently dismissed first.
-export async function fetchAllDismissals() {
+// Fetches every dismissal row, expired or not -- the tab decides what to
+// do with each based on dismissed_until vs. now (so "Dismissed" filter
+// can still show recently-expired ones for context if wanted later).
+export async function fetchDismissals() {
   const { data, error } = await supabase
     .from('exp_check_dismissals')
     .select('*')
@@ -62,27 +34,29 @@ export async function fetchAllDismissals() {
   return data
 }
 
-// durationDays: number of days from now, or null for a permanent dismissal.
-export async function dismissLot(lotCode, materialCode, durationDays, note = null) {
-  const dismissedUntil = durationDays
-    ? new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString()
-    : null
+// Dismiss (or re-dismiss/extend) a specific lot+material for `days` days.
+export async function dismissLot(lotCode, materialCode, days, dismissedBy, note) {
+  const dismissedUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
   const { error } = await supabase
     .from('exp_check_dismissals')
     .upsert(
       [{
         lot_code: lotCode,
         material_code: materialCode,
+        dismissed_by: dismissedBy || null,
         dismissed_at: new Date().toISOString(),
         dismissed_until: dismissedUntil,
-        note,
+        note: note || null,
       }],
       { onConflict: 'lot_code,material_code' }
     )
   if (error) throw error
 }
 
-export async function restoreLot(lotCode, materialCode) {
+// Restore (un-dismiss) -- deletes the row entirely rather than just
+// setting dismissed_until to the past, so a restored lot doesn't leave
+// stale history cluttering the table if it's dismissed again later.
+export async function undismissLot(lotCode, materialCode) {
   const { error } = await supabase
     .from('exp_check_dismissals')
     .delete()
@@ -90,5 +64,3 @@ export async function restoreLot(lotCode, materialCode) {
     .eq('material_code', materialCode)
   if (error) throw error
 }
-
-export { dismissalKey }
