@@ -42,6 +42,19 @@
 // the only way to guarantee an exact match to the validated Daily number
 // for any date, since the two are now doing the literal same math.
 //
+// 2026-08-03 (round 3): even the hour-by-hour replication was still
+// ~0.4h/day off from Daily (same direction, two different days — Mon
+// 8/3: 161.2 vs 161.6, Tue 8/4: 179.2 vs 179.6 — ruling out live-data
+// timing drift, which would vary in size and sign). Root cause:
+// applySettings() in laborCalc.js rounds EACH HOUR's req to 1 decimal
+// (`Math.round(perHourReq[h] * 10) / 10`) before FacilityPanel sums 24
+// of them into totalLaborReq. The first version here summed the raw,
+// unrounded per-hour values and rounded only the grand total once —
+// mathematically closer to the "true" number, but not what Daily
+// literally computes. Fixed by rounding each hour's contribution to 1
+// decimal before adding it to the running total, matching applySettings
+// exactly.
+//
 // Deliberately NOT sourced from Omni's own labor_required column — a
 // separate, less-trusted forecasting model per Dan/Dean's 2026-08-03
 // Front discussion about the scheduling app.
@@ -159,33 +172,41 @@ export async function fetchWeeklyRequiredHours(facilityId, weekDays, settings, p
         }
       }
 
+      // NOTE: each hour's req is rounded to 1 decimal HERE, before being
+      // added to totalReq — matching applySettings()'s
+      // `Math.round(perHourReq[h] * 10) / 10` exactly. Summing 24 raw
+      // (unrounded) per-hour values and rounding only the final total
+      // is mathematically "more precise" but produces a different
+      // number than what Daily's KPI actually displays, since Daily
+      // sums already-rounded per-hour req values.
       let totalReq = 0
       for (let h = 0; h < 24; h++) {
         const apptSrc = hourlyAppts[h] ?? { inb: 0, out: 0 }
         const est = estDropsByHour[h] ?? 0
         const totalAppts = (apptSrc.inb ?? 0) + est + (apptSrc.out ?? 0)
 
+        let hourReq
         if (!hasOverrides) {
-          totalReq += totalAppts * defaultHpa
-          continue
+          hourReq = totalAppts * defaultHpa
+        } else {
+          const hourMap = perProjectHourly[h] || {}
+          let overrideHours = 0
+          let overrideAppts = 0
+          for (const name of overrideNames) {
+            if (!projectHpa.has(name)) continue
+            const counts = hourMap[name]
+            const liveAppts = (counts?.inb ?? 0) + (counts?.out ?? 0)
+            const dropRaw = projectHourlyDrops?.[name]?.[h]
+            const dropCount = typeof dropRaw === 'object' ? (dropRaw?.est_drops ?? 0) : Number(dropRaw ?? 0)
+            const projectTotal = liveAppts + dropCount
+            if (projectTotal === 0) continue
+            overrideHours += projectTotal * projectHpa.get(name)
+            overrideAppts += projectTotal
+          }
+          const remainingAppts = Math.max(0, totalAppts - overrideAppts)
+          hourReq = overrideHours + remainingAppts * defaultHpa
         }
-
-        const hourMap = perProjectHourly[h] || {}
-        let overrideHours = 0
-        let overrideAppts = 0
-        for (const name of overrideNames) {
-          if (!projectHpa.has(name)) continue
-          const counts = hourMap[name]
-          const liveAppts = (counts?.inb ?? 0) + (counts?.out ?? 0)
-          const dropRaw = projectHourlyDrops?.[name]?.[h]
-          const dropCount = typeof dropRaw === 'object' ? (dropRaw?.est_drops ?? 0) : Number(dropRaw ?? 0)
-          const projectTotal = liveAppts + dropCount
-          if (projectTotal === 0) continue
-          overrideHours += projectTotal * projectHpa.get(name)
-          overrideAppts += projectTotal
-        }
-        const remainingAppts = Math.max(0, totalAppts - overrideAppts)
-        totalReq += overrideHours + remainingAppts * defaultHpa
+        totalReq += Math.round(hourReq * 10) / 10
       }
 
       return [date, Math.round(totalReq * 10) / 10]
