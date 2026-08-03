@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import ProjectList from './ProjectList.jsx'
-import { fetchWeeklyRosterHours, fetchWeeklyRequiredHours } from '../lib/weeklyLabor.js'
+import { fetchWeeklyRosterHours, fetchWeeklyRequiredHours, fetchWeeklyAdjustments } from '../lib/weeklyLabor.js'
 
 // Labor Overview sub-tab (Weekly tab), added 2026-08-03 alongside the
 // Customer Snapshot / Labor Overview sub-tab split in FacilityPanel.jsx.
@@ -30,6 +30,12 @@ import { fetchWeeklyRosterHours, fetchWeeklyRequiredHours } from '../lib/weeklyL
 // zero when the override projects' own hourly counts exceed it, which
 // only happens at the hour level and can't be reproduced by summing
 // daily totals. See weeklyLabor.js's header comment for the full story.
+//
+// Headline delta (added 2026-08-03, later): the strip now shows "Daily
+// +/- After Adj" — Daily's ACTUAL headline KPI — not the pre-adjustment
+// delta. Per KpiPills.jsx: laborAfterAdj = avail + totalAdj (manual
+// hourly_labor_adjustments); deltaAfterAdj = laborAfterAdj - req.
+// fetchWeeklyAdjustments (weeklyLabor.js) fetches totalAdj per day.
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 function formatMDD(iso) {
@@ -43,6 +49,7 @@ export default function WeeklyLaborOverview({
 }) {
   const [rosterHours, setRosterHours] = useState({})
   const [reqHoursByDay, setReqHoursByDay] = useState({})
+  const [adjByDay, setAdjByDay] = useState({})
   const [hoursLoading, setHoursLoading] = useState(true)
 
   useEffect(() => {
@@ -52,28 +59,35 @@ export default function WeeklyLaborOverview({
     Promise.all([
       fetchWeeklyRosterHours(facilityId, weekDays, settings),
       fetchWeeklyRequiredHours(facilityId, weekDays, settings, projectHpa, weeklyProjectAppts),
+      fetchWeeklyAdjustments(facilityId, weekDays),
     ])
-      .then(([avail, req]) => {
+      .then(([avail, req, adj]) => {
         if (cancelled) return
         setRosterHours(avail)
         setReqHoursByDay(req)
+        setAdjByDay(adj)
       })
-      .catch(() => { if (!cancelled) { setRosterHours({}); setReqHoursByDay({}) } })
+      .catch(() => { if (!cancelled) { setRosterHours({}); setReqHoursByDay({}); setAdjByDay({}) } })
       .finally(() => { if (!cancelled) setHoursLoading(false) })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facilityId, weekDays.join(','), settings, projectHpa])
 
+  // Daily +/- After Adj — matches KpiPills.jsx exactly:
+  //   laborAfterAdj = avail + totalAdj
+  //   deltaAfterAdj = laborAfterAdj - req
   const dayRows = weekDays.map((date, idx) => {
     const reqHours = reqHoursByDay[date]
     const availHours = rosterHours[date]
-    const delta = (availHours == null || reqHours == null) ? null : Math.round((availHours - reqHours) * 10) / 10
-    return { date, label: DAY_LABELS[idx], mdd: formatMDD(date), reqHours, availHours, delta, isToday: date === planDate }
+    const totalAdj = adjByDay[date] ?? 0
+    const availAfterAdj = availHours == null ? null : Math.round((availHours + totalAdj) * 10) / 10
+    const delta = (availAfterAdj == null || reqHours == null) ? null : Math.round((availAfterAdj - reqHours) * 10) / 10
+    return { date, label: DAY_LABELS[idx], mdd: formatMDD(date), reqHours, availHours, totalAdj, availAfterAdj, delta, isToday: date === planDate }
   })
 
   return (
     <div>
-      <div className="section-label" style={{ marginTop: 0 }}>Labor Hours Delta — Mon–Sun</div>
+      <div className="section-label" style={{ marginTop: 0 }}>Labor Daily +/- After Adj — Mon–Sun</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8, marginBottom: 8 }}>
         {dayRows.map(d => (
           <div
@@ -102,7 +116,7 @@ export default function WeeklyLaborOverview({
                   {d.delta > 0 ? '+' : ''}{d.delta}
                 </div>
                 <div style={{ fontSize: 9, color: 'var(--text-secondary)', marginTop: 2 }}>
-                  {d.availHours}h avail / {d.reqHours}h req
+                  {d.availAfterAdj}h avail{d.totalAdj !== 0 ? ` (${d.totalAdj > 0 ? '+' : ''}${d.totalAdj} adj)` : ''} / {d.reqHours}h req
                 </div>
               </>
             )}
@@ -110,7 +124,7 @@ export default function WeeklyLaborOverview({
         ))}
       </div>
       <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
-        Delta = roster hours available (break-adjusted) minus required hours (drops + inbound + outbound appointments × hours/appt, using each project's rate override where configured in Settings). Days with no roster data yet show blank — open that date in the Daily tab / Roster Board to sync it.
+        Delta = Daily +/- After Adj: (roster hours available + manual hourly adjustments) minus required hours (drops + inbound + outbound appointments × hours/appt, using each project's rate override where configured in Settings). Matches the same-named pill on the Daily tab exactly. Days with no roster data yet show blank — open that date in the Daily tab / Roster Board to sync it.
       </div>
 
       <div className="section-label">Weekly Projects</div>

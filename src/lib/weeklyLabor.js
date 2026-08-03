@@ -59,7 +59,7 @@
 // separate, less-trusted forecasting model per Dan/Dean's 2026-08-03
 // Front discussion about the scheduling app.
 
-import { fetchTodayAssignments, fetchEmployeeBreaks, fetchProjectHourlyDrops } from './supabase.js'
+import { fetchTodayAssignments, fetchEmployeeBreaks, fetchProjectHourlyDrops, fetchHourlyAdjustments } from './supabase.js'
 import { fetchB2eRoster, fetchHourlyAppointments, fetchProjectHourlyAppointments } from './omni.js'
 import { buildRosterAvailability } from './laborCalc.js'
 
@@ -216,5 +216,29 @@ export async function fetchWeeklyRequiredHours(facilityId, weekDays, settings, p
     }
   }))
 
+  return Object.fromEntries(perDay)
+}
+
+
+/**
+ * Returns { [isoDate]: totalAdj } for the given week's dates — the sum
+ * of manual hourly_labor_adjustments for that facility/date, matching
+ * Daily's `totalAdj` (used to compute "Labor After Adj" and "Daily +/-
+ * After Adj" — see KpiPills.jsx: laborAfterAdj = avail + totalAdj;
+ * deltaAfterAdj = laborAfterAdj - req). Missing/failed dates return 0
+ * (an adjustment-fetch failure shouldn't blank out the whole day's
+ * delta — it just falls back to the pre-adjustment number).
+ */
+export async function fetchWeeklyAdjustments(facilityId, weekDays) {
+  const perDay = await Promise.all(weekDays.map(async (date) => {
+    try {
+      const adj = await fetchHourlyAdjustments(facilityId, date)
+      const total = Object.values(adj).reduce((s, v) => s + Number(v || 0), 0)
+      return [date, total]
+    } catch (e) {
+      console.warn(`fetchWeeklyAdjustments ${facilityId} ${date} failed (non-fatal):`, e?.message)
+      return [date, 0]
+    }
+  }))
   return Object.fromEntries(perDay)
 }
