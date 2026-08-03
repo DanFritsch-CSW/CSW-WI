@@ -22,6 +22,7 @@ const DvrTracker         = lazy(() => import('./pages/DvrTracker.jsx'))
 const Takt               = lazy(() => import('./pages/Takt.jsx'))
 const Manager            = lazy(() => import('./pages/Manager.jsx'))
 const Hr                 = lazy(() => import('./pages/Hr.jsx'))
+const SchedulingTab      = lazy(() => import('./pages/SchedulingTab.jsx'))
 
 function PageLoading() {
   return (
@@ -109,6 +110,7 @@ export default function App() {
               <Route path="/takt"                 element={<Takt />}              />
               <Route path="/manager"              element={<ManagerPasswordGate><Manager /></ManagerPasswordGate>} />
               <Route path="/hr"                   element={<HrPasswordGate><Hr /></HrPasswordGate>} />
+              <Route path="/scheduling"            element={<SchedulingTab />}     />
             </Routes>
           </Suspense>
         </PageErrorBoundary>
