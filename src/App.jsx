@@ -23,6 +23,8 @@ const Takt               = lazy(() => import('./pages/Takt.jsx'))
 const Manager            = lazy(() => import('./pages/Manager.jsx'))
 const Hr                 = lazy(() => import('./pages/Hr.jsx'))
 const SchedulingTab      = lazy(() => import('./pages/SchedulingTab.jsx'))
+const SchedulingDashboard = lazy(() => import('./pages/scheduling/SchedulingDashboard.jsx'))
+const PluginView         = lazy(() => import('./pages/scheduling/PluginView.jsx'))
 
 function PageLoading() {
   return (
@@ -111,6 +113,8 @@ export default function App() {
               <Route path="/manager"              element={<ManagerPasswordGate><Manager /></ManagerPasswordGate>} />
               <Route path="/hr"                   element={<HrPasswordGate><Hr /></HrPasswordGate>} />
               <Route path="/scheduling"            element={<SchedulingTab />}     />
+              <Route path="/scheduling/dashboard"  element={<SchedulingDashboard />} />
+              <Route path="/scheduling/plugin"     element={<PluginView />}        />
             </Routes>
           </Suspense>
         </PageErrorBoundary>
