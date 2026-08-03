@@ -23,6 +23,10 @@
 // REST fetch against Supabase instead of @supabase/supabase-js — this repo's
 // netlify/functions folder has no Supabase SDK dependency (see
 // fefo-dismissals.cjs), so this stays consistent rather than adding one.
+//
+// getAccessToken is also exported directly (2026-08-03) so
+// scheduling-create-load-container.cjs can reuse the same cached token
+// instead of duplicating the whole Azure AD flow.
 
 const DATEX_BASE_URL = process.env.DATEX_BASE_URL || 'https://csw-footprint-api.wavelength.host'
 
@@ -285,4 +289,4 @@ async function pushToDatex(record) {
   return { success: true, datex_appointment_id: body.dock_appointment_id ?? null }
 }
 
-module.exports = { pushToDatex, missingRequiredFields, WAREHOUSE_IDS, APPOINTMENT_TYPE_IDS }
+module.exports = { pushToDatex, missingRequiredFields, getAccessToken, WAREHOUSE_IDS, APPOINTMENT_TYPE_IDS, DATEX_BASE_URL }
