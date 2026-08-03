@@ -1,6 +1,15 @@
 import { useState, useEffect } from 'react'
 import ProjectList from './ProjectList.jsx'
+import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 import { fetchWeeklyRosterHours, fetchWeeklyRequiredHours, fetchWeeklyAdjustments } from '../lib/weeklyLabor.js'
+
+// Notify (added 2026-08-03) — CAL/KEN only, per Dan's scope call (matches
+// Kay's original Cal/Ken Front thread this automates, not all 5
+// facilities). Full Mon-Sun text table, configurable time/days via the
+// same NotifySettingsPanel used by MAD/WR/EC. Backend:
+// netlify/functions/weekly-labor-digest-run.cjs (scheduled) /
+// weekly-labor-digest-test.cjs (manual) / lib/weekly-labor-digest-shared.cjs
+// (self-contained cjs port of this file's own avail/req/adj calc).
 
 // Labor Overview sub-tab (Weekly tab), added 2026-08-03 alongside the
 // Customer Snapshot / Labor Overview sub-tab split in FacilityPanel.jsx.
@@ -126,6 +135,18 @@ export default function WeeklyLaborOverview({
       <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
         Delta = Daily +/- After Adj: (roster hours available + manual hourly adjustments) minus required hours (drops + inbound + outbound appointments × hours/appt, using each project's rate override where configured in Settings). Matches the same-named pill on the Daily tab exactly. Days with no roster data yet show blank — open that date in the Daily tab / Roster Board to sync it.
       </div>
+
+      {(facilityId === 'cal' || facilityId === 'ken') && (
+        <NotifySettingsPanel
+          facility={facilityId}
+          dashboardType="weekly_labor"
+          functionName="weekly-labor-digest-test"
+          manualTestBody={{ facility: facilityId }}
+          contentDateLabel="the current week"
+          showSkipToNextValidDay={false}
+          digestDescription="Posts the Mon-Sun Daily +/- After Adj table as a text comment to Front — same numbers as the strip above."
+        />
+      )}
 
       <div className="section-label">Weekly Projects</div>
       <ProjectList

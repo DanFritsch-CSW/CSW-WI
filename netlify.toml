@@ -263,6 +263,25 @@
 [functions."attendance-points-digest-test"]
   timeout = 26
 
+# Weekly Labor Overview digest -- added 2026-08-03. CAL and KEN only
+# (dashboard_type='weekly_labor' in prepick_notify_settings, one row
+# each -- matches Kay's original Cal/Ken Front thread this automates).
+# Posts the Mon-Sun "Daily +/- After Adj" table as a text comment,
+# configurable time/days via the Weekly tab's Labor Overview sub-tab.
+# No duckdb/native-module dependency (calls the existing
+# motherduck-appointments/motherduck-b2e-roster functions + Supabase REST
+# directly), so no external_node_modules/included_files entry needed.
+[functions."weekly-labor-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# Weekly Labor Overview digest MANUAL TEST -- no schedule, so direct POST
+# works (same fix pattern as every other *-digest-test.cjs in this app --
+# see lib/weekly-labor-digest-shared.cjs). Requires {facility} in the POST
+# body ('cal' or 'ken').
+[functions."weekly-labor-digest-test"]
+  timeout = 26
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
