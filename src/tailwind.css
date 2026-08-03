@@ -1,0 +1,5 @@
+/* Tailwind entry point — scoped to the ported scheduling app components
+   (2026-08-03). preflight is disabled in tailwind.config.js so this only
+   adds utility classes; it does not reset base element styles anywhere
+   else in the app. Imported after index.css/diagnostic.css in main.jsx. */
+@tailwind utilities;
