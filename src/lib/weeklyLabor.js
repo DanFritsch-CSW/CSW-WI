@@ -10,18 +10,30 @@
 // reached it), that day comes back as `null` rather than triggering a
 // cold-cache seed here.
 //
+// Avail hours use buildRosterAvailability — the SAME function
+// FacilityPanel.jsx uses for its own Daily "Total Hrs Avail" KPI (24-hour
+// array, summed) — NOT computeBreakAdjustedTotalHours, a second
+// hand-rolled total-hours implementation in laborCalc.js that treats
+// carryover-employee hour-capping slightly differently (caught 2026-08-03
+// (later) via Dan's Daily-vs-Weekly avail mismatch report, ~0.4h/day).
+// Using the identical function Daily uses guarantees this can't drift
+// from the validated Daily number for any date, by construction.
+//
 // Required hours (the other half of the Labor Hours Delta section) are
 // deliberately NOT sourced from Omni's own labor_required column — that's
 // a separate, less-trusted forecasting model per Dan/Dean's 2026-08-03
 // Front discussion about the scheduling app. Instead, WeeklyLaborOverview
 // derives required hours from the SAME weekly appointment/drops data
-// already fetched for the Projects grid (dr + inb + out, matching the KPI
-// "Total Appointments" semantic used everywhere else in the app) x the
-// facility's hours_per_appt setting — see WeeklyLaborOverview.jsx.
+// already fetched for the Projects grid (dr + inb + out per project) x
+// EACH PROJECT'S hours_per_appt override where one exists in
+// project_labor_assumptions (same projectHpa map Daily's perHourReq uses)
+// — see WeeklyLaborOverview.jsx. A flat facility-default rate was the
+// original 2026-08-03 implementation; Dan caught it running ~10h/day low
+// on KEN, which has 6 of 8 projects overridden above the 1.5 default.
 
 import { fetchTodayAssignments, fetchEmployeeBreaks } from './supabase.js'
 import { fetchB2eRoster } from './omni.js'
-import { computeBreakAdjustedTotalHours } from './laborCalc.js'
+import { buildRosterAvailability } from './laborCalc.js'
 
 function buildEmployeesFromAssignments(facility, assignments, carryovers) {
   const emps = assignments.filter(a => !a.is_temp).map(a => ({
@@ -72,7 +84,10 @@ export async function fetchWeeklyRosterHours(facilityId, weekDays, settings) {
       if (assignments.length === 0) return [date, null]
       const carryovers = b2eRosterFull.filter(e => e.is_carryover)
       const { employees, laneMap, assignmentMap } = buildEmployeesFromAssignments(facilityId, assignments, carryovers)
-      const hours = computeBreakAdjustedTotalHours(employees, laneMap, settings, assignmentMap, null, breaksMap)
+      // Same function + same "24-hour array, then sum" approach
+      // FacilityPanel uses for its Daily Total Hrs Avail KPI.
+      const hourlyAvail = buildRosterAvailability(employees, laneMap, settings, assignmentMap, null, breaksMap)
+      const hours = Math.round(hourlyAvail.reduce((s, v) => s + v, 0) * 10) / 10
       return [date, hours]
     } catch (e) {
       console.warn(`fetchWeeklyRosterHours ${facilityId} ${date} failed (non-fatal):`, e?.message)

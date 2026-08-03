@@ -1117,6 +1117,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
               settings={settings}
               color={facility.color}
               projectFilter={projectFilter}
+              projectHpa={projectHpa}
             />
           )}
         </>

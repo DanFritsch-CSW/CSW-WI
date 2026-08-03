@@ -13,10 +13,23 @@ import { fetchWeeklyRosterHours } from '../lib/weeklyLabor.js'
 //      weeklyProjectDrops for this component but had nothing rendering
 //      them (orphaned since Customer Snapshot took over the Weekly tab).
 //
-// See src/lib/weeklyLabor.js for the roster-hours half of the delta calc.
+// See src/lib/weeklyLabor.js for the roster-hours (avail) half of the
+// delta calc — as of 2026-08-03 (later) it uses buildRosterAvailability,
+// the SAME function Daily's own Total Hrs Avail KPI uses, not a separate
+// reimplementation, so avail matches Daily exactly for any date.
+//
 // Required hours use the SAME weekly appts/drops data as the Projects
-// grid below (dr + inb + out) x hours_per_appt, NOT Omni's own
-// labor_required column — keeps the two sections internally consistent.
+// grid below (dr + inb + out per project), NOT Omni's own labor_required
+// column. As of 2026-08-03 (later), required hours also apply each
+// project's hours_per_appt OVERRIDE from project_labor_assumptions
+// (projectHpa, same map Daily's perHourReq uses) instead of a flat
+// facility default — Dan caught KEN's Weekly total running ~10h/day
+// low vs. the validated Daily total because KEN has 6 of its projects
+// overridden above the 1.5 default (Crown/Pretzilla/Richelieu/
+// Birchwood/BossBites at 1.75, Pedone Pinsa at 2.00). Since req is
+// linear in appts, summing (project_total_appts × its own rate) across
+// the day is mathematically identical to Daily's per-hour blended
+// calc integrated over 24 hours — no need to replicate hour-by-hour.
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 function formatMDD(iso) {
@@ -26,7 +39,7 @@ function formatMDD(iso) {
 
 export default function WeeklyLaborOverview({
   facilityId, planDate, weekDays, weeklyProjectAppts, weeklyProjectDrops,
-  weeklyLoading, settings, color, projectFilter,
+  weeklyLoading, settings, color, projectFilter, projectHpa,
 }) {
   const [rosterHours, setRosterHours] = useState({})
   const [hoursLoading, setHoursLoading] = useState(true)
@@ -43,18 +56,25 @@ export default function WeeklyLaborOverview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facilityId, weekDays.join(','), settings])
 
-  const hpa = settings?.hours_per_appt ?? 1.5
+  const defaultHpa = settings?.hours_per_appt ?? 1.5
 
+  // Per-project rate: use the project's hours_per_appt override if one
+  // exists in project_labor_assumptions (same projectHpa map Daily's
+  // perHourReq uses), else the facility default. Summing (appts × rate)
+  // per project across the whole day is equivalent to Daily's per-hour
+  // blended formula summed over 24 hours, since req is linear in appts.
   const dayRows = weekDays.map((date, idx) => {
     const projAppts = weeklyProjectAppts[date] || {}
     const projDrops = weeklyProjectDrops[date] || {}
     const names = new Set([...Object.keys(projAppts), ...Object.keys(projDrops)])
-    let totalAppts = 0
+    let reqHours = 0
     for (const name of names) {
       const a = projAppts[name] || {}
-      totalAppts += (a.inb ?? 0) + (a.out ?? 0) + (projDrops[name] ?? 0)
+      const projectTotal = (a.inb ?? 0) + (a.out ?? 0) + (projDrops[name] ?? 0)
+      const rate = projectHpa?.get?.(name) ?? defaultHpa
+      reqHours += projectTotal * rate
     }
-    const reqHours = Math.round(totalAppts * hpa * 10) / 10
+    reqHours = Math.round(reqHours * 10) / 10
     const availHours = rosterHours[date]
     const delta = availHours == null ? null : Math.round((availHours - reqHours) * 10) / 10
     return { date, label: DAY_LABELS[idx], mdd: formatMDD(date), reqHours, availHours, delta, isToday: date === planDate }
@@ -97,7 +117,7 @@ export default function WeeklyLaborOverview({
         ))}
       </div>
       <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
-        Delta = roster hours available (break-adjusted) minus required hours (drops + inbound + outbound appointments × hours/appt). Days with no roster data yet show blank — open that date in the Daily tab / Roster Board to sync it.
+        Delta = roster hours available (break-adjusted) minus required hours (drops + inbound + outbound appointments × hours/appt, using each project's rate override where configured in Settings). Days with no roster data yet show blank — open that date in the Daily tab / Roster Board to sync it.
       </div>
 
       <div className="section-label">Weekly Projects</div>
