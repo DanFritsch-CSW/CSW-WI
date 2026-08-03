@@ -6,6 +6,7 @@ import ProjectList from '../components/ProjectList.jsx'
 import RosterBoard from '../components/RosterBoard.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
 import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
+import WeeklyLaborOverview from '../components/WeeklyLaborOverview.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
 import JdfPutaways from '../components/JdfPutaways.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
@@ -60,6 +61,14 @@ const WR_TABS = [
 // logic in the isMad branch below.
 const MAD_TABS = [
   { id: 'ops', label: 'Daily Ops' }, { id: 'prepick', label: 'Pre-Pick Status' }, { id: 'putaways', label: 'JDF Putaways' },
+]
+// Weekly tab sub-tab row (added 2026-08-03) — sits below the global
+// Daily/Weekly toggle when in Weekly view, same pattern as the other
+// tab-row consts above. "Customer Snapshot" is the pre-existing
+// customer-facing card view; "Labor Overview" is the new labor-hours-
+// delta + reconnected weekly Projects grid.
+const WEEKLY_SUB_TABS = [
+  { id: 'customer', label: 'Customer Snapshot' }, { id: 'labor', label: 'Labor Overview' },
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
@@ -216,6 +225,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   const [sideTab, setSideTab] = useState('all')
   const [wrTab, setWrTab]     = useState('warehouse')
   const [madTab, setMadTab]   = useState('ops')
+  const [weeklySubTab, setWeeklySubTab] = useState('customer')
 
   const [picklineSnapshot,  setPicklineSnapshot]  = useState(null)
   const [picklineOverrides, setPicklineOverrides] = useState({})
@@ -1080,11 +1090,36 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
       )}
 
       {!isDaily && (
-        <CustomerSnapshot
-          facilityId={facility.id}
-          planDate={planDate}
-          color={facility.color}
-        />
+        <>
+          <div className="cal2-tab-row">
+            {WEEKLY_SUB_TABS.map(t => (
+              <button key={t.id} data-side={t.id}
+                className={`cal2-tab${weeklySubTab === t.id ? ' active' : ''}`}
+                onClick={() => setWeeklySubTab(t.id)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {weeklySubTab === 'customer' ? (
+            <CustomerSnapshot
+              facilityId={facility.id}
+              planDate={planDate}
+              color={facility.color}
+            />
+          ) : (
+            <WeeklyLaborOverview
+              facilityId={facility.id}
+              planDate={planDate}
+              weekDays={weekDays}
+              weeklyProjectAppts={weeklyProjectAppts}
+              weeklyProjectDrops={weeklyProjectDrops}
+              weeklyLoading={weeklyLoading}
+              settings={settings}
+              color={facility.color}
+              projectFilter={projectFilter}
+            />
+          )}
+        </>
       )}
     </div>
   )
