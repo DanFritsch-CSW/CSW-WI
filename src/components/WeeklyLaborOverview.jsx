@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import ProjectList from './ProjectList.jsx'
-import { fetchWeeklyRosterHours } from '../lib/weeklyLabor.js'
+import { fetchWeeklyRosterHours, fetchWeeklyRequiredHours } from '../lib/weeklyLabor.js'
 
 // Labor Overview sub-tab (Weekly tab), added 2026-08-03 alongside the
 // Customer Snapshot / Labor Overview sub-tab split in FacilityPanel.jsx.
@@ -18,18 +18,18 @@ import { fetchWeeklyRosterHours } from '../lib/weeklyLabor.js'
 // the SAME function Daily's own Total Hrs Avail KPI uses, not a separate
 // reimplementation, so avail matches Daily exactly for any date.
 //
-// Required hours use the SAME weekly appts/drops data as the Projects
-// grid below (dr + inb + out per project), NOT Omni's own labor_required
-// column. As of 2026-08-03 (later), required hours also apply each
-// project's hours_per_appt OVERRIDE from project_labor_assumptions
-// (projectHpa, same map Daily's perHourReq uses) instead of a flat
-// facility default — Dan caught KEN's Weekly total running ~10h/day
-// low vs. the validated Daily total because KEN has 6 of its projects
-// overridden above the 1.5 default (Crown/Pretzilla/Richelieu/
-// Birchwood/BossBites at 1.75, Pedone Pinsa at 2.00). Since req is
-// linear in appts, summing (project_total_appts × its own rate) across
-// the day is mathematically identical to Daily's per-hour blended
-// calc integrated over 24 hours — no need to replicate hour-by-hour.
+// Required hours: fetchWeeklyRequiredHours (src/lib/weeklyLabor.js)
+// replicates FacilityPanel's perHourReq formula HOUR BY HOUR, not a
+// day-level per-project sum. Dan caught two rounds of this: (1) a flat
+// facility-default rate ran ~10h/day low on KEN (which has 6 of 8
+// projects overridden above the 1.5 default); (2) even after switching
+// to a per-project-rate DAY-TOTAL sum (mathematically clean, but wrong),
+// KEN Mon 8/3 still showed 171.8h vs Daily's validated 161.6h — Daily's
+// real formula blends per-project rates hour-by-hour against the
+// facility-wide hourly total and clamps the non-override remainder to
+// zero when the override projects' own hourly counts exceed it, which
+// only happens at the hour level and can't be reproduced by summing
+// daily totals. See weeklyLabor.js's header comment for the full story.
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 function formatMDD(iso) {
@@ -42,41 +42,32 @@ export default function WeeklyLaborOverview({
   weeklyLoading, settings, color, projectFilter, projectHpa,
 }) {
   const [rosterHours, setRosterHours] = useState({})
+  const [reqHoursByDay, setReqHoursByDay] = useState({})
   const [hoursLoading, setHoursLoading] = useState(true)
 
   useEffect(() => {
     if (!weekDays.length || !settings) return
     let cancelled = false
     setHoursLoading(true)
-    fetchWeeklyRosterHours(facilityId, weekDays, settings)
-      .then(res => { if (!cancelled) setRosterHours(res) })
-      .catch(() => { if (!cancelled) setRosterHours({}) })
+    Promise.all([
+      fetchWeeklyRosterHours(facilityId, weekDays, settings),
+      fetchWeeklyRequiredHours(facilityId, weekDays, settings, projectHpa, weeklyProjectAppts),
+    ])
+      .then(([avail, req]) => {
+        if (cancelled) return
+        setRosterHours(avail)
+        setReqHoursByDay(req)
+      })
+      .catch(() => { if (!cancelled) { setRosterHours({}); setReqHoursByDay({}) } })
       .finally(() => { if (!cancelled) setHoursLoading(false) })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [facilityId, weekDays.join(','), settings])
+  }, [facilityId, weekDays.join(','), settings, projectHpa])
 
-  const defaultHpa = settings?.hours_per_appt ?? 1.5
-
-  // Per-project rate: use the project's hours_per_appt override if one
-  // exists in project_labor_assumptions (same projectHpa map Daily's
-  // perHourReq uses), else the facility default. Summing (appts × rate)
-  // per project across the whole day is equivalent to Daily's per-hour
-  // blended formula summed over 24 hours, since req is linear in appts.
   const dayRows = weekDays.map((date, idx) => {
-    const projAppts = weeklyProjectAppts[date] || {}
-    const projDrops = weeklyProjectDrops[date] || {}
-    const names = new Set([...Object.keys(projAppts), ...Object.keys(projDrops)])
-    let reqHours = 0
-    for (const name of names) {
-      const a = projAppts[name] || {}
-      const projectTotal = (a.inb ?? 0) + (a.out ?? 0) + (projDrops[name] ?? 0)
-      const rate = projectHpa?.get?.(name) ?? defaultHpa
-      reqHours += projectTotal * rate
-    }
-    reqHours = Math.round(reqHours * 10) / 10
+    const reqHours = reqHoursByDay[date]
     const availHours = rosterHours[date]
-    const delta = availHours == null ? null : Math.round((availHours - reqHours) * 10) / 10
+    const delta = (availHours == null || reqHours == null) ? null : Math.round((availHours - reqHours) * 10) / 10
     return { date, label: DAY_LABELS[idx], mdd: formatMDD(date), reqHours, availHours, delta, isToday: date === planDate }
   })
 
@@ -98,6 +89,8 @@ export default function WeeklyLaborOverview({
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>…</div>
             ) : d.availHours == null ? (
               <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 8 }}>No roster data</div>
+            ) : d.reqHours == null ? (
+              <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 8 }}>Req unavailable</div>
             ) : (
               <>
                 <div

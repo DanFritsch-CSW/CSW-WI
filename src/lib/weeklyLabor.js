@@ -1,38 +1,53 @@
 // Read-only weekly labor-hours helper for the Weekly tab's "Labor Overview"
-// sub-tab (added 2026-08-03). Mirrors the READ path of RosterBoard.jsx's
-// _buildState (employees/laneMap/assignmentMap construction from a date's
-// roster_assignments rows + B2E carryover rows) WITHOUT any of
+// sub-tab (added 2026-08-03). Two exports:
+//
+//   fetchWeeklyRosterHours    — avail side
+//   fetchWeeklyRequiredHours  — req side
+//
+// ── Avail ────────────────────────────────────────────────────────────
+// Mirrors the READ path of RosterBoard.jsx's _buildState (assignments +
+// B2E carryover rows → employees/laneMap/assignmentMap) WITHOUT any of
 // RosterBoard's write/seed/purge machinery — this is a passive weekly
-// summary, not a place that should be mutating roster_assignments.
+// summary, not a place that should be mutating roster_assignments. A
+// date with no roster_assignments rows yet comes back `null` rather than
+// triggering a cold-cache seed here.
 //
-// If a date has no assignments rows yet (never opened in the Daily tab /
-// Roster Board, or the nightly B2E cron/background horizon sync hasn't
-// reached it), that day comes back as `null` rather than triggering a
-// cold-cache seed here.
+// Uses buildRosterAvailability — the SAME function FacilityPanel.jsx uses
+// for its Daily "Total Hrs Avail" KPI (24-hour array, summed) — NOT
+// computeBreakAdjustedTotalHours, a second hand-rolled implementation
+// that treats carryover-employee hour-capping slightly differently
+// (caught 2026-08-03 (later) via a ~0.4h/day Daily-vs-Weekly mismatch).
 //
-// Avail hours use buildRosterAvailability — the SAME function
-// FacilityPanel.jsx uses for its own Daily "Total Hrs Avail" KPI (24-hour
-// array, summed) — NOT computeBreakAdjustedTotalHours, a second
-// hand-rolled total-hours implementation in laborCalc.js that treats
-// carryover-employee hour-capping slightly differently (caught 2026-08-03
-// (later) via Dan's Daily-vs-Weekly avail mismatch report, ~0.4h/day).
-// Using the identical function Daily uses guarantees this can't drift
-// from the validated Daily number for any date, by construction.
+// ── Required ─────────────────────────────────────────────────────────
+// 2026-08-03 (later still): Dan caught the Weekly req total (a per-
+// project daily-total × override-rate sum) still not matching Daily's
+// real number even after the avail fix and the first req fix (KEN Mon
+// 8/3: Weekly 171.8h vs Daily's validated 161.6h). Root cause: Daily's
+// actual perHourReq formula in FacilityPanel.jsx is NOT simply
+// (each project's daily total × its rate) — it blends per-project rates
+// HOUR BY HOUR against the facility-wide hourly appointment total, and
+// clamps the "non-override" remainder to zero if the override projects'
+// own per-hour counts (from a separate per-project Omni query) exceed
+// the aggregate per-hour total (from a different Omni query) at that
+// hour. That clamping is invisible at the daily-total level — it only
+// shows up hour by hour — so a day-level linear sum, however
+// mathematically tidy, cannot reproduce it.
 //
-// Required hours (the other half of the Labor Hours Delta section) are
-// deliberately NOT sourced from Omni's own labor_required column — that's
-// a separate, less-trusted forecasting model per Dan/Dean's 2026-08-03
-// Front discussion about the scheduling app. Instead, WeeklyLaborOverview
-// derives required hours from the SAME weekly appointment/drops data
-// already fetched for the Projects grid (dr + inb + out per project) x
-// EACH PROJECT'S hours_per_appt override where one exists in
-// project_labor_assumptions (same projectHpa map Daily's perHourReq uses)
-// — see WeeklyLaborOverview.jsx. A flat facility-default rate was the
-// original 2026-08-03 implementation; Dan caught it running ~10h/day low
-// on KEN, which has 6 of 8 projects overridden above the 1.5 default.
+// fetchWeeklyRequiredHours therefore replicates FacilityPanel's
+// perHourReq loop verbatim, hour by hour, using the same three sources
+// Daily uses: fetchHourlyAppointments (facility-wide per-hour appts),
+// fetchProjectHourlyDrops (per-project per-hour EST drops, Supabase),
+// and fetchProjectHourlyAppointments (per-project per-hour live appts,
+// only fetched when overrides exist — same guard Daily uses). This is
+// the only way to guarantee an exact match to the validated Daily number
+// for any date, since the two are now doing the literal same math.
+//
+// Deliberately NOT sourced from Omni's own labor_required column — a
+// separate, less-trusted forecasting model per Dan/Dean's 2026-08-03
+// Front discussion about the scheduling app.
 
-import { fetchTodayAssignments, fetchEmployeeBreaks } from './supabase.js'
-import { fetchB2eRoster } from './omni.js'
+import { fetchTodayAssignments, fetchEmployeeBreaks, fetchProjectHourlyDrops } from './supabase.js'
+import { fetchB2eRoster, fetchHourlyAppointments, fetchProjectHourlyAppointments } from './omni.js'
 import { buildRosterAvailability } from './laborCalc.js'
 
 function buildEmployeesFromAssignments(facility, assignments, carryovers) {
@@ -91,6 +106,91 @@ export async function fetchWeeklyRosterHours(facilityId, weekDays, settings) {
       return [date, hours]
     } catch (e) {
       console.warn(`fetchWeeklyRosterHours ${facilityId} ${date} failed (non-fatal):`, e?.message)
+      return [date, null]
+    }
+  }))
+
+  return Object.fromEntries(perDay)
+}
+
+
+/**
+ * Returns { [isoDate]: reqHours | null } for the given week's dates.
+ * Replicates FacilityPanel.jsx's perHourReq loop hour-by-hour so the
+ * total matches Daily's validated "Labor Req Total" KPI exactly for any
+ * date — see the header comment above for why a day-level per-project
+ * sum can't do this on its own.
+ *
+ * @param facilityId
+ * @param weekDays          array of ISO date strings
+ * @param settings          facility settings ({ hours_per_appt, ... })
+ * @param projectHpa        Map<projectName, rate> from project_labor_assumptions
+ * @param weeklyProjectAppts { [isoDate]: { [projectName]: { inb, out } } }
+ *   — same data FacilityPanel already fetched for the Weekly Projects
+ *   grid; used only to get each day's live-appt project name list
+ *   (mirrors Daily's `projects.map(p => p.name)`).
+ */
+export async function fetchWeeklyRequiredHours(facilityId, weekDays, settings, projectHpa, weeklyProjectAppts) {
+  const defaultHpa = settings?.hours_per_appt ?? 1.5
+  const hasOverrides = !!(projectHpa && projectHpa.size > 0)
+
+  const perDay = await Promise.all(weekDays.map(async (date) => {
+    try {
+      const dayProjectNames = Object.keys(weeklyProjectAppts?.[date] || {})
+      const overrideNames = hasOverrides
+        ? [...new Set([...dayProjectNames, ...projectHpa.keys()])]
+        : []
+
+      const [hourlyAppts, projectHourlyDrops, perProjectHourly] = await Promise.all([
+        fetchHourlyAppointments(facilityId, date).catch(() => ({})),
+        fetchProjectHourlyDrops(facilityId, date).catch(() => ({})),
+        hasOverrides
+          ? fetchProjectHourlyAppointments(facilityId, date, overrideNames).catch(() => ({}))
+          : Promise.resolve({}),
+      ])
+
+      // Facility-wide EST drops per hour (sum across all projects) —
+      // same as FacilityPanel's `estDrops` useMemo.
+      const estDropsByHour = {}
+      for (const hourMap of Object.values(projectHourlyDrops)) {
+        for (const [h, v] of Object.entries(hourMap)) {
+          const val = typeof v === 'object' ? (v?.est_drops ?? 0) : Number(v ?? 0)
+          estDropsByHour[h] = (estDropsByHour[h] ?? 0) + val
+        }
+      }
+
+      let totalReq = 0
+      for (let h = 0; h < 24; h++) {
+        const apptSrc = hourlyAppts[h] ?? { inb: 0, out: 0 }
+        const est = estDropsByHour[h] ?? 0
+        const totalAppts = (apptSrc.inb ?? 0) + est + (apptSrc.out ?? 0)
+
+        if (!hasOverrides) {
+          totalReq += totalAppts * defaultHpa
+          continue
+        }
+
+        const hourMap = perProjectHourly[h] || {}
+        let overrideHours = 0
+        let overrideAppts = 0
+        for (const name of overrideNames) {
+          if (!projectHpa.has(name)) continue
+          const counts = hourMap[name]
+          const liveAppts = (counts?.inb ?? 0) + (counts?.out ?? 0)
+          const dropRaw = projectHourlyDrops?.[name]?.[h]
+          const dropCount = typeof dropRaw === 'object' ? (dropRaw?.est_drops ?? 0) : Number(dropRaw ?? 0)
+          const projectTotal = liveAppts + dropCount
+          if (projectTotal === 0) continue
+          overrideHours += projectTotal * projectHpa.get(name)
+          overrideAppts += projectTotal
+        }
+        const remainingAppts = Math.max(0, totalAppts - overrideAppts)
+        totalReq += overrideHours + remainingAppts * defaultHpa
+      }
+
+      return [date, Math.round(totalReq * 10) / 10]
+    } catch (e) {
+      console.warn(`fetchWeeklyRequiredHours ${facilityId} ${date} failed (non-fatal):`, e?.message)
       return [date, null]
     }
   }))
