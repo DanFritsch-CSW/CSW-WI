@@ -16,23 +16,37 @@
 // character corrupts the PDF's internal structure silently. Rather than
 // risk shipping a corrupted or half-verified binary, this builds a
 // clean PDF from scratch via pdf-lib (same library already used by
-// wr-secondary-repl-pdf.cjs) that reproduces the same fields, labels,
-// and point-schedule text as the original form, filled with real data.
-// It is not byte-identical to the original — flagged here and in the
-// Notion changelog so it isn't mistaken for the original scan.
+// wr-secondary-repl-pdf.cjs).
 //
-// PDF NOTE (2026-08-02, third pass): Dan supplied a real completed
-// example (Gary Yeoman docx) showing HOW the form is actually filled out
-// in practice — layout order Date/Name/Position -> Program schedule ->
-// Disciplinary Action -> "ACTION TAKEN:" -> "Dates Missed:" TABLE (each
-// row = transaction type + date + points, not just the single triggering
-// transaction) -> Current Point Count -> 2x2 warning-tier checkbox grid
-// -> signatures on one line. Layout below now matches that example, and
-// "Dates Missed" lists every known B2E transaction for the employee
-// (type/date/points), not just the most recent one — see
-// queryEmployeeTransactions(). "Position" isn't available from any
-// B2E/Supabase source this function has access to yet, so it renders as
-// "—" — flagged as a known gap, not silently guessed.
+// PDF NOTE (2026-08-02, fourth pass — CURRENT LAYOUT): Dean Dioguardi
+// (via Slack, forwarded by Dan) asked the form match "our formatted
+// sheet" exactly — Dan's earlier pass (third pass, matching a completed
+// Gary Yeoman docx example) was "very much the same but still slightly
+// different." Rebuilt to follow the ACTUAL uploaded fillable AcroForm
+// (Attendance_Policy__non-union_.pdf) line-for-line instead: title
+// "Attendance Policy / Disciplinary Action Form", Date/Name line,
+// "Program: 10-point system in a rolling 6-month period." (static text
+// on the real form, not a fillable field), the exact "Employees will be
+// charged points..." intro + 3 point-value lines, "Disciplinary Action"
+// header + the exact "When an employee reaches..." line + 3 separate
+// "N Points: <Action>" lines (not combined onto one line), the exact
+// "This document is to confirm in writing the disciplinary action for
+// attendance." sentence, "Dates Missed (excused or unexcused):" (blank
+// rows on the real form — this is where the automation adds real value:
+// every known B2E transaction, dated, with points, instead of a human
+// hand-writing them in), "Action Taken" header (no colon, per the real
+// form) with the exact 2x2 grid (Current Point Count + Written Warning
+// on one row; Final Written Warning + Termination on the next — field
+// positions confirmed by inspecting the real PDF's AcroForm annotation
+// rects), "Employee Signature:" and "Supervisor or Ops Mgr Signature:"
+// each on their OWN line (not side-by-side), and the exact all-caps
+// footer sentence.
+//
+// Known, deliberate deviation from the real form (flagged to Dan/Dean,
+// not silently added): a "Facility" note appended to the Date/Name line.
+// The real form has no facility field, but this automation covers 5
+// locations and HR needs to know which one a given notice is for. Easy
+// to remove if it should match 100%.
 //
 // KNOWN LIMITATION AT BUILD TIME (documented so it isn't silently lost):
 // both b2e_slv_pointsbalance and b2e_slv_detailedpointsreport have
@@ -157,13 +171,13 @@ async function queryPointsBalance(facility) {
 }
 
 // ALL known point-earning transactions per employee (type/date/points),
-// newest first — this is what populates the "Dates Missed" table on the
-// generated form, matching the real completed-example layout (each row
-// = one B2E transaction, not just the single most-recent one). Filtered
-// to points > 0 (skip any zero/negative adjustment rows). See file
-// header: only one historical load exists in MotherDuck as of build
-// time, so this is the full transaction history available today, not
-// necessarily the full rolling-6-month history once the sync is fixed.
+// newest first — this is what populates the "Dates Missed" section on
+// the generated form (the real form leaves this section blank for a
+// human to hand-write; the automation fills it from B2E instead).
+// Filtered to points > 0 (skip any zero/negative adjustment rows). See
+// file header: only one historical load exists in MotherDuck as of
+// build time, so this is the full transaction history available today,
+// not necessarily the full rolling-6-month history once the sync lands.
 async function queryEmployeeTransactions(employeeIds) {
   if (!employeeIds.length) return new Map()
   const { db, conn } = openDuck()
@@ -243,17 +257,16 @@ async function frontPostCommentWithPdf(conversationId, body, pdfBytes, filename)
   return json
 }
 
-// Builds a filled Disciplinary Action Form PDF. Layout matches the real
-// completed example Dan supplied (Gary Yeoman docx): Date/Name/Position
-// -> Program schedule -> Disciplinary Action -> "ACTION TAKEN:" ->
-// "Dates Missed:" table (every known transaction, not just the latest)
-// -> Current Point Count -> 2x2 warning-tier checkbox grid ->
-// signatures on one line. Signature lines are blank underscores — NEVER
-// filled. "Position" isn't available from any data source this function
-// has today, so it renders as "—".
+// Builds a filled Disciplinary Action Form PDF, following the REAL
+// uploaded fillable form (Attendance_Policy__non-union_.pdf) line-for-
+// line — see file header for the full mapping. Signature lines are
+// blank underscores — NEVER filled. The one deliberate addition beyond
+// the real form is the small "Facility" note (5-location automation,
+// no facility field on the original) and the populated Dates Missed
+// table (the real form leaves this section blank for hand-writing).
 async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points, thresholdPoints, transactions }) {
   const PAGE_W = 612, PAGE_H = 792 // US Letter
-  const MARGIN = 50
+  const MARGIN = 54
 
   const doc = await PDFDocument.create()
   const font = await doc.embedFont(StandardFonts.Helvetica)
@@ -265,67 +278,64 @@ async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points,
   const text = (str, x, size, bold = false, color = rgb(0.08, 0.08, 0.1)) => {
     page.drawText(str, { x, y, size, font: bold ? fontBold : font, color })
   }
-  const hr = (yPos) => page.drawLine({
-    start: { x: MARGIN, y: yPos }, end: { x: PAGE_W - MARGIN, y: yPos },
-    thickness: 0.75, color: rgb(0.6, 0.6, 0.6),
-  })
   const checkbox = (label, checked, x) => {
     page.drawRectangle({ x, y: y - 9, width: 10, height: 10, borderColor: rgb(0.2, 0.2, 0.2), borderWidth: 1 })
     if (checked) page.drawText('X', { x: x + 1.5, y: y - 8, size: 9, font: fontBold })
     page.drawText(label, { x: x + 16, y, size: 9, font })
   }
 
-  // ── Header ──────────────────────────────────────────────
-  text('Attendance Disciplinary Action Form', MARGIN, 15, true)
-  y -= 10
-  text('System-generated — pending human review and signature', MARGIN, 8, false, rgb(0.5, 0.5, 0.5))
-  y -= 20
-
-  text(`DATE: ${new Date().toLocaleDateString('en-US')}`, MARGIN, 10, true)
-  text(`NAME: ${employeeName}`, MARGIN + 200, 10, true)
+  // ── Title (matches the real form exactly) ───────────────
+  text('Attendance Policy', MARGIN, 14, true)
   y -= 16
-  text(`POSITION: —`, MARGIN, 10, true)
-  text(`FACILITY: ${facilityDisplay}`, MARGIN + 200, 10, true)
-  y -= 20
+  text('Disciplinary Action Form', MARGIN, 13, true)
+  y -= 22
 
-  // ── Program / point schedule ───────────────────────────
-  text('Program', MARGIN, 10, true)
+  // ── Date / Name (+ Facility — the one deliberate addition) ─
+  text(`Date: ${new Date().toLocaleDateString('en-US')}`, MARGIN, 10)
+  text(`Name: ${employeeName}`, MARGIN + 190, 10)
+  text(`(Facility: ${facilityDisplay})`, MARGIN + 380, 9, false, rgb(0.45, 0.45, 0.5))
+  y -= 16
+
+  // "Program:" on the real form is static text, not a fillable field.
+  text('Program:', MARGIN, 10)
   y -= 13
-  text('10-point system in a rolling 6-month period. Employees will be charged points per the schedule below:', MARGIN, 9)
-  y -= 14
-  text('+4 Points   Absence without advanced notification (no-call/no-show)', MARGIN + 10, 9)
-  y -= 12
-  text('+2 Points   Unexcused absence', MARGIN + 10, 9)
-  y -= 12
-  text('+1/2 Point  Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN + 10, 9)
+  text('10-point system in a rolling 6-month period.', MARGIN, 10)
   y -= 18
 
-  // ── Disciplinary Action ─────────────────────────────────
-  text('Disciplinary Action', MARGIN, 10, true)
-  y -= 13
+  text('Employees will be charged points based on the schedule below:', MARGIN, 10)
+  y -= 14
+  text('+4 Points   Absence without advanced notification (no-call/no-show)', MARGIN, 9)
+  y -= 12
+  text('+2 Points   Unexcused absence', MARGIN, 9)
+  y -= 12
+  text('+1/2 Point  Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN, 9)
+  y -= 20
+
+  text('Disciplinary Action', MARGIN, 11, true)
+  y -= 14
   text('When an employee reaches the following points, the corresponding disciplinary action may result:', MARGIN, 9)
   y -= 13
-  text('6 Points: Written Warning      8 Points: Final Warning      10 Points: Termination', MARGIN + 10, 9, true)
+  text('6 Points: Written Warning', MARGIN, 9)
+  y -= 12
+  text('8 Points: Final Warning', MARGIN, 9)
+  y -= 12
+  text('10 Points: Termination', MARGIN, 9)
   y -= 18
 
-  text('THIS IS TO CONFIRM IN WRITING THE DISCIPLINARY ACTION FOR ATTENDANCE', MARGIN, 9, true)
-  y -= 16
-  hr(y + 6)
+  text('This document is to confirm in writing the disciplinary action for attendance.', MARGIN, 9)
+  y -= 20
+
+  // ── Dates Missed (blank on the real form — populated here) ─
+  text('Dates Missed (excused or unexcused):', MARGIN, 10, true)
   y -= 14
 
-  // ── Action Taken / Dates Missed table ───────────────────
-  text('ACTION TAKEN:', MARGIN, 10, true)
-  y -= 15
-  text('Dates Missed:', MARGIN, 10, true)
-  y -= 14
-
-  const MAX_ROWS = 14
+  const MAX_ROWS = 12
   const shown = (transactions || []).slice(0, MAX_ROWS)
   if (shown.length === 0) {
-    text('No individual transaction history available — see B2E detailed points report.', MARGIN + 10, 9, false, rgb(0.5, 0.5, 0.5))
+    text('No individual transaction history available — see B2E detailed points report.', MARGIN + 4, 9, false, rgb(0.5, 0.5, 0.5))
     y -= 13
   } else {
-    text('Type', MARGIN + 10, 8, true, rgb(0.4, 0.4, 0.45))
+    text('Type', MARGIN + 4, 8, true, rgb(0.4, 0.4, 0.45))
     text('Date', MARGIN + 140, 8, true, rgb(0.4, 0.4, 0.45))
     text('Points', MARGIN + 250, 8, true, rgb(0.4, 0.4, 0.45))
     y -= 11
@@ -334,40 +344,40 @@ async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points,
       const dateStr = tx.modified_ts ? String(tx.modified_ts).slice(0, 10) : (tx.modified || '—')
       const pts = Number(tx.points)
       sum += pts
-      text(tx.transaction_type || '—', MARGIN + 10, 9)
+      text(tx.transaction_type || '—', MARGIN + 4, 9)
       text(dateStr, MARGIN + 140, 9)
       text(String(pts), MARGIN + 250, 9)
       y -= 12
     }
     if ((transactions || []).length > MAX_ROWS) {
-      text(`+${transactions.length - MAX_ROWS} more — see B2E for full history`, MARGIN + 10, 8, false, rgb(0.5, 0.5, 0.5))
+      text(`+${transactions.length - MAX_ROWS} more — see B2E for full history`, MARGIN + 4, 8, false, rgb(0.5, 0.5, 0.5))
       y -= 12
     }
     if (Math.abs(sum - points) > 0.01) {
-      text(`Note: sum of listed transactions (${sum}) may not exactly match Current Point Count due to the rolling 6-month decay / manual edits — B2E's balance is authoritative.`, MARGIN + 10, 7, false, rgb(0.6, 0.4, 0.1))
+      text(`Note: listed transactions sum to ${sum}; may not exactly match Current Point Count due to the rolling`, MARGIN + 4, 7, false, rgb(0.6, 0.4, 0.1))
+      y -= 9
+      text(`6-month decay / manual edits — B2E's balance is authoritative.`, MARGIN + 4, 7, false, rgb(0.6, 0.4, 0.1))
       y -= 12
     }
   }
-  y -= 8
-  hr(y + 6)
+  y -= 10
+
+  // ── Action Taken (real form's 2x2 grid — field positions confirmed ─
+  // via the real PDF's AcroForm annotation rects)                    ─
+  text('Action Taken', MARGIN, 11, true)
   y -= 16
-
-  text(`Current Point Count: ${points}`, MARGIN, 11, true)
-  y -= 22
-
-  // ── Warning-tier checkbox grid (2x2, matches the real example) ─
-  checkbox('Written Warning (6 pts)', thresholdPoints === 6, MARGIN)
-  checkbox('Final Warning (8 pts)', thresholdPoints === 8, MARGIN + 260)
+  text(`Current Point Count: ${points}`, MARGIN, 10, true)
+  checkbox('Written Warning (6 pts)', thresholdPoints === 6, MARGIN + 250)
   y -= 20
-  checkbox('Termination / Discharge (10 pts)', thresholdPoints === 10, MARGIN)
+  checkbox('Final Written Warning (8 pts)', thresholdPoints === 8, MARGIN)
+  checkbox('Termination (10 pts)', thresholdPoints === 10, MARGIN + 250)
   y -= 34
 
-  // ── Signatures ──────────────────────────────────────────
-  text('SIGNATURES', MARGIN, 10, true)
-  y -= 20
-  text('EMPLOYEE: ________________________', MARGIN, 10)
-  text('SUPERVISOR: ________________________', MARGIN + 260, 10)
-  y -= 30
+  // ── Signatures — each on its own line, per the real form ──
+  text('Employee Signature: ______________________________________', MARGIN, 10)
+  y -= 24
+  text('Supervisor or Ops Mgr Signature: ______________________________________', MARGIN, 10)
+  y -= 26
 
   text('FUTURE VIOLATIONS WILL RESULT IN DISCIPLINARY ACTION LEADING UP TO AND INCLUDING TERMINATION.', MARGIN, 8, true)
   y -= 16
