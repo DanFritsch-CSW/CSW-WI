@@ -69,6 +69,18 @@
 // THEY were created, not today's value. Scoping to recent lots avoids drowning real,
 // actionable anomalies in that historical noise.
 //
+// On-hand filter (added 2026-08-02, Billie Jo's feedback via Front on Bernatello's WR):
+// lot 6168/material 120 showed up flagged even though it had already fully shipped out on
+// 7/13 -- confirmed live via gold.available_inventory_by_lp (SUM(available_amount) = 0
+// across every warehouse for that vendor_lot_id) that there was zero remaining inventory
+// anywhere. A shipped-out lot isn't operationally actionable (nothing left to correct/pull),
+// so it's noise. Checked live across the whole 45-day Bernatello's window: 172 lots total,
+// only 120 still had ANY on-hand inventory -- 52 fully-shipped lots (30%) were cluttering the
+// check for no reason. Now hard-filtered via an INNER JOIN against an on-hand CTE (only lots
+// with SUM(available_amount) > 0 survive); confirmed gold.available_inventory_by_lp has
+// coverage across all 5 warehouses (1/3/4/5/6), so this filter applies safely to Pretzilla
+// too, not just Bernatello's/WR.
+//
 // Bernatello's, added 2026-08-02: project_id 282 (Madison, BERNA1, inactive since
 // 2025-09-08 -- will show nothing at the default window, expected) and 320 (Wisconsin
 // Rapids, BERNA3, same project_id the WR Pick Location Lot Check tab already uses).
@@ -81,7 +93,9 @@
 // vendor_lot_id rows over time (re-received/re-created lots sharing a code) -- this is the
 // creator of the exact row being flagged, not necessarily "the one true original creation
 // event" for that lot code across its whole history. Sometimes a person, sometimes
-// "SmartUp API" -- passed through as-is so the UI can distinguish the two.
+// "SmartUp API" -- passed through as-is so the UI can distinguish the two. Confirmed live
+// (Front feedback thread, 2026-08-02) this field is accurate to Datex's own record even when
+// the named person is surprised to see it -- not a display bug on our end.
 //
 // projectId (added 2026-08-02, for the per-project Notify digest): optionally scopes the
 // query to exactly ONE project_id instead of a whole customer's project list -- mirrors
@@ -198,6 +212,12 @@ exports.handler = async (event) => {
     await runQuery(`ATTACH 'md:production_db' (READ_ONLY)`);
 
     const sql = `
+      WITH onhand AS (
+        SELECT vendor_lot_id, SUM(available_amount) AS qty
+        FROM production_db.gold.available_inventory_by_lp
+        GROUP BY vendor_lot_id
+        HAVING SUM(available_amount) > 0
+      )
       SELECT
         vl.lookup_code            AS lot_code,
         m.lookup_code             AS material_code,
@@ -215,6 +235,7 @@ exports.handler = async (event) => {
         )                          AS diff_days,
         vl.created_sys_date_time  AS created_sys_date_time,
         vl.created_sys_user       AS created_by,
+        oh.qty                     AS on_hand_qty,
         ${matchExpr}               AS julian_applicable,
         CASE WHEN ${matchExpr} THEN ${decodedDateExpr} ELSE NULL END AS julian_decoded_date,
         CASE WHEN ${matchExpr} THEN
@@ -233,6 +254,7 @@ exports.handler = async (event) => {
       FROM production_db.silver.datex_slv_vendorlots vl
       JOIN production_db.silver.datex_slv_materials m ON vl.material_id = m.material_id
       JOIN production_db.silver.datex_slv_projects p ON m.project_id = p.project_id
+      JOIN onhand oh ON vl.vendor_lot_id = oh.vendor_lot_id
       WHERE p.project_id IN (${projectIds.join(',')})
         AND m.lookup_code NOT ILIKE '99%'
         AND vl.manufacture_date IS NOT NULL
@@ -266,6 +288,7 @@ exports.handler = async (event) => {
         diffDays: r.diff_days === null ? null : Number(r.diff_days),
         createdAt: r.created_sys_date_time,
         createdBy: r.created_by,
+        onHandQty: r.on_hand_qty === null || r.on_hand_qty === undefined ? null : Number(r.on_hand_qty),
         verdict: r.verdict,
         julianApplicable,
         julianDecodedDate: r.julian_decoded_date || null,
