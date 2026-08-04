@@ -25,7 +25,7 @@
 const {
   sbFetch,
   centralTodayISO, isNotifyTimeMatch, isoWeekdayOf, mondayOfISO,
-  postDigest,
+  claimSendSlot, postDigest,
 } = require('./lib/weekly-labor-digest-shared.cjs')
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
@@ -75,8 +75,23 @@ async function runScheduledDigests() {
       continue
     }
 
+    // Atomic claim BEFORE computing/sending — see claimSendSlot's header
+    // comment in weekly-labor-digest-shared.cjs. Closes the duplicate-
+    // send race (Netlify at-least-once scheduled delivery, or a manual
+    // test click landing in the same window as the scheduled tick).
     try {
-      const result = await postDigest({ facilityId, conversationId, mondayISO, isManualTest: false })
+      const claimed = await claimSendSlot(facilityId, today)
+      if (!claimed) {
+        results.push({ facility: facilityId, ok: true, skipped: true, reason: 'Lost race — another invocation already claimed this send' })
+        continue
+      }
+    } catch (err) {
+      results.push({ facility: facilityId, ok: false, reason: `claimSendSlot failed: ${err.message}` })
+      continue
+    }
+
+    try {
+      const result = await postDigest({ facilityId, conversationId, mondayISO })
       results.push({ facility: facilityId, ...result })
     } catch (err) {
       results.push({ facility: facilityId, ok: false, reason: err.message })

@@ -44,7 +44,7 @@ async function runTest(facilityId) {
   }
 
   const mondayISO = mondayOfISO(centralTodayISO())
-  return postDigest({ facilityId, conversationId, mondayISO, isManualTest: true })
+  return postDigest({ facilityId, conversationId, mondayISO })
 }
 
 exports.handler = async function (event) {

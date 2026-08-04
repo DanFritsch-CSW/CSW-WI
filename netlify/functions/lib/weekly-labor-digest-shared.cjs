@@ -667,9 +667,57 @@ function buildDigestBody(facilityId, mondayISO, week) {
   return lines.join('\n')
 }
 
-// ── Post to Front + last_sent_date bookkeeping ──────────────────────────
+// ── Duplicate-send guard ────────────────────────────────────────
+//
+// 2026-08-04: Dan reported the digest posting the SAME message twice, at
+// the same timestamp, in the same Front thread — for both CAL and KEN.
+// Root cause: the original postDigest() wrote last_sent_date AFTER
+// successfully posting to Front (same order every other digest in this
+// app uses — dailyops, wr-cases, takt, etc. all check-then-post-then-
+// mark). That leaves a race window: if two invocations run close enough
+// together (Netlify's scheduled functions are "at least once" delivery,
+// so the same cron tick can occasionally fire twice — or someone clicks
+// "Send test digest now" in the same 15-minute window the schedule was
+// also configured to fire), BOTH can read last_sent_date as "not sent
+// yet" before either has written it back, and both post.
+//
+// Fix: claimSendSlot() does the last_sent_date write FIRST, atomically,
+// as a conditional PATCH scoped to rows where last_sent_date isn't
+// already today (Supabase/PostgREST's `Prefer: return=representation`
+// lets us see whether OUR request was the one that matched and updated
+// the row). If a concurrent invocation already claimed the slot, this
+// PATCH matches zero rows and we skip without computing or sending
+// anything. Tradeoff: if the Front POST fails AFTER a successful claim,
+// last_sent_date is already set for today, so the scheduled path won't
+// auto-retry — "Send test digest now" (which never checks last_sent_date)
+// is the manual fallback for that rare case, same as it already is for
+// every other digest in this app.
+//
+// Only the SCHEDULED path (weekly-labor-digest-run.cjs) claims a slot.
+// The manual test path (weekly-labor-digest-test.cjs) intentionally
+// ignores last_sent_date entirely and always sends on click — that's
+// its whole point, not a bug.
 
-async function postDigest({ facilityId, conversationId, mondayISO, isManualTest }) {
+async function claimSendSlot(facilityId, today) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.weekly_labor&or=(last_sent_date.is.null,last_sent_date.neq.${today})`,
+    {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json', Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ last_sent_date: today }),
+    }
+  )
+  if (!res.ok) { const t = await res.text(); throw new Error(t) }
+  const rows = await res.json()
+  return rows.length > 0
+}
+
+// ── Post to Front ──────────────────────────────────────────────
+
+async function postDigest({ facilityId, conversationId, mondayISO }) {
   const week = await computeWeek(facilityId, mondayISO)
   const body = buildDigestBody(facilityId, mondayISO, week)
 
@@ -683,10 +731,6 @@ async function postDigest({ facilityId, conversationId, mondayISO, isManualTest 
   try { frontJson = JSON.parse(frontText) } catch { frontJson = { raw: frontText } }
   if (!frontRes.ok) return { ok: false, reason: 'Front API error posting comment', detail: frontJson }
 
-  if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.weekly_labor`, { last_sent_date: centralTodayISO() })
-  }
-
   return { ok: true, date: mondayISO, conversationId, commentId: frontJson.id }
 }
 
@@ -695,5 +739,5 @@ module.exports = {
   FACILITIES, FACILITY_LABELS,
   sbFetch, sbPatch,
   centralNowParts, centralTodayISO, isNotifyTimeMatch, isoWeekdayOf, mondayOfISO,
-  computeWeek, buildDigestBody, postDigest,
+  computeWeek, buildDigestBody, claimSendSlot, postDigest,
 }
