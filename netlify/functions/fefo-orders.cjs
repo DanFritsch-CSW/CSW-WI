@@ -122,6 +122,32 @@
 //       licenseplatecontents + licenseplates with archived=false + qty>0.
 //       For Birchwood: 1,970 rows. 20× reduction.
 // Verified against MotherDuck: query completes in <2s for Birchwood scale.
+//
+// ── License-plate-level hold detection (2026-07-30, Dean's report) ─────────
+//
+// CRITICAL BUG FOUND AND FIXED: every hold check up to this point (both in
+// the REM/onhand query below and in allocSql's shipping-side hold flag)
+// only ever looked at l.status_name — the LOT's own status. Dean flagged
+// via Front (cnv_1c0ok3dg, screenshot) that a specific PALLET (license
+// plate MFG0591957) was on HOLD in Datex while its lot (WC105376) showed
+// 'Active', and the app wasn't picking up on it. Confirmed via MotherDuck:
+// datex_slv_licenseplates.status_name carries its OWN hold status,
+// independent of the lot's status — a lot can have some pallets on hold
+// and others not (in this warehouse's live data: 649 QA Hold, 26 Food
+// Safety, 2 Pending Hold, 1 HOLD license plates, all with otherwise-normal
+// lots). A held pallet with an Active lot was therefore invisible to the
+// app — it counted as ordinary available stock, which could both overstate
+// cases_available and cause an otherwise-clean order to fire a false FEFO
+// violation against stock that was never actually pickable. Fixed in the
+// onhand/REM query only this pass (the concrete case Dean reported — an
+// unallocated pallet sitting on hold): the onhand SQL now computes
+// cases_held (per-LICENSE-PLATE status, same status set as isHoldStatus()
+// below) and subtracts it from cases_available, and a lot whose LPs are
+// ALL held now surfaces as a proper 'hold' REM candidate instead of either
+// vanishing (cases_available hit 0) or reading as ordinary available
+// stock. allocSql's shipping-side hold flag still checks lot-level status
+// only — a held pallet already allocated to an order isn't covered by this
+// pass and remains a known related gap.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -588,9 +614,31 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         MAX(vl.expiration_date) AS lot_expiration_date,
         COUNT(DISTINCT lpc.license_plate_id) AS lp_count,
         SUM(lpc.packaged_amount) AS cases_onhand,
+        -- cases_held (added 2026-07-30, Dean's report via Front cnv_1c0ok3dg
+        -- — a specific PALLET (LP MFG0591957) was on HOLD while its LOT
+        -- (WC105376) showed 'Active'). Confirmed via MotherDuck:
+        -- datex_slv_licenseplates.status_name carries its OWN hold status,
+        -- independent of the lot's status_name — a lot can have some
+        -- pallets on hold and others not. Every hold check up to this point
+        -- (both here and in allocSql below) only ever looked at l.status_name
+        -- (the LOT), so a held pallet with an otherwise-Active lot was
+        -- invisible to the app — it counted as ordinary available stock,
+        -- which could both overstate cases_available and cause a REM
+        -- candidate to show as a plain violation instead of correctly
+        -- surfacing as held. Same status set as isHoldStatus() below,
+        -- inlined here since this needs to run in SQL, not JS.
+        SUM(CASE WHEN lp.status_name IN (
+          'HOLD', 'Pending Hold', 'QA Hold', 'Food Safety',
+          'NOT RELEASED', 'Damaged / Hold', 'Administrative'
+        ) THEN lpc.packaged_amount ELSE 0 END) AS cases_held,
         COALESCE(MAX(c.cases_committed), 0) AS cases_committed,
         GREATEST(
-          SUM(lpc.packaged_amount) - COALESCE(MAX(c.cases_committed), 0),
+          SUM(lpc.packaged_amount)
+            - COALESCE(MAX(c.cases_committed), 0)
+            - SUM(CASE WHEN lp.status_name IN (
+                'HOLD', 'Pending Hold', 'QA Hold', 'Food Safety',
+                'NOT RELEASED', 'Damaged / Hold', 'Administrative'
+              ) THEN lpc.packaged_amount ELSE 0 END),
           0
         ) AS cases_available,
         MAX(ll.locations) AS locations
@@ -669,6 +717,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       cases:          Number(r.cases_available) || 0,
       casesGross:     Number(r.cases_onhand) || 0,
       casesCommitted: Number(r.cases_committed) || 0,
+      // casesHeld — added 2026-07-30 alongside the cases_held SQL column
+      // above. Cases sitting on a HELD license plate, already excluded
+      // from cases_available. Kept separately (not just folded into
+      // casesCommitted) so a fully-held lot can still be surfaced as a
+      // REM candidate with hold:true instead of silently vanishing from
+      // consideration just because its available count hit zero.
+      casesHeld:      Number(r.cases_held) || 0,
       lps:            Number(r.lp_count) || 0,
       location:        locInfo.primary,
       locations:       locInfo.locations,
@@ -685,7 +740,14 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate, expirationDate: c.expirationDate })
         return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display, dateUnknown: !!parsed.error }
       })
-      .filter(c => c.cases > 0)
+      // 2026-07-30 — was `c.cases > 0`. A lot whose LPs are ALL on hold now
+      // has cases_available=0 by design (see cases_held SQL above), which
+      // used to make it disappear from candidates entirely — the exact bug
+      // Dean reported (a held pallet just vanished instead of being
+      // recognized as held). Keeping casesHeld > 0 candidates means a
+      // fully-held lot still surfaces below as a proper 'hold' REM
+      // candidate instead of silently not existing.
+      .filter(c => c.cases > 0 || c.casesHeld > 0)
 
     // 2026-07-10 — undated on-hand lots are excluded from REM auto-pick so
     // they can't force-win as "the oldest lot" purely by virtue of their
@@ -696,16 +758,25 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
 
     if (datedCandidates.length > 0) {
       const oldest = datedCandidates.reduce((a, b) => a.k < b.k ? a : b)
-      const held = isHoldStatus(oldest.status)
+      // fullyHeld — added 2026-07-30 (Dean's report). Every case on this
+      // lot's LPs is on hold (cases_available=0 after the SQL-side
+      // subtraction), so there's nothing genuinely pickable here even
+      // though the lot itself sits on hand. Treat exactly like a
+      // lot-level hold (isHoldStatus(oldest.status)) so it produces the
+      // same 'hold' verdict — "older stock exists, correctly skipped" —
+      // instead of either vanishing (the original bug) or, if it somehow
+      // still showed cases=0 with hold=false, reading as "fully cleared."
+      const fullyHeld = oldest.cases === 0 && oldest.casesHeld > 0
+      const held = fullyHeld || isHoldStatus(oldest.status)
       line.rem = {
         lot:      oldest.lotCode,
         date:     oldest.display,
         k:        oldest.k,
         kDay:     oldest.kDay,
         lps:      oldest.lps,
-        cases:    oldest.cases,
+        cases:    fullyHeld ? oldest.casesHeld : oldest.cases,
         hold:     held,
-        holdType: held ? oldest.status : undefined,
+        holdType: held ? (fullyHeld ? 'HOLD' : oldest.status) : undefined,
         location:        oldest.location || '',
         locations:       oldest.locations || [],
         locationBlocked: !!oldest.locationBlocked,
