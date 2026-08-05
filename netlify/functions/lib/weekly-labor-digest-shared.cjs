@@ -667,55 +667,58 @@ function buildDigestBody(facilityId, mondayISO, week) {
   return lines.join('\n')
 }
 
-// ── Duplicate-send guard ────────────────────────────────────────
+// ── Duplicate-send guard (round 2) ──────────────────────────────────────
 //
 // 2026-08-04: Dan reported the digest posting the SAME message twice, at
-// the same timestamp, in the same Front thread — for both CAL and KEN.
-// Root cause: the original postDigest() wrote last_sent_date AFTER
-// successfully posting to Front (same order every other digest in this
-// app uses — dailyops, wr-cases, takt, etc. all check-then-post-then-
-// mark). That leaves a race window: if two invocations run close enough
-// together (Netlify's scheduled functions are "at least once" delivery,
-// so the same cron tick can occasionally fire twice — or someone clicks
-// "Send test digest now" in the same 15-minute window the schedule was
-// also configured to fire), BOTH can read last_sent_date as "not sent
-// yet" before either has written it back, and both post.
+// the same timestamp, for both CAL and KEN. First fix: a conditional
+// PATCH on prepick_notify_settings.last_sent_date, scoped to rows where
+// it wasn't already today (relying on Postgres re-checking the WHERE
+// clause after a concurrent UPDATE's lock releases — standard, documented
+// READ COMMITTED behavior).
 //
-// Fix: claimSendSlot() does the last_sent_date write FIRST, atomically,
-// as a conditional PATCH scoped to rows where last_sent_date isn't
-// already today (Supabase/PostgREST's `Prefer: return=representation`
-// lets us see whether OUR request was the one that matched and updated
-// the row). If a concurrent invocation already claimed the slot, this
-// PATCH matches zero rows and we skip without computing or sending
-// anything. Tradeoff: if the Front POST fails AFTER a successful claim,
-// last_sent_date is already set for today, so the scheduled path won't
-// auto-retry — "Send test digest now" (which never checks last_sent_date)
-// is the manual fallback for that rare case, same as it already is for
-// every other digest in this app.
+// 2026-08-05: it happened again — KEN posted twice, CAL three times,
+// seconds apart (12:15:31/:43 for KEN; 12:15:44/:54/:55 for CAL),
+// nearly a full day after the first fix had deployed (confirmed via
+// commit timestamp vs. incident timestamp), so this wasn't a stale-
+// deploy issue. Without Netlify invocation logs to inspect, the exact
+// failure mode of the conditional-PATCH approach is unconfirmed — it
+// may be correct and something upstream (multiple near-simultaneous
+// scheduled invocations, Netlify's "at least once" delivery) is
+// triggering a genuinely large number of concurrent claim attempts in
+// a way that exposes a subtlety this file's author didn't anticipate.
+//
+// Rather than keep relying on an approach whose failure mode is
+// unproven, claimSendSlot() now uses an INSERT into a dedicated table
+// (weekly_labor_digest_sends, PRIMARY KEY (facility, plan_date)) with
+// `Prefer: resolution=ignore-duplicates` (= `ON CONFLICT DO NOTHING`).
+// This is unconditional: Postgres enforces the unique constraint with
+// zero ambiguity regardless of how many concurrent INSERTs race for the
+// same key — DO NOTHING rows are never returned by RETURNING, so
+// `rows.length > 0` unambiguously means "I am the exclusive winner for
+// this (facility, day)." There is no WHERE-clause re-evaluation subtlety
+// to get wrong here; a unique-constraint violation is not negotiable.
 //
 // Only the SCHEDULED path (weekly-labor-digest-run.cjs) claims a slot.
 // The manual test path (weekly-labor-digest-test.cjs) intentionally
-// ignores last_sent_date entirely and always sends on click — that's
-// its whole point, not a bug.
+// ignores this guard entirely and always sends on click — that's its
+// whole point, not a bug.
 
 async function claimSendSlot(facilityId, today) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.weekly_labor&or=(last_sent_date.is.null,last_sent_date.neq.${today})`,
-    {
-      method: 'PATCH',
-      headers: {
-        apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json', Prefer: 'return=representation',
-      },
-      body: JSON.stringify({ last_sent_date: today }),
-    }
-  )
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/weekly_labor_digest_sends`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation,resolution=ignore-duplicates',
+    },
+    body: JSON.stringify({ facility: facilityId, plan_date: today }),
+  })
   if (!res.ok) { const t = await res.text(); throw new Error(t) }
   const rows = await res.json()
   return rows.length > 0
 }
 
-// ── Post to Front ──────────────────────────────────────────────
+// ── Post to Front ─────────────────────────────────────────────────────
 
 async function postDigest({ facilityId, conversationId, mondayISO }) {
   const week = await computeWeek(facilityId, mondayISO)

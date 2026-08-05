@@ -23,7 +23,7 @@
 // logic.
 
 const {
-  sbFetch,
+  sbFetch, sbPatch,
   centralTodayISO, isNotifyTimeMatch, isoWeekdayOf, mondayOfISO,
   claimSendSlot, postDigest,
 } = require('./lib/weekly-labor-digest-shared.cjs')
@@ -59,6 +59,12 @@ async function runScheduledDigests() {
       results.push({ facility: facilityId, ok: true, skipped: true, reason: 'Digest disabled' })
       continue
     }
+    // Cheap early-exit only — NOT the correctness guard (that's
+    // claimSendSlot below, backed by a unique-constraint table). This
+    // field is now purely informational; kept in sync on successful
+    // sends below so a glance at prepick_notify_settings still shows a
+    // sensible "last sent" date, but nothing here depends on it being
+    // accurate to avoid duplicates.
     if (settings.last_sent_date === today) {
       results.push({ facility: facilityId, ok: true, skipped: true, reason: 'Already sent today' })
       continue
@@ -75,10 +81,12 @@ async function runScheduledDigests() {
       continue
     }
 
-    // Atomic claim BEFORE computing/sending — see claimSendSlot's header
-    // comment in weekly-labor-digest-shared.cjs. Closes the duplicate-
-    // send race (Netlify at-least-once scheduled delivery, or a manual
-    // test click landing in the same window as the scheduled tick).
+    // Unconditional claim BEFORE computing/sending — a unique-constraint
+    // INSERT into weekly_labor_digest_sends, see claimSendSlot's header
+    // comment in weekly-labor-digest-shared.cjs for the round-2 story
+    // (the first fix, a conditional PATCH, still let 2-3 duplicates
+    // through on 2026-08-05 for reasons that couldn't be confirmed
+    // without Netlify invocation logs).
     try {
       const claimed = await claimSendSlot(facilityId, today)
       if (!claimed) {
@@ -93,6 +101,13 @@ async function runScheduledDigests() {
     try {
       const result = await postDigest({ facilityId, conversationId, mondayISO })
       results.push({ facility: facilityId, ...result })
+      if (result.ok) {
+        // Best-effort, informational only — see the comment above the
+        // "Already sent today" check. Not awaited-for-correctness;
+        // failure here doesn't affect the duplicate-send guarantee.
+        sbPatch(`prepick_notify_settings?facility=eq.${facilityId}&dashboard_type=eq.weekly_labor`, { last_sent_date: today })
+          .catch(err => console.warn(`last_sent_date bookkeeping update failed for ${facilityId} (non-fatal):`, err.message))
+      }
     } catch (err) {
       results.push({ facility: facilityId, ok: false, reason: err.message })
     }
