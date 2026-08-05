@@ -22,26 +22,33 @@
 // date, not just an arbitrary lot number:
 //   - Pretzilla: 5-digit YYDDD (2-digit year + 3-digit day-of-year), e.g.
 //     "26210" = day 210 of '26 = 7/29/26. Optional trailing "A" for
-//     relabeled lots, stripped before decoding. Verified against 12,127
-//     real lots with shelf_life_span > 0: 99% exact match (0-1 day off,
-//     the 1-day cases look like a UTC/Central day-boundary artifact on
-//     timestamps, not real errors), ~1% real mismatches -- the Julian
-//     misread errors this feature exists to catch.
+//     relabeled lots, stripped before decoding.
 //   - Bernatello's: 4-digit YDDD (1-digit year + 3-digit day-of-year,
-//     year base 2020), e.g. "6119" = day 119 of '26 = 4/29/26. Verified
-//     against 1,943 real lots: 96% exact/near match, ~4% real mismatches.
+//     year base 2020), e.g. "6119" = day 119 of '26 = 4/29/26.
 //   - Both formats confirmed by testing against real stored
 //     manufacture_date values, not assumed from a spec doc.
-//   - Filtered to shelf_life_span > 0 when validating the format, since
-//     packaging/film materials (shelf_life_span = 0) don't follow either
-//     Julian convention at all (their lot codes are internal sequence
-//     numbers, unrelated to a production date) -- including them produced
-//     nonsense multi-year "mismatches" that aren't real.
 //   - The Julian check itself is NOT gated on shelf_life_span > 0 in the
 //     query below (a lot with no shelf life can still have a real,
 //     checkable MFG-vs-lot-code relationship) -- only lots whose
 //     lookup_code actually matches the customer's Julian pattern get a
 //     julianVerdict at all; everything else reports 'not_applicable'.
+//
+// Julian check tolerance is EXACT MATCH, zero tolerance (fixed 2026-08-05,
+// Billie Jo's manual audit): originally shipped with an "off by <=1 day
+// counts as match" tolerance, on the theory that a 1-day gap was usually
+// a UTC/Central timestamp-boundary artifact rather than a real error.
+// Billie Jo's own manual spreadsheet audit (Lot Converted vs Man Date,
+// zero tolerance) caught real 1-day discrepancies our app was silently
+// swallowing as "match" -- including at least one (lot 26212, five
+// materials, Pretzilla Kenosha) where the underlying timestamp was
+// exactly midnight Central, so it wasn't even a timezone artifact, just a
+// real 1-day gap between the lot code and the recorded MFG date. The
+// team's actual working standard is exact equality, not a tolerance band
+// -- confirmed by checking the live impact before changing this (in the
+// current 45-day Pretzilla window: 85 exact matches, 4 one-day-off lots
+// that now correctly flip to 'mismatch', 1 lot already >1 day off -- a
+// small, safe increase, not a reopening of the original all-time-noise
+// problem that motivated the day-window scoping below).
 //
 // What the Julian check does NOT do: it does not read the physical case
 // label or BOL -- it only has the lot_code Datex already has on file. If
@@ -56,7 +63,10 @@
 //     dating for it at all — EXP silently ends up equal to MFG. This is a data-setup gap,
 //     not a one-off entry mistake (e.g. lookup_code 60613/60624 — packaging/film materials).
 //   - mismatch: expiration_date on the vendor lot doesn't reconcile with
-//     manufacture_date + material.shelf_life_span (more than 1 day off).
+//     manufacture_date + material.shelf_life_span (more than 1 day off). This tolerance is
+//     UNCHANGED (still <=1 day = clean) -- Billie Jo's audit was specifically about the
+//     Julian check (lot code vs MFG date), not this EXP-vs-shelf-life check, and this
+//     tolerance has its own separate live validation (99% match rate on real data) backing it.
 //   - relabeled: lookup_code ends in "A" — Pretzilla's convention for a pallet that was
 //     taken back and relabeled with an extended expiration date. NOT an error — flagged
 //     separately for a human to eyeball. Bernatello's has no equivalent convention observed
@@ -74,12 +84,10 @@
 // 7/13 -- confirmed live via gold.available_inventory_by_lp (SUM(available_amount) = 0
 // across every warehouse for that vendor_lot_id) that there was zero remaining inventory
 // anywhere. A shipped-out lot isn't operationally actionable (nothing left to correct/pull),
-// so it's noise. Checked live across the whole 45-day Bernatello's window: 172 lots total,
-// only 120 still had ANY on-hand inventory -- 52 fully-shipped lots (30%) were cluttering the
-// check for no reason. Now hard-filtered via an INNER JOIN against an on-hand CTE (only lots
-// with SUM(available_amount) > 0 survive); confirmed gold.available_inventory_by_lp has
-// coverage across all 5 warehouses (1/3/4/5/6), so this filter applies safely to Pretzilla
-// too, not just Bernatello's/WR.
+// so it's noise. Now hard-filtered via an INNER JOIN against an on-hand CTE (only lots with
+// SUM(available_amount) > 0 survive); confirmed gold.available_inventory_by_lp has coverage
+// across all 5 warehouses, so this filter applies safely to Pretzilla too, not just
+// Bernatello's/WR.
 //
 // Bernatello's, added 2026-08-02: project_id 282 (Madison, BERNA1, inactive since
 // 2025-09-08 -- will show nothing at the default window, expected) and 320 (Wisconsin
@@ -89,19 +97,15 @@
 // match that prefix, so this is safe for both customers).
 //
 // createdBy: the vendor lot row's own created_sys_user -- who/what created THIS specific
-// vendor lot record. Confirmed live that the same lookup_code can have multiple distinct
-// vendor_lot_id rows over time (re-received/re-created lots sharing a code) -- this is the
-// creator of the exact row being flagged, not necessarily "the one true original creation
-// event" for that lot code across its whole history. Sometimes a person, sometimes
-// "SmartUp API" -- passed through as-is so the UI can distinguish the two. Confirmed live
-// (Front feedback thread, 2026-08-02) this field is accurate to Datex's own record even when
-// the named person is surprised to see it -- not a display bug on our end.
+// vendor lot record. Sometimes a person, sometimes "SmartUp API" -- passed through as-is so
+// the UI can distinguish the two. Confirmed live (Front feedback thread, 2026-08-02) this
+// field is accurate to Datex's own record even when the named person is surprised to see it
+// -- not a display bug on our end.
 //
 // projectId (added 2026-08-02, for the per-project Notify digest): optionally scopes the
-// query to exactly ONE project_id instead of a whole customer's project list -- mirrors
-// FEFO's per-project settings-row pattern (one Front conversation per Datex project, not
-// one per customer). Still resolves the right customer's Julian format automatically via
-// PROJECT_TO_CUSTOMER, so the caller only needs to pass projectId, not customer+projectId.
+// query to exactly ONE project_id instead of a whole customer's project list. Still resolves
+// the right customer's Julian format automatically via PROJECT_TO_CUSTOMER, so the caller
+// only needs to pass projectId, not customer+projectId.
 
 const duckdb = require('duckdb');
 
@@ -272,7 +276,10 @@ exports.handler = async (event) => {
       const julianDiff = r.julian_diff_days === null || r.julian_diff_days === undefined ? null : Number(r.julian_diff_days);
       let julianVerdict = 'not_applicable';
       if (julianApplicable) {
-        julianVerdict = Math.abs(julianDiff) <= 1 ? 'match' : 'mismatch';
+        // Zero tolerance (fixed 2026-08-05) -- see file header. Exact
+        // equality only; even a 1-day gap is a real mismatch worth
+        // surfacing, per Billie Jo's manual audit standard.
+        julianVerdict = julianDiff === 0 ? 'match' : 'mismatch';
       }
       return {
         lotCode: r.lot_code,
