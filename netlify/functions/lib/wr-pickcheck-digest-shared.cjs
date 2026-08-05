@@ -15,6 +15,17 @@
 // buildDigestBody for details. Everything else is unchanged from the
 // original wr-pickcheck-digest-run.cjs — see that file's original header
 // (preserved in git history) for the fuller feature history.
+//
+// Dismissal filtering (added 2026-08-05): materials that aren't actually
+// stocked in a P-slot at all (e.g. Tavern-Style Crust Pub, picked from
+// bulk C/D/E/F racking, never the pickline) can be dismissed from the
+// live tab. Same root cause and fix as EXP Check's dismissal filter —
+// motherduck-wr-pick-check.cjs is a pure MotherDuck query with zero
+// knowledge of Supabase dismissals, so without this fix a dismissed
+// material would disappear from the on-screen "Warehouse" list but keep
+// inflating the nightly Front digest's count. fetchActiveDismissedCodes()
+// is best-effort: if Supabase hiccups, the digest falls back to an
+// unfiltered count rather than blocking the whole send.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -43,6 +54,23 @@ async function sbPatch(path, body) {
     body: JSON.stringify(body),
   })
   if (!res.ok) { const t = await res.text(); throw new Error(t) }
+}
+
+// Returns a Set of material_codes currently dismissed (dismissed_until
+// null, or still in the future). Best-effort — an empty Set on any
+// failure, so a Supabase hiccup can't block the digest entirely.
+async function fetchActiveDismissedCodes() {
+  try {
+    const rows = await sbFetch('wr_pick_check_dismissals?select=material_code,dismissed_until')
+    const now = Date.now()
+    const set = new Set()
+    for (const r of rows) {
+      if (!r.dismissed_until || new Date(r.dismissed_until).getTime() > now) set.add(r.material_code)
+    }
+    return set
+  } catch {
+    return new Set()
+  }
 }
 
 function centralNowParts() {
@@ -85,6 +113,22 @@ function callOutBlock(lines, label) {
   lines.push(divider)
 }
 
+// Recomputes summary counts from materials[], excluding anything in
+// dismissedCodes — mirrors exp-check-digest-shared.cjs's summarize().
+function summarize(materials) {
+  const s = { total: 0, primary: 0, secondary: 0, warehouse: 0, agingCritical: 0, agingWarning: 0, agingWatch: 0 }
+  for (const m of materials) {
+    s.total++
+    if (m.status === 'primary') s.primary++
+    if (m.status === 'secondary') s.secondary++
+    if (m.status === 'warehouse') s.warehouse++
+    if (m.aging === 'critical') s.agingCritical++
+    if (m.aging === 'warning') s.agingWarning++
+    if (m.aging === 'watch') s.agingWatch++
+  }
+  return s
+}
+
 function buildDigestBody(data, dateObj) {
   const s = data.summary
   const lines = []
@@ -119,7 +163,13 @@ async function postDigest({ conversationId, dateObj, isManualTest }) {
     return { ok: false, reason: 'motherduck-wr-pick-check failed', detail: pickCheckJson }
   }
 
-  const body = buildDigestBody(pickCheckJson, dateObj)
+  const dismissedCodes = await fetchActiveDismissedCodes()
+  const filteredMaterials = dismissedCodes.size > 0
+    ? pickCheckJson.materials.filter(m => !dismissedCodes.has(m.materialCode))
+    : pickCheckJson.materials
+  const filteredData = { ...pickCheckJson, materials: filteredMaterials, summary: summarize(filteredMaterials) }
+
+  const body = buildDigestBody(filteredData, dateObj)
 
   const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',

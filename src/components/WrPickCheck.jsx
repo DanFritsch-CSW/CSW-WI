@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { fetchWrPickCheck } from '../lib/wrPickCheck.js'
+import { fetchDismissals, dismissMaterial, restoreMaterial } from '../lib/wrPickCheckDismissals.js'
 import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 
 // WR "Pick Location Lot Check" sub-tab. Real ask from a recorded call
@@ -32,6 +33,24 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 // 30-59d, Watch 60-119d) — folded in per Dan's request so this one report
 // can also drive communication back to Bernatello's about what needs to
 // sell through or ship soon.
+//
+// Dismiss (added 2026-08-05): some materials (e.g. Tavern-Style Crust Pub
+// 72320-72323) are never actually stocked in a P-slot at all — they're
+// picked entirely from C/D/E/F rack locations, so they always land in
+// "WAREHOUSE" here even though they're not on the pickline this check is
+// built around. Confirmed live before wiring this up: those 4 lookup
+// codes have zero rows with is_primary_pick=true across every location
+// they've ever occupied, vs. the separate "HV Tavern Style" family
+// (72100-72105) which does have real P-slot presence and should stay
+// checked. Dismissal is material-level and defaults to PERMANENT (not a
+// time-boxed noise reducer like EXP Check's per-lot dismissals) — a
+// material that's structurally off the pickline doesn't become on-pickline
+// again after 30/60/90 days, so no auto-expiry is the right default here.
+// A time-boxed option is still offered in case Dan ever wants to re-check
+// a specific material later. Backed by wr_pick_check_dismissals, a table
+// that already existed (empty, unwired) before this change — confirmed
+// live schema/RLS via information_schema/pg_policies before building
+// against it, matching this project's standing rule.
 
 const STATUS_META = {
   primary:   { label: 'PRIMARY',   color: '#3fb950', bg: 'rgba(63,185,80,0.12)' },
@@ -44,6 +63,12 @@ const AGING_META = {
   warning:  { label: 'WARNING',  color: '#d4a72c', bg: 'rgba(212,167,44,0.12)' },
   watch:    { label: 'WATCH',    color: '#b08d2f', bg: 'rgba(212,167,44,0.08)' },
 }
+
+const DISMISS_OPTIONS = [
+  { label: 'Permanently (not on pickline)', days: null },
+  { label: '90 days', days: 90 },
+  { label: '1 year', days: 365 },
+]
 
 function fmtDate(iso) {
   if (!iso) return '—'
@@ -81,12 +106,46 @@ function StatCard({ label, value, color, onClick, active }) {
   )
 }
 
+function DismissMenu({ onDismiss, onClose }) {
+  return (
+    <div style={{
+      position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 20,
+      background: 'var(--bg0)', border: '1px solid var(--border)', borderRadius: 6,
+      boxShadow: '0 4px 12px rgba(0,0,0,0.3)', minWidth: 200, overflow: 'hidden',
+    }}>
+      {DISMISS_OPTIONS.map(opt => (
+        <button
+          key={opt.label}
+          onClick={() => { onDismiss(opt.days); onClose() }}
+          style={{
+            display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px',
+            background: 'transparent', border: 'none', color: 'var(--text-primary)',
+            fontSize: 11, fontFamily: 'var(--font-mono)', cursor: 'pointer',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg2)' }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export default function WrPickCheck() {
   const [data, setData]       = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState(null)
   const [filter, setFilter]   = useState('all')
   const [agingOnly, setAgingOnly] = useState(false)
+
+  const [dismissals, setDismissals] = useState([])
+  const [dismissMenuFor, setDismissMenuFor] = useState(null) // materialCode currently showing the duration menu
+  const [dismissBusy, setDismissBusy] = useState(null)       // materialCode currently saving
+
+  const loadDismissals = useCallback(() => {
+    fetchDismissals().then(setDismissals).catch(() => {}) // best-effort — never blocks the live tab
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -96,15 +155,84 @@ export default function WrPickCheck() {
       .then(d => { if (!cancelled) setData(d) })
       .catch(e => { if (!cancelled) setError(e.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
+    loadDismissals()
     return () => { cancelled = true }
-  }, [])
+  }, [loadDismissals])
+
+  // Active dismissals only — a time-boxed one whose dismissed_until has
+  // passed stops matching here and the material reappears automatically.
+  const activeDismissedCodes = useMemo(() => {
+    const now = Date.now()
+    const set = new Set()
+    for (const d of dismissals) {
+      if (!d.dismissed_until || new Date(d.dismissed_until).getTime() > now) set.add(d.material_code)
+    }
+    return set
+  }, [dismissals])
+
+  const liveMaterials = useMemo(() => data?.materials ?? [], [data])
+
+  // Everything except the dedicated Dismissed view excludes actively-
+  // dismissed materials — same convention as EXP Check's dismiss filter.
+  const visibleMaterials = useMemo(
+    () => liveMaterials.filter(m => !activeDismissedCodes.has(m.materialCode)),
+    [liveMaterials, activeDismissedCodes]
+  )
+
+  // Stat cards recompute client-side from the dismissal-filtered set, so
+  // dismissing something actually removes it from the headline numbers,
+  // not just the list underneath.
+  const counts = useMemo(() => {
+    const c = { total: 0, primary: 0, secondary: 0, warehouse: 0, agingCritical: 0, agingWarning: 0, agingWatch: 0 }
+    for (const m of visibleMaterials) {
+      c.total++
+      c[m.status] = (c[m.status] || 0) + 1
+      if (m.aging === 'critical') c.agingCritical++
+      if (m.aging === 'warning') c.agingWarning++
+      if (m.aging === 'watch') c.agingWatch++
+    }
+    return c
+  }, [visibleMaterials])
 
   const rows = useMemo(() => {
-    if (!data?.materials) return []
-    let r = filter === 'all' ? data.materials : data.materials.filter(m => m.status === filter)
+    if (filter === 'dismissed') {
+      // Show every currently-dismissed material, matched back against the
+      // live snapshot for its current status/aging if it still has any
+      // on-hand inventory (it may not, if it's genuinely never stocked).
+      const byCode = new Map(liveMaterials.map(m => [m.materialCode, m]))
+      return dismissals
+        .filter(d => activeDismissedCodes.has(d.material_code))
+        .map(d => ({
+          ...(byCode.get(d.material_code) || { materialCode: d.material_code, materialName: d.material_code, status: null }),
+          _dismissal: d,
+        }))
+    }
+    let r = filter === 'all' ? visibleMaterials : visibleMaterials.filter(m => m.status === filter)
     if (agingOnly) r = r.filter(m => m.aging)
     return r
-  }, [data, filter, agingOnly])
+  }, [filter, agingOnly, visibleMaterials, liveMaterials, dismissals, activeDismissedCodes])
+
+  async function handleDismiss(materialCode, days) {
+    setDismissBusy(materialCode)
+    try {
+      await dismissMaterial(materialCode, days, null, days ? null : 'Not stocked in a P-slot — off pickline')
+      loadDismissals()
+    } finally {
+      setDismissBusy(null)
+    }
+  }
+
+  async function handleRestore(materialCode) {
+    setDismissBusy(materialCode)
+    try {
+      await restoreMaterial(materialCode)
+      loadDismissals()
+    } finally {
+      setDismissBusy(null)
+    }
+  }
+
+  const dismissedCount = activeDismissedCodes.size
 
   return (
     <div style={{ padding: '16px 4px' }}>
@@ -115,6 +243,8 @@ export default function WrPickCheck() {
         Is the oldest AVAILABLE lot in the primary pick slot? If not, is it in the secondaries (overhead rack directly
         above)? If not, it's out in the warehouse. Cases already committed to an active pick task are netted out
         first. Aging flags carry the 120-day threshold for communicating sell-through/ship timing to Bernatello's.
+        Materials that aren't actually stocked in a P-slot at all (e.g. crust items picked from bulk racking, not the
+        pickline) can be dismissed below so they stop cluttering Warehouse.
       </div>
 
       <NotifySettingsPanel
@@ -144,16 +274,23 @@ export default function WrPickCheck() {
       {!loading && !error && data && (
         <>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
-            <StatCard label="Checked" value={data.summary.total} onClick={() => setFilter('all')} active={filter === 'all'} />
-            <StatCard label="Primary" value={data.summary.primary} color={STATUS_META.primary.color} onClick={() => setFilter('primary')} active={filter === 'primary'} />
-            <StatCard label="Secondary" value={data.summary.secondary} color={STATUS_META.secondary.color} onClick={() => setFilter('secondary')} active={filter === 'secondary'} />
-            <StatCard label="Warehouse" value={data.summary.warehouse} color={STATUS_META.warehouse.color} onClick={() => setFilter('warehouse')} active={filter === 'warehouse'} />
+            <StatCard label="Checked" value={counts.total} onClick={() => setFilter('all')} active={filter === 'all'} />
+            <StatCard label="Primary" value={counts.primary} color={STATUS_META.primary.color} onClick={() => setFilter('primary')} active={filter === 'primary'} />
+            <StatCard label="Secondary" value={counts.secondary} color={STATUS_META.secondary.color} onClick={() => setFilter('secondary')} active={filter === 'secondary'} />
+            <StatCard label="Warehouse" value={counts.warehouse} color={STATUS_META.warehouse.color} onClick={() => setFilter('warehouse')} active={filter === 'warehouse'} />
             <StatCard
               label="Aging Flags (<120d)"
-              value={data.summary.agingCritical + data.summary.agingWarning + data.summary.agingWatch}
+              value={counts.agingCritical + counts.agingWarning + counts.agingWatch}
               color="#d4a72c"
               onClick={() => setAgingOnly(v => !v)}
               active={agingOnly}
+            />
+            <StatCard
+              label="Dismissed"
+              value={dismissedCount}
+              color="var(--text-dim)"
+              onClick={() => setFilter('dismissed')}
+              active={filter === 'dismissed'}
             />
           </div>
 
@@ -166,13 +303,15 @@ export default function WrPickCheck() {
                   <th style={{ padding: '10px 14px' }}>Currently In Primary</th>
                   <th style={{ padding: '10px 14px' }}>Location</th>
                   <th style={{ padding: '10px 14px' }}>Aging</th>
+                  <th style={{ padding: '10px 14px' }}></th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((m) => {
-                  const sm = STATUS_META[m.status]
+                  const sm = m.status ? STATUS_META[m.status] : null
                   const am = m.aging ? AGING_META[m.aging] : null
                   const locList = m.status === 'secondary' ? m.secondaryLocations : m.status === 'warehouse' ? m.warehouseLocations : null
+                  const isDismissedView = filter === 'dismissed'
                   return (
                     <tr key={m.materialCode} style={{ borderTop: '1px solid var(--border-subtle)' }}>
                       <td style={{ padding: '10px 14px' }}>
@@ -180,10 +319,14 @@ export default function WrPickCheck() {
                         <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{m.materialCode}</div>
                       </td>
                       <td style={{ padding: '10px 14px' }}>
-                        <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{m.oldestLotCode ?? '—'}</div>
-                        <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                          {fmtDate(m.oldestExpirationDate)}{m.daysRemaining != null ? ` · ${m.daysRemaining}d` : ''}
-                        </div>
+                        {m.oldestLotCode !== undefined ? (
+                          <>
+                            <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{m.oldestLotCode ?? '—'}</div>
+                            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                              {fmtDate(m.oldestExpirationDate)}{m.daysRemaining != null ? ` · ${m.daysRemaining}d` : ''}
+                            </div>
+                          </>
+                        ) : <span style={{ color: 'var(--text-dim)' }}>no current stock</span>}
                       </td>
                       <td style={{ padding: '10px 14px' }}>
                         {m.currentLotCodes ? (
@@ -194,10 +337,17 @@ export default function WrPickCheck() {
                         ) : <span style={{ color: 'var(--text-dim)' }}>—</span>}
                       </td>
                       <td style={{ padding: '10px 14px' }}>
-                        <Badge label={sm.label} color={sm.color} bg={sm.bg} />
+                        {sm && <Badge label={sm.label} color={sm.color} bg={sm.bg} />}
                         {locList && (
                           <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginTop: 4, maxWidth: 260 }}>
                             {locList}
+                          </div>
+                        )}
+                        {isDismissedView && m._dismissal && (
+                          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+                            Dismissed {fmtDate(m._dismissal.dismissed_at)}
+                            {m._dismissal.dismissed_until ? ` · until ${fmtDate(m._dismissal.dismissed_until)}` : ' · permanently'}
+                            {m._dismissal.note ? ` · ${m._dismissal.note}` : ''}
                           </div>
                         )}
                       </td>
@@ -205,6 +355,41 @@ export default function WrPickCheck() {
                         {am
                           ? <Badge label={`${am.label} · ${m.daysRemaining}d`} color={am.color} bg={am.bg} />
                           : <span style={{ color: 'var(--text-dim)' }}>—</span>}
+                      </td>
+                      <td style={{ padding: '10px 14px', position: 'relative', textAlign: 'right' }}>
+                        {isDismissedView ? (
+                          <button
+                            onClick={() => handleRestore(m.materialCode)}
+                            disabled={dismissBusy === m.materialCode}
+                            style={{
+                              padding: '4px 10px', fontSize: 10, fontFamily: 'var(--font-mono)',
+                              background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 6,
+                              color: 'var(--text-primary)', cursor: 'pointer',
+                            }}
+                          >
+                            {dismissBusy === m.materialCode ? '…' : 'Restore'}
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => setDismissMenuFor(v => v === m.materialCode ? null : m.materialCode)}
+                              disabled={dismissBusy === m.materialCode}
+                              style={{
+                                padding: '4px 10px', fontSize: 10, fontFamily: 'var(--font-mono)',
+                                background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 6,
+                                color: 'var(--text-primary)', cursor: 'pointer',
+                              }}
+                            >
+                              {dismissBusy === m.materialCode ? '…' : 'Dismiss'}
+                            </button>
+                            {dismissMenuFor === m.materialCode && (
+                              <DismissMenu
+                                onDismiss={(days) => handleDismiss(m.materialCode, days)}
+                                onClose={() => setDismissMenuFor(null)}
+                              />
+                            )}
+                          </>
+                        )}
                       </td>
                     </tr>
                   )
