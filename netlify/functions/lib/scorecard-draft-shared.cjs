@@ -80,6 +80,16 @@
 // front-draft-shared.cjs doesn't export it and this is a small, self-
 // contained piece of logic — not worth changing that file's exports for.
 //
+// FIXED 2026-08-06 (same first test's real output): buildClaudePrompt was
+// only fed OTT (2hr/3hr) and Case Pick Accuracy — Claude correctly wrote
+// "Carrier Performance: not reported this period" rather than inventing a
+// number, but Dan pointed out Bernatello's real Omni dashboard DOES have a
+// "Carrier % On-Time Arrival" metric this function was simply never built
+// to compute. Added — see motherduck-scorecard-metrics.cjs's header for
+// the formula (derived from the same arrival_status data already computed
+// for OTT) and its validation caveats. metricLines below now includes it
+// whenever motherduck-scorecard-metrics.cjs returns a non-null value.
+//
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Add a "tag conversation" action for "QBR - Case Study" on the existing
 //   "Scorecard Template" rule (rul_7kwwk) so it actually gets applied to
@@ -87,11 +97,11 @@
 //   this session's tools.
 // - Omni dashboard document-state read (drift-proofing) not implemented —
 //   only the dashboard_id pointer is stored.
-// - ANTHROPIC_API_KEY added 2026-08-06 — not yet verified via a real call
-//   (the channel_id bug above meant the pipeline never got that far in the
-//   first test run — Claude may not have been reached yet either).
-// - End-to-end NOT yet fully verified live — re-run scorecard-draft-test.cjs
-//   (via the Scorecard Drafts UI tab) now that channel_id is fixed.
+// - Carrier % On-Time Arrival formula not fully validated against Omni's
+//   literal underlying definition — see motherduck-scorecard-metrics.cjs.
+// - End-to-end verified live once (cnv_1c1dcmvo, after the channel_id fix)
+//   — draft created successfully, Claude wrote a real narrative. Re-verify
+//   once more with the Carrier % metric now included.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -317,6 +327,7 @@ function buildClaudePrompt(config, metrics, threadContext) {
   const metricLines = []
   if (metrics.ott2?.pct != null) metricLines.push(`Under 2 Hours: ${metrics.ott2.pct}% (${metrics.ott2.numerator}/${metrics.ott2.denominator})`)
   if (metrics.ott3?.pct != null) metricLines.push(`Under 3 Hours: ${metrics.ott3.pct}% (${metrics.ott3.numerator}/${metrics.ott3.denominator})`)
+  if (metrics.carrierOnTime?.pct != null) metricLines.push(`Carrier % On-Time Arrival: ${metrics.carrierOnTime.pct}% (${metrics.carrierOnTime.numerator}/${metrics.carrierOnTime.denominator})`)
   if (metrics.casePickAccuracy?.pct != null) metricLines.push(`Case Pick Accuracy: ${metrics.casePickAccuracy.pct}%`)
   metricLines.push(`Total completed outbound appointments: ${metrics.totalCompletedAppointments}`)
 
