@@ -658,7 +658,19 @@ async function computeWeek(facilityId, startDate) {
   return { weekDays, days }
 }
 
-const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+// Sun=0..Sat=6 (matches Date.getUTCDay()) — NOT a Monday-anchored array.
+// 2026-08-06: caught live via a test send — with the window now rolling
+// from `today` (which can be any weekday, not always Monday, since the
+// 2026-08-06 "next 7 days" change), a fixed ['Mon','Tue',...] array
+// indexed by position mislabeled every day once today wasn't a Monday
+// (a Thursday start showed "Mon 8/6" for an actual Thursday). Each
+// day's label is now derived from its own date, not from its position
+// in the week.
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+function shortDayName(iso) {
+  const d = new Date(iso + 'T00:00:00Z')
+  return WEEKDAY_NAMES[d.getUTCDay()]
+}
 
 function fmtDelta(n) {
   if (n == null) return '—'
@@ -669,8 +681,8 @@ function buildDigestBody(facilityId, startDate, week) {
   const lines = []
   lines.push(`${FACILITY_LABELS[facilityId] || facilityId} — Labor Daily +/- After Adj, next 7 days (${formatMDD(startDate)}–${formatMDD(addDaysISO(startDate, 6))}):`)
   lines.push('')
-  week.days.forEach((d, i) => {
-    lines.push(`${DAY_LABELS[i]} ${formatMDD(d.date)}: ${fmtDelta(d.delta)}`)
+  week.days.forEach((d) => {
+    lines.push(`${shortDayName(d.date)} ${formatMDD(d.date)}: ${fmtDelta(d.delta)}`)
   })
   return lines.join('\n')
 }
