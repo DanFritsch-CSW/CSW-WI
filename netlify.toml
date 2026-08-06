@@ -170,15 +170,25 @@
 # Takt tab Notify digests -- added 2026-08-02, later same day. Backs 6
 # rows in prepick_notify_settings (dashboard_type='takt'): one per
 # facility plus facility='all' for a senior-leadership rollup. Content
-# date is ALWAYS the day before the send (see lib/takt-digest-shared.cjs
-# header) -- sidesteps the same-day data-lag issue on
-# gold.takt_productivity_v2_agg. Same schedule/manual-test split as every
-# other digest in this app.
+# date was originally a fixed "day before the send" offset; FIXED
+# 2026-08-06 after that broke (actual data lag on
+# gold.takt_productivity_v2_agg drifted past 1 day within 4 days of
+# shipping) -- now resolved live via motherduck-takt-latest-date.cjs
+# (MAX(shift_start_date), one shared date across the whole send). See
+# lib/takt-digest-shared.cjs header for the full story. Same
+# schedule/manual-test split as every other digest in this app.
 [functions."takt-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
 
 [functions."takt-digest-test"]
+  timeout = 26
+
+# Takt digest shared content-date lookup -- added 2026-08-06 (see the
+# Takt digest comment above). Single lightweight query, no schedule (only
+# called internally by takt-digest-run.cjs/takt-digest-test.cjs via
+# SITE_URL, never hit directly by the frontend).
+[functions."motherduck-takt-latest-date"]
   timeout = 26
 
 # EXP Check (Pretzilla) -- added 2026-08-02. Plain read-only POST, no
