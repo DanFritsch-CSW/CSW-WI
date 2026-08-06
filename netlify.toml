@@ -282,6 +282,29 @@
 [functions."weekly-labor-digest-test"]
   timeout = 26
 
+# Scorecard Draft Creator -- added 2026-08-06, BERNATELLO'S PILOT ONLY.
+# Reads Omni's weekly customer scorecard email (Bernatello's-WR), pulls
+# this app's own already-validated OTT/Case Pick Accuracy formulas scoped
+# to that customer + week, generates a GM-style narrative via the Claude
+# API, and creates a Front DRAFT reply -- never auto-sends. See
+# lib/scorecard-draft-shared.cjs's header for the full design writeup and
+# known gaps (no live Front tag/webhook trigger yet -- falls back to a
+# subject-string search; ANTHROPIC_API_KEY must be added before this can
+# succeed at all; end-to-end not yet verified live).
+[functions."motherduck-scorecard-metrics"]
+  timeout = 26
+
+[functions."scorecard-draft-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# Scorecard Draft Creator MANUAL TEST -- no schedule, so direct POST works
+# (same 403-avoidance pattern as every other *-digest-test.cjs in this
+# app). NOT a dry run -- creates a real Front draft and really calls the
+# Claude API. Requires { customerKey, conversationId } in the POST body.
+[functions."scorecard-draft-test"]
+  timeout = 26
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
