@@ -2,8 +2,10 @@
 
 // Takt tab Notify digest — MANUAL TEST ONLY. Added 2026-08-02, sibling to
 // takt-digest-run.cjs (see that file's header, and
-// lib/takt-digest-shared.cjs's header, for why this split exists and why
-// the content date is always "yesterday").
+// lib/takt-digest-shared.cjs's header, for why this split exists and how
+// the shared content date is resolved — fixed 2026-08-06 to a live
+// MAX(shift_start_date) lookup after the original fixed "yesterday"
+// offset broke once the actual data lag drifted past 1 day).
 //
 // This function deliberately has NO `schedule` entry in netlify.toml, so
 // Netlify allows the browser to POST to it directly. Requires
@@ -15,7 +17,7 @@
 
 const {
   sbFetch,
-  contentDateObj,
+  fetchContentDate,
   postDigest,
 } = require('./lib/takt-digest-shared.cjs')
 
@@ -40,7 +42,8 @@ async function runTest(facility) {
     return { ok: false, reason: `No front_conversation_id configured for Takt (${facility}) in prepick_notify_settings` }
   }
 
-  return postDigest({ facility, conversationId, isManualTest: true })
+  const { iso: date, dateObj } = await fetchContentDate()
+  return postDigest({ facility, conversationId, isManualTest: true, date, dateObj })
 }
 
 exports.handler = async function (event) {
