@@ -50,23 +50,46 @@ async function getDriveRef(facility,token){
   _driveCache[facility]={driveId:item.parentReference.driveId,itemId:item.id}
   return _driveCache[facility]
 }
-async function findLastDataRow(sheetBase,token){
-  // Use usedRange metadata (rowCount only) — no cell values read, works for any file size.
-  // Falls back to small column scan if usedRange fails (phantom-formatting edge case).
-  try{
-    const r=await graph(`${sheetBase}/usedRange(valuesOnly=true)?$select=rowCount`,token)
-    if(r&&r.rowCount>0)return r.rowCount
-  }catch(e){
-    console.warn('[sharepoint-dvr-append] usedRange failed, falling back to column scan:',e.message)
+
+// Find the last row that actually contains data in column A.
+// Strategy: get usedRange rowCount (fast metadata) to know the sheet extent,
+// then scan backwards within a 500-row window to skip phantom-formatted empty rows.
+// This handles both large files (CAL 15k+) and sheets with phantom formatting (KEN DVRS).
+async function findLastDataRow(sheetBase, token) {
+  // Step 1: get usedRange extent
+  let endRow = 500
+  try {
+    const r = await graph(`${sheetBase}/usedRange(valuesOnly=true)?$select=rowCount`, token)
+    if (r && r.rowCount > 0) endRow = r.rowCount
+  } catch(e) {
+    console.warn('[sharepoint-dvr-append] usedRange failed:', e.message)
   }
-  // Fallback: scan first 500 rows of col A (should only hit for empty/new sheets)
-  const r=await graph(`${sheetBase}/range(address='A1:A500')`,token)
-  const vals=r.values||[]
-  for(let i=vals.length-1;i>=0;i--){
-    if(vals[i][0]!==null&&vals[i][0]!==''&&vals[i][0]!==0)return i+1
+  console.log(`[sharepoint-dvr-append] usedRange rowCount=${endRow}`)
+
+  // Step 2: scan backwards from endRow in col A (max 500-row window)
+  const scanStart = Math.max(1, endRow - 499)
+  const r = await graph(`${sheetBase}/range(address='A${scanStart}:A${endRow}')`, token)
+  const vals = r.values || []
+  for (let i = vals.length - 1; i >= 0; i--) {
+    if (vals[i][0] !== null && vals[i][0] !== '' && vals[i][0] !== 0) {
+      const found = scanStart + i
+      console.log(`[sharepoint-dvr-append] last data row=${found}`)
+      return found
+    }
   }
+
+  // Step 3: window was all empty (phantom formatting) — scan from top
+  if (scanStart > 1) {
+    const r2 = await graph(`${sheetBase}/range(address='A1:A500')`, token)
+    const vals2 = r2.values || []
+    for (let i = vals2.length - 1; i >= 0; i--) {
+      if (vals2[i][0] !== null && vals2[i][0] !== '' && vals2[i][0] !== 0) return i + 1
+    }
+  }
+
   return 1
 }
+
 function colLetter(idx){let r='',n=idx+1;while(n>0){n--;r=String.fromCharCode(65+(n%26))+r;n=Math.floor(n/26)}return r}
 function buildColMap(headerRow){
   const col={}
@@ -106,9 +129,8 @@ async function notifyFront(facility, tabKey, payload, rowNum){
       headers:{Authorization:`Bearer ${FRONT_API_KEY}`,'Content-Type':'application/json'},
       body:JSON.stringify({author_id:'default',body:lines.join('\n')}),
     })
-    console.log(`[loadproof-notify] Posted to ${NOTIFY_CONVERSATION}`)
   }catch(e){
-    console.warn(`[loadproof-notify] Front comment failed (non-fatal):`,e.message)
+    console.warn(`[loadproof-notify] Front comment failed:`,e.message)
   }
 }
 
