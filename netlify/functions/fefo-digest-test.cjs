@@ -15,11 +15,16 @@
 // immediately for the resolved content date regardless of time/active,
 // and does not touch last_sent_date — same "test doesn't interfere with
 // the real scheduled send" behavior as before the split.
+//
+// Content date for open-order (non-closedOrders) projects changed
+// 2026-08-06 from a resolved "next business day" to a live "everything
+// currently Processing" snapshot (see lib/fefo-digest-shared.cjs's header)
+// — this file just needed to swap which date-resolution helper it calls.
 
 const {
   PROJECT_BY_DASHBOARD_TYPE,
   sbFetch,
-  nextBusinessDayDateObj, sameCalendarDayDateObj,
+  centralTodayDateObj, sameCalendarDayDateObj,
   runForProject,
 } = require('./lib/fefo-digest-shared.cjs')
 
@@ -40,7 +45,7 @@ async function runTest(dashboardType) {
     `prepick_notify_settings?facility=eq.${project.facility}&dashboard_type=eq.${dashboardType}&select=front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
   const settingsRow = rows?.[0]
-  const dateObj = project.closedOrders ? sameCalendarDayDateObj() : nextBusinessDayDateObj(settingsRow?.notify_days)
+  const dateObj = project.closedOrders ? sameCalendarDayDateObj() : centralTodayDateObj()
   return runForProject({ settingsRow, project, dateObj, isManualTest: true })
 }
 
