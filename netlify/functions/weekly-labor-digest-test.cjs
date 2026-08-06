@@ -7,9 +7,11 @@
 //
 // This function deliberately has NO `schedule` entry in netlify.toml, so
 // Netlify allows the browser to POST to it directly. Always sends
-// immediately for the CURRENT week (Monday of the week containing
-// today, Central time) regardless of time/active/weekday settings, and
-// does not touch last_sent_date.
+// immediately for a ROLLING 7 DAYS starting today (Central time) —
+// changed 2026-08-06 to match weekly-labor-digest-run.cjs's window (see
+// that file's header for why: Kay Martin's Front request) — regardless
+// of time/active/weekday settings, and does not touch last_sent_date or
+// the weekly_labor_digest_sends claim table at all.
 //
 // Requires { facility } in the POST body ('cal' or 'ken') — this
 // function backs two settings rows sharing one Netlify function, same
@@ -17,7 +19,7 @@
 
 const {
   sbFetch,
-  centralTodayISO, mondayOfISO,
+  centralTodayISO,
   postDigest,
 } = require('./lib/weekly-labor-digest-shared.cjs')
 
@@ -43,8 +45,7 @@ async function runTest(facilityId) {
     return { ok: false, reason: `No front_conversation_id configured for ${facilityId} Weekly Labor in prepick_notify_settings` }
   }
 
-  const mondayISO = mondayOfISO(centralTodayISO())
-  return postDigest({ facilityId, conversationId, mondayISO })
+  return postDigest({ facilityId, conversationId, startDate: centralTodayISO() })
 }
 
 exports.handler = async function (event) {

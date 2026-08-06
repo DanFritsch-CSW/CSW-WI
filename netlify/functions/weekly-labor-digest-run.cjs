@@ -11,12 +11,14 @@
 // weekly-labor-digest-test.cjs instead (Netlify blocks direct HTTP
 // invocation of anything carrying a `schedule`).
 //
-// Content date = the CURRENT week (Monday of the week containing today,
-// Central time) — this is a weekly-cadence digest, not a look-ahead-to-
-// tomorrow one like the daily digests, so "content date" here means
-// "which week" rather than "which day." Fires on whichever
-// notify_days/notify_hour/notify_minute are configured in the shared
-// NotifySettingsPanel (same UI as MAD/WR/EC), typically Monday morning.
+// Content window = a ROLLING 7 DAYS starting TODAY (Central time), not
+// Mon-Sun of the calendar week containing today — changed 2026-08-06 per
+// Kay Martin's Front request ("could we get that auto populating fxn to
+// provide the next 7 days rather than the current week?"). Fires on
+// whichever notify_days/notify_hour/notify_minute are configured in the
+// shared NotifySettingsPanel (same UI as MAD/WR/EC) — with notify_days
+// set to multiple weekdays, each day's send shows a fresh 7-day window
+// starting that day, which is the whole point of "rolling."
 //
 // See lib/weekly-labor-digest-shared.cjs for the actual calc (a
 // self-contained cjs port of src/lib/weeklyLabor.js) and message-building
@@ -24,7 +26,7 @@
 
 const {
   sbFetch, sbPatch,
-  centralTodayISO, isNotifyTimeMatch, isoWeekdayOf, mondayOfISO,
+  centralTodayISO, isNotifyTimeMatch, isoWeekdayOf,
   claimSendSlot, postDigest,
 } = require('./lib/weekly-labor-digest-shared.cjs')
 
@@ -45,7 +47,6 @@ async function runScheduledDigests() {
 
   const today = centralTodayISO()
   const isoWeekday = isoWeekdayOf(today)
-  const mondayISO = mondayOfISO(today)
 
   const results = []
   for (const settings of (settingsRows || [])) {
@@ -99,7 +100,7 @@ async function runScheduledDigests() {
     }
 
     try {
-      const result = await postDigest({ facilityId, conversationId, mondayISO })
+      const result = await postDigest({ facilityId, conversationId, startDate: today })
       results.push({ facility: facilityId, ...result })
       if (result.ok) {
         // Best-effort, informational only — see the comment above the

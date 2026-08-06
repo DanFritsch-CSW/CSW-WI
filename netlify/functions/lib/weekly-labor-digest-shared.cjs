@@ -26,6 +26,14 @@
 // weeklyLabor.js's header comment for the three-round precision saga
 // this format is built on (per-project rate overrides applied hour-by-
 // hour, each hour's req rounded to 1 decimal before summing).
+//
+// Content window (changed 2026-08-06 per Kay Martin's Front request):
+// rolling 7 days starting TODAY (send date), not Mon-Sun of the
+// calendar week containing today. The on-screen Weekly tab strip in
+// WeeklyLaborOverview.jsx is UNCHANGED (still Mon-Sun of the viewed
+// week) — this window change is scoped to the Front digest content
+// only, since that's what Kay's request referred to ("that auto
+// populating fxn").
 
 const { createClient } = require('@supabase/supabase-js')
 
@@ -627,8 +635,8 @@ async function computeDayAdj(facilityId, date) {
 
 // ── Week assembly + digest body ─────────────────────────────────────────
 
-async function computeWeek(facilityId, mondayISO) {
-  const weekDays = Array.from({ length: 7 }, (_, i) => addDaysISO(mondayISO, i))
+async function computeWeek(facilityId, startDate) {
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDaysISO(startDate, i))
   const [settings, breaksMap, projectHpa] = await Promise.all([
     fetchFacilitySettings(facilityId),
     fetchEmployeeBreaks(facilityId),
@@ -657,9 +665,9 @@ function fmtDelta(n) {
   return `${n > 0 ? '+' : ''}${n}`
 }
 
-function buildDigestBody(facilityId, mondayISO, week) {
+function buildDigestBody(facilityId, startDate, week) {
   const lines = []
-  lines.push(`${FACILITY_LABELS[facilityId] || facilityId} — Labor Daily +/- After Adj (${formatMDD(mondayISO)}–${formatMDD(addDaysISO(mondayISO, 6))}):`)
+  lines.push(`${FACILITY_LABELS[facilityId] || facilityId} — Labor Daily +/- After Adj, next 7 days (${formatMDD(startDate)}–${formatMDD(addDaysISO(startDate, 6))}):`)
   lines.push('')
   week.days.forEach((d, i) => {
     lines.push(`${DAY_LABELS[i]} ${formatMDD(d.date)}: ${fmtDelta(d.delta)}`)
@@ -720,9 +728,9 @@ async function claimSendSlot(facilityId, today) {
 
 // ── Post to Front ─────────────────────────────────────────────────────
 
-async function postDigest({ facilityId, conversationId, mondayISO }) {
-  const week = await computeWeek(facilityId, mondayISO)
-  const body = buildDigestBody(facilityId, mondayISO, week)
+async function postDigest({ facilityId, conversationId, startDate }) {
+  const week = await computeWeek(facilityId, startDate)
+  const body = buildDigestBody(facilityId, startDate, week)
 
   const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
@@ -734,7 +742,7 @@ async function postDigest({ facilityId, conversationId, mondayISO }) {
   try { frontJson = JSON.parse(frontText) } catch { frontJson = { raw: frontText } }
   if (!frontRes.ok) return { ok: false, reason: 'Front API error posting comment', detail: frontJson }
 
-  return { ok: true, date: mondayISO, conversationId, commentId: frontJson.id }
+  return { ok: true, date: startDate, conversationId, commentId: frontJson.id }
 }
 
 module.exports = {
