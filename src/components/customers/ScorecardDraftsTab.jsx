@@ -1,27 +1,246 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   fetchAllScorecardConfigs, updateScorecardPromptStyle, updateScorecardActive,
-  triggerScorecardDraftTest,
+  updateScorecardConfigField, insertScorecardConfig, triggerScorecardDraftTest,
 } from '../../lib/customerScorecard.js'
 
 // Scorecard Drafts tab — added 2026-08-06 per Dan's ask: "build the tab
 // within the UI so that I can see and test the prompt." Bernatello's-only
-// pilot (see lib/scorecard-draft-shared.cjs on the backend for the full
-// design writeup). Deliberately simple for this first pass — view/edit the
-// prompt style, see the read-only config that drives detection + metrics,
-// and run a real test draft against a known Front conversation. No
-// customer picker/multi-row management yet since there's only one
-// customer_scorecard_config row (bernatellos) as of this build.
+// pilot at first (see lib/scorecard-draft-shared.cjs on the backend for
+// the full design writeup).
+//
+// EXTENDED 2026-08-06 (later same day), "Add Customer" ask: config fields
+// are now editable inline (not just prompt style), and a new customer can
+// be added entirely from this tab — no dev/Claude session needed, AS LONG
+// AS the new customer's scorecard only needs metrics this app already
+// computes (OTT 2hr/3hr, Case Pick Accuracy, Carrier % On-Time Arrival —
+// all from motherduck-scorecard-metrics.cjs). A customer needing a
+// genuinely new metric type still needs that MotherDuck query built once;
+// this form removes the "every customer needs a dev session" ceiling, not
+// the "every new METRIC TYPE needs a dev session" one. See the Notion
+// changelog entry for the fuller discussion of why (Omni dashboard IDs
+// aren't read dynamically yet — that's the actual fix for the metric-type
+// ceiling, not built this pass).
+//
+// Warehouse names are a fixed dropdown, not free text — confirmed live via
+// Omni (gold__truck_appointments) that exactly 5 values exist: CSW-Eau
+// Claire, CSW-Franksville, CSW-Kenosha, CSW-Madison, CSW-Wisconsin Rapids.
+// A typo here would silently break both the MotherDuck metrics query
+// (wrong/no rows) and Front channel resolution (falls through to the
+// GET /channels fallback in scorecard-draft-shared.cjs instead of the
+// correct facility inbox) — a dropdown makes that class of error
+// impossible instead of relying on someone typing it exactly right.
 
-function ConfigField({ label, value, mono }) {
+const WAREHOUSE_OPTIONS = [
+  { warehouseName: 'CSW-Franksville',      facility: 'cal' },
+  { warehouseName: 'CSW-Kenosha',          facility: 'ken' },
+  { warehouseName: 'CSW-Madison',          facility: 'mad' },
+  { warehouseName: 'CSW-Wisconsin Rapids', facility: 'wr' },
+  { warehouseName: 'CSW-Eau Claire',       facility: 'ec' },
+]
+
+const inputStyle = {
+  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-mono)', fontSize: 12,
+  padding: '6px 10px', borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)',
+  background: 'var(--bg2, transparent)', color: 'inherit',
+}
+const labelStyle = {
+  fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase',
+  letterSpacing: '0.04em', marginBottom: 4, display: 'block',
+}
+const primaryBtnStyle = (disabled) => ({
+  padding: '6px 16px', borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)',
+  background: 'var(--brand, #a07818)', color: '#fff', fontSize: 12, fontWeight: 600,
+  cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+})
+
+function Field({ label, children }) {
   return (
     <div style={{ marginBottom: 10 }}>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 2 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 13, fontFamily: mono ? 'var(--font-mono)' : 'inherit', color: 'var(--text-primary, #fff)' }}>
-        {value == null || value === '' ? '—' : String(value)}
-      </div>
+      <label style={labelStyle}>{label}</label>
+      {children}
+    </div>
+  )
+}
+
+// EditableConfigField — a single config value with inline edit-and-save.
+// Text fields (dashboard ID, project filter, subject match) get a plain
+// input; warehouse gets the fixed dropdown (also drives facility
+// automatically); case pick accuracy gets a checkbox.
+function EditableConfigField({ label, field, value, customerKey, type = 'text', onSaved }) {
+  const [draft, setDraft] = useState(value ?? (type === 'checkbox' ? false : ''))
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+
+  useEffect(() => { setDraft(value ?? (type === 'checkbox' ? false : '')) }, [value])
+
+  const dirty = type === 'checkbox' ? draft !== !!value : draft !== (value ?? '')
+
+  async function save() {
+    setSaving(true)
+    setErr(null)
+    try {
+      if (field === 'warehouse_name') {
+        const match = WAREHOUSE_OPTIONS.find((w) => w.warehouseName === draft)
+        await updateScorecardConfigField(customerKey, 'warehouse_name', draft)
+        if (match) await updateScorecardConfigField(customerKey, 'facility', match.facility)
+        onSaved({ warehouse_name: draft, facility: match?.facility ?? null })
+      } else {
+        await updateScorecardConfigField(customerKey, field, draft)
+        onSaved({ [field]: draft })
+      }
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <label style={labelStyle}>{label}</label>
+      {type === 'checkbox' ? (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+          <input type="checkbox" checked={!!draft} onChange={(e) => setDraft(e.target.checked)} />
+          Included
+        </label>
+      ) : type === 'select' ? (
+        <select value={draft} onChange={(e) => setDraft(e.target.value)} style={inputStyle}>
+          <option value="">— select —</option>
+          {WAREHOUSE_OPTIONS.map((w) => (
+            <option key={w.warehouseName} value={w.warehouseName}>{w.warehouseName}</option>
+          ))}
+        </select>
+      ) : (
+        <input type="text" value={draft} onChange={(e) => setDraft(e.target.value)} style={inputStyle} />
+      )}
+      {dirty && (
+        <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={save} disabled={saving} style={{ ...primaryBtnStyle(saving), padding: '3px 10px', fontSize: 11 }}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          {err && <span style={{ fontSize: 11, color: 'var(--red)' }}>{err}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// AddCustomerForm — collapsible, creates a new customer_scorecard_config
+// row. Always inserted active=false — same "prove it via manual test
+// before turning on the schedule" convention as every digest onboarding
+// elsewhere in this app.
+function AddCustomerForm({ onAdded }) {
+  const [open, setOpen] = useState(false)
+  const [customerKey, setCustomerKey] = useState('')
+  const [customerLabel, setCustomerLabel] = useState('')
+  const [omniDashboardId, setOmniDashboardId] = useState('')
+  const [projectNameContains, setProjectNameContains] = useState('')
+  const [warehouseName, setWarehouseName] = useState('')
+  const [includeCasePickAccuracy, setIncludeCasePickAccuracy] = useState(false)
+  const [frontSubjectContains, setFrontSubjectContains] = useState('')
+  const [promptStyle, setPromptStyle] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+
+  function reset() {
+    setCustomerKey(''); setCustomerLabel(''); setOmniDashboardId('')
+    setProjectNameContains(''); setWarehouseName(''); setIncludeCasePickAccuracy(false)
+    setFrontSubjectContains(''); setPromptStyle(''); setErr(null)
+  }
+
+  async function handleCreate() {
+    setSaving(true)
+    setErr(null)
+    try {
+      const match = WAREHOUSE_OPTIONS.find((w) => w.warehouseName === warehouseName)
+      const row = await insertScorecardConfig({
+        customerKey, customerLabel, omniDashboardId, projectNameContains,
+        warehouseName, facility: match?.facility, includeCasePickAccuracy,
+        frontSubjectContains, promptStyle,
+      })
+      reset()
+      setOpen(false)
+      onAdded(row)
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const canCreate = customerKey.trim() && customerLabel.trim() && projectNameContains.trim()
+    && warehouseName && frontSubjectContains.trim()
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          padding: '8px 16px', borderRadius: 'var(--r-md)', border: '1px dashed var(--border-subtle)',
+          background: 'transparent', color: 'var(--text-secondary)', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+        }}
+      >
+        {open ? '− Cancel' : '+ Add Customer'}
+      </button>
+
+      {open && (
+        <div className="chart-card" style={{ marginTop: 10 }}>
+          <div className="chart-header">
+            <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>New Customer</span>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 12px' }}>
+            Only covers metrics this app already computes (OTT, Case Pick Accuracy, Carrier % On-Time Arrival). A customer needing a new metric type still needs that built once first.
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <Field label="Customer Key (unique, e.g. mccain)">
+              <input type="text" value={customerKey} onChange={(e) => setCustomerKey(e.target.value)} style={inputStyle} placeholder="mccain" />
+            </Field>
+            <Field label="Customer Label (display name)">
+              <input type="text" value={customerLabel} onChange={(e) => setCustomerLabel(e.target.value)} style={inputStyle} placeholder="McCain Foods" />
+            </Field>
+            <Field label="Omni Dashboard ID">
+              <input type="text" value={omniDashboardId} onChange={(e) => setOmniDashboardId(e.target.value)} style={inputStyle} placeholder="aa9ac42a" />
+            </Field>
+            <Field label="MotherDuck Project Filter">
+              <input type="text" value={projectNameContains} onChange={(e) => setProjectNameContains(e.target.value)} style={inputStyle} placeholder="McCain" />
+            </Field>
+            <Field label="Warehouse">
+              <select value={warehouseName} onChange={(e) => setWarehouseName(e.target.value)} style={inputStyle}>
+                <option value="">— select —</option>
+                {WAREHOUSE_OPTIONS.map((w) => (
+                  <option key={w.warehouseName} value={w.warehouseName}>{w.warehouseName}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Case Pick Accuracy">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={includeCasePickAccuracy} onChange={(e) => setIncludeCasePickAccuracy(e.target.checked)} />
+                Include this metric
+              </label>
+            </Field>
+            <Field label="Front Subject Match">
+              <input type="text" value={frontSubjectContains} onChange={(e) => setFrontSubjectContains(e.target.value)} style={inputStyle} placeholder="McCain YTD OTT Scorecard" />
+            </Field>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <label style={labelStyle}>Prompt Style (tone/emphasis guidance — can refine later)</label>
+            <textarea
+              value={promptStyle}
+              onChange={(e) => setPromptStyle(e.target.value)}
+              rows={4}
+              style={{ ...inputStyle, lineHeight: 1.5, resize: 'vertical' }}
+              placeholder="Write in the voice of a warehouse GM writing directly to a long-standing customer contact..."
+            />
+          </div>
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button onClick={handleCreate} disabled={saving || !canCreate} style={primaryBtnStyle(saving || !canCreate)}>
+              {saving ? 'Creating…' : 'Create Customer (inactive)'}
+            </button>
+            {err && <span style={{ fontSize: 11, color: 'var(--red)' }}>{err}</span>}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -61,6 +280,15 @@ export default function ScorecardDraftsTab() {
     setSavedAt(null)
     setTestResult(null)
     setTestErr(null)
+  }
+
+  function handleFieldSaved(patch) {
+    setConfigs((prev) => prev.map((c) => (c.customer_key === selected.customer_key ? { ...c, ...patch } : c)))
+  }
+
+  async function handleCustomerAdded(row) {
+    await load()
+    if (row?.customer_key) handleSelect(row.customer_key)
   }
 
   async function handleSavePrompt() {
@@ -111,193 +339,192 @@ export default function ScorecardDraftsTab() {
     return <div style={{ color: 'var(--text-secondary)', fontSize: 13, padding: '12px 0' }}>Loading…</div>
   }
 
-  if (configs.length === 0) {
-    return (
-      <div style={{ color: 'var(--text-secondary)', fontSize: 13, padding: '12px 0' }}>
-        No customer_scorecard_config rows found. Seed a row via SQL before this tab has anything to show.
-      </div>
-    )
-  }
-
   return (
     <div>
-      {/* Customer selector — currently just Bernatello's, but built as a
-          list so extending to more customers later doesn't need new UI. */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
-        {configs.map((c) => (
-          <button
-            key={c.customer_key}
-            onClick={() => handleSelect(c.customer_key)}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 'var(--r-md)',
-              border: c.customer_key === selectedKey ? '1px solid var(--brand, #a07818)' : '1px solid var(--border-subtle)',
-              background: c.customer_key === selectedKey ? 'var(--brand-bg, #fef9ec)' : 'transparent',
-              color: c.customer_key === selectedKey ? 'var(--brand, #a07818)' : 'var(--text-secondary)',
-              fontSize: 13,
-              fontWeight: c.customer_key === selectedKey ? 600 : 500,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            {c.customer_label}
-            <span style={{
-              fontSize: 10, padding: '1px 6px', borderRadius: 10,
-              background: c.active ? 'var(--green)' : 'var(--bg3)',
-              color: c.active ? '#fff' : 'var(--text-dim)',
-            }}>
-              {c.active ? 'ACTIVE' : 'INACTIVE'}
-            </span>
-          </button>
-        ))}
-      </div>
+      <AddCustomerForm onAdded={handleCustomerAdded} />
 
-      {selected && (
+      {configs.length === 0 ? (
+        <div style={{ color: 'var(--text-secondary)', fontSize: 13, padding: '12px 0' }}>
+          No customers configured yet — use "+ Add Customer" above to create the first one.
+        </div>
+      ) : (
         <>
-          {/* Read-only config — what drives detection + metrics. Editing
-              these needs a SQL change for now (dashboard_id, project
-              filters, etc. are precise identifiers, not free text worth
-              risking a UI typo on for a one-customer pilot). */}
-          <div className="chart-card" style={{ marginBottom: 20 }}>
-            <div className="chart-header">
-              <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Config (read-only)</span>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, padding: '4px 0' }}>
-              <ConfigField label="Omni Dashboard ID" value={selected.omni_dashboard_id} mono />
-              <ConfigField label="MotherDuck Project Filter" value={selected.project_name_contains} mono />
-              <ConfigField label="Warehouse Name" value={selected.warehouse_name} mono />
-              <ConfigField label="Facility" value={selected.facility} mono />
-              <ConfigField label="Case Pick Accuracy Included" value={selected.include_case_pick_accuracy ? 'Yes' : 'No'} />
-              <ConfigField label="Front Subject Match" value={selected.front_subject_contains} mono />
-            </div>
-            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* Customer selector */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+            {configs.map((c) => (
               <button
-                onClick={handleToggleActive}
-                disabled={activeSaving}
+                key={c.customer_key}
+                onClick={() => handleSelect(c.customer_key)}
                 style={{
-                  padding: '6px 14px', borderRadius: 'var(--r-md)',
-                  border: '1px solid var(--border-subtle)',
-                  background: selected.active ? 'var(--red)' : 'var(--green)',
-                  color: '#fff', fontSize: 12, fontWeight: 600, cursor: activeSaving ? 'default' : 'pointer',
-                  opacity: activeSaving ? 0.6 : 1,
+                  padding: '8px 16px',
+                  borderRadius: 'var(--r-md)',
+                  border: c.customer_key === selectedKey ? '1px solid var(--brand, #a07818)' : '1px solid var(--border-subtle)',
+                  background: c.customer_key === selectedKey ? 'var(--brand-bg, #fef9ec)' : 'transparent',
+                  color: c.customer_key === selectedKey ? 'var(--brand, #a07818)' : 'var(--text-secondary)',
+                  fontSize: 13,
+                  fontWeight: c.customer_key === selectedKey ? 600 : 500,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
                 }}
               >
-                {activeSaving ? 'Saving…' : selected.active ? 'Deactivate' : 'Activate (enables scheduled auto-drafting)'}
+                {c.customer_label}
+                <span style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 10,
+                  background: c.active ? 'var(--green)' : 'var(--bg3)',
+                  color: c.active ? '#fff' : 'var(--text-dim)',
+                }}>
+                  {c.active ? 'ACTIVE' : 'INACTIVE'}
+                </span>
               </button>
-              <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                Active controls the scheduled */15 run only — the manual test below always works regardless.
-              </span>
-            </div>
+            ))}
           </div>
 
-          {/* Prompt style editor — the actual "see and test the prompt" ask. */}
-          <div className="chart-card" style={{ marginBottom: 20 }}>
-            <div className="chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Prompt Style</span>
-              <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                Tone/emphasis guidance only — metrics come from MotherDuck/Omni, not this text
-              </span>
-            </div>
-            <textarea
-              value={promptDraft}
-              onChange={(e) => setPromptDraft(e.target.value)}
-              rows={10}
-              style={{
-                width: '100%', boxSizing: 'border-box', marginTop: 8,
-                fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.5,
-                padding: 10, borderRadius: 'var(--r-md)',
-                border: '1px solid var(--border-subtle)',
-                background: 'var(--bg2, transparent)', color: 'inherit',
-                resize: 'vertical',
-              }}
-            />
-            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button
-                onClick={handleSavePrompt}
-                disabled={saving || promptDraft === (selected.prompt_style || '')}
-                style={{
-                  padding: '6px 16px', borderRadius: 'var(--r-md)',
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--brand, #a07818)', color: '#fff',
-                  fontSize: 12, fontWeight: 600,
-                  cursor: saving || promptDraft === (selected.prompt_style || '') ? 'default' : 'pointer',
-                  opacity: saving || promptDraft === (selected.prompt_style || '') ? 0.5 : 1,
-                }}
-              >
-                {saving ? 'Saving…' : 'Save Prompt'}
-              </button>
-              {savedAt && <span style={{ fontSize: 11, color: 'var(--green)' }}>Saved {savedAt.toLocaleTimeString()}</span>}
-              {saveErr && <span style={{ fontSize: 11, color: 'var(--red)' }}>Error: {saveErr}</span>}
-            </div>
-          </div>
-
-          {/* Manual test — creates a REAL Front draft and really calls
-              Claude. Not a dry run. See scorecard-draft-test.cjs. */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Test the Prompt</span>
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '4px 0 10px' }}>
-              Not a dry run — this creates a real Front draft on the conversation below and really calls the Claude API.
-              Point it at a known past scorecard conversation (e.g. a real Bernatello's "YTD OTT Scorecard" thread ID from Front).
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <input
-                type="text"
-                value={testConversationId}
-                onChange={(e) => setTestConversationId(e.target.value)}
-                placeholder="Front conversation ID (e.g. cnv_1c1dcmvo)"
-                style={{
-                  flex: 1, minWidth: 240, fontFamily: 'var(--font-mono)', fontSize: 12,
-                  padding: '7px 10px', borderRadius: 'var(--r-md)',
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--bg2, transparent)', color: 'inherit',
-                }}
-              />
-              <button
-                onClick={handleRunTest}
-                disabled={testRunning || !testConversationId.trim()}
-                style={{
-                  padding: '7px 16px', borderRadius: 'var(--r-md)',
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--brand, #a07818)', color: '#fff',
-                  fontSize: 12, fontWeight: 600,
-                  cursor: testRunning || !testConversationId.trim() ? 'default' : 'pointer',
-                  opacity: testRunning || !testConversationId.trim() ? 0.5 : 1,
-                }}
-              >
-                {testRunning ? 'Running…' : 'Run Test Draft'}
-              </button>
-            </div>
-
-            {testErr && (
-              <div style={{ marginTop: 12, fontSize: 12, color: 'var(--red)' }}>Error: {testErr}</div>
-            )}
-
-            {testResult && (
-              <div style={{ marginTop: 12, padding: 12, borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)' }}>
-                {testResult.ok ? (
-                  <>
-                    <div style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600, marginBottom: 6 }}>
-                      Draft created — open it in Front to review/edit/send: {testResult.draftId}
+          {selected && (
+            <>
+              {/* Editable config — no longer read-only as of the Add Customer
+                  pass. Each field saves independently. */}
+              <div className="chart-card" style={{ marginBottom: 20 }}>
+                <div className="chart-header">
+                  <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Config</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, padding: '4px 0' }}>
+                  <EditableConfigField
+                    label="Omni Dashboard ID" field="omni_dashboard_id" value={selected.omni_dashboard_id}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                  />
+                  <EditableConfigField
+                    label="MotherDuck Project Filter" field="project_name_contains" value={selected.project_name_contains}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                  />
+                  <EditableConfigField
+                    label="Warehouse" field="warehouse_name" value={selected.warehouse_name} type="select"
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                  />
+                  <EditableConfigField
+                    label="Case Pick Accuracy Included" field="include_case_pick_accuracy" value={selected.include_case_pick_accuracy} type="checkbox"
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                  />
+                  <EditableConfigField
+                    label="Front Subject Match" field="front_subject_contains" value={selected.front_subject_contains}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                  />
+                  <Field label="Facility (auto-set from Warehouse)">
+                    <div style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-primary, #fff)', padding: '6px 0' }}>
+                      {selected.facility || '—'}
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
-                      Week of {testResult.weekStart} to {testResult.weekEndExclusive} · {testResult.flaggedContextCount} flagged thread line(s)
-                    </div>
-                    <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>
-                      {testResult.draftPreview}{testResult.draftPreview?.length >= 300 ? '…' : ''}
-                    </div>
-                  </>
-                ) : (
-                  <div style={{ fontSize: 12, color: 'var(--red)' }}>
-                    Failed: {testResult.reason}
+                  </Field>
+                </div>
+                <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button
+                    onClick={handleToggleActive}
+                    disabled={activeSaving}
+                    style={{
+                      padding: '6px 14px', borderRadius: 'var(--r-md)',
+                      border: '1px solid var(--border-subtle)',
+                      background: selected.active ? 'var(--red)' : 'var(--green)',
+                      color: '#fff', fontSize: 12, fontWeight: 600, cursor: activeSaving ? 'default' : 'pointer',
+                      opacity: activeSaving ? 0.6 : 1,
+                    }}
+                  >
+                    {activeSaving ? 'Saving…' : selected.active ? 'Deactivate' : 'Activate (enables scheduled auto-drafting)'}
+                  </button>
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                    Active controls the scheduled */15 run only — the manual test below always works regardless.
+                  </span>
+                </div>
+              </div>
+
+              {/* Prompt style editor — the actual "see and test the prompt" ask. */}
+              <div className="chart-card" style={{ marginBottom: 20 }}>
+                <div className="chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Prompt Style</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                    Tone/emphasis guidance only — metrics come from MotherDuck/Omni, not this text
+                  </span>
+                </div>
+                <textarea
+                  value={promptDraft}
+                  onChange={(e) => setPromptDraft(e.target.value)}
+                  rows={10}
+                  style={{
+                    width: '100%', boxSizing: 'border-box', marginTop: 8,
+                    fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.5,
+                    padding: 10, borderRadius: 'var(--r-md)',
+                    border: '1px solid var(--border-subtle)',
+                    background: 'var(--bg2, transparent)', color: 'inherit',
+                    resize: 'vertical',
+                  }}
+                />
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button
+                    onClick={handleSavePrompt}
+                    disabled={saving || promptDraft === (selected.prompt_style || '')}
+                    style={primaryBtnStyle(saving || promptDraft === (selected.prompt_style || ''))}
+                  >
+                    {saving ? 'Saving…' : 'Save Prompt'}
+                  </button>
+                  {savedAt && <span style={{ fontSize: 11, color: 'var(--green)' }}>Saved {savedAt.toLocaleTimeString()}</span>}
+                  {saveErr && <span style={{ fontSize: 11, color: 'var(--red)' }}>Error: {saveErr}</span>}
+                </div>
+              </div>
+
+              {/* Manual test — creates a REAL Front draft and really calls
+                  Claude. Not a dry run. See scorecard-draft-test.cjs. */}
+              <div className="chart-card">
+                <div className="chart-header">
+                  <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Test the Prompt</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '4px 0 10px' }}>
+                  Not a dry run — this creates a real Front draft on the conversation below and really calls the Claude API.
+                  Point it at a known past scorecard conversation for this customer (a real Front thread ID).
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    value={testConversationId}
+                    onChange={(e) => setTestConversationId(e.target.value)}
+                    placeholder="Front conversation ID (e.g. cnv_1c1dcmvo)"
+                    style={{ ...inputStyle, flex: 1, minWidth: 240, padding: '7px 10px' }}
+                  />
+                  <button
+                    onClick={handleRunTest}
+                    disabled={testRunning || !testConversationId.trim()}
+                    style={primaryBtnStyle(testRunning || !testConversationId.trim())}
+                  >
+                    {testRunning ? 'Running…' : 'Run Test Draft'}
+                  </button>
+                </div>
+
+                {testErr && (
+                  <div style={{ marginTop: 12, fontSize: 12, color: 'var(--red)' }}>Error: {testErr}</div>
+                )}
+
+                {testResult && (
+                  <div style={{ marginTop: 12, padding: 12, borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)' }}>
+                    {testResult.ok ? (
+                      <>
+                        <div style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600, marginBottom: 6 }}>
+                          Draft created — open it in Front to review/edit/send: {testResult.draftId}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
+                          Week of {testResult.weekStart} to {testResult.weekEndExclusive} · {testResult.flaggedContextCount} flagged thread line(s)
+                        </div>
+                        <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>
+                          {testResult.draftPreview}{testResult.draftPreview?.length >= 300 ? '…' : ''}
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: 12, color: 'var(--red)' }}>
+                        Failed: {testResult.reason}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-            )}
-          </div>
+            </>
+          )}
         </>
       )}
     </div>
