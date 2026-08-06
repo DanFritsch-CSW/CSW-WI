@@ -9,12 +9,14 @@
 // on this file only; manual test lives in the sibling takt-digest-test.cjs
 // since Netlify blocks direct HTTP invocation of anything with a
 // `schedule`). See lib/takt-digest-shared.cjs for the message-building
-// logic and — importantly — the "content date is always yesterday
-// relative to the send" rule.
+// logic and — importantly — how the shared content date is resolved
+// (fixed 2026-08-06 to a live MAX(shift_start_date) lookup, ONE date
+// shared across every row in this run, after the original fixed
+// "yesterday" offset broke when the actual data lag drifted past 1 day).
 
 const {
   sbFetch,
-  contentDateISO, contentDateObj, isNotifyTimeMatch,
+  fetchContentDate, isNotifyTimeMatch,
   postDigest,
 } = require('./lib/takt-digest-shared.cjs')
 
@@ -33,8 +35,10 @@ async function runScheduledDigests() {
     `prepick_notify_settings?dashboard_type=eq.takt&select=facility,front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
 
-  const date = contentDateISO()
-  const dateObj = contentDateObj()
+  // ONE shared content date for this whole run — see
+  // lib/takt-digest-shared.cjs's header for why this is a single global
+  // query rather than each facility resolving its own latest date.
+  const { iso: date, dateObj } = await fetchContentDate()
   const isoWeekday = dateObj.getUTCDay() === 0 ? 7 : dateObj.getUTCDay()
 
   const results = []
@@ -66,7 +70,7 @@ async function runScheduledDigests() {
     }
 
     try {
-      const result = await postDigest({ facility, conversationId, isManualTest: false })
+      const result = await postDigest({ facility, conversationId, isManualTest: false, date, dateObj })
       results.push({ facility, ...result })
     } catch (err) {
       results.push({ facility, ok: false, reason: err.message })
