@@ -47,15 +47,15 @@ const FRONT_TOKEN = process.env.FRONT_API_TOKEN
 const SITE_URL = process.env.URL || process.env.DEPLOY_URL
 
 const FEFO_PROJECTS = [
-  { id: 'faioa5', code: 'FAIOA5', name: 'Fair Oaks Farms', facility: 'ken' },
-  { id: 'fofwe5', code: 'FOFWE5', name: 'Fair Oaks Farms West', facility: 'ken' },
-  { id: 'riche5', code: 'RICHE5', name: 'Richelieu Foods', facility: 'ken' },
-  { id: 'golst5', code: 'GOLST5', name: 'Crown Bakeries', facility: 'ken' },
-  { id: 'birch5', code: 'BIRCH5', name: 'Birchwood Foods', facility: 'ken' },
-  { id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia", facility: 'cal' },
-  { id: 'palma9', code: 'PALMA9', name: "Palermo's Caledonia Materials", facility: 'cal' },
-  { id: 'paldsd9', code: 'PALDSD9', name: "Palermo's Caledonia DSD", facility: 'cal' },
-  { id: 'jdf1', code: 'JDF1', name: 'Jones Dairy Farm', facility: 'mad', closedOrders: true },
+  { id: 'faioa5', code: 'FAIOA5', name: 'Fair Oaks Farms', facility: 'ken', dateSemantic: 'pack' },
+  { id: 'fofwe5', code: 'FOFWE5', name: 'Fair Oaks Farms West', facility: 'ken', dateSemantic: 'pack' },
+  { id: 'riche5', code: 'RICHE5', name: 'Richelieu Foods', facility: 'ken', dateSemantic: 'expiration' },
+  { id: 'golst5', code: 'GOLST5', name: 'Crown Bakeries', facility: 'ken', dateSemantic: 'pack' },
+  { id: 'birch5', code: 'BIRCH5', name: 'Birchwood Foods', facility: 'ken', dateSemantic: 'received' },
+  { id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia", facility: 'cal', dateSemantic: 'expiration' },
+  { id: 'palma9', code: 'PALMA9', name: "Palermo's Caledonia Materials", facility: 'cal', dateSemantic: 'expiration' },
+  { id: 'paldsd9', code: 'PALDSD9', name: "Palermo's Caledonia DSD", facility: 'cal', dateSemantic: 'expiration' },
+  { id: 'jdf1', code: 'JDF1', name: 'Jones Dairy Farm', facility: 'mad', closedOrders: true, dateSemantic: 'man' },
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_${p.id}`, p]))
 const APP_URL = 'https://csw-wi.netlify.app/customers?tab=fefo'
@@ -185,6 +185,15 @@ function orderSeverity(order) {
   return days >= 4 ? 'critical' : 'warning'
 }
 
+// lineSeverity — added 2026-08-06 alongside verdictCopy above, for the same
+// per-line digest detail. Mirrors orderSeverity's threshold (4 days) but
+// per LINE rather than per order, matching src/lib/fefo.js's lineSeverity.
+function lineSeverity(line) {
+  const days = lineDaysOlder(line)
+  if (days === 0) return null
+  return days >= 4 ? 'critical' : 'warning'
+}
+
 function undatedLotCount(orders) {
   const lots = new Set()
   for (const o of orders) {
@@ -194,6 +203,51 @@ function undatedLotCount(orders) {
     }
   }
   return lots.size
+}
+
+// verdictCopy/dateVerb/locSuffix — added 2026-08-06 per Dan's approved
+// mockup (Hill/Sam/Dan FEFO review call): the digest's violation list now
+// includes the same per-line detail the live tab shows, rather than a
+// separate, hand-written summary that could drift from the app's own
+// wording. Ported verbatim from src/lib/fefo.js's verdictCopy/dateVerb —
+// takes a project OBJECT directly (we already have one in scope here)
+// rather than looking one up by id the way the client's dateVerb(projId)
+// does.
+function dateVerb(project) {
+  if (project?.dateSemantic === 'expiration') return 'expiring'
+  if (project?.dateSemantic === 'received')   return 'received'
+  if (project?.dateSemantic === 'man')        return 'manufactured'
+  return 'packed'
+}
+
+function locSuffix(rem) {
+  if (!rem?.location) return ''
+  return ` at ${rem.location}`
+}
+
+function verdictCopy(line, project) {
+  const verb = dateVerb(project)
+  const v = lineVerdict(line)
+  if (v === 'violation') {
+    const datedShip = line.ship.filter(s => !s.dateUnknown)
+    const oldShip = datedShip.reduce((a, b) => a.k < b.k ? a : b)
+    const stockUnit = line.rem.lps > 0 ? `${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}` : 'stock'
+    const loc = locSuffix(line.rem)
+    const days = lineDaysOlder(line)
+    const drift = days > 0 ? ` (${days} day${days === 1 ? '' : 's'} older)` : ''
+    return `Out of rotation${drift} — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
+  }
+  if (v === 'hold') {
+    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
+  }
+  if (v === 'blocked') {
+    const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
+    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
+  }
+  if (!line.rem || line.rem.lps === 0) {
+    return 'In rotation — the oldest stock on hand is shipping first… fully cleared.'
+  }
+  return 'In rotation — the oldest stock on hand is shipping first.'
 }
 
 function buildDigestBody(orders, project, dateObj) {
@@ -244,10 +298,17 @@ function buildDigestBody(orders, project, dateObj) {
     lines.push(project.closedOrders ? 'Shipped out of FEFO order:' : 'Violations:')
     lines.push('')
     for (const o of byVerdict.violation) {
-      const days = orderMaxDaysOlder(o)
-      const sev = orderSeverity(o)
-      const verb = project.closedOrders ? 'shipped ahead of' : 'older stock available, unallocated —'
-      lines.push(`• ${o.id} — ${days}d ${verb}${sev ? ` (${sev.toUpperCase()})` : ''} — ${o.dest || 'dest unknown'}`)
+      lines.push(`• ${o.id} — ${o.dest || 'dest unknown'}${o.appt && o.appt !== '—' ? ` — appt ${o.appt}` : ''}`)
+      // Per-line detail (added 2026-08-06, Dan's approved mockup) — same
+      // wording as the live tab's OrderCard/SkuLineRow, so Front and the
+      // app never disagree. Only the actually-violating lines on this
+      // order get a detail line; a multi-SKU order with one bad line
+      // doesn't repeat detail for its clean lines.
+      for (const line of (o.lines || [])) {
+        if (lineVerdict(line) !== 'violation') continue
+        const sev = lineSeverity(line)
+        lines.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
+      }
       lines.push('')
     }
   }
