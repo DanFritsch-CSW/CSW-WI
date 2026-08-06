@@ -15,15 +15,22 @@
 // for the senior-leadership rollup across every facility. All six rows
 // share dashboard_type='takt' in prepick_notify_settings.
 //
-// CONTENT DATE — per Dan's explicit call (2026-08-02): the digest ALWAYS
-// summarizes the day BEFORE it fires, regardless of what time it's
-// configured to send at (a 6am send looks at yesterday, same as a 6pm
-// send). This sidesteps the data-lag issue confirmed live the same
-// session (gold.takt_productivity_v2_agg often doesn't have full
-// same-day rows yet — see motherduck-takt-daily.cjs's header). Simpler
-// and more predictable than trying to auto-detect "the most recent date
-// with data," which would risk the leadership digest showing different
-// dates for different facilities in the same message.
+// CONTENT DATE — FIXED 2026-08-06. Originally this always summarized the
+// day before it fired ("yesterday"), per Dan's explicit call, to sidestep
+// the same-day data-lag issue confirmed live 2026-08-02. That broke
+// within days: checked live 2026-08-06, the table's actual lag had
+// drifted to ~2 days (most recent data was 8/4 when the digest fired
+// 8/6 and asked for 8/5), and the lag isn't even constant week to week.
+// FIX: content date is now the MAX(shift_start_date) actually present in
+// gold.takt_productivity_v2_agg — one shared query
+// (motherduck-takt-latest-date.cjs), ONE resulting date, applied
+// uniformly to every facility in a given send. Deliberately global
+// rather than per-facility latest-date, so the leadership digest can't
+// show Caledonia's numbers as of 8/4 next to Eau Claire's as of 8/2 in
+// the same message — that mismatch risk is exactly why auto-detection
+// was passed over for the original "yesterday" rule, and pinning
+// everyone to one shared date closes that gap while still tracking
+// whatever the real lag is.
 //
 // Reuses motherduck-takt-daily.cjs via an internal SITE_URL fetch rather
 // than re-implementing the MotherDuck query here — same established
@@ -86,20 +93,24 @@ function isNotifyTimeMatch(notifyHour, notifyMinute) {
   return hour === notifyHour && bucket === targetBucket
 }
 
-// Content date is always "yesterday" relative to Central today — see the
-// file header for why. Returned both as an ISO string (for the MotherDuck
-// query + last_sent_date) and a UTC Date object (for weekday checks and
-// display formatting), mirroring centralTodayISO/centralTodayDateObj's
-// shape in every other digest-shared file.
-function contentDateISO() {
-  const { year, month, day } = centralNowParts()
-  const d = new Date(Date.UTC(year, month - 1, day))
-  d.setUTCDate(d.getUTCDate() - 1)
-  return d.toISOString().slice(0, 10)
-}
-
-function contentDateObj() {
-  return new Date(contentDateISO() + 'T00:00:00Z')
+// Fetches the shared content date — the most recent shift_start_date
+// with any data at all, across every facility. See file header for why
+// this replaced the old fixed "yesterday" offset. Returns { iso, dateObj }
+// or throws if the underlying table has no data whatsoever (defensive —
+// shouldn't happen in practice, but a clear error beats silently
+// formatting a null date).
+async function fetchContentDate() {
+  const res = await fetch(`${SITE_URL}/.netlify/functions/motherduck-takt-latest-date`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  const text = await res.text()
+  let json
+  try { json = JSON.parse(text) } catch { json = { raw: text } }
+  if (!res.ok) throw new Error(json?.error || text)
+  if (!json.date) throw new Error('gold.takt_productivity_v2_agg has no data at all')
+  return { iso: json.date, dateObj: new Date(json.date + 'T00:00:00Z') }
 }
 
 function formatHeaderDate(dateObj) {
@@ -186,10 +197,7 @@ function buildLeadershipDigestBody(data, dateObj) {
   return lines.join('\n')
 }
 
-async function postDigest({ facility, conversationId, isManualTest }) {
-  const date = contentDateISO()
-  const dateObj = contentDateObj()
-
+async function postDigest({ facility, conversationId, isManualTest, date, dateObj }) {
   let body
   if (facility === 'all') {
     const data = await fetchTaktData(date)
@@ -221,7 +229,7 @@ async function postDigest({ facility, conversationId, isManualTest }) {
 module.exports = {
   SUPABASE_URL, SUPABASE_KEY, FRONT_TOKEN, SITE_URL,
   sbFetch, sbPatch,
-  contentDateISO, contentDateObj, isNotifyTimeMatch, formatHeaderDate,
+  fetchContentDate, isNotifyTimeMatch, formatHeaderDate,
   buildFacilityDigestBody, buildLeadershipDigestBody, postDigest,
   FACILITY_LABEL, FACILITY_ORDER,
 }
