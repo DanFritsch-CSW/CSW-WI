@@ -36,12 +36,18 @@
 // and every other weekly construct in this app (Weekly Labor Overview,
 // etc.).
 //
-// NOT YET LIVE-VERIFIED end-to-end from this function specifically (the
-// underlying formulas are validated; the project_name-filtered/weekly-
-// windowed combination here has only been checked via Omni's natural-
-// language layer, not by running this exact generated SQL against
-// MotherDuck directly). Run "Send test draft now" before trusting this
-// blindly for a real customer send.
+// ROUNDING (fixed 2026-08-06, after first successful live test):
+// Dan's ask — match Omni's own dashboard display rounding, not raw
+// precision. OTT (both 2hr and 3hr) rounds to the nearest WHOLE number
+// (e.g. 97.53% → 98%, matching the dashboard). Case Pick Accuracy rounds
+// to the nearest 0.1% (e.g. 99.65% → 99.7%). This only affects display —
+// the underlying numerator/denominator counts are still exact and
+// unrounded, so nothing about the actual query logic changed.
+//
+// LIVE-VERIFIED 2026-08-06: first real end-to-end test (via the Scorecard
+// Drafts UI tab, cnv_1c1dcmvo) succeeded — real Front draft created,
+// numbers pulled correctly (97.53%/100%/99.65% pre-rounding-fix), Claude
+// wrote a real narrative in the configured voice.
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -193,7 +199,9 @@ exports.handler = async (event) => {
       const absDiscrepancySum = num(c.abs_discrepancy_sum)
       const pct = expectedSum > 0 ? ((expectedSum - absDiscrepancySum) / expectedSum) * 100 : null
       casePickAccuracy = {
-        pct: pct == null ? null : Math.round(pct * 100) / 100,
+        // Rounded to nearest 0.1% per Dan's ask (2026-08-06) — matches
+        // Omni's own dashboard display rounding.
+        pct: pct == null ? null : Math.round(pct * 10) / 10,
         containers: num(c.containers),
         expectedScans: expectedSum,
         absoluteDiscrepancy: absDiscrepancySum,
@@ -208,8 +216,10 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         projectNameContains, warehouseName, weekStart, weekEndExclusive,
         totalCompletedAppointments: num(r.total_completed),
-        ott2: { pct: ott2Pct == null ? null : Math.round(ott2Pct * 100) / 100, numerator: num(r.ott2_num), denominator: ott2Denom },
-        ott3: { pct: ott3Pct == null ? null : Math.round(ott3Pct * 100) / 100, numerator: num(r.ott3_num), denominator: ott3Denom },
+        // Rounded to nearest WHOLE number per Dan's ask (2026-08-06) —
+        // matches Omni's own dashboard display rounding (e.g. 97.53% -> 98%).
+        ott2: { pct: ott2Pct == null ? null : Math.round(ott2Pct), numerator: num(r.ott2_num), denominator: ott2Denom },
+        ott3: { pct: ott3Pct == null ? null : Math.round(ott3Pct), numerator: num(r.ott3_num), denominator: ott3Denom },
         casePickAccuracy,
         fetchedAt: new Date().toISOString(),
         elapsedMs: Date.now() - t0,
