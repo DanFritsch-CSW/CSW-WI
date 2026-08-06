@@ -167,6 +167,29 @@
 // forever — tying it to order status keeps the commitment live only while
 // the order is actually still open). See committed_raw below for the full
 // writeup.
+//
+// ── Open-order date filtering removed (2026-08-06) ─────────────────────────
+//
+// Live Hill/Sam/Dan FEFO review call (Fathom recording 774067255):
+// Palermo's/PVI orders don't reliably carry a scheduled dock appointment
+// date far enough in advance for the old forward day-stepper to mean
+// anything — Hill: "Palermos definitely doesn't have the date dialed in
+// enough to rely on the requested date." Richelieu was flagged as equally
+// unreliable ("it's all over the board"). Dan's fix, confirmed for ALL
+// open-order (non-closedOrders) FEFO projects, not just PVI: stop windowing
+// by appointment date at all — review is now simply every order currently
+// 'Processing' right now, no day picker, no forward window. Two changes:
+//   1. orderSql's date-range filter on the appts CTE is now skipped
+//      entirely for non-closedOrders projects (closedOrders/JDF keeps its
+//      existing backward window, untouched).
+//   2. The appts JOIN is now LEFT (was INNER) for non-closedOrders
+//      projects — an INNER JOIN was silently excluding any order with no
+//      scheduled appointment yet at all, a related invisibility bug this
+//      same fix also resolves.
+// day is now always 0 for non-closedOrders orders (no bucket concept left);
+// dayOffsetFrom (only used for the old bucketing) was removed as dead code.
+// See src/components/customers/FefoRotationTab.jsx and
+// lib/fefo-digest-shared.cjs for the matching UI/digest-side changes.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -393,14 +416,11 @@ function fmtPack(palletTie, palletHigh, shortName) {
   return s
 }
 
-function dayOffsetFrom(dateLike, today) {
-  if (!dateLike) return null
-  const d = new Date(dateLike)
-  if (Number.isNaN(d.getTime())) return null
-  const dDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
-  const diffMs = dDay.getTime() - today.getTime()
-  return Math.round(diffMs / 86400000)
-}
+// dayOffsetFrom was removed 2026-08-06 — its only call site (open-order
+// day-bucketing) went away when the day-stepper was removed for
+// non-closedOrders projects (see file header "Open-order date filtering
+// removed"). closedOrders (JDF) computes its own backward daysAgo inline
+// instead.
 
 // todayCentralMidnight — "today" as a UTC-midnight Date object representing
 // the CURRENT CALENDAR DAY IN AMERICA/CHICAGO, not the server's raw UTC
@@ -410,7 +430,7 @@ function dayOffsetFrom(dateLike, today) {
 // Central-time business day actually ended). Same pattern
 // fefo-digest-run.cjs's centralTodayDateObj already used correctly; this
 // just brings the live-query path in line with it. All Date arithmetic
-// downstream (dateFrom/dateTo window, dayOffsetFrom comparisons, closedOrders
+// downstream (dateFrom/dateTo window, closedOrders
 // daysAgo) is unaffected in shape — it still operates on a UTC-midnight
 // Date object, just one that's computed from the right wall-clock day.
 function todayCentralMidnight() {
@@ -450,6 +470,11 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   // in the shared handler since a batch request could in principle mix
   // closed- and open-order projects (it doesn't today — JDF is alone on
   // facility MAD — but this keeps the function correct regardless).
+  // Date-window/day-stepper REMOVED for open-order (non-closedOrders)
+  // projects (2026-08-06, Hill/Sam/Dan FEFO review call — see file header
+  // "Open-order date filtering removed"). closedOrders (JDF) keeps its
+  // existing backward dateFrom/dateTo window untouched below; everything
+  // else just pulls the live Processing snapshot with no date bound at all.
   if (project.closedOrders) {
     dateTo = fmtDateISO(today)                                              // today
     dateFrom = fmtDateISO(new Date(today.getTime() - (dayCount - 1) * 86400000)) // dayCount days back, inclusive of today
@@ -480,7 +505,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         WHERE dai.item_entity_type = 'Order'
           AND ds.dock_appointment_status_name NOT IN (${project.closedOrders ? `'Cancelled'` : `'Cancelled', 'Completed'`})
           AND da.warehouse_id = ${warehouseId}
-          AND DATE(da.scheduled_arrival) BETWEEN '${dateFrom}' AND '${dateTo}'
+          ${project.closedOrders ? `AND DATE(da.scheduled_arrival) BETWEEN '${dateFrom}' AND '${dateTo}'` : ''}
       ) ranked
       WHERE rn = 1
     )
@@ -499,7 +524,12 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     FROM production_db.silver.datex_slv_orders o
     JOIN proj                                                  ON o.project_id = proj.project_id
     JOIN production_db.silver.datex_slv_orderstatuses os       ON o.order_status_id = os.order_status_id
-    JOIN appts a                                               ON a.order_id = o.order_id
+    -- LEFT JOIN (was INNER JOIN) for open-order projects, 2026-08-06 — an
+    -- INNER JOIN here silently excluded any order with no scheduled dock
+    -- appointment yet at all, regardless of the date-window question this
+    -- same change addresses. closedOrders (JDF) keeps INNER since a closed
+    -- order genuinely needs an appointment/ship-date to bucket by.
+    ${project.closedOrders ? 'JOIN' : 'LEFT JOIN'} appts a                  ON a.order_id = o.order_id
     LEFT JOIN production_db.silver.datex_slv_orderaddresses oa ON oa.order_id = o.order_id
     -- Outbound-only join (added 2026-07-18 — see file header "Outbound-only
     -- filter"). Without this, Inbound ASN (receiving) orders were mixed
@@ -875,17 +905,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   for (const oh of orderRows) {
     const orderId = Number(oh.order_id)
     const arrival = arrivalToDate(oh.scheduled_arrival)
-    // day-bucket: closedOrders projects (e.g. JDF) look BACKWARD, so the
-    // forward dayOffsetFrom (which clamps every negative offset to 0) can't
-    // be reused here. Fixed 2026-07-18 (Dan asked for a day-stepper
-    // matching the other customers instead of a fixed "last N days"
-    // window, then asked again the same day to make TODAY selectable too,
-    // not just historical days): daysAgo counts backward from today
-    // (0 = today, 1 = yesterday, 2 = two days ago, ...) — same numbering
-    // convention as the open-order dayOffsetFrom (0 = today), just running
-    // the opposite direction in time. Clamped into [0, dayCount-1]. The
-    // client's day-stepper pages through these exactly like the forward
-    // projects page through their day buckets, just running backward.
+    // day-bucket: closedOrders projects (e.g. JDF) still look BACKWARD —
+    // unchanged, see below. Open-order (non-closedOrders) projects no
+    // longer bucket by day at all (2026-08-06 — see file header
+    // "Open-order date filtering removed"): every currently-Processing
+    // order is the live snapshot, always day 0. dayOffsetFrom is kept
+    // around only for the `past` (stale-appointment) check further down,
+    // not for bucketing.
     let day
     if (project.closedOrders) {
       const daysAgo = arrival
@@ -893,8 +919,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         : 0
       day = Math.max(0, Math.min(dayCount - 1, daysAgo))
     } else {
-      const dayOffset = dayOffsetFrom(arrival, today)
-      day = Math.max(0, Math.min(dayCount - 1, dayOffset == null ? 0 : dayOffset))
+      day = 0
     }
     // closedOrders (e.g. JDF) force past:false — the 'stale' verdict means
     // "past appointment, still holding allocated stock," which doesn't
