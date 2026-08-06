@@ -4,6 +4,7 @@ import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import ExpCheckTab from '../components/customers/ExpCheckTab.jsx'
+import ScorecardDraftsTab from '../components/customers/ScorecardDraftsTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
@@ -13,7 +14,8 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 //
 // Tab order:
 //   LoadProof / DVRS → FEFO Rotation → EXP Check (Pretzilla) →
-//   PVI At Risk Inventory → Space Planning → Customer Onboarding
+//   Scorecard Drafts → PVI At Risk Inventory → Space Planning →
+//   Customer Onboarding
 //
 // LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
 // for Caledonia and Kenosha. Seeded with last-30-day open incidents from
@@ -33,6 +35,13 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // math-reconciliation view only (EXP vs MFG + shelf life); it does not
 // catch an internally-consistent misread manufacture date — see
 // netlify/functions/motherduck-exp-check.cjs for exactly what it covers.
+//
+// Scorecard Drafts tab added 2026-08-06, per Dan's ask: "build the tab
+// within the UI so that I can see and test the prompt." Bernatello's-only
+// pilot — view/edit the per-customer prompt style, toggle active, and run
+// a real (not dry-run) test draft against a known Front conversation. See
+// components/customers/ScorecardDraftsTab.jsx and
+// netlify/functions/lib/scorecard-draft-shared.cjs for the full design.
 const SUB_TABS = [
   {
     id: 'dvr',
@@ -48,6 +57,11 @@ const SUB_TABS = [
     id: 'expcheck',
     label: 'EXP Check',
     subtitle: 'Pretzilla · EXP date vs. manufacture date + shelf life reconciliation',
+  },
+  {
+    id: 'scorecard',
+    label: 'Scorecard Drafts',
+    subtitle: "Bernatello's pilot · view/edit the AI draft prompt, toggle active, run a test draft",
   },
   {
     id: 'pvi',
@@ -145,6 +159,7 @@ export default function Customers() {
         {subTab === 'dvr'        && <DvrTab />}
         {subTab === 'fefo'       && <FefoRotationTab />}
         {subTab === 'expcheck'   && <ExpCheckTab />}
+        {subTab === 'scorecard'  && <ScorecardDraftsTab />}
         {subTab === 'pvi'        && <PviShelfLife />}
         {subTab === 'space'      && <SpacePlanningTab />}
         {subTab === 'onboarding' && <OnboardingTab />}
