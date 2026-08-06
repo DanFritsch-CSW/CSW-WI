@@ -7,11 +7,20 @@ import { supabase } from './supabase.js'
 // on a huge file); this app's established pattern for a self-contained
 // feature is its own lib file (see managerBonus.js, pviShelfLife.js).
 //
-// Backs customer_scorecard_config (Bernatello's-pilot config: prompt style,
-// Omni dashboard pointer, MotherDuck project/warehouse filters, active flag)
-// and triggers scorecard-draft-test.cjs for the "test the prompt" workflow —
-// see that function's own header for what it actually does (creates a REAL
-// Front draft, not a dry run).
+// Backs customer_scorecard_config (per-customer scorecard config: prompt
+// style, Omni dashboard pointer, MotherDuck project/warehouse filters,
+// active flag) and triggers scorecard-draft-test.cjs for the "test the
+// prompt" workflow — see that function's own header for what it actually
+// does (creates a REAL Front draft, not a dry run).
+//
+// insertScorecardConfig / updateScorecardConfigField (added 2026-08-06,
+// "Add Customer" ask) — extends this pilot from Bernatello's-only to any
+// customer whose scorecard only needs metrics this app ALREADY computes
+// (OTT + Case Pick Accuracy + Carrier % On-Time Arrival, all from
+// motherduck-scorecard-metrics.cjs). A customer needing a genuinely new
+// metric type still needs that MotherDuck query built once — this form
+// doesn't remove that ceiling, it just removes the need for a dev/Claude
+// session for every customer that fits the existing metric set.
 
 export async function fetchAllScorecardConfigs() {
   if (!supabase) return []
@@ -39,6 +48,62 @@ export async function updateScorecardActive(customerKey, active) {
     .update({ active, updated_at: new Date().toISOString() })
     .eq('customer_key', customerKey)
   if (error) { console.error('updateScorecardActive:', error); throw error }
+}
+
+// insertScorecardConfig — creates a brand-new customer_scorecard_config row.
+// Always inserted with active=false (same "prove it via manual test before
+// turning on the schedule" convention as every other digest onboarding in
+// this app — see attendance-points-shared.cjs's header for the precedent).
+// customer_key must be unique (table's primary key) — the Supabase error
+// surfaces naturally as a duplicate-key message if the person reuses one.
+export async function insertScorecardConfig({
+  customerKey, customerLabel, omniDashboardId, projectNameContains,
+  warehouseName, facility, includeCasePickAccuracy, frontSubjectContains, promptStyle,
+}) {
+  if (!supabase) return
+  const payload = {
+    customer_key: customerKey.trim(),
+    customer_label: customerLabel.trim(),
+    omni_dashboard_id: (omniDashboardId || '').trim() || null,
+    project_name_contains: projectNameContains.trim(),
+    warehouse_name: warehouseName,
+    facility: facility || null,
+    include_case_pick_accuracy: !!includeCasePickAccuracy,
+    front_subject_contains: frontSubjectContains.trim(),
+    prompt_style: (promptStyle || '').trim(),
+    active: false,
+  }
+  if (!payload.customer_key) throw new Error('Customer key is required')
+  if (!payload.customer_label) throw new Error('Customer label is required')
+  if (!payload.project_name_contains) throw new Error('MotherDuck project filter is required')
+  if (!payload.warehouse_name) throw new Error('Warehouse is required')
+  if (!payload.front_subject_contains) throw new Error('Front subject match is required')
+  const { data, error } = await supabase
+    .from('customer_scorecard_config')
+    .insert(payload)
+    .select()
+    .single()
+  if (error) { console.error('insertScorecardConfig:', error); throw error }
+  return data
+}
+
+// updateScorecardConfigField — generic single-field update for the
+// read-only-turned-editable config fields (dashboard ID, project filter,
+// warehouse, facility, case pick accuracy flag, subject match). Kept
+// generic rather than one function per field since these are all simple
+// same-shape writes to the same row.
+const EDITABLE_CONFIG_FIELDS = new Set([
+  'omni_dashboard_id', 'project_name_contains', 'warehouse_name',
+  'facility', 'include_case_pick_accuracy', 'front_subject_contains',
+])
+export async function updateScorecardConfigField(customerKey, field, value) {
+  if (!supabase) return
+  if (!EDITABLE_CONFIG_FIELDS.has(field)) throw new Error(`Field '${field}' is not editable via this function`)
+  const { error } = await supabase
+    .from('customer_scorecard_config')
+    .update({ [field]: value, updated_at: new Date().toISOString() })
+    .eq('customer_key', customerKey)
+  if (error) { console.error('updateScorecardConfigField:', error); throw error }
 }
 
 // triggerScorecardDraftTest — calls scorecard-draft-test.cjs directly (no
