@@ -6,7 +6,6 @@ const CLIENT_SECRET  = process.env.SHAREPOINT_CLIENT_SECRET
 const WEBHOOK_SECRET = process.env.SHAREPOINT_WEBHOOK_SECRET
 const FRONT_API_KEY  = process.env.FRONT_API_KEY
 
-// Front conversation to notify on every new LoadProof entry (monitoring only)
 const NOTIFY_CONVERSATION = 'cnv_1bwzzexg'
 
 const FAC_LABEL = { mad: 'Madison', ken: 'Kenosha', cal: 'Caledonia' }
@@ -52,7 +51,8 @@ async function getDriveRef(facility,token){
   return _driveCache[facility]
 }
 async function findLastDataRow(sheetBase,token){
-  const r=await graph(`${sheetBase}/range(address='A1:A10000')`,token)
+  // Read column A up to 25000 rows - handles large facilities (CAL is 15k+ rows)
+  const r=await graph(`${sheetBase}/range(address='A1:A25000')`,token)
   const vals=r.values||[]
   for(let i=vals.length-1;i>=0;i--){
     if(vals[i][0]!==null&&vals[i][0]!==''&&vals[i][0]!==0)return i+1
