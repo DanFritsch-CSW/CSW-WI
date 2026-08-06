@@ -5,7 +5,7 @@ import {
   FEFO_PROJECTS, AUTO_LOAD_PROJECT_IDS, getProject, dateVerb,
   orderVerdict, lineVerdict, compareByVerdict, verdictCopy,
   bannerCounts, kpiRow, rollupByProject,
-  dayLabel, daySubLabel, closedDayLabel, closedDaySubLabel,
+  closedDayLabel, closedDaySubLabel,
   VERDICT_TOKENS, SEVERITY_TOKENS, UNDATED_TOKEN,
   lineSeverity, orderSeverity, orderMaxDaysOlder, lineDaysOlder,
   undatedLotsInView,
@@ -192,7 +192,6 @@ export default function FefoRotationTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <ControlsRow
-        day={day}        onDayChange={setDay}
         proj={proj}      onProjChange={setProj}
         orderCount={visible.length}
         loading={isLazyProj ? lazyLoading : loading}
@@ -310,7 +309,7 @@ function FefoNotifySettings() {
 // documented fragile-push size threshold (~50-60KB) — same pattern as
 // SpacePlanningTab.jsx/SpaceStackingExceptions.jsx.
 
-function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh, isClosedOrders, closedDay, onClosedDayChange, closedDayCount }) {
+function ControlsRow({ proj, onProjChange, orderCount, loading, allFailed, failedScoped, liveResult, onRefresh, isClosedOrders, closedDay, onClosedDayChange, closedDayCount }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -318,7 +317,7 @@ function ControlsRow({ day, onDayChange, proj, onProjChange, orderCount, loading
     }}>
       {isClosedOrders
         ? <ClosedDayStepper day={closedDay} dayCount={closedDayCount} onChange={onClosedDayChange} />
-        : <DayStepper day={day} onChange={onDayChange} />}
+        : <LiveSnapshotLabel />}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <DataSourceBadge
           loading={loading}
@@ -395,29 +394,27 @@ function BadgeChip({ color, label, title }) {
   )
 }
 
-function DayStepper({ day, onChange }) {
+// LiveSnapshotLabel — replaces DayStepper for open-order (non-closedOrders)
+// projects, added 2026-08-06 (Hill/Sam/Dan FEFO review call — see
+// fefo-orders.cjs's file header "Open-order date filtering removed" for
+// the full story). Palermo's/PVI and Richelieu don't reliably carry a
+// scheduled dock appointment date far enough ahead for a forward
+// day-stepper to mean anything, so review is now simply every order
+// currently 'Processing,' with no day picker at all — this label replaces
+// the removed stepper rather than leaving an empty gap in ControlsRow.
+// ClosedDayStepper (JDF's backward-looking retrospective) is untouched.
+function LiveSnapshotLabel() {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '4px 8px',
+      padding: '4px 12px',
       background: 'var(--bg2, #f8f9fb)',
       border: '1px solid var(--border)',
       borderRadius: 'var(--r-md, 8px)',
     }}>
-      <StepBtn disabled={day <= 0} onClick={() => onChange(Math.max(0, day - 1))} ariaLabel="Previous day">‹</StepBtn>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 130, lineHeight: 1.2 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-          {dayLabel(day)}
-        </span>
-        <span style={{
-          fontSize: 10, color: 'var(--text-dim)',
-          fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-          letterSpacing: '0.06em', marginTop: 2,
-        }}>
-          {daySubLabel(day)}
-        </span>
-      </div>
-      <StepBtn disabled={day >= 4} onClick={() => onChange(Math.min(4, day + 1))} ariaLabel="Next day">›</StepBtn>
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+        Live Processing Snapshot
+      </span>
     </div>
   )
 }
