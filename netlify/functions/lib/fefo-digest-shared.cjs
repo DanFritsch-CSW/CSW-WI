@@ -28,6 +28,18 @@
 // fefo-digest-run.cjs — see that file's original header (preserved in git
 // history) for the fuller feature history (per-project settings rows,
 // next-business-day content date, JDF's closedOrders variant, etc).
+//
+// ── Open-order content date: live snapshot, not "next business day" (2026-08-06)
+//
+// Hill/Sam/Dan FEFO review call (Fathom 774067255): the nightly digest's
+// "next business day" resolution (nextBusinessDayDateObj, removed) doesn't
+// make sense once the live tab itself stopped windowing by appointment
+// date (see fefo-orders.cjs's "Open-order date filtering removed"). Every
+// open-order (non-closedOrders) project's digest now reports the SAME live
+// "everything currently Processing" snapshot the tab shows, with the
+// header reading "Live snapshot: <today>" instead of "Next business day:
+// <date>". closedOrders (JDF) is completely unaffected — it still reviews
+// a specific closed/shipped calendar day via sameCalendarDayDateObj.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -46,7 +58,6 @@ const FEFO_PROJECTS = [
   { id: 'jdf1', code: 'JDF1', name: 'Jones Dairy Farm', facility: 'mad', closedOrders: true },
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_${p.id}`, p]))
-const DEFAULT_NOTIFY_DAYS = [1, 2, 3, 4, 5]
 const APP_URL = 'https://csw-wi.netlify.app/customers?tab=fefo'
 
 async function sbFetch(path) {
@@ -86,16 +97,12 @@ function centralTodayDateObj() {
   return new Date(Date.UTC(year, month - 1, day))
 }
 
-function nextBusinessDayDateObj(notifyDays) {
-  const days = (notifyDays && notifyDays.length) ? notifyDays : DEFAULT_NOTIFY_DAYS
-  let d = new Date(centralTodayDateObj().getTime() + 24 * 60 * 60 * 1000)
-  let advanced = 0
-  while (!days.includes(isoWeekday(d)) && advanced < 6) {
-    d = new Date(d.getTime() + 24 * 60 * 60 * 1000)
-    advanced++
-  }
-  return d
-}
+// nextBusinessDayDateObj was removed 2026-08-06 (Hill/Sam/Dan FEFO review
+// call — see fefo-orders.cjs's file header "Open-order date filtering
+// removed" for the full story). Open-order (non-closedOrders) digests no
+// longer resolve a future business day at all — they now report a LIVE
+// snapshot of everything currently 'Processing', same as the live tab.
+// centralTodayDateObj (still defined below) covers what's needed instead.
 
 function sameCalendarDayDateObj() {
   return centralTodayDateObj()
@@ -108,10 +115,8 @@ function isNotifyTimeMatch(notifyHour, notifyMinute) {
   return hour === notifyHour && bucket === targetBucket
 }
 
-function isoWeekday(dateObj) {
-  const dow = dateObj.getUTCDay()
-  return dow === 0 ? 7 : dow
-}
+// isoWeekday was removed 2026-08-06 — its only caller (nextBusinessDayDateObj)
+// was removed in the same change (see that note above).
 
 function isoDate(dateObj) { return dateObj.toISOString().slice(0, 10) }
 
@@ -198,7 +203,7 @@ function buildDigestBody(orders, project, dateObj) {
   lines.push('CSW Operations Hub')
   lines.push(project.closedOrders
     ? `Reviewing closed orders shipped: ${formatHeaderDate(dateObj)}`
-    : `Next business day: ${formatHeaderDate(dateObj)}`)
+    : `Live snapshot: ${formatHeaderDate(dateObj)}`)
   lines.push('')
 
   if (orders.length === 0) {
@@ -281,16 +286,17 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
 
   const date = isoDate(dateObj)
 
-  let dayCount
+  // dayCount/closedDayBucket — closedOrders (JDF) still uses its own
+  // backward window, unchanged. Open-order (non-closedOrders) projects no
+  // longer need a day-window at all (2026-08-06 — see fefo-orders.cjs's
+  // file header "Open-order date filtering removed"): fefo-orders.cjs
+  // ignores date bounds entirely for these now and always returns day=0,
+  // so dayCount=1 with no per-day filtering is sufficient — every order it
+  // returns IS the live snapshot.
+  let dayCount = 1
   let closedDayBucket = 0
   if (project.closedOrders) {
-    dayCount = 1
     closedDayBucket = 0
-  } else {
-    let targetDayOffset = Math.round((dateObj.getTime() - centralTodayDateObj().getTime()) / 86400000)
-    if (targetDayOffset < 0) targetDayOffset = 0
-    if (targetDayOffset > 6) targetDayOffset = 6
-    dayCount = targetDayOffset + 1
   }
 
   const ordersRes = await fetch(`${SITE_URL}/.netlify/functions/fefo-orders`, {
@@ -306,7 +312,7 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   }
 
   const allOrders = ordersJson.ordersByProject?.[project.id] || []
-  const targetOrders = project.closedOrders ? allOrders.filter(o => o.day === closedDayBucket) : allOrders.filter(o => o.day === dayCount - 1)
+  const targetOrders = project.closedOrders ? allOrders.filter(o => o.day === closedDayBucket) : allOrders
 
   const body = buildDigestBody(targetOrders, project, dateObj)
 
@@ -333,6 +339,6 @@ module.exports = {
   SUPABASE_URL, SUPABASE_KEY, FRONT_TOKEN, SITE_URL,
   FEFO_PROJECTS, PROJECT_BY_DASHBOARD_TYPE, APP_URL,
   sbFetch, sbPatch,
-  centralTodayDateObj, nextBusinessDayDateObj, sameCalendarDayDateObj, isNotifyTimeMatch, isoDate,
+  centralTodayDateObj, sameCalendarDayDateObj, isNotifyTimeMatch, isoDate,
   runForProject,
 }
