@@ -1,9 +1,10 @@
 'use strict'
 
 // MotherDuck backend for the Scorecard Draft Creator feature — added
-// 2026-08-06. Computes ONE customer's weekly OTT (2hr v2 / 3hr all) and,
-// optionally, Case Pick Accuracy, scoped by MotherDuck project_name
-// instead of the Manager tab's quarter/facility-wide scope.
+// 2026-08-06. Computes ONE customer's weekly OTT (2hr v2 / 3hr all),
+// Carrier % On-Time Arrival, and, optionally, Case Pick Accuracy, scoped by
+// MotherDuck project_name instead of the Manager tab's quarter/facility-wide
+// scope.
 //
 // Deliberately a SEPARATE function from motherduck-ott.cjs and
 // motherduck-case-pick-accuracy.cjs rather than an extra mode bolted onto
@@ -22,6 +23,33 @@
 // week (small gap consistent with Omni's fuzzy "last week" window vs. an
 // exact Mon-Sun boundary — this function uses the exact boundary).
 //
+// CARRIER % ON-TIME ARRIVAL (added 2026-08-06, after the first live test's
+// output surfaced the gap — Dan's real Bernatello's Omni dashboard has this
+// metric and this function was missing it entirely, so Claude's narrative
+// correctly reported "not reported this period" for a metric it genuinely
+// had no data for). Confirmed live via Omni: a real measure named exactly
+// "Carrier % On-Time Arrival" exists in the same gold__truck_appointments
+// topic. This is a DIFFERENT concept than the OTT turn-time metrics above —
+// it measures whether the CARRIER arrived on/before its scheduled
+// appointment time, not how fast the warehouse processed the load once it
+// arrived. Computed here from the SAME arrival_status bucketing already
+// built for the OTT CTE (checked_in_on vs scheduled_arrival, within 15 min
+// = 'On Time'), since that's the same underlying data Omni's measure draws
+// from: on-time % = (On Time + Early) / (On Time + Early + Late), excluding
+// appointments with no check-in data recorded (arrival_status IS NULL) from
+// both sides of the ratio — a missing check-in isn't a carrier tardiness
+// signal either way.
+// NOT YET FULLY VALIDATED: cross-checked against Omni's own built-in
+// measure with the same filters (project_name/warehouse_name/outbound,
+// last week) and got ~86%, in the same ballpark as Dan's reported 90% for
+// "this period" — the gap is consistent with the same fuzzy-week-boundary
+// pattern already documented above for OTT (Omni's natural-language "last
+// week" vs. this function's exact Mon-Sun window), not evidence of a wrong
+// formula, but this hasn't been checked against Omni's literal underlying
+// SQL definition for the measure (not introspectable via the tools used to
+// build this). Treat as a reasonable first pass, not a guaranteed exact
+// match — validate against a known week before fully trusting it.
+//
 // Case Pick Accuracy reuses the identical formula from
 // motherduck-case-pick-accuracy.cjs (SUM(expected_scans) −
 // SUM(ABS(discrepancy)), over SUM(expected_scans), from
@@ -38,16 +66,18 @@
 //
 // ROUNDING (fixed 2026-08-06, after first successful live test):
 // Dan's ask — match Omni's own dashboard display rounding, not raw
-// precision. OTT (both 2hr and 3hr) rounds to the nearest WHOLE number
-// (e.g. 97.53% → 98%, matching the dashboard). Case Pick Accuracy rounds
-// to the nearest 0.1% (e.g. 99.65% → 99.7%). This only affects display —
-// the underlying numerator/denominator counts are still exact and
-// unrounded, so nothing about the actual query logic changed.
+// precision. OTT (2hr, 3hr) AND Carrier % On-Time Arrival all round to the
+// nearest WHOLE number (e.g. 97.53% → 98%, matching the dashboard). Case
+// Pick Accuracy rounds to the nearest 0.1% (e.g. 99.65% → 99.7%). This only
+// affects display — the underlying numerator/denominator counts are still
+// exact and unrounded, so nothing about the actual query logic changed.
 //
 // LIVE-VERIFIED 2026-08-06: first real end-to-end test (via the Scorecard
 // Drafts UI tab, cnv_1c1dcmvo) succeeded — real Front draft created,
 // numbers pulled correctly (97.53%/100%/99.65% pre-rounding-fix), Claude
-// wrote a real narrative in the configured voice.
+// wrote a real narrative in the configured voice. That same test is what
+// surfaced the missing Carrier % metric (Claude correctly said "not
+// reported this period" rather than fabricating a number).
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -171,7 +201,9 @@ exports.handler = async (event) => {
         COUNT(CASE WHEN arrival_status NOT IN ('Work-in','Late') THEN 1 END)
           - COUNT(CASE WHEN arrival_status NOT IN ('Work-in','Late') AND notes ILIKE '%driver not ready%' AND turn_hours >= 2 THEN 1 END) AS ott2_denom,
         SUM(under_3_hours_) AS ott3_num,
-        COUNT(*) - COUNT(CASE WHEN notes ILIKE '%driver not ready%' AND turn_hours >= 3 THEN 1 END) AS ott3_denom
+        COUNT(*) - COUNT(CASE WHEN notes ILIKE '%driver not ready%' AND turn_hours >= 3 THEN 1 END) AS ott3_denom,
+        COUNT(CASE WHEN arrival_status IN ('On Time','Early') THEN 1 END) AS carrier_ontime_num,
+        COUNT(CASE WHEN arrival_status IS NOT NULL THEN 1 END) AS carrier_ontime_denom
       FROM final
     `
 
@@ -181,6 +213,8 @@ exports.handler = async (event) => {
     const ott3Denom = num(r.ott3_denom)
     const ott2Pct = ott2Denom > 0 ? (num(r.ott2_num) / ott2Denom) * 100 : null
     const ott3Pct = ott3Denom > 0 ? (num(r.ott3_num) / ott3Denom) * 100 : null
+    const carrierOntimeDenom = num(r.carrier_ontime_denom)
+    const carrierOntimePct = carrierOntimeDenom > 0 ? (num(r.carrier_ontime_num) / carrierOntimeDenom) * 100 : null
 
     let casePickAccuracy = null
     if (includeCasePickAccuracy) {
@@ -220,6 +254,13 @@ exports.handler = async (event) => {
         // matches Omni's own dashboard display rounding (e.g. 97.53% -> 98%).
         ott2: { pct: ott2Pct == null ? null : Math.round(ott2Pct), numerator: num(r.ott2_num), denominator: ott2Denom },
         ott3: { pct: ott3Pct == null ? null : Math.round(ott3Pct), numerator: num(r.ott3_num), denominator: ott3Denom },
+        // Carrier % On-Time Arrival — added 2026-08-06, see file header for
+        // formula/validation notes. Same whole-number rounding as OTT.
+        carrierOnTime: {
+          pct: carrierOntimePct == null ? null : Math.round(carrierOntimePct),
+          numerator: num(r.carrier_ontime_num),
+          denominator: carrierOntimeDenom,
+        },
         casePickAccuracy,
         fetchedAt: new Date().toISOString(),
         elapsedMs: Date.now() - t0,
