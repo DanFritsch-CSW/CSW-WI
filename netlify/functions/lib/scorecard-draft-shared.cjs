@@ -37,31 +37,43 @@
 //    without an explicit re-review of the data-exposure risk (an internal
 //    ops comment ending up quoted in a customer-facing draft).
 //
-// TRIGGER/DETECTION (updated 2026-08-06, later same day): scoped via a real
-// Front tag, "qbr_case_study" (Dan's chosen name, replacing the earlier
-// "customer scorecard" placeholder name from the original scoping
-// discussion). resolveScorecardTagId() looks this tag up BY NAME every run
-// (GET /tags, exact case-insensitive match) rather than hardcoding a tag ID —
-// the tag did not exist in the workspace as of this session, so this stays
-// resilient to it being created (or recreated) later without a code change.
-// Confirmed via Front's own API docs: GET /tags/{tag_id}/conversations is
-// the real "List tagged conversations" endpoint. Per-customer
-// front_subject_contains is still used to partition tagged conversations by
-// customer (multiple customers' scorecard emails will likely share this one
-// tag, same as Hill's original "tag anything with 'customer scorecard'"
-// framing intended). If the tag isn't found (not yet created, or renamed),
-// falls back to the older subject-string-only Front search — weaker, but
-// keeps the pilot testable in the meantime.
+// TRIGGER/DETECTION (updated 2026-08-06, confirmed with Dan via screenshot):
+// scoped via a real Front tag, "QBR - Case Study" — a company-level tag
+// nested under Positive > Sentiment (Front Settings → Tags → Company). Note
+// the exact spelling: spaces + hyphen, NOT the "qbr_case_study" placeholder
+// name used earlier during scoping — that name was wrong, corrected once
+// Dan confirmed the real tag via a screenshot of Front's tag settings.
+// resolveScorecardTagId() looks this tag up BY NAME every run (GET /tags,
+// exact case-insensitive match) rather than hardcoding a tag ID. Confirmed
+// via Front's own API docs: GET /tags/{tag_id}/conversations is the real
+// "List tagged conversations" endpoint. Per-customer front_subject_contains
+// is still used to partition tagged conversations by customer (multiple
+// customers' scorecard emails likely share this one tag, per Hill's
+// original "tag anything with 'customer scorecard'" framing). If the tag
+// isn't found, falls back to the older subject-string-only Front search.
+//
+// UNVERIFIED RISK, flagged rather than assumed away: this session's Front
+// MCP tool (list_tags) could NOT find "QBR - Case Study" under any query
+// variant (exact name, partial, unfiltered listing) even after Dan
+// confirmed via screenshot that it exists at the company level, nested
+// under a parent tag. That strongly suggests company-level/nested tags
+// aren't returned the same way by whatever tags-listing surface that tool
+// wraps. resolveScorecardTagId() below calls Front's REST API directly
+// (GET /tags) with FRONT_API_TOKEN — NOT the same code path as the MCP
+// tool — so it may or may not have the same blind spot. This has NOT been
+// verified live. If scorecard-draft-test.cjs's response shows tag
+// resolution failing, this is the first thing to check — may need GET
+// /tags to be paginated further, or a company-level tags endpoint that
+// differs from the workspace-scoped one this code currently calls.
 //
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
-// - Dan needs to (1) create the "qbr_case_study" tag in Front if it doesn't
-//   already exist by the time this runs, and (2) add a "tag conversation"
-//   action for it on the existing "Scorecard Template" rule (rul_7kwwk) —
-//   rule-editing isn't available through this session's tools.
+// - Add a "tag conversation" action for "QBR - Case Study" on the existing
+//   "Scorecard Template" rule (rul_7kwwk) so it actually gets applied to
+//   incoming Omni scorecard emails — rule-editing isn't available through
+//   this session's tools.
 // - Omni dashboard document-state read (drift-proofing) not implemented —
 //   only the dashboard_id pointer is stored.
-// - ANTHROPIC_API_KEY must be added to Netlify env vars — first LLM call in
-//   this app. Nothing in this file will succeed until that's set.
+// - ANTHROPIC_API_KEY added 2026-08-06 — not yet verified via a real call.
 // - End-to-end (real Front draft landing correctly, reply-all resolution,
 //   Claude output quality) NOT yet verified live — run
 //   scorecard-draft-test.cjs against a real past Bernatello's conversation
@@ -76,10 +88,14 @@ const SITE_URL = process.env.URL || process.env.DEPLOY_URL
 const CLAUDE_MODEL = 'claude-sonnet-4-5'
 
 // The Front tag that scopes which conversations this feature looks at at
-// all — Dan's ask (2026-08-06), replacing the placeholder "customer
-// scorecard" name used during scoping. Resolved by name at runtime (see
-// resolveScorecardTagId below), not hardcoded as an ID.
-const SCORECARD_TAG_NAME = 'qbr_case_study'
+// all. CORRECTED 2026-08-06 (later same day) — Dan confirmed via a Front
+// Settings screenshot that the real tag is "QBR - Case Study" (company
+// level, nested under Positive > Sentiment), not the "qbr_case_study"
+// placeholder name used earlier. Resolved by name at runtime (see
+// resolveScorecardTagId below), not hardcoded as an ID — see the
+// UNVERIFIED RISK note above regarding whether this lookup can actually
+// see a company-level/nested tag.
+const SCORECARD_TAG_NAME = 'QBR - Case Study'
 
 // Keyword flags Dan asked for (2026-08-05 Front feedback thread) — lines in
 // recent thread context containing these are surfaced to Claude as explicit
@@ -178,12 +194,12 @@ async function frontGetUrl(url) {
   return res.json()
 }
 
-// Resolves the "qbr_case_study" tag's ID by name — NOT hardcoded, since the
-// tag did not exist in the workspace as of 2026-08-06 and may be created (or
-// renamed) independently of this code. Case-insensitive exact match. Paginates
-// through /tags in case the workspace has more than one page of tags. Returns
-// null (not a throw) if not found, so callers can gracefully fall back —
-// a missing tag is an expected, documented state during rollout, not a bug.
+// Resolves the "QBR - Case Study" tag's ID by name — see UNVERIFIED RISK
+// note in the file header regarding company-level/nested tag visibility.
+// Case-insensitive exact match. Paginates through /tags in case the
+// workspace has more than one page of tags. Returns null (not a throw) if
+// not found, so callers can gracefully fall back — a missing tag is an
+// expected, documented state during rollout, not a bug.
 async function resolveScorecardTagId() {
   let all = []
   let data = await frontGet('/tags?limit=100')
@@ -205,9 +221,9 @@ async function listConversationsByTag(tagId, sinceMinutes) {
 }
 
 // Searches Front for candidate conversations by subject string — FALLBACK
-// ONLY, used when the qbr_case_study tag can't be resolved yet (not created,
-// or renamed). Weaker than the tag-based path since it depends on Omni never
-// changing its subject line wording.
+// ONLY, used when the "QBR - Case Study" tag can't be resolved (see
+// UNVERIFIED RISK above). Weaker than the tag-based path since it depends
+// on Omni never changing its subject line wording.
 async function searchRecentScorecardConversations(subjectContains, sinceMinutes) {
   const res = await fetch(
     `https://api2.frontapp.com/conversations/search/${encodeURIComponent(subjectContains)}`,
