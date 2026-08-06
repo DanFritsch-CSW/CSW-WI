@@ -51,43 +51,35 @@ async function getDriveRef(facility,token){
   return _driveCache[facility]
 }
 
-// Find the last row that actually contains data in column A.
-// Strategy: get usedRange rowCount (fast metadata) to know the sheet extent,
-// then scan backwards within a 500-row window to skip phantom-formatted empty rows.
-// This handles both large files (CAL 15k+) and sheets with phantom formatting (KEN DVRS).
+// Read the entire column A in one call and scan forward for last non-empty row.
+// One column is fast regardless of row count (no wide data, just date values).
+// This correctly handles both large files (CAL 15k rows) and sheets with large
+// phantom-formatted empty regions (KEN DVRS: usedRange=18k, real data ends at ~2.4k).
 async function findLastDataRow(sheetBase, token) {
-  // Step 1: get usedRange extent
-  let endRow = 500
+  let endRow = 1000
   try {
-    const r = await graph(`${sheetBase}/usedRange(valuesOnly=true)?$select=rowCount`, token)
-    if (r && r.rowCount > 0) endRow = r.rowCount
+    const ur = await graph(`${sheetBase}/usedRange(valuesOnly=true)?$select=rowCount`, token)
+    if (ur && ur.rowCount > 0) endRow = ur.rowCount
   } catch(e) {
-    console.warn('[sharepoint-dvr-append] usedRange failed:', e.message)
+    console.warn('[append] usedRange failed:', e.message)
   }
-  console.log(`[sharepoint-dvr-append] usedRange rowCount=${endRow}`)
 
-  // Step 2: scan backwards from endRow in col A (max 500-row window)
-  const scanStart = Math.max(1, endRow - 499)
-  const r = await graph(`${sheetBase}/range(address='A${scanStart}:A${endRow}')`, token)
+  // Single API call: read all of column A from row 1 to endRow
+  const r = await graph(`${sheetBase}/range(address='A1:A${endRow}')`, token)
   const vals = r.values || []
-  for (let i = vals.length - 1; i >= 0; i--) {
-    if (vals[i][0] !== null && vals[i][0] !== '' && vals[i][0] !== 0) {
-      const found = scanStart + i
-      console.log(`[sharepoint-dvr-append] last data row=${found}`)
-      return found
+
+  // Scan forward, tracking the last row that has actual data
+  // Skip row 0 (header) — start from i=1
+  let lastRow = 1
+  for (let i = 1; i < vals.length; i++) {
+    const v = vals[i][0]
+    if (v !== null && v !== '' && v !== 0 && v !== false) {
+      lastRow = i + 1  // 1-indexed
     }
   }
 
-  // Step 3: window was all empty (phantom formatting) — scan from top
-  if (scanStart > 1) {
-    const r2 = await graph(`${sheetBase}/range(address='A1:A500')`, token)
-    const vals2 = r2.values || []
-    for (let i = vals2.length - 1; i >= 0; i--) {
-      if (vals2[i][0] !== null && vals2[i][0] !== '' && vals2[i][0] !== 0) return i + 1
-    }
-  }
-
-  return 1
+  console.log(`[append] usedRange=${endRow} lastDataRow=${lastRow}`)
+  return lastRow
 }
 
 function colLetter(idx){let r='',n=idx+1;while(n>0){n--;r=String.fromCharCode(65+(n%26))+r;n=Math.floor(n/26)}return r}
