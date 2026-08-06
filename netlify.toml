@@ -5,48 +5,104 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
-  # duckdb is a native module (compiled C++ bindings). Two pieces are required
-  # for it to actually work in a Netlify Lambda:
-  #   1. external_node_modules: tells esbuild to leave `require('duckdb')`
-  #      alone instead of trying to bundle the source into the JS artifact.
-  #   2. included_files: forces Netlify's zip-it-and-ship-it bundler to
-  #      actually copy the node_modules/duckdb directory (including the
-  #      .node native binary at node_modules/duckdb/lib/binding/duckdb.node)
-  #      into the function deploy artifact. Without (2), the require()
-  #      finds nothing at runtime and throws "Connection Error: Connection
-  #      was never established" within a few ms -- misleading error coming
-  #      from duckdb's constructor when the native binding fails to load.
-  #   @napi-rs/canvas (added 2026-07-14, dailyops-digest-run.cjs) is the
-  #   same class of native module -- prebuilt binaries per platform, no
-  #   build step, but esbuild/zip-it-and-ship-it still needs to be told to
-  #   leave it alone and actually ship the binary, same as duckdb above.
-  #   dejavu-fonts-ttf ships the font files @napi-rs/canvas registers at
-  #   runtime (see dailyops-digest-run.cjs "Font registration" comment --
-  #   Netlify's Lambda has zero system fonts, so text draws as nothing
-  #   without an explicitly-registered font file). First attempt listed
-  #   only the 2 specific TTF files + package.json in included_files --
-  #   that silently failed to ship at runtime ("Cannot find module
-  #   'dejavu-fonts-ttf/package.json'"). Switched to the same glob
-  #   pattern already proven working for duckdb/@napi-rs/canvas above
-  #   (whole-package `**` glob) rather than exact file paths.
-  external_node_modules = ["duckdb", "@napi-rs/canvas", "dejavu-fonts-ttf"]
-  included_files = [
-    "node_modules/duckdb/**",
-    "node_modules/@mapbox/node-pre-gyp/**",
-    "node_modules/node-addon-api/**",
-    "node_modules/@napi-rs/canvas/**",
-    "node_modules/@napi-rs/canvas-linux-x64-gnu/**",
-    "node_modules/dejavu-fonts-ttf/**",
-  ]
+  # FIXED 2026-08-06: external_node_modules/included_files for duckdb,
+  # @napi-rs/canvas, and dejavu-fonts-ttf used to live HERE, at the
+  # top-level [functions] block -- which applies to EVERY function, not
+  # just the ones that need it. duckdb's native binary alone is tens of
+  # MB; copying it into all ~90 function bundles (including things like
+  # front-send-email.cjs that never touch DuckDB) finally exhausted the
+  # build machine's disk and took down every deploy:
+  #   [Error: ENOSPC: no space left on device, write]
+  # This had been a ticking time bomb since the first motherduck-*.cjs
+  # function was added -- it just crossed the quota once the function
+  # count grew enough. Real fix: these settings now live ONLY on the
+  # per-function blocks below that actually require('duckdb') or
+  # require('@napi-rs/canvas'), whether directly or transitively via a
+  # shared lib/*.cjs file. Verified via `github:search_code` for
+  # `require('duckdb')` and `@napi-rs/canvas` across the whole repo
+  # before writing this -- not guessed. See each function block below for
+  # which native-module group it needs and why.
 
 [functions."omni-query"]
   timeout = 26
 
+# --- duckdb-needing functions below (native module: external_node_modules
+# + included_files scoped here only, not globally -- see [functions] header
+# above for the 2026-08-06 ENOSPC fix story) ---
+
 [functions."fefo-orders"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."pvi-derive-accounts"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."pvi-shelf-life"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."revision-sync"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-labor"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-b2e-roster"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-l4w"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-inventory"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-appointments"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-jdf-putaways"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-wr-pick-check"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-wr-cases"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."motherduck-prepick-status"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."space-per-room"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."space-room-aisle-mapping"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."space-per-aisle-projects"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."space-per-room-projects"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+[functions."space-materials-for-project"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."nightly-b2e-sync"]
   schedule = "0 10 * * *"
@@ -80,15 +136,31 @@
 [functions."wr-cases-digest-test"]
   timeout = 26
 
+# --- @napi-rs/canvas + dejavu-fonts-ttf-needing functions below ---
+
 [functions."dailyops-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
+  external_node_modules = ["@napi-rs/canvas", "dejavu-fonts-ttf"]
+  included_files = ["node_modules/@napi-rs/canvas/**", "node_modules/@napi-rs/canvas-linux-x64-gnu/**", "node_modules/dejavu-fonts-ttf/**"]
 
 # Daily Ops digest MANUAL TEST -- added 2026-07-31, same reason and
 # pattern as above (fixes 403 -- see lib/dailyops-digest-shared.cjs).
 # Requires {facility} in the POST body (loops all facilities on schedule).
 [functions."dailyops-digest-test"]
   timeout = 26
+  external_node_modules = ["@napi-rs/canvas", "dejavu-fonts-ttf"]
+  included_files = ["node_modules/@napi-rs/canvas/**", "node_modules/@napi-rs/canvas-linux-x64-gnu/**", "node_modules/dejavu-fonts-ttf/**"]
+
+# WR Secondary Replenishments PDF generator -- discovered 2026-08-06 during
+# the ENOSPC fix: was being bundled by Netlify's directory scan (every
+# .cjs in netlify/functions/ gets bundled regardless of a netlify.toml
+# entry) but had NO scoped block at all, meaning it was silently relying
+# on the global (now-removed) native-module settings. Given its own block
+# now so it isn't left broken by the fix that removed those globally.
+[functions."wr-secondary-repl-pdf"]
+  external_node_modules = ["@napi-rs/canvas", "dejavu-fonts-ttf"]
+  included_files = ["node_modules/@napi-rs/canvas/**", "node_modules/@napi-rs/canvas-linux-x64-gnu/**", "node_modules/dejavu-fonts-ttf/**"]
 
 [functions."fefo-digest-run"]
   schedule = "*/15 * * * *"
@@ -138,27 +210,41 @@
 # place (no file-delete tool) but is now dead/unregistered.
 [functions."motherduck-dock-counts"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."wr-secondary-repl"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."motherduck-ott"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."motherduck-case-pick-accuracy"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."motherduck-osd-dollar"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."motherduck-osd-count"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."sharepoint-ec-osd-count"]
   timeout = 26
 
 [functions."motherduck-takt"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # Takt tab (top-level, ungated) -- added 2026-08-02. Sibling to
 # motherduck-takt.cjs (Manager tab's quarterly metric) -- same source
@@ -166,6 +252,8 @@
 # See the function's own header for the full data-lag caveat.
 [functions."motherduck-takt-daily"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # Takt tab Notify digests -- added 2026-08-02, later same day. Backs 6
 # rows in prepick_notify_settings (dashboard_type='takt'): one per
@@ -190,6 +278,8 @@
 # SITE_URL, never hit directly by the frontend).
 [functions."motherduck-takt-latest-date"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # EXP Check (Pretzilla) -- added 2026-08-02. Plain read-only POST, no
 # schedule (no digest asked for this round) -- same duckdb single-query
@@ -197,6 +287,8 @@
 # for the standard 26s timeout.
 [functions."motherduck-exp-check"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
@@ -211,6 +303,8 @@
 [functions."cmm-outbound-draft-create"]
   schedule = "*/15 * * * *"
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # CMM Outbound Appts draft creation MANUAL TEST -- added 2026-07-31, same
 # reason and pattern as above (fixes 403 on "Create Draft Now (test)" --
@@ -218,6 +312,8 @@
 # body (defaults to 'cal', the only facility wired up today).
 [functions."cmm-outbound-draft-create-test"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # LoadProof / DVRS open-incidents daily digest -- added 2026-07-19, same
 # every-15-min tick + configurable notify_hour/notify_minute/notify_days
@@ -259,10 +355,14 @@
 # window via "Run check now (test)" before any facility flips active=true.
 [functions."motherduck-attendance-points"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."attendance-points-digest-run"]
   schedule = "30 10 * * *"
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # Attendance Points digest MANUAL TEST -- no schedule, so direct POST
 # works (same fix pattern as every other *-digest-test.cjs in this app).
@@ -272,6 +372,8 @@
 # Dan validates accuracy before turning a facility's cron on for real.
 [functions."attendance-points-digest-test"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # Weekly Labor Overview digest -- added 2026-08-03. CAL and KEN only
 # (dashboard_type='weekly_labor' in prepick_notify_settings, one row
@@ -298,11 +400,13 @@
 # to that customer + week, generates a GM-style narrative via the Claude
 # API, and creates a Front DRAFT reply -- never auto-sends. See
 # lib/scorecard-draft-shared.cjs's header for the full design writeup and
-# known gaps (no live Front tag/webhook trigger yet -- falls back to a
-# subject-string search; ANTHROPIC_API_KEY must be added before this can
-# succeed at all; end-to-end not yet verified live).
+# known gaps (qbr_case_study Front tag not yet created; falls back to a
+# subject-string search; ANTHROPIC_API_KEY added 2026-08-06 but not yet
+# verified via a real test call; end-to-end not yet verified live).
 [functions."motherduck-scorecard-metrics"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 [functions."scorecard-draft-run"]
   schedule = "*/15 * * * *"
