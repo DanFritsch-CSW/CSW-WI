@@ -37,15 +37,27 @@
 //    without an explicit re-review of the data-exposure risk (an internal
 //    ops comment ending up quoted in a customer-facing draft).
 //
+// TRIGGER/DETECTION (updated 2026-08-06, later same day): scoped via a real
+// Front tag, "qbr_case_study" (Dan's chosen name, replacing the earlier
+// "customer scorecard" placeholder name from the original scoping
+// discussion). resolveScorecardTagId() looks this tag up BY NAME every run
+// (GET /tags, exact case-insensitive match) rather than hardcoding a tag ID —
+// the tag did not exist in the workspace as of this session, so this stays
+// resilient to it being created (or recreated) later without a code change.
+// Confirmed via Front's own API docs: GET /tags/{tag_id}/conversations is
+// the real "List tagged conversations" endpoint. Per-customer
+// front_subject_contains is still used to partition tagged conversations by
+// customer (multiple customers' scorecard emails will likely share this one
+// tag, same as Hill's original "tag anything with 'customer scorecard'"
+// framing intended). If the tag isn't found (not yet created, or renamed),
+// falls back to the older subject-string-only Front search — weaker, but
+// keeps the pilot testable in the meantime.
+//
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
-// - No live Front webhook or tag-based trigger exists yet. Hill's ask was to
-//   scope this via a "customer scorecard" Front tag + rule action, but no
-//   such tag exists in the workspace as of 2026-08-06, and rule-editing
-//   isn't available through this session's tools — Dan needs to add the tag
-//   action to the existing "Scorecard Template" rule (rul_7kwwk) in Front's
-//   own rule builder. Until then, scorecard-draft-run.cjs falls back to a
-//   Front conversation SEARCH by subject string + recency, which is a real
-//   but weaker filter than a tag.
+// - Dan needs to (1) create the "qbr_case_study" tag in Front if it doesn't
+//   already exist by the time this runs, and (2) add a "tag conversation"
+//   action for it on the existing "Scorecard Template" rule (rul_7kwwk) —
+//   rule-editing isn't available through this session's tools.
 // - Omni dashboard document-state read (drift-proofing) not implemented —
 //   only the dashboard_id pointer is stored.
 // - ANTHROPIC_API_KEY must be added to Netlify env vars — first LLM call in
@@ -62,6 +74,12 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
 const SITE_URL = process.env.URL || process.env.DEPLOY_URL
 
 const CLAUDE_MODEL = 'claude-sonnet-4-5'
+
+// The Front tag that scopes which conversations this feature looks at at
+// all — Dan's ask (2026-08-06), replacing the placeholder "customer
+// scorecard" name used during scoping. Resolved by name at runtime (see
+// resolveScorecardTagId below), not hardcoded as an ID.
+const SCORECARD_TAG_NAME = 'qbr_case_study'
 
 // Keyword flags Dan asked for (2026-08-05 Front feedback thread) — lines in
 // recent thread context containing these are surfaced to Claude as explicit
@@ -148,6 +166,78 @@ async function frontGet(path) {
   })
   if (!res.ok) throw new Error(`Front GET ${path} → ${res.status}: ${await res.text()}`)
   return res.json()
+}
+
+// Same as frontGet but takes a full URL (Front's pagination cursors — via
+// _pagination.next — are already-complete URLs, not relative paths).
+async function frontGetUrl(url) {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, Accept: 'application/json' },
+  })
+  if (!res.ok) throw new Error(`Front GET ${url} → ${res.status}: ${await res.text()}`)
+  return res.json()
+}
+
+// Resolves the "qbr_case_study" tag's ID by name — NOT hardcoded, since the
+// tag did not exist in the workspace as of 2026-08-06 and may be created (or
+// renamed) independently of this code. Case-insensitive exact match. Paginates
+// through /tags in case the workspace has more than one page of tags. Returns
+// null (not a throw) if not found, so callers can gracefully fall back —
+// a missing tag is an expected, documented state during rollout, not a bug.
+async function resolveScorecardTagId() {
+  let all = []
+  let data = await frontGet('/tags?limit=100')
+  all = all.concat(data._results || [])
+  while (data._pagination?.next) {
+    data = await frontGetUrl(data._pagination.next)
+    all = all.concat(data._results || [])
+  }
+  const match = all.find((t) => (t.name || '').toLowerCase() === SCORECARD_TAG_NAME.toLowerCase())
+  return match ? match.id : null
+}
+
+// Lists conversations carrying the resolved tag, updated within the last
+// `sinceMinutes`. This is the PRIMARY detection path once the tag exists.
+async function listConversationsByTag(tagId, sinceMinutes) {
+  const data = await frontGet(`/tags/${tagId}/conversations?limit=50`)
+  const cutoff = Date.now() - sinceMinutes * 60 * 1000
+  return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
+}
+
+// Searches Front for candidate conversations by subject string — FALLBACK
+// ONLY, used when the qbr_case_study tag can't be resolved yet (not created,
+// or renamed). Weaker than the tag-based path since it depends on Omni never
+// changing its subject line wording.
+async function searchRecentScorecardConversations(subjectContains, sinceMinutes) {
+  const res = await fetch(
+    `https://api2.frontapp.com/conversations/search/${encodeURIComponent(subjectContains)}`,
+    { headers: { Authorization: `Bearer ${FRONT_TOKEN}`, Accept: 'application/json' } }
+  )
+  if (!res.ok) throw new Error(`Front search API → ${res.status}: ${await res.text()}`)
+  const data = await res.json()
+  const cutoff = Date.now() - sinceMinutes * 60 * 1000
+  return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
+}
+
+// Combined lookup used by scorecard-draft-run.cjs: tries the tag first,
+// falls back to subject search per-customer if the tag isn't resolvable.
+// Returns { candidates, usedTag: boolean } so the caller/results can report
+// which path was actually used — useful while the tag rollout is in
+// progress, so it's visible in the run's own output which mode fired.
+async function fetchScorecardCandidates(config, sinceMinutes) {
+  let tagId = null
+  try {
+    tagId = await resolveScorecardTagId()
+  } catch (_) { /* fall through to subject search */ }
+
+  if (tagId) {
+    const tagged = await listConversationsByTag(tagId, sinceMinutes)
+    const candidates = tagged.filter((c) => (c.subject || '').includes(config.front_subject_contains))
+    return { candidates, usedTag: true }
+  }
+
+  const candidates = await searchRecentScorecardConversations(config.front_subject_contains, sinceMinutes)
+  return { candidates, usedTag: false }
 }
 
 // Pulls comments (internal discussion) from the last THREAD_CONTEXT_DAYS on
@@ -318,20 +408,8 @@ async function runForConversation({ customerKey, conversationId, isManualTest })
   }
 }
 
-// Searches Front for candidate conversations by subject string, for the
-// scheduled runner's fallback path (no "customer scorecard" tag exists yet —
-// see file header). Returns conversations updated in the last `sinceMinutes`.
-async function searchRecentScorecardConversations(subjectContains, sinceMinutes) {
-  const res = await fetch(
-    `https://api2.frontapp.com/conversations/search/${encodeURIComponent(subjectContains)}`,
-    { headers: { Authorization: `Bearer ${FRONT_TOKEN}`, Accept: 'application/json' } }
-  )
-  if (!res.ok) throw new Error(`Front search API → ${res.status}: ${await res.text()}`)
-  const data = await res.json()
-  const cutoff = Date.now() - sinceMinutes * 60 * 1000
-  return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
-}
-
 module.exports = {
-  fetchCustomerConfig, runForConversation, searchRecentScorecardConversations,
+  fetchCustomerConfig, runForConversation,
+  resolveScorecardTagId, listConversationsByTag, searchRecentScorecardConversations,
+  fetchScorecardCandidates, SCORECARD_TAG_NAME,
 }
