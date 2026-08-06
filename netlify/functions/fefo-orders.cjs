@@ -148,6 +148,25 @@
 // stock. allocSql's shipping-side hold flag still checks lot-level status
 // only — a held pallet already allocated to an order isn't covered by this
 // pass and remains a known related gap.
+//
+// ── Picked-but-unshipped inventory counted as available (2026-08-06) ──────
+//
+// CRITICAL BUG FOUND AND FIXED, live on a Hill/Sam/Dan FEFO review call:
+// a pick task moving to 'Completed' does NOT decrement the source license
+// plate's on-hand record in licenseplatecontents — confirmed against real
+// data (task 51679997/lot 1129928, order 771768 still 'Processing', source
+// LP still showing the full pre-pick quantity, not reduced by the 1816
+// cases already picked). committed_raw only ever excluded Planned/
+// Released/Started/Suspended tasks from "available" — Completed wasn't in
+// that list, so cases already picked to a real order, just not yet
+// shipped, fell straight through and counted as ordinary available stock.
+// Fixed by adding two more committed_raw branches for Completed tasks,
+// scoped to the task's own order still being 'Processing' (unlike the
+// other four statuses, Completed never changes again, so counting it
+// unconditionally would accumulate every historical pick against a lot
+// forever — tying it to order status keeps the commitment live only while
+// the order is actually still open). See committed_raw below for the full
+// writeup.
 
 // Set HOME before requiring duckdb — duckdb reads it at load time.
 process.env.HOME = process.env.HOME || '/tmp'
@@ -586,6 +605,62 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
           AND t.actual_source_license_plate_id IS NOT NULL
           AND lpc.lot_id IN (SELECT lot_id FROM scope_lots)
           AND ts.status_name IN ('Planned', 'Released', 'Started', 'Suspended')
+
+        UNION ALL
+
+        -- Completed-but-not-yet-shipped picks (added 2026-08-06, Hill/Sam/
+        -- Dan FEFO review call). CONFIRMED LIVE: a pick task moving to
+        -- 'Completed' does NOT decrement the source license plate's
+        -- on-hand record in licenseplatecontents (task 51679997, lot
+        -- 1129928, picked 1816 cases to order 771768 -- still 'Processing'
+        -- -- source LP 5928184 still shows the full pre-pick 3634, not
+        -- reduced). Cases already picked to an order but not yet shipped
+        -- therefore fell through every committed-status check above
+        -- (Completed isn't Planned/Released/Started/Suspended) and counted
+        -- as ordinary available on-hand stock -- exactly Hill's live
+        -- diagnosis on the call ("it thinks it's available because
+        -- there's not a release task, but it's already been picked, it's
+        -- not closed out").
+        --   Scoped to the task's OWN order still being 'Processing' --
+        -- unlike the other four statuses, 'Completed' never changes again,
+        -- so counting it unconditionally would accumulate every
+        -- historical completed pick against a lot forever, including ones
+        -- whose orders shipped weeks ago. Tying it to order status keeps
+        -- this "committed" amount live only for as long as the order it
+        -- belongs to is actually still open. Uses actual_packaged_amount
+        -- (falling back to expected) since the pick is done and the real
+        -- amount is known, unlike the in-progress statuses above.
+        SELECT t.lot_id, COALESCE(t.actual_packaged_amount, t.expected_packaged_amount) AS cases_committed
+        FROM production_db.silver.datex_slv_tasks t
+        JOIN production_db.silver.datex_slv_taskstatuses ts
+          ON ts.task_status_id = t.status_id
+        JOIN production_db.silver.datex_slv_orders o
+          ON o.order_id = t.order_id
+        JOIN production_db.silver.datex_slv_orderstatuses os
+          ON os.order_status_id = o.order_status_id
+        WHERE t.warehouse_id = ${warehouseId}
+          AND t.lot_id IN (SELECT lot_id FROM scope_lots)
+          AND ts.status_name = 'Completed'
+          AND os.status_name = 'Processing'
+
+        UNION ALL
+
+        SELECT lpc.lot_id, COALESCE(t.actual_packaged_amount, t.expected_packaged_amount) AS cases_committed
+        FROM production_db.silver.datex_slv_tasks t
+        JOIN production_db.silver.datex_slv_taskstatuses ts
+          ON ts.task_status_id = t.status_id
+        JOIN production_db.silver.datex_slv_licenseplatecontents lpc
+          ON lpc.license_plate_id = t.actual_source_license_plate_id
+        JOIN production_db.silver.datex_slv_orders o
+          ON o.order_id = t.order_id
+        JOIN production_db.silver.datex_slv_orderstatuses os
+          ON os.order_status_id = o.order_status_id
+        WHERE t.warehouse_id = ${warehouseId}
+          AND t.lot_id IS NULL
+          AND t.actual_source_license_plate_id IS NOT NULL
+          AND lpc.lot_id IN (SELECT lot_id FROM scope_lots)
+          AND ts.status_name = 'Completed'
+          AND os.status_name = 'Processing'
       ),
       committed AS (
         SELECT lot_id, SUM(cases_committed) AS cases_committed
