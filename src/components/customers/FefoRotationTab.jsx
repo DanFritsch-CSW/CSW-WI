@@ -236,14 +236,16 @@ export default function FefoRotationTab() {
 // function (fefo-digest-run.cjs) — see that file's header for why a shared
 // function backs every row instead of one file per project.
 //
-// Content date is the NEXT BUSINESS DAY, always (2026-07-14, later) — same
-// semantics as Pre-Pick/Cases/Daily Ops, per Dan's follow-up feedback after
-// the first live test. "Business day" is defined per-project by the same
-// "Send on:" day toggles already in NotifySettingsPanel (notify_days) — no
-// separate M-F-vs-7-days-a-week control needed. See fefo-digest-run.cjs
-// header for the full reasoning. Content scope is full status per project
-// (order count + every non-clean category + undated lots), confirmed with
-// Dan rather than violations-only.
+// Content date WAS the next business day, always (2026-07-14) — CHANGED
+// 2026-08-06 (Hill/Sam/Dan FEFO review call): every open-order project's
+// digest now reports a LIVE "everything currently Processing" snapshot
+// instead, same as the live tab (see lib/fefo-digest-shared.cjs's "Open-
+// order content date" note and fefo-orders.cjs's "Open-order date
+// filtering removed" note for the full story — Palermo's/PVI and
+// Richelieu don't reliably carry a scheduled appointment date far enough
+// ahead for "next business day" to mean anything). Content SCOPE is still
+// full status per project (order count + every non-clean category +
+// undated lots), unchanged from Dan's original call.
 //
 // EXCEPTION (2026-07-18): JDF (`closedOrders: true`) is backward-looking —
 // its nightly digest reviews yesterday's CLOSED orders instead of an
@@ -284,7 +286,7 @@ function FefoNotifySettings() {
                 dashboardType={`fefo_${p.id}`}
                 functionName="fefo-digest-test"
                 manualTestBody={{ dashboardType: `fefo_${p.id}` }}
-                contentDateLabel={p.closedOrders ? 'the most recent closed business day' : 'the next business day'}
+                contentDateLabel={p.closedOrders ? 'the most recent closed business day' : 'right now (live snapshot)'}
                 showSkipToNextValidDay={false}
                 digestDescription={
                   p.closedOrders
