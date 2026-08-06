@@ -66,6 +66,20 @@
 // /tags to be paginated further, or a company-level tags endpoint that
 // differs from the workspace-scoped one this code currently calls.
 //
+// FIXED 2026-08-06 (first real test run via the new UI tab): createScorecardDraft
+// was wrongly assuming Front's drafts endpoint would default to the
+// conversation's own channel for a reply, omitting channel_id entirely.
+// Real error from the first live test: "Front drafts API → 400:
+// {"_errors":{"status":400,"title":"Bad request","message":"Body did not
+// satisfy requirements","details":["body.channel_id: missing"]}}". Front's
+// drafts API requires channel_id unconditionally — confirmed by
+// front-draft-shared.cjs (this app's other, already-working Front-draft
+// caller) always resolving and passing one. Fixed by copying that same
+// resolveChannelId logic (WAREHOUSE_MAP + FRONT_CHANNEL_ID env override +
+// GET /channels fallback) into this file rather than importing it, since
+// front-draft-shared.cjs doesn't export it and this is a small, self-
+// contained piece of logic — not worth changing that file's exports for.
+//
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Add a "tag conversation" action for "QBR - Case Study" on the existing
 //   "Scorecard Template" rule (rul_7kwwk) so it actually gets applied to
@@ -73,11 +87,11 @@
 //   this session's tools.
 // - Omni dashboard document-state read (drift-proofing) not implemented —
 //   only the dashboard_id pointer is stored.
-// - ANTHROPIC_API_KEY added 2026-08-06 — not yet verified via a real call.
-// - End-to-end (real Front draft landing correctly, reply-all resolution,
-//   Claude output quality) NOT yet verified live — run
-//   scorecard-draft-test.cjs against a real past Bernatello's conversation
-//   before trusting this for an upcoming real send.
+// - ANTHROPIC_API_KEY added 2026-08-06 — not yet verified via a real call
+//   (the channel_id bug above meant the pipeline never got that far in the
+//   first test run — Claude may not have been reached yet either).
+// - End-to-end NOT yet fully verified live — re-run scorecard-draft-test.cjs
+//   (via the Scorecard Drafts UI tab) now that channel_id is fixed.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -106,6 +120,24 @@ const CONTEXT_KEYWORDS = ['urgent', 'hold', 'escalat', 'complaint', 'asap', 'imm
 // How far back to pull Front thread context for "ops context" per the
 // 2026-08-05 decision (numbers + last week's thread, not numbers alone).
 const THREAD_CONTEXT_DAYS = 7
+
+// Warehouse → Front appointments-inbox channel map, copied from
+// front-draft-shared.cjs (not exported there, so duplicated here rather
+// than changing that file's exports for one small lookup). Keys match
+// warehouseKey()'s normalization: lowercase, spaces → hyphens. This
+// customer_scorecard_config.warehouse_name value ("CSW-Wisconsin Rapids")
+// normalizes to "csw-wisconsin-rapids", which matches this map exactly.
+const WAREHOUSE_MAP = {
+  'csw-franksville':      { channel: 'cha_ema1g', inbox: 'inb_aut78' }, // CAL Appointments
+  'csw-kenosha':          { channel: 'cha_ema6s', inbox: 'inb_awl90' }, // KEN Appointments
+  'csw-madison':          { channel: 'cha_ema8k', inbox: 'inb_awlas' }, // MAD Appointments
+  'csw-wisconsin-rapids': { channel: 'cha_euvx0', inbox: 'inb_b8n2s' }, // WR Appointments
+  'csw-eau-claire':       { channel: 'cha_eubx0', inbox: 'inb_beis4' }, // EC Appointments
+}
+
+function warehouseKey(warehouse) {
+  return (warehouse || '').toLowerCase().replace(/\s+/g, '-')
+}
 
 async function sbFetch(path) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -359,14 +391,34 @@ async function getReplyAllRecipients(conversationId) {
   }
 }
 
-// Creates a Front DRAFT reply on the conversation. Deliberately omits
-// channel_id — Front's drafts endpoint falls back to the conversation's own
-// default channel for a reply (channel_id is only required when starting a
-// brand-new outbound conversation). NEVER calls Front's send-message
-// endpoint — see file header.
-async function createScorecardDraft(conversationId, bodyText) {
-  const { to, cc } = await getReplyAllRecipients(conversationId)
-  const payload = { body: toHtml(bodyText), mode: 'shared', type: 'replyAll' }
+// Resolves a Front channel_id to send from — REQUIRED by Front's drafts API
+// unconditionally (confirmed live 2026-08-06: omitting it 400s with
+// "body.channel_id: missing" even for a reply draft). Same fallback chain
+// as front-draft-shared.cjs's resolveChannelId: explicit FRONT_CHANNEL_ID
+// env override first, then the WAREHOUSE_MAP lookup, then GET /channels
+// and pick the first real email-type channel.
+async function resolveChannelId(warehouseName) {
+  if (process.env.FRONT_CHANNEL_ID) return process.env.FRONT_CHANNEL_ID
+
+  const key = warehouseKey(warehouseName)
+  const mapping = WAREHOUSE_MAP[key]
+  if (mapping?.channel) return mapping.channel
+
+  const r = await frontGet('/channels')
+  const ch = r._results?.find((c) => ['smtp', 'office365', 'gmail', 'imap'].includes(c.type)) || r._results?.[0]
+  if (!ch?.id) throw new Error('Could not resolve a sending channel for the scorecard draft. Set FRONT_CHANNEL_ID in Netlify env vars.')
+  return ch.id
+}
+
+// Creates a Front DRAFT reply on the conversation. NEVER calls Front's
+// send-message endpoint — see file header. channel_id is REQUIRED (see
+// resolveChannelId above and the FIXED note at the top of this file).
+async function createScorecardDraft(conversationId, bodyText, warehouseName) {
+  const [channelId, { to, cc }] = await Promise.all([
+    resolveChannelId(warehouseName),
+    getReplyAllRecipients(conversationId),
+  ])
+  const payload = { channel_id: channelId, body: toHtml(bodyText), mode: 'shared', type: 'replyAll' }
   if (to.length) payload.to = to
   if (cc.length) payload.cc = cc
 
@@ -404,7 +456,7 @@ async function runForConversation({ customerKey, conversationId, isManualTest })
     threadContext = await fetchRecentThreadContext(conversationId)
     const prompt = buildClaudePrompt(config, metrics, threadContext)
     draftBody = await callClaude(prompt)
-    draftResult = await createScorecardDraft(conversationId, draftBody)
+    draftResult = await createScorecardDraft(conversationId, draftBody, config.warehouse_name)
   } catch (e) {
     await logDraftResult({ customerKey, conversationId, status: 'error', errorDetail: e.message, isManualTest })
     return { ok: false, reason: e.message, customerKey, conversationId }
