@@ -14,14 +14,16 @@
 // one place.
 //
 // See fefo-digest-shared.cjs for the full original feature history
-// (per-project settings rows, next-business-day content date, JDF's
-// closedOrders variant, etc) — none of that changed, only where the
-// manual-test entry point lives.
+// (per-project settings rows, JDF's closedOrders variant, etc). Content
+// date for open-order (non-closedOrders) projects changed 2026-08-06 from
+// a resolved "next business day" to a live "everything currently
+// Processing" snapshot (see that file's header) — this file just needed
+// to swap which date-resolution helper it calls; nothing else here changed.
 
 const {
   PROJECT_BY_DASHBOARD_TYPE,
   sbFetch,
-  nextBusinessDayDateObj, sameCalendarDayDateObj, isNotifyTimeMatch, isoDate,
+  centralTodayDateObj, sameCalendarDayDateObj, isNotifyTimeMatch, isoDate,
   runForProject,
 } = require('./lib/fefo-digest-shared.cjs')
 
@@ -36,10 +38,11 @@ async function runScheduledDigest() {
   if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
 
-  // Loop every fefo_* row (across ALL facilities) — each row resolves its
-  // OWN next business day from its own notify_days, then fires if this
-  // tick matches the configured send time and it hasn't already sent for
-  // that resolved date.
+  // Loop every fefo_* row (across ALL facilities). closedOrders (JDF)
+  // resolves its own closed/shipped calendar day; every other project now
+  // just uses today (2026-08-06 — see lib/fefo-digest-shared.cjs's "Open-
+  // order content date: live snapshot" note), then fires if this tick
+  // matches the configured send time and it hasn't already sent today.
   const rows = await sbFetch(
     `prepick_notify_settings?dashboard_type=like.fefo_*&select=facility,dashboard_type,front_conversation_id,notify_hour,notify_minute,notify_days,active,last_sent_date`
   )
@@ -48,7 +51,7 @@ async function runScheduledDigest() {
     const project = PROJECT_BY_DASHBOARD_TYPE.get(row.dashboard_type)
     if (!project) continue
     if (row.active === false) { results.push({ ok: true, skipped: true, project: project.code, reason: 'Digest disabled' }); continue }
-    const dateObj = project.closedOrders ? sameCalendarDayDateObj() : nextBusinessDayDateObj(row.notify_days)
+    const dateObj = project.closedOrders ? sameCalendarDayDateObj() : centralTodayDateObj()
     const notifyHour = row.notify_hour ?? 22
     const notifyMinute = row.notify_minute ?? 15
     if (!isNotifyTimeMatch(notifyHour, notifyMinute)) {
