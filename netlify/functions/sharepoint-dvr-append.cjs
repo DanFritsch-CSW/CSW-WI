@@ -51,8 +51,16 @@ async function getDriveRef(facility,token){
   return _driveCache[facility]
 }
 async function findLastDataRow(sheetBase,token){
-  // Read column A up to 25000 rows - handles large facilities (CAL is 15k+ rows)
-  const r=await graph(`${sheetBase}/range(address='A1:A25000')`,token)
+  // Use usedRange metadata (rowCount only) — no cell values read, works for any file size.
+  // Falls back to small column scan if usedRange fails (phantom-formatting edge case).
+  try{
+    const r=await graph(`${sheetBase}/usedRange(valuesOnly=true)?$select=rowCount`,token)
+    if(r&&r.rowCount>0)return r.rowCount
+  }catch(e){
+    console.warn('[sharepoint-dvr-append] usedRange failed, falling back to column scan:',e.message)
+  }
+  // Fallback: scan first 500 rows of col A (should only hit for empty/new sheets)
+  const r=await graph(`${sheetBase}/range(address='A1:A500')`,token)
   const vals=r.values||[]
   for(let i=vals.length-1;i>=0;i--){
     if(vals[i][0]!==null&&vals[i][0]!==''&&vals[i][0]!==0)return i+1
