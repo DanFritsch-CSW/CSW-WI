@@ -3,6 +3,7 @@ import AttendancePointsTab from '../components/hr/AttendancePointsTab.jsx'
 import RecruitingTab from '../components/hr/RecruitingTab.jsx'
 import ThirtySixtyNinetyTab from '../components/hr/ThirtySixtyNinetyTab.jsx'
 import ActiveLeaveTab from '../components/hr/ActiveLeaveTab.jsx'
+import DisciplinaryTab from '../components/hr/DisciplinaryTab.jsx'
 
 // HR — top-level tab (added 2026-08-02). Structured as a tab row (like
 // Settings.jsx) so future HR tools land here as additional sub-tabs
@@ -22,12 +23,17 @@ import ActiveLeaveTab from '../components/hr/ActiveLeaveTab.jsx'
 // before writing parsers. Most sensitive HR data in the app so far
 // (medical/legal details) — this is the tracker Tim specifically flagged
 // as needing a stronger password than the app's other gates.
+//
+// 2026-08-07 (later still) — Disciplinary Action Tracker added as a fifth
+// sub-tab. 3 sheets: Attendance Write-Ups, Misconduct, PIPs, each with its
+// own step progression derived from which "mark" column is set (X).
 
 const TABS = [
   { id: 'attendance', label: 'Attendance Points' },
   { id: 'recruiting', label: 'Recruiting' },
   { id: 'checkins', label: '30/60/90 Check-Ins' },
   { id: 'leave', label: 'Active Leave' },
+  { id: 'disciplinary', label: 'Disciplinary Action' },
 ]
 
 export default function Hr() {
@@ -38,7 +44,7 @@ export default function Hr() {
       <div className="page-header">
         <div>
           <div className="page-title">HR</div>
-          <div className="page-subtitle">Attendance points, recruiting, 30/60/90 check-ins, leave tracking, and other HR automation tools.</div>
+          <div className="page-subtitle">Attendance points, recruiting, 30/60/90 check-ins, leave tracking, disciplinary action, and other HR automation tools.</div>
         </div>
       </div>
 
@@ -58,6 +64,7 @@ export default function Hr() {
       {activeTab === 'recruiting' && <RecruitingTab />}
       {activeTab === 'checkins' && <ThirtySixtyNinetyTab />}
       {activeTab === 'leave' && <ActiveLeaveTab />}
+      {activeTab === 'disciplinary' && <DisciplinaryTab />}
     </div>
   )
 }
