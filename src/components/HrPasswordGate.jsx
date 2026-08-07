@@ -6,18 +6,22 @@ import { useState, useEffect } from 'react'
 // Added 2026-08-02 for the Attendance Points build. HR/disciplinary data
 // is at least as sensitive as the Manager bonus scorecard, so this
 // applies the same gate rather than leaving the tab open by default.
-// Password matches the existing 'csw' convention shared by
-// Manager/Recruiting "for now" — bump PASSWORD + STORAGE_KEY suffix
-// together if this needs to diverge later.
+//
+// 2026-08-07 — password changed from the shared 'csw' convention to a
+// dedicated 'cswhr', per Dan/Tim's HR call flagging this section (FMLA,
+// disciplinary, recruiting) as needing stronger protection than the rest
+// of the app. STORAGE_KEY suffix bumped to v2 so everyone re-enters once.
 //
 // Same limitation as every other gate in this app: this only hides the
 // page shell. The JS bundle contains the password string, and it does
 // NOT protect the Netlify function endpoints this tab calls
-// (motherduck-attendance-points, attendance-points-digest-test). Fine
-// for "keep casual browsers off this tab"; not real access control.
+// (motherduck-attendance-points, attendance-points-digest-test,
+// sharepoint-recruiting, sharepoint-30-60-90, sharepoint-active-leave,
+// sharepoint-disciplinary, sharepoint-referral-bonus). Fine for "keep
+// casual browsers off this tab"; not real access control.
 
-const PASSWORD = 'csw'
-const STORAGE_KEY = 'hr_gate_unlocked_v1'
+const PASSWORD = 'cswhr'
+const STORAGE_KEY = 'hr_gate_unlocked_v2'
 
 export default function HrPasswordGate({ children }) {
   const [unlocked, setUnlocked] = useState(false)
