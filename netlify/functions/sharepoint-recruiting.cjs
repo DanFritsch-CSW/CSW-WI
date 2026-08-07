@@ -4,9 +4,7 @@ const TENANT_ID     = process.env.SHAREPOINT_TENANT_ID
 const CLIENT_ID     = process.env.SHAREPOINT_CLIENT_ID
 const CLIENT_SECRET = process.env.SHAREPOINT_CLIENT_SECRET
 
-// Set this in Netlify env vars once the share link is available. No code change
-// needed after that — just add SHAREPOINT_RECRUITING_URL and redeploy (or it
-// picks up on next cold start).
+// SHAREPOINT_RECRUITING_URL set in Netlify 2026-08-07 — live.
 const RECRUITING_SHARE_URL = process.env.SHAREPOINT_RECRUITING_URL || null
 
 const TABS = {
