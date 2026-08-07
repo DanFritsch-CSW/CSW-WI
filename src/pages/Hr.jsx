@@ -4,6 +4,7 @@ import RecruitingTab from '../components/hr/RecruitingTab.jsx'
 import ThirtySixtyNinetyTab from '../components/hr/ThirtySixtyNinetyTab.jsx'
 import ActiveLeaveTab from '../components/hr/ActiveLeaveTab.jsx'
 import DisciplinaryTab from '../components/hr/DisciplinaryTab.jsx'
+import ReferralBonusTab from '../components/hr/ReferralBonusTab.jsx'
 
 // HR — top-level tab (added 2026-08-02). Structured as a tab row (like
 // Settings.jsx) so future HR tools land here as additional sub-tabs
@@ -27,6 +28,12 @@ import DisciplinaryTab from '../components/hr/DisciplinaryTab.jsx'
 // 2026-08-07 (later still) — Disciplinary Action Tracker added as a fifth
 // sub-tab. 3 sheets: Attendance Write-Ups, Misconduct, PIPs, each with its
 // own step progression derived from which "mark" column is set (X).
+//
+// 2026-08-07 (later still) — Referral Bonus Tracker added as a sixth
+// sub-tab. Single sheet, simplest of the batch — $200 at 90 days, $300 at
+// 1 year, per-milestone "Mark Paid" action. This completes the tracker
+// list from Dan/Tim's original HR call, aside from EEOC/Legal and
+// Workman's Comp (no file link provided) and the survey response files.
 
 const TABS = [
   { id: 'attendance', label: 'Attendance Points' },
@@ -34,6 +41,7 @@ const TABS = [
   { id: 'checkins', label: '30/60/90 Check-Ins' },
   { id: 'leave', label: 'Active Leave' },
   { id: 'disciplinary', label: 'Disciplinary Action' },
+  { id: 'referral', label: 'Referral Bonus' },
 ]
 
 export default function Hr() {
@@ -44,7 +52,7 @@ export default function Hr() {
       <div className="page-header">
         <div>
           <div className="page-title">HR</div>
-          <div className="page-subtitle">Attendance points, recruiting, 30/60/90 check-ins, leave tracking, disciplinary action, and other HR automation tools.</div>
+          <div className="page-subtitle">Attendance points, recruiting, 30/60/90 check-ins, leave tracking, disciplinary action, referral bonuses, and other HR automation tools.</div>
         </div>
       </div>
 
@@ -65,6 +73,7 @@ export default function Hr() {
       {activeTab === 'checkins' && <ThirtySixtyNinetyTab />}
       {activeTab === 'leave' && <ActiveLeaveTab />}
       {activeTab === 'disciplinary' && <DisciplinaryTab />}
+      {activeTab === 'referral' && <ReferralBonusTab />}
     </div>
   )
 }
