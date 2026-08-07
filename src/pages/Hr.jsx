@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import AttendancePointsTab from '../components/hr/AttendancePointsTab.jsx'
 import RecruitingTab from '../components/hr/RecruitingTab.jsx'
+import ThirtySixtyNinetyTab from '../components/hr/ThirtySixtyNinetyTab.jsx'
 
 // HR — top-level tab (added 2026-08-02). Structured as a tab row (like
 // Settings.jsx) so future HR tools land here as additional sub-tabs
@@ -8,10 +9,16 @@ import RecruitingTab from '../components/hr/RecruitingTab.jsx'
 // standalone /recruiting tab (2026-08-02, same session Takt took over
 // Recruiting's old top-level nav slot) — inherits this page's
 // HrPasswordGate instead of its own RecruitingPasswordGate.
+//
+// 2026-08-07 — 30/60/90 Check-Ins added as a third sub-tab, per Dan/Tim's
+// HR Functions to AI call. Separate from the Employee Onboarding module's
+// trainer curriculum (day30/60/90_review_conducted) — this tracks HR's
+// new-hire follow-up calls (Maria/Amy) + benefits enrollment.
 
 const TABS = [
   { id: 'attendance', label: 'Attendance Points' },
   { id: 'recruiting', label: 'Recruiting' },
+  { id: 'checkins', label: '30/60/90 Check-Ins' },
 ]
 
 export default function Hr() {
@@ -22,7 +29,7 @@ export default function Hr() {
       <div className="page-header">
         <div>
           <div className="page-title">HR</div>
-          <div className="page-subtitle">Attendance points, recruiting, and other HR automation tools.</div>
+          <div className="page-subtitle">Attendance points, recruiting, 30/60/90 check-ins, and other HR automation tools.</div>
         </div>
       </div>
 
@@ -40,6 +47,7 @@ export default function Hr() {
 
       {activeTab === 'attendance' && <AttendancePointsTab />}
       {activeTab === 'recruiting' && <RecruitingTab />}
+      {activeTab === 'checkins' && <ThirtySixtyNinetyTab />}
     </div>
   )
 }
