@@ -54,17 +54,31 @@
 //
 // UNVERIFIED RISK, flagged rather than assumed away: this session's Front
 // MCP tool (list_tags) could NOT find "QBR - Case Study" under any query
-// variant (exact name, partial, unfiltered listing) even after Dan
-// confirmed via screenshot that it exists at the company level, nested
-// under a parent tag. That strongly suggests company-level/nested tags
-// aren't returned the same way by whatever tags-listing surface that tool
-// wraps. resolveScorecardTagId() below calls Front's REST API directly
-// (GET /tags) with FRONT_API_TOKEN — NOT the same code path as the MCP
-// tool — so it may or may not have the same blind spot. This has NOT been
-// verified live. If scorecard-draft-test.cjs's response shows tag
-// resolution failing, this is the first thing to check — may need GET
-// /tags to be paginated further, or a company-level tags endpoint that
-// differs from the workspace-scoped one this code currently calls.
+// variant (exact name, partial, unfiltered listing, even searching for its
+// parent "Sentiment" tag) even after Dan confirmed via screenshot that it
+// exists at the company level, nested under a parent tag. That strongly
+// suggests company-level/nested tags aren't returned the same way by
+// whatever tags-listing surface that tool wraps. resolveScorecardTagId()
+// below calls Front's REST API directly (GET /tags) with FRONT_API_TOKEN —
+// NOT the same code path as the MCP tool — so it may or may not have the
+// same blind spot. This has NOT been verified live from inside a deployed
+// function. Confirmed live 2026-08-07 (Grassland's real inbound email,
+// cnv_1c3896fo) that the conversation itself carries zero tags regardless
+// (tagIds: []) — the "Scorecard Template" rule only posts a comment, it
+// has no tag action yet. Given BOTH of these gaps stack, the tag path is
+// realistically not doing anything useful yet either way — see the FIXED
+// note below for how the code now tolerates that gracefully instead of
+// silently failing.
+//
+// FIXED 2026-08-07: fetchScorecardCandidates() previously only fell back
+// to subject search when resolveScorecardTagId() itself failed/returned
+// null — if the tag DID resolve but zero conversations were actually
+// tagged for a given customer (exactly Grassland's real situation: no tag
+// action on the rule yet), the function returned zero candidates and
+// NEVER fell back, meaning that customer would silently never get a draft
+// no matter how many scheduled ticks passed. Now falls back to subject
+// search whenever the tag path yields zero candidates, not just when tag
+// resolution errors outright.
 //
 // FIXED 2026-08-06 (first real test run via the new UI tab): createScorecardDraft
 // was wrongly assuming Front's drafts endpoint would default to the
@@ -94,7 +108,10 @@
 // - Add a "tag conversation" action for "QBR - Case Study" on the existing
 //   "Scorecard Template" rule (rul_7kwwk) so it actually gets applied to
 //   incoming Omni scorecard emails — rule-editing isn't available through
-//   this session's tools.
+//   this session's tools. Until this exists, EVERY customer relies on the
+//   subject-search fallback, not the tag path — confirmed this is fine
+//   functionally after the 2026-08-07 fix above, just weaker/slower than
+//   the intended design (depends on Omni's subject line never changing).
 // - Omni dashboard document-state read (drift-proofing) not implemented —
 //   only the dashboard_id pointer is stored.
 // - Carrier % On-Time Arrival formula not fully validated against Omni's
@@ -278,10 +295,17 @@ async function searchRecentScorecardConversations(subjectContains, sinceMinutes)
 }
 
 // Combined lookup used by scorecard-draft-run.cjs: tries the tag first,
-// falls back to subject search per-customer if the tag isn't resolvable.
-// Returns { candidates, usedTag: boolean } so the caller/results can report
-// which path was actually used — useful while the tag rollout is in
-// progress, so it's visible in the run's own output which mode fired.
+// falls back to subject search if the tag can't be resolved OR resolves
+// but finds zero tagged candidates for this customer (FIXED 2026-08-07 —
+// the original version only fell back when resolveScorecardTagId() itself
+// failed, so a conversation that simply hadn't been tagged yet — e.g. the
+// "Scorecard Template" rule not having a tag action added, or a brand-new
+// customer's first email landing before that rule catches up — would
+// silently never surface via the scheduled run, no matter how many ticks
+// passed. Confirmed this exact scenario live: Grassland's real inbound
+// email (cnv_1c3896fo) came back with tagIds: [] from Front). Returns
+// { candidates, usedTag: boolean } so results can report which path
+// actually produced the candidates.
 async function fetchScorecardCandidates(config, sinceMinutes) {
   let tagId = null
   try {
@@ -291,7 +315,9 @@ async function fetchScorecardCandidates(config, sinceMinutes) {
   if (tagId) {
     const tagged = await listConversationsByTag(tagId, sinceMinutes)
     const candidates = tagged.filter((c) => (c.subject || '').includes(config.front_subject_contains))
-    return { candidates, usedTag: true }
+    if (candidates.length) return { candidates, usedTag: true }
+    // Tag resolved but nothing tagged yet for this customer — don't give up,
+    // fall through to the subject search below as a safety net.
   }
 
   const candidates = await searchRecentScorecardConversations(config.front_subject_contains, sinceMinutes)
