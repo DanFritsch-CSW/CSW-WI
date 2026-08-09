@@ -427,3 +427,22 @@
   from = "/*"
   to = "/index.html"
   status = 200
+
+# Scheduling plugin CSP/iframe headers -- added 2026-08-09. Front embeds
+# this app's PluginView route inside an iframe in its own sidebar.
+# Browsers block iframe embedding by default (or via a strict global CSP),
+# so this app needs to explicitly allow it -- but ONLY for the one route
+# that's actually meant to be embedded. Deliberately scoped to
+# /scheduling/plugin alone, not the whole app or even /scheduling/*, so
+# every other page (Labor Planning, HR, Manager, etc.) keeps its normal
+# clickjacking protection. frame-ancestors in CSP is what modern browsers
+# actually honor for this (X-Frame-Options has no reliable cross-browser
+# way to allow a specific origin -- ALLOW-FROM is deprecated/unsupported
+# in Chrome/Firefox), so no X-Frame-Options header is set here on purpose;
+# setting one (even SAMEORIGIN) would fight with the CSP allowance below
+# in browsers that still respect it. app.frontapp.com is Front's own app
+# origin; the wildcard covers Front's per-team subdomains.
+[[headers]]
+  for = "/scheduling/plugin"
+  [headers.values]
+    Content-Security-Policy = "frame-ancestors 'self' https://app.frontapp.com https://*.frontapp.com"
