@@ -438,7 +438,7 @@ export default function InventoryReport() {
           </div>
           <div style={S.btnRow}>
             {discrepancies.size > 0 && <button style={S.btnDanger} onClick={() => setShowLog(true)}>⚑ {discrepancies.size} Discrepanc{discrepancies.size > 1 ? 'ies' : 'y'}</button>}
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer' }} title="Print one row per pallet/LP with Item Code and Description columns instead of one row per location — for verifying counts against the description when the case/pallet isn't labeled with the item code.">
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer' }} title="Shows Item Code + Description on screen and on the printed sheet, one line per pallet/LP — for verifying counts against the description when the case/pallet isn't labeled with the item code.">
               <input type="checkbox" checked={printDetailed} onChange={e => setPrintDetailed(e.target.checked)} />
               Include item code/description
             </label>
@@ -500,7 +500,7 @@ export default function InventoryReport() {
                     <th style={{ ...S.thR, width: 70  }}>Pallets</th>
                     <th style={{ ...S.thR, width: 80  }}>Total Qty</th>
                     <th style={{ ...S.th,  width: 90  }}>Status</th>
-                    <th style={S.th}>LP · Material · Lots</th>
+                    <th style={S.th}>{printDetailed ? 'Item Code · Description' : 'LP · Material · Lots'}</th>
                     <th style={{ ...S.th,  width: 80  }}></th>
                   </tr>
                 </thead>
@@ -527,7 +527,11 @@ export default function InventoryReport() {
                           <td style={{ padding: '8px 10px', color: 'var(--text-secondary)', fontSize: 11 }}>
                             {isFlagged
                               ? <span style={{ color: 'var(--red)', fontSize: 10, fontWeight: 600 }}>⚑ {DISC_TYPES.find(t => t.value === discrepancies.get(loc.id)?.discType)?.label ?? 'Flagged'}</span>
-                              : hasInventory && !isExpanded ? `${loc.pallets.length} pallet${loc.pallets.length > 1 ? 's' : ''} — tap to expand` : ''
+                              : hasInventory && !isExpanded
+                                ? (printDetailed && loc.pallets.length === 1
+                                    ? <span><span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{loc.pallets[0].materialCode}</span>{loc.pallets[0].materialDescription && <span> — {loc.pallets[0].materialDescription}</span>}</span>
+                                    : `${loc.pallets.length} pallet${loc.pallets.length > 1 ? 's' : ''} — tap to expand`)
+                                : ''
                             }
                           </td>
                           <td style={{ padding: '8px 10px' }} onClick={e => e.stopPropagation()}>
@@ -544,6 +548,7 @@ export default function InventoryReport() {
                             <td />
                             <td style={{ padding: '4px 10px', fontSize: 11 }}>
                               <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{p.materialCode}</span>
+                              {printDetailed && p.materialDescription && <span style={{ color: 'var(--text-secondary)', marginLeft: 8, fontSize: 10 }}>{p.materialDescription}</span>}
                               {p.vendorLot && <span style={{ color: 'var(--text-secondary)', marginLeft: 10, fontSize: 10 }}>VL: {p.vendorLot}</span>}
                               {p.sysLot    && <span style={{ color: 'var(--text-secondary)', marginLeft: 8,  fontSize: 10 }}>SL: {p.sysLot}</span>}
                             </td>
