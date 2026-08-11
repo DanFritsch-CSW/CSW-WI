@@ -1,35 +1,60 @@
 'use strict'
 
-// Shared core for the nightly B2E sync — SPLIT 2026-08-11 into
-// lib/nightly-b2e-sync-shared.cjs + nightly-b2e-sync-run.cjs (scheduled) +
-// nightly-b2e-sync-test.cjs (manual, no schedule), same pattern as every
-// other digest in this app (see fefo-digest-shared.cjs's 2026-07-30 header
-// for the full "Netlify blocks direct HTTP invocation of any function
-// carrying a schedule" story). Reason for THIS split: Dean/Dan suspected
-// the 5am cron wasn't running as expected (CAL's weekly digest showed a
-// deep negative delta for a future day, then the same day showed a large
-// positive delta minutes later with zero manual edits — see the
-// 2026-08-11 investigation). Splitting this out gives a manual-test path
-// so that theory can be checked THE SAME DAY instead of waiting for
-// tomorrow's 10:00 UTC run.
+// Shared core for the nightly B2E sync.
 //
-// Also added this pass: cron_health logging. Every run (scheduled OR
-// manual test) writes one row per facility plus one summary row to the
-// new `cron_health` table — ok/error, duration, and (new) how many
-// distinct days of B2E schedule data were actually returned and the
-// furthest-out date actually written to roster_assignments. This exists
-// because the live investigation found MAD/WR/EC had ZERO forward-seeded
-// rows at all, and CAL/KEN's forward data stopped around day 8-9 despite
-// FORWARD_DAYS=21 and B2E's own source table
-// (silver.b2e_slv_futurescheduleentries) having real data out to
-// 2026-10-06 for Caledonia — so the sync is silently not doing what it's
-// configured to do. Rather than debug this via Netlify's dashboard log
-// viewer every time, cron_health makes it a 5-second SQL query.
+// SPLIT 2026-08-11 into lib/nightly-b2e-sync-shared.cjs +
+// nightly-b2e-sync-run.cjs (scheduled) + nightly-b2e-sync-test.cjs
+// (manual, no schedule) — see that commit's message for the original
+// reasoning (Dean/Dan suspected the 5am cron wasn't seeding future days
+// as expected).
 //
-// Everything below this point is the original nightly-b2e-sync.cjs logic,
-// unchanged in behavior — see that file's original header for the
-// purge/seed/refresh design rationale (ported from src/lib/supabase.js
-// and src/lib/omni.js).
+// CRITICAL FIX, same day, later pass: the manual test this split enabled
+// immediately surfaced a real, active data-loss bug — running it deleted
+// 244 real roster_assignments rows for CAL and 155 for KEN. Root cause,
+// confirmed with hard evidence before touching anything:
+//
+//   - cron_health's diagnostic fields showed every facility's B2E
+//     schedule query collapsing to a SINGLE stale date (2026-07-20, three
+//     weeks in the past) after the per-employee "keep the freshest
+//     ingestion batch" filter.
+//   - Replicated the identical per-employee-freshest-ingestion logic
+//     directly in MotherDuck SQL against silver.b2e_slv_futurescheduleentries
+//     for Caledonia: it returned a full, correct spread of real future
+//     dates (8/11 through 10/1), each with a genuinely fresh ingestion_ts
+//     from earlier that same day. The underlying B2E data was never wrong.
+//   - Conclusion: the bug was specifically in the OMNI-PROXIED query this
+//     file used to fetch that same data (via omni-query.cjs, `TIME_FOR_
+//     UNIT_DURATION` on entry_date) — a known-unreliable pattern for
+//     multi-day windows elsewhere in this app's own history. It was
+//     silently returning a stale/collapsed result instead of throwing,
+//     so seedForwardHorizon correctly-by-its-own-broken-premise treated
+//     "B2E has nothing scheduled for anyone on any future date" as true,
+//     and deleted every non-manual future roster row that didn't match.
+//     This is almost certainly what's been causing the partial/missing
+//     forward coverage the whole investigation started from — the
+//     scheduled 5am cron has likely been doing this silently for a while.
+//
+// FIX: this file no longer talks to Omni for B2E roster/schedule data at
+// all. It now calls netlify/functions/motherduck-b2e-roster.cjs — an
+// existing, already-deployed, already-duckdb-scoped function that queries
+// MotherDuck directly and was explicitly built (per its own header) to
+// return the exact same Omni-qualified-column-name row shape so it could
+// be swapped in without touching any downstream processing. weekly-labor-
+// digest-shared.cjs already uses this same endpoint successfully for its
+// own B2E reads — this brings nightly-b2e-sync in line with that
+// established, verified-correct pattern instead of the ad-hoc Omni path
+// the original file used.
+//
+// No netlify.toml change needed for this fix — motherduck-b2e-roster.cjs
+// already carries its own duckdb scoping; this file just calls it over
+// HTTP like weekly-labor-digest-shared.cjs does, so it stays duckdb-free
+// itself.
+//
+// Recovery: nothing is unrecoverable. The real B2E data was confirmed
+// intact throughout — deleted rows were all non-manually-edited (manual
+// overrides are protected by seedForwardHorizon's own guard and were
+// never touched), so a clean re-run with this fix restores CAL/KEN's
+// forward roster from the correct source.
 
 const { createClient } = require('@supabase/supabase-js')
 
@@ -42,10 +67,12 @@ function getAllowedJobCodes(facilityId) {
   return (facilityId === 'mad' || facilityId === 'ec') ? new Set(['205', '209']) : new Set(['205'])
 }
 
-const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
-const ROSTER       = 'silver__b2e_slv_employeeroster'
-const SCHEDULE     = 'silver__b2e_slv_futurescheduleentries'
+const ROSTER   = 'silver__b2e_slv_employeeroster'
+const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
 
+// Kept as a fast local guard so an unknown facilityId short-circuits
+// before making any network call. motherduck-b2e-roster.cjs owns the
+// authoritative copy of this map and validates it server-side too.
 const B2E_LOCATION = {
   cal:  '019 - Caledonia',
   mad:  '011 - Madison',
@@ -116,63 +143,35 @@ function computeShiftHours(startTime, endTime) {
   return hours > 0 ? Math.round(hours * 2) / 2 : null
 }
 
-// ── Omni query — proxies to internal omni-query.cjs ────────────────────────
+// ── MotherDuck-direct B2E fetch (replaces the Omni proxy path) ─────────────
+//
+// Same call shape/pattern as weekly-labor-digest-shared.cjs's
+// motherduckB2eQuery — POST to the existing motherduck-b2e-roster.cjs
+// function, which returns rows already reshaped to the Omni-qualified
+// column-name convention (`${SCHEDULE}.employee_id` etc.) that the
+// processing logic below expects.
 
-async function omniQuery(query, baseUrl) {
-  const proxyUrl = `${baseUrl}/.netlify/functions/omni-query`
-  const res = await fetch(proxyUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: { version: 5, ...query } }),
+async function motherduckB2eQuery(payload, baseUrl) {
+  const res = await fetch(`${baseUrl}/.netlify/functions/motherduck-b2e-roster`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   })
   if (!res.ok) {
-    let body = ''
-    try { body = await res.text() } catch { /* ignore */ }
-    throw new Error(`omni-query proxy HTTP ${res.status}: ${body.slice(0, 300)}`)
+    let body = {}
+    try { body = await res.json() } catch { /* non-json */ }
+    throw new Error(body.error || `motherduck-b2e-roster ${res.status}`)
   }
-  const payload = await res.json()
-  if (!payload || !Array.isArray(payload.rows)) {
-    throw new Error(`omni-query proxy: missing rows field: ${JSON.stringify(payload).slice(0, 300)}`)
-  }
-  return payload.rows
+  const { rows } = await res.json()
+  return rows
 }
-
-// ── B2E fetchers (ported from omni.js) ─────────────────────────────────────
 
 async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward, cal2DockAssignments) {
   const location = B2E_LOCATION[facilityId]
-  if (!location) return {}
+  if (!location) return { rosterByDate: {}, rawDistinctDates: 0, rawRowCount: 0 }
   const isCal = facilityId === 'cal'
 
   const [rosterRows, scheduleRows] = await Promise.all([
-    omniQuery({
-      modelId: B2E_MODEL_ID, table: ROSTER,
-      fields: [`${ROSTER}.employee_id`, `${ROSTER}.employee_status`],
-      filters: {
-        [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      },
-      limit: 500,
-    }, baseUrl),
-    omniQuery({
-      modelId: B2E_MODEL_ID, table: SCHEDULE,
-      fields: [
-        `${SCHEDULE}.employee_id`, `${SCHEDULE}.first_name`, `${SCHEDULE}.last_name`,
-        `${SCHEDULE}.default_job_code`, `${SCHEDULE}.start_time`, `${SCHEDULE}.end_time`,
-        `${SCHEDULE}.modified_start_time`, `${SCHEDULE}.modified_end_time`,
-        `${SCHEDULE}.work_schedule`, `${SCHEDULE}.ingestion_ts`, `${SCHEDULE}.entry_date`,
-      ],
-      filters: {
-        [`${SCHEDULE}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${SCHEDULE}.entry_date`]: {
-          kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
-          isFiscal: false, left_side: fromDate, is_negative: false,
-          offset_interval_string: `${daysForward} days`,
-        },
-      },
-      sorts: [{ column_name: `${SCHEDULE}.ingestion_ts`, sort_descending: true }],
-      limit: 5000,
-    }, baseUrl),
+    motherduckB2eQuery({ kind: 'active_roster_all_jobcodes', facilityId }, baseUrl),
+    motherduckB2eQuery({ kind: 'schedule_range', facilityId, fromDate, daysForward }, baseUrl),
   ])
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
@@ -191,9 +190,10 @@ async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward
   const byDateEmp = new Map()
   // Diagnostic only — raw distinct entry_date count BEFORE the stale-snapshot
   // filter narrows to each employee's single freshest ingestion batch. Lets
-  // cron_health show whether Omni's response itself was already truncated
-  // (rawDistinctDates small) vs. the stale-snapshot dedup being what's
-  // discarding far-future days (rawDistinctDates large, byDateEmp small).
+  // cron_health show whether the source query itself returned a narrow
+  // range (rawDistinctDates small) vs. the stale-snapshot dedup being what
+  // narrows it (rawDistinctDates large, byDateEmp small) — exactly the
+  // signal that exposed the Omni-path bug this file used to have.
   const rawDistinctDates = new Set()
   for (const r of scheduleRows) {
     const dateRaw = r[`${SCHEDULE}.entry_date`]
@@ -260,17 +260,10 @@ async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward
 async function fetchActiveB2eEmployees(baseUrl, facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return new Set()
-  const rows = await omniQuery({
-    modelId: B2E_MODEL_ID, table: ROSTER,
-    fields: [`${ROSTER}.employee_id`],
-    filters: {
-      [`${ROSTER}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-      [`${ROSTER}.employee_status`]:            { kind: 'EQUALS', type: 'string', values: ['Active'] },
-      [`${ROSTER}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: (facilityId === 'mad' || facilityId === 'ec') ? ['205', '209'] : ['205'] },
-    },
-    sorts: [],
-    limit: 500,
-  }, baseUrl)
+  // 'active_roster' kind already applies the correct per-facility job-code
+  // filter server-side (205, or 205+209 for mad/ec) — matches this
+  // function's original Omni filter exactly.
+  const rows = await motherduckB2eQuery({ kind: 'active_roster', facilityId }, baseUrl)
   return new Set(rows.map(r => String(r[`${ROSTER}.employee_id`])))
 }
 
@@ -485,8 +478,6 @@ async function syncFacility(supabase, baseUrl, facility, today, cal2Docks, trigg
     const result = {
       ok: true,
       activeEmps: activeEmps.size,
-      // Diagnostic fields — added 2026-08-11 to answer "is the 21-day
-      // window actually being reached" without a separate SQL query.
       b2eRawRowCount: rawRowCount,
       b2eRawDistinctDates: rawDistinctDates,
       b2eDatesAfterDedup: seededDates.length,
