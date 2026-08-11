@@ -18,19 +18,7 @@
      text-overlap, no blank trailing pages.
    Pattern mirrors src/styles/wr-secondary-repl.css: classNames scoped to
    this component rather than a body-level rule, since this tab shares the
-   app shell's <body> with every other facility tab.
-
-   2026-08-11 — added .inv-print-table-detailed rules for the new "Include
-   item code / description" print mode (per Kaylee Stumpf's request via
-   Dan). This is a single full-width table (no .inv-print-columns grid)
-   with two extra columns. Cells are forced to a single line via
-   white-space:nowrap + text-overflow:ellipsis — deliberately, because the
-   whole rows-per-page pagination math in InventoryReport.jsx assumes a
-   fixed row height, and a wrapped multi-line description would break that
-   the same way the rev-2 CSS-multicol attempt broke on variable content
-   height. Truncating with an ellipsis instead of wrapping keeps that
-   assumption intact; long descriptions are what they are on a paper sheet,
-   the on-screen view has the full text if needed. */
+   app shell's <body> with every other facility tab. */
 
 .inv-print-only { display: none; }
 
@@ -62,11 +50,11 @@
   .inv-print-header .meta { font-size: 11px; color: #333; margin-bottom: 1px; }
   .inv-print-header .meta.small { font-size: 9.5px; color: #666; margin-top: 4px; font-style: italic; }
 
-  /* Each .inv-print-page is a pre-sized chunk (see printPages /
-     printDetailedPages) — force a clean break between them instead of
-     letting content flow/fragment wherever it happens to run out of
-     vertical room. Deliberately conservative row budgets (see JSX) mean a
-     page may end with some blank space rather than risk overflow. */
+  /* Each .inv-print-page is a pre-sized chunk (see printPages) — force a
+     clean break between them instead of letting content flow/fragment
+     wherever it happens to run out of vertical room. Deliberately
+     conservative row budgets (see JSX) mean a page may end with some blank
+     space rather than risk overflow. */
   .inv-print-page:not(:last-child) {
     page-break-after: always;
     break-after: page;
@@ -98,13 +86,11 @@
     padding: 3px 4px;
     color: #000;
   }
-  /* Safety net only — printPages/printDetailedPages are sized to avoid
-     mid-row splits in the first place, but a row is never allowed to break
-     across a page either way if the estimate runs a little short on a
-     given printer. */
+  /* Safety net only — printPages is sized to avoid mid-row splits in the
+     first place, but a row is never allowed to break across a page either
+     way if the estimate runs a little short on a given printer. */
   .inv-print-table tr { break-inside: avoid; }
   .inv-print-table .loc { font-family: monospace; font-weight: 700; white-space: nowrap; }
-  .inv-print-table .mono { font-family: monospace; }
   .inv-print-table .flag { color: #b91c1c; font-weight: 700; }
 
   .inv-print-table .loc-col { width: 26%; }
@@ -112,20 +98,27 @@
   .inv-print-table .blank-col-sm { width: 16%; }
   .inv-print-table .blank-col-lg { width: 34%; }
 
-  /* Detailed mode — single full-width column (no .inv-print-columns grid
-     wrapper), so column-width percentages are re-scaled to sum to 100%
-     across 7 columns instead of 5. Every cell forced to one line (see
-     file-header note above) so the fixed-row-height pagination math holds. */
-  .inv-print-table-detailed td,
-  .inv-print-table-detailed th {
+  /* Detailed print mode (2026-08-11) — one row per pallet/LP with Item Code +
+     Description columns (Kaylee's ask: some items don't have the item code
+     on the case/pallet, only the description, so counters need it on the
+     sheet to verify). Description and Item Code are forced to a single line
+     via ellipsis, NOT wrapped, so row height matches the standard sheet and
+     the ROWS_FIRST_PAGE_COL/ROWS_OTHER_PAGE_COL budget in InventoryReport.jsx
+     stays valid. Not yet verified on a real multi-page print — check a
+     facility like WR before relying on it, same as every prior revision to
+     this sheet. */
+  .inv-print-table-detailed .code,
+  .inv-print-table-detailed .desc {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .inv-print-table-detailed .loc-col { width: 12%; }
-  .inv-print-table-detailed .num-col { width: 8%; }
-  .inv-print-table-detailed .mat-col { width: 12%; }
-  .inv-print-table-detailed .desc-col { width: 24%; }
-  .inv-print-table-detailed .blank-col-sm { width: 8%; }
-  .inv-print-table-detailed .blank-col-lg { width: 28%; }
+  .inv-print-table-detailed .code { font-family: monospace; }
+
+  .inv-print-table .d-loc-col  { width: 14%; }
+  .inv-print-table .d-code-col { width: 11%; }
+  .inv-print-table .d-desc-col { width: 29%; }
+  .inv-print-table .d-num-col  { width: 9%;  }
+  .inv-print-table .d-blank-sm { width: 12%; }
+  .inv-print-table .d-blank-lg { width: 25%; }
 }
