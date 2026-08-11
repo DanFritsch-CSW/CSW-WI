@@ -3,6 +3,10 @@
 // thin POST wrapper, throws on non-2xx so the component's own try/catch controls
 // the loading/error UI. No body params needed -- this is a live "right now"
 // snapshot, not date-scoped.
+//
+// 2026-08-11: response payload gained `dailyScorecard` and `buildingWide`
+// keys (see motherduck-jdf-putaways.cjs's header) -- no change needed here,
+// this wrapper just passes the whole JSON body through unchanged.
 
 export async function fetchJdfPutaways() {
   const res = await fetch('/.netlify/functions/motherduck-jdf-putaways', {

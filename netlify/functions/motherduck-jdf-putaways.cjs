@@ -30,6 +30,29 @@
 // move's CURRENT-day classification, which isn't a real historical trend.
 // Everything returned here is a live "right now" snapshot instead.
 //
+// ── 2026-08-11 addition: Daily Putaway Scorecard + Building-Wide baseline ──
+// New top-of-tab metrics per Dan's ops-accountability project: "same item,
+// same tier" (single-SKU-per-bin discipline) as the baseline, with "also same
+// MAN date" as a second, stricter layer (same item + same manufacture date,
+// derived from the lot code — this is the FEFO/pick-efficiency layer). Two
+// cuts of the same underlying classification:
+//   - dailyScorecard: LPs whose license plate was CREATED (received) on the
+//     previous CENTRAL calendar day, and where they landed. Deliberately
+//     lagged one full day rather than "today" — a same-day pull is mostly
+//     still sitting in receiving/staging (validated live: 16 of 109 same-day
+//     vs. 120 of 143 the next day), so "today" would grade the team on a
+//     tiny, misleading slice of the day's actual work.
+//   - buildingWide: every active LP right now, regardless of receipt date —
+//     the slow-moving cumulative baseline, not a daily execution number.
+// Both reuse the SAME jdf-only per-location classification as the existing
+// clean/mixed_item/mixed_date scoring below (loc_class), so these new
+// numbers can never silently drift from what the aisle/rack-type breakdown
+// already shows — "same item, same tier" == NOT mixed_item; "also same MAN
+// date" == clean (neither mixed_item nor mixed_date). Deliberately scoped to
+// F8 only, matching this whole function's existing stated scope (a handful
+// of JDF LPs live outside F8 — e.g. F5 — and are excluded here exactly as
+// they already are from every other metric in this file).
+//
 // POST body: {} (no params).
 
 const NO_CACHE_HEADERS = {
@@ -45,6 +68,26 @@ const EVENT_WINDOW_DAYS = 14
 
 function num(v) { return Number(v ?? 0) || 0 }
 function fmtDate(d) { return d ? new Date(d).toISOString().slice(0, 10) : null }
+
+// centralNowParts/centralYesterdayDateStr — same America/Chicago resolution
+// pattern used by lib/fefo-digest-shared.cjs and the other digest-shared
+// modules in this app, ported here (this function has no shared-lib import
+// today) so "yesterday" for the Daily Putaway Scorecard means the same thing
+// a Central-time human means by it, not UTC-yesterday.
+function centralNowParts() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const get = t => Number(parts.find(p => p.type === t).value)
+  return { year: get('year'), month: get('month'), day: get('day') }
+}
+
+function centralYesterdayDateStr() {
+  const { year, month, day } = centralNowParts()
+  const d = new Date(Date.UTC(year, month - 1, day))
+  d.setUTCDate(d.getUTCDate() - 1)
+  return d.toISOString().slice(0, 10)
+}
 
 exports.handler = async (event) => {
   const t0 = Date.now()
@@ -79,12 +122,16 @@ exports.handler = async (event) => {
     await exec(`ATTACH 'md:production_db'`)
 
     // Materialize the F8 on-hand snapshot once; every query below reads from it.
+    // created_date added 2026-08-11 (Daily Putaway Scorecard) -- when the LP
+    // itself was created/received, used to build the "yesterday's arrivals"
+    // cohort below. Doesn't affect any existing query in this file.
     await exec(`
       CREATE TEMP TABLE onhand AS
       SELECT
         loc.location_container_name AS location,
         substr(loc.location_container_name,3,1) AS aisle,
         lp.license_plate_id,
+        CAST(lp.created_sys_date_time AS DATE) AS created_date,
         lot.lot_id,
         m.material_id,
         m.lookup_code AS material_code,
@@ -121,7 +168,12 @@ exports.handler = async (event) => {
       GROUP BY location
     `)
 
-    const [locationRows, itemDetailRows, materialNameRows, customerNameRows, employeeEventRows, allMoveRows] = await Promise.all([
+    const yesterday = centralYesterdayDateStr()
+
+    const [
+      locationRows, itemDetailRows, materialNameRows, customerNameRows,
+      employeeEventRows, allMoveRows, dailyRows, buildingWideRows,
+    ] = await Promise.all([
       runQuery(`
         SELECT location, aisle, jdf_lp, distinct_materials, distinct_mfg_dates, earliest, latest, other_lp, other_customers
         FROM loc_class
@@ -168,6 +220,33 @@ exports.handler = async (event) => {
           AND t.completed_date_time >= now() - INTERVAL ${EVENT_WINDOW_DAYS} DAY
         ORDER BY t.completed_date_time DESC
       `),
+      // Daily Putaway Scorecard (2026-08-11) -- LPs created (received) on the
+      // previous Central calendar day. "put away" = landed somewhere in the F8
+      // onhand snapshot at all (still-staged/receiving LPs live outside F8's
+      // location namespace and so never enter `onhand` in the first place --
+      // this correctly excludes them from the denominator rather than
+      // miscounting them as either correct or mixed).
+      runQuery(`
+        SELECT
+          count(distinct o.license_plate_id) AS put_away,
+          count(distinct CASE WHEN lc.distinct_materials <= 1 THEN o.license_plate_id END) AS same_item_tier,
+          count(distinct CASE WHEN lc.distinct_materials <= 1 AND lc.distinct_mfg_dates <= 1 THEN o.license_plate_id END) AS same_item_tier_date
+        FROM onhand o
+        JOIN loc_class lc ON lc.location = o.location
+        WHERE o.project_id = ${JDF_PROJECT_ID}
+          AND o.created_date = DATE '${yesterday}'
+      `),
+      // Building-Wide baseline (2026-08-11) -- every active JDF LP right now,
+      // regardless of receipt date. Same classification, no date filter.
+      runQuery(`
+        SELECT
+          count(distinct o.license_plate_id) AS total_active,
+          count(distinct CASE WHEN lc.distinct_materials <= 1 THEN o.license_plate_id END) AS same_item_tier,
+          count(distinct CASE WHEN lc.distinct_materials <= 1 AND lc.distinct_mfg_dates <= 1 THEN o.license_plate_id END) AS same_item_tier_date
+        FROM onhand o
+        JOIN loc_class lc ON lc.location = o.location
+        WHERE o.project_id = ${JDF_PROJECT_ID}
+      `),
     ])
 
     try { conn.close(); db.close() } catch (_) {}
@@ -192,11 +271,26 @@ exports.handler = async (event) => {
     const employeeEvents = employeeEventRows.map(r => [r.employee, r.location, r.status, r.completed_at, r.lot_code])
     const allMoves = allMoveRows.map(r => [r.aisle, r.completed_at])
 
+    const dailyRow = dailyRows[0] || {}
+    const buildingRow = buildingWideRows[0] || {}
+    const dailyScorecard = {
+      date: yesterday,
+      putAway: num(dailyRow.put_away),
+      sameItemTier: num(dailyRow.same_item_tier),
+      sameItemTierDate: num(dailyRow.same_item_tier_date),
+    }
+    const buildingWide = {
+      totalActive: num(buildingRow.total_active),
+      sameItemTier: num(buildingRow.same_item_tier),
+      sameItemTierDate: num(buildingRow.same_item_tier_date),
+    }
+
     return {
       statusCode: 200,
       headers: NO_CACHE_HEADERS,
       body: JSON.stringify({
         locations, locationItemDetail, materialNames, customerNames, employeeEvents, allMoves,
+        dailyScorecard, buildingWide,
         fetchedAt: new Date().toISOString(), elapsedMs: Date.now() - t0,
       }),
     }
