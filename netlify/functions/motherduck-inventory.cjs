@@ -46,12 +46,17 @@ exports.handler = async (event) => {
 
   const safe = whName.replace(/'/g, "''")
 
+  // material_description: Description is the primary field editors fill in on
+  // the material record, but ~9% of rows have it blank while material_name is
+  // populated (confirmed live via MotherDuck) — fall back to material_name so
+  // the print sheet doesn't show a blank where a usable name exists.
   const inventorySql = `
     SELECT
       lp.lookup_code                     AS lp_code,
       loc.location_container_name        AS location_name,
       COALESCE(lpc.packaged_amount, 0)   AS qty,
       COALESCE(m.lookup_code,  '')       AS material_code,
+      COALESCE(NULLIF(m.Description, ''), m.material_name, '') AS material_description,
       COALESCE(vl.lookup_code, '')       AS vendor_lot,
       COALESCE(sl.lookup_code, '')       AS sys_lot
     FROM production_db.silver.datex_slv_licenseplates lp
@@ -124,12 +129,13 @@ exports.handler = async (event) => {
       headers: NO_CACHE_HEADERS,
       body: JSON.stringify({
         inventoryRows: inventoryRows.map(r => ({
-          lp:           String(r.lp_code       || ''),
-          locationName: String(r.location_name || ''),
-          qty:          Number(r.qty)           || 0,
-          materialCode: String(r.material_code || ''),
-          vendorLot:    String(r.vendor_lot    || ''),
-          sysLot:       String(r.sys_lot       || ''),
+          lp:                  String(r.lp_code              || ''),
+          locationName:        String(r.location_name        || ''),
+          qty:                 Number(r.qty)                  || 0,
+          materialCode:        String(r.material_code        || ''),
+          materialDescription: String(r.material_description || ''),
+          vendorLot:           String(r.vendor_lot           || ''),
+          sysLot:              String(r.sys_lot              || ''),
         })),
         emptyLocations: emptyRows.map(r => String(r.location_name || '')).filter(Boolean),
       }),
