@@ -17,6 +17,7 @@ import {
   fetchFrontChannels, triggerFrontChannelsSync,
 } from '../lib/cmmOutbound.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
+import { fetchCronHealth } from '../lib/cronHealth.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
 
 // ── Tab nav ────────────────────────────────────────────────
@@ -29,6 +30,7 @@ const TABS = [
   { id: 'pvi',         label: 'PVI Accounts' },
   { id: 'discussions', label: 'Daily Discussions' },
   { id: 'cmmOutbound', label: 'CMM Outbound Appts' },
+  { id: 'b2eSync',     label: 'B2E Sync Health' },
 ]
 
 // Hardcoded EST drop projects per facility (mirrors PROJECT_DROP_RULES in omni.js).
@@ -1067,6 +1069,199 @@ function CmmOutboundApptsEditor() {
   )
 }
 
+// ── B2E Sync Health ──────────────────────────────────────────
+//
+// Added 2026-08-11 alongside the nightly-b2e-sync shared/run/test split.
+// Dan/Dean suspected the 5am cron wasn't seeding future days as expected
+// (see lib/nightly-b2e-sync-shared.cjs's header for the full story). This
+// panel gives two things without needing Netlify's dashboard log viewer:
+//   1. A "Run B2E Sync Now" button — fires nightly-b2e-sync-test.cjs
+//      directly, NOT a dry run, same real purge/seed/refresh as the real
+//      5am cron, so "is this actually working" can be checked TODAY.
+//   2. A log of the last several runs (scheduled AND manual) from the new
+//      cron_health table, including the diagnostic fields
+//      (b2eDatesAfterDedup / maxSeededDate / expectedMaxDate) that answer
+//      "did this run actually reach the full 21-day forward window."
+
+function formatCronHealthTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+}
+
+function B2eSyncHealthPanel() {
+  const [summaryRows, setSummaryRows] = useState([])
+  const [facilityRows, setFacilityRows] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [running, setRunning] = useState(false)
+  const [runResult, setRunResult] = useState(null)
+  const [runError, setRunError] = useState(null)
+
+  async function loadHealth() {
+    setLoading(true)
+    const [summaries, facilities] = await Promise.all([
+      fetchCronHealth('nightly-b2e-sync-summary', 10),
+      fetchCronHealth('nightly-b2e-sync', 25),
+    ])
+    setSummaryRows(summaries)
+    setFacilityRows(facilities)
+    setLoading(false)
+  }
+
+  useEffect(() => { loadHealth() }, [])
+
+  async function handleRunNow() {
+    setRunning(true)
+    setRunResult(null)
+    setRunError(null)
+    try {
+      const res = await triggerDigestTest('nightly-b2e-sync-test', {})
+      setRunResult(res)
+    } catch (err) {
+      setRunError(err.message)
+    } finally {
+      setRunning(false)
+      await loadHealth()
+    }
+  }
+
+  const lastScheduled = summaryRows.find(r => r.trigger === 'scheduled')
+
+  return (
+    <div className="b2e-sync-health">
+      <p className="settings-page-sub" style={{ marginBottom: 16 }}>
+        The nightly B2E sync (5am Central) seeds <code>roster_assignments</code> 21 days forward for all 5
+        facilities. Click below to run it right now instead of waiting for tomorrow's scheduled tick — this is
+        NOT a dry run, it writes real data, same as the real cron.
+      </p>
+
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16 }}>
+        <button className="settings-save-btn" onClick={handleRunNow} disabled={running}>
+          {running ? 'Running…' : 'Run B2E Sync Now (test)'}
+        </button>
+        {lastScheduled && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)' }}>
+            Last scheduled run: {formatCronHealthTime(lastScheduled.ran_at)} — {lastScheduled.ok ? 'ok' : 'FAILED'}
+          </span>
+        )}
+      </div>
+
+      {runError && (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#e05a5a', marginBottom: 16 }}>
+          Run failed: {runError}
+        </div>
+      )}
+
+      {runResult && (
+        <div style={{ marginBottom: 20, padding: 12, border: '1px solid var(--border)', borderRadius: 4 }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, marginBottom: 8 }}>
+            Just ran ({formatCronHealthTime(runResult.ranAt)}) — overall: {runResult.ok ? 'OK' : 'FAILED'}
+          </div>
+          <table className="hourly-table">
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left' }}>Facility</th>
+                <th>OK</th>
+                <th>Active Emps</th>
+                <th>B2E days seen</th>
+                <th>Max date written</th>
+                <th>Expected max date</th>
+                <th style={{ textAlign: 'left' }}>Purge / Seed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(runResult.results || {}).map(([fac, r]) => (
+                <tr key={fac}>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{fac.toUpperCase()}</td>
+                  <td style={{ textAlign: 'center', color: r.ok ? 'var(--text-secondary)' : '#e05a5a' }}>{r.ok ? '✓' : '✗'}</td>
+                  <td style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.activeEmps ?? '—'}</td>
+                  <td style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.b2eDatesAfterDedup ?? '—'}</td>
+                  <td style={{
+                    textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11,
+                    color: r.maxSeededDate && r.expectedMaxDate && r.maxSeededDate < r.expectedMaxDate ? '#e0a05a' : 'inherit',
+                  }}>
+                    {r.maxSeededDate ?? '—'}
+                  </td>
+                  <td style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.expectedMaxDate ?? '—'}</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)' }}>
+                    {r.ok
+                      ? `+${r.seed?.inserted ?? 0} / -${r.seed?.deleted ?? 0} / ~${r.seed?.refreshed ?? 0}`
+                      : (r.error || 'error')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="settings-page-sub" style={{ marginTop: 8, fontSize: 10 }}>
+            "Max date written" in amber means this run did NOT reach the expected 21-day window for that
+            facility — the gap is real, not a display artifact.
+          </p>
+        </div>
+      )}
+
+      <div className="settings-page-sub" style={{ fontWeight: 600, marginBottom: 8 }}>Recent runs</div>
+      {loading ? (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>Loading…</div>
+      ) : summaryRows.length === 0 ? (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>
+          No runs logged yet — click "Run B2E Sync Now" above, or wait for the next scheduled tick.
+        </div>
+      ) : (
+        <table className="hourly-table" style={{ marginBottom: 20 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left' }}>Ran At</th>
+              <th style={{ textAlign: 'left' }}>Trigger</th>
+              <th>OK</th>
+              <th>Total ms</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summaryRows.map(r => (
+              <tr key={r.id}>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{formatCronHealthTime(r.ran_at)}</td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.trigger}</td>
+                <td style={{ textAlign: 'center', color: r.ok ? 'var(--text-secondary)' : '#e05a5a' }}>{r.ok ? '✓' : '✗'}</td>
+                <td style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.duration_ms ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="settings-page-sub" style={{ fontWeight: 600, marginBottom: 8 }}>Per-facility history (last 25)</div>
+      {facilityRows.length === 0 ? (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '12px 0' }}>No facility-level runs logged yet.</div>
+      ) : (
+        <table className="hourly-table">
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left' }}>Ran At</th>
+              <th style={{ textAlign: 'left' }}>Facility</th>
+              <th style={{ textAlign: 'left' }}>Trigger</th>
+              <th>OK</th>
+              <th>B2E days seen</th>
+              <th>Max date written</th>
+            </tr>
+          </thead>
+          <tbody>
+            {facilityRows.map(r => (
+              <tr key={r.id}>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{formatCronHealthTime(r.ran_at)}</td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{(r.facility || '—').toUpperCase()}</td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.trigger}</td>
+                <td style={{ textAlign: 'center', color: r.ok ? 'var(--text-secondary)' : '#e05a5a' }}>{r.ok ? '✓' : '✗'}</td>
+                <td style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.detail?.b2eDatesAfterDedup ?? '—'}</td>
+                <td style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{r.detail?.maxSeededDate ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
 // ── Page ───────────────────────────────────────────────────
 
 export default function Settings() {
@@ -1174,6 +1369,16 @@ export default function Settings() {
             <p className="settings-page-sub">Creates a Front email draft (not sent) of tomorrow's open CMM/Palermo's outbound appointments at Caledonia, for review before sending.</p>
           </div>
           <CmmOutboundApptsEditor />
+        </>
+      )}
+
+      {activeTab === 'b2eSync' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">B2E Sync Health</h2>
+            <p className="settings-page-sub">Run the nightly roster sync on demand and see recent run history — no waiting for tomorrow, no Netlify log diving.</p>
+          </div>
+          <B2eSyncHealthPanel />
         </>
       )}
     </div>
