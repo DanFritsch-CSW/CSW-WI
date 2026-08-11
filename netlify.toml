@@ -433,6 +433,29 @@
 [functions."scorecard-draft-test"]
   timeout = 26
 
+# JDF Putaway Scorecard daily digest -- added 2026-08-11. Same
+# every-15-min tick + configurable notify_hour/notify_minute/notify_days
+# pattern as the other digests (facility='mad', dashboard_type=
+# 'jdf_putaway_scorecard' in prepick_notify_settings). Content date is
+# YESTERDAY (Central time) -- see lib/jdf-scorecard-digest-shared.cjs's
+# header for why this is a fixed one-day lookback rather than a lookahead.
+# Runs its own direct MotherDuck query (self-contained port convention,
+# same as weekly-labor-digest-shared.cjs) so it needs duckdb like the
+# other motherduck-*.cjs functions.
+[functions."jdf-scorecard-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# JDF Putaway Scorecard digest MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as every other *-digest-test.cjs in
+# this app -- see lib/jdf-scorecard-digest-shared.cjs).
+[functions."jdf-scorecard-digest-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
