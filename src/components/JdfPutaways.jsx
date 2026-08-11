@@ -2,6 +2,7 @@ import { useMemo, useState, useEffect, Fragment } from 'react'
 import { RACK_TYPE, RACK_GROUP, CUSTOMER_NAMES } from '../lib/jdfPutawaysLocations.js'
 import { fetchJdfPutaways } from '../lib/jdfPutaways.js'
 import { pct, classifyLocation, getWindowStart, windowLabel } from '../lib/jdfPutawaysLogic.js'
+import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 
 // ─── JDF Putaways ───────────────────────────────────────────────────────
 // Visibility tool for F8 (Madison) JDF slotting: how well putaways are
@@ -28,6 +29,27 @@ import { pct, classifyLocation, getWindowStart, windowLabel } from '../lib/jdfPu
 // putting a slower-moving customer's pallets behind faster JDF movers is a
 // deliberate way to use full lane depth. Only JDF's own SKU/date discipline
 // counts toward clean/mixed.
+//
+// ── 2026-08-11 redesign: Daily Putaway Scorecard + Building-Wide baseline ──
+// Replaced the single "clean lanes %" headline with four cards per Dan's
+// ops-accountability project: same item/same tier as the baseline (daily +
+// building-wide), plus "also same MAN date" as a second, stricter layer
+// (the FEFO/pick-efficiency number). Data comes from the SAME
+// motherduck-jdf-putaways.cjs payload as everything else on this tab (new
+// dailyScorecard/buildingWide keys -- see that file's 2026-08-11 header
+// note), so these numbers can never drift from the aisle/rack-type
+// breakdown below -- same underlying loc_class classification throughout.
+// Daily is intentionally "yesterday," not "today" -- a same-day pull is
+// mostly still sitting in receiving (validated live: 16 of 109 same-day
+// vs. 120 of 143 the next day), so grading the team on today's number
+// would be measuring an empty box, not their actual work.
+//
+// Notify settings (2026-08-11): reuses the same NotifySettingsPanel shared
+// component every other digest in this app already uses -- M-F day
+// toggles, configurable send time, Enabled checkbox, Front conversation ID,
+// "Send test digest now" -- backed by prepick_notify_settings
+// (facility='mad', dashboard_type='jdf_putaway_scorecard'). See
+// lib/jdf-scorecard-digest-shared.cjs for the digest itself.
 
 const STATUS_ORDER = { clean: 0, mixed_date: 1, mixed_item: 2 }
 
@@ -246,24 +268,118 @@ export default function JdfPutaways() {
     )
   }
 
+  const daily = data?.dailyScorecard ?? { date: null, putAway: 0, sameItemTier: 0, sameItemTierDate: 0 }
+  const building = data?.buildingWide ?? { totalActive: 0, sameItemTier: 0, sameItemTierDate: 0 }
+  const dailyMixed = daily.putAway - daily.sameItemTier
+  const buildingMixed = building.totalActive - building.sameItemTier
+  const dailyDateLabel = daily.date
+    ? new Date(`${daily.date}T00:00:00Z`).toLocaleDateString(undefined, { weekday: 'long', month: 'numeric', day: 'numeric', timeZone: 'UTC' })
+    : '—'
+
+  const scoreCardStyle = { background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--r-lg)', padding: '14px 18px' }
+  const scoreLabelStyle = { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }
+  const scoreValueStyle = { fontFamily: 'var(--font-mono)', fontSize: 32, fontWeight: 600, lineHeight: 1 }
+
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 }}>
-        <div>
-          <div className="section-label" style={{ marginBottom: 4 }}>JDF Putaways — F8 slotting visibility</div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', maxWidth: 620 }}>
-            JDF product only — surfacing where slotting could run tighter, not a scorecard on any one person.
-          </div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-            {data?.fetchedAt && <span>as of {new Date(data.fetchedAt).toLocaleTimeString()}</span>}
-            <button className="est-reset-btn" onClick={() => setRefreshTick(t => t + 1)} disabled={loading}>{loading ? 'Refreshing…' : '↻ Refresh'}</button>
-          </div>
+      <div style={{ marginBottom: 12 }}>
+        <div className="section-label" style={{ marginBottom: 4 }}>JDF Putaways — Same Item, Same Tier</div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', maxWidth: 640 }}>
+          Same item, same tier. Two numbers: how the team executed yesterday, and where the whole building stands right now.
         </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 26, fontWeight: 500, color: 'var(--brand)' }}>{totals.cleanPct}%</div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-dim)', textTransform: 'uppercase' }}>clean lanes (JDF-only)</div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+          {data?.fetchedAt && <span>as of {new Date(data.fetchedAt).toLocaleTimeString()}</span>}
+          <button className="est-reset-btn" onClick={() => setRefreshTick(t => t + 1)} disabled={loading}>{loading ? 'Refreshing…' : '↻ Refresh'}</button>
         </div>
       </div>
+
+      {/* ── Row 1: baseline — Daily Putaway Score + Building-Wide Same Item/Tier ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 12, marginBottom: 12 }}>
+        <div style={{ ...scoreCardStyle, borderTop: '2px solid var(--brand)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={scoreLabelStyle}>Daily Putaway Score — {dailyDateLabel}</div>
+              <div style={{ ...scoreValueStyle, color: 'var(--brand)' }}>{pct(daily.sameItemTier, daily.putAway)}%</div>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>same item/tier of pallets put away</div>
+            </div>
+            <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
+              <div>{daily.putAway} put away</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 16, marginTop: 12 }}>
+            <div>
+              <span style={{ color: 'var(--green)', fontSize: 18, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{daily.sameItemTier}</span>
+              <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 6 }}>correct</span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--red)', fontSize: 18, fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{dailyMixed}</span>
+              <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 6 }}>mixed</span>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ ...scoreCardStyle, borderTop: '2px solid var(--green)' }}>
+          <div style={scoreLabelStyle}>Building-Wide Same Item / Tier</div>
+          <div style={{ ...scoreValueStyle, color: 'var(--green)' }}>{pct(building.sameItemTier, building.totalActive)}%</div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4, marginBottom: 14 }}>all active pallets, regardless of receipt date</div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.9 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Total active pallets</span><strong style={{ color: 'var(--text-primary)' }}>{building.totalActive}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Same item / tier</span><strong style={{ color: 'var(--green)' }}>{building.sameItemTier}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Mixed</span><strong style={{ color: 'var(--red)' }}>{buildingMixed}</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Row 2: layer — also same MAN date (FEFO/pick-efficiency layer) ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 12, marginBottom: 12 }}>
+        <div style={{ ...scoreCardStyle, borderTop: '2px solid var(--blue)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={scoreLabelStyle}>Daily — Also Same MAN Date</div>
+              <div style={{ ...scoreValueStyle, color: 'var(--blue)' }}>{pct(daily.sameItemTierDate, daily.putAway)}%</div>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>of all pallets put away {dailyDateLabel}</div>
+            </div>
+            <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
+              <div>{daily.putAway} put away</div>
+              <div>{daily.sameItemTier} same item/tier</div>
+              <div style={{ color: 'var(--blue)' }}>{daily.sameItemTierDate} also same date</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 10 }}>
+            {daily.sameItemTierDate} of the {daily.sameItemTier} same item/tier pallets
+            ({pct(daily.sameItemTierDate, daily.sameItemTier)}%) also share a MAN date — this is where FEFO pick efficiency actually comes from.
+          </div>
+        </div>
+
+        <div style={{ ...scoreCardStyle, borderTop: '2px solid var(--blue)' }}>
+          <div style={scoreLabelStyle}>Building-Wide — Also Same MAN Date</div>
+          <div style={{ ...scoreValueStyle, color: 'var(--blue)' }}>{pct(building.sameItemTierDate, building.totalActive)}%</div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4, marginBottom: 14 }}>of all active pallets, regardless of receipt date</div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.9 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Same item / tier</span><strong style={{ color: 'var(--text-primary)' }}>{building.sameItemTier}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Also same MAN date</span><strong style={{ color: 'var(--blue)' }}>{building.sameItemTierDate}</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <NotifySettingsPanel
+        facility="mad"
+        dashboardType="jdf_putaway_scorecard"
+        functionName="jdf-scorecard-digest-test"
+        contentDateLabel="yesterday"
+        showSkipToNextValidDay={false}
+        digestDescription="Posts the Daily Putaway Scorecard (same item/tier + also same MAN date) and the Building-Wide baseline as a Front comment."
+      />
 
       <div style={{ ...cardStyle, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 8 }}>
         <strong style={{ color: 'var(--text-primary)' }}>About shared lanes:</strong> in the 7-deep drive-in racks (A, G, H),
