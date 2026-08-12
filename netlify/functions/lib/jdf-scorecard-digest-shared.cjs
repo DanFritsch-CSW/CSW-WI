@@ -14,7 +14,7 @@
 // M-F day toggles, configurable send time, Enabled checkbox, all already
 // built in, nothing new needed there).
 //
-// Content date: same "yesterday, Central time" resolution as
+// Content date: same "today, Central time" resolution as
 // motherduck-jdf-putaways.cjs's Daily Putaway Scorecard block (this module
 // runs its OWN independent MotherDuck query rather than calling that
 // function over HTTP, following this app's established "self-contained
@@ -24,11 +24,16 @@
 // location, JDF-only, F8-scoped) so the digest number and the on-screen
 // number can't drift apart even though the query is duplicated here.
 //
-// No skip-to-next-valid-day concept: unlike the appointment-based digests
-// (Pre-Pick, Cases, Daily Ops) which look FORWARD to tomorrow and can skip
-// a night if tomorrow isn't a checked day, this digest always looks
-// BACKWARD exactly one day from whatever day it fires on. There's no
-// "next valid day" to jump to — see NotifySettingsPanel's
+// CHANGED 2026-08-12: originally ran on "yesterday" (see the 2026-08-11
+// commit for why: a same-day pull is mostly still in receiving). Dan's
+// explicit call was to switch to TODAY instead and surface the
+// incompleteness directly — the digest body now includes a
+// "still in receiving/staging" line rather than avoiding the problem via a
+// one-day lag. Because content date now always equals the send date, this
+// also simplifies jdf-scorecard-digest-run.cjs's notify_days check (it's
+// just "is today a checked day," no more content-vs-send-day distinction).
+//
+// No skip-to-next-valid-day concept — see NotifySettingsPanel's
 // showSkipToNextValidDay=false on this tab, same as FEFO.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
@@ -80,6 +85,14 @@ function centralYesterdayDateStr() {
   return d.toISOString().slice(0, 10)
 }
 
+// centralTodayDateStr — added 2026-08-12 alongside the today/staging-callout
+// switch (see this file's header). centralYesterdayDateStr left in place,
+// unused, same reasoning as motherduck-jdf-putaways.cjs's identical comment.
+function centralTodayDateStr() {
+  const { year, month, day } = centralNowParts()
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10)
+}
+
 function isNotifyTimeMatch(notifyHour, notifyMinute) {
   const { hour, minute } = centralNowParts()
   const bucket = Math.floor(minute / 15) * 15
@@ -97,8 +110,9 @@ function pct(n, d) { return d ? Math.round((n / d) * 1000) / 10 : 0 }
 
 // runQueries — one self-contained MotherDuck connection covering both the
 // daily cohort and the building-wide baseline, mirroring the exact
-// classification query in motherduck-jdf-putaways.cjs's 2026-08-11 addition.
-async function runQueries(yesterday) {
+// classification query in motherduck-jdf-putaways.cjs's 2026-08-11/08-12
+// additions (today's date, plus the stillStaged/totalReceived fields).
+async function runQueries(today) {
   process.env.HOME = '/tmp'
   process.env.motherduck_token = MOTHERDUCK_TOKEN
   const duckdb = require('duckdb')
@@ -139,7 +153,7 @@ async function runQueries(yesterday) {
       FROM onhand
       GROUP BY location
     `)
-    const [dailyRows, buildingRows] = await Promise.all([
+    const [dailyRows, buildingRows, receivedRows] = await Promise.all([
       runQuery(`
         SELECT
           count(distinct o.license_plate_id) AS put_away,
@@ -148,7 +162,7 @@ async function runQueries(yesterday) {
         FROM onhand o
         JOIN loc_class lc ON lc.location = o.location
         WHERE o.project_id = ${JDF_PROJECT_ID}
-          AND o.created_date = DATE '${yesterday}'
+          AND o.created_date = DATE '${today}'
       `),
       runQuery(`
         SELECT
@@ -159,17 +173,35 @@ async function runQueries(yesterday) {
         JOIN loc_class lc ON lc.location = o.location
         WHERE o.project_id = ${JDF_PROJECT_ID}
       `),
+      // Received-anywhere-today (2026-08-12) -- same purpose as the
+      // identical query in motherduck-jdf-putaways.cjs: the gap between this
+      // and put_away above is the "still in receiving/staging" line in the
+      // digest body.
+      runQuery(`
+        SELECT count(distinct lpc.license_plate_id) AS total_received
+        FROM production_db.silver.datex_slv_licenseplates lp
+        JOIN production_db.silver.datex_slv_licenseplatecontents lpc ON lpc.license_plate_id = lp.license_plate_id
+        JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
+        JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
+        WHERE m.project_id = ${JDF_PROJECT_ID}
+          AND CAST(lp.created_sys_date_time AS DATE) = DATE '${today}'
+          AND (lp.Archived IS NULL OR lp.Archived = false)
+      `),
     ])
-    return { daily: dailyRows[0] || {}, building: buildingRows[0] || {} }
+    return { daily: dailyRows[0] || {}, building: buildingRows[0] || {}, received: receivedRows[0] || {} }
   } finally {
     try { conn.close(); db.close() } catch (_) {}
   }
 }
 
-function buildDigestBody(daily, building, yesterday) {
+function buildDigestBody(daily, building, received, today) {
   const num = v => Number(v ?? 0) || 0
+  const totalReceived = num(received.total_received)
+  const putAway = num(daily.put_away)
   const d = {
-    putAway: num(daily.put_away),
+    totalReceived,
+    putAway,
+    stillStaged: Math.max(totalReceived - putAway, 0),
     sameItemTier: num(daily.same_item_tier),
     sameItemTierDate: num(daily.same_item_tier_date),
   }
@@ -183,12 +215,13 @@ function buildDigestBody(daily, building, yesterday) {
   lines.push('JDF Putaways — Daily Scorecard')
   lines.push(APP_URL)
   lines.push('CSW Operations Hub')
-  lines.push(`Yesterday: ${formatHeaderDate(yesterday)}`)
+  lines.push(`Today: ${formatHeaderDate(today)}`)
   lines.push('')
-  if (d.putAway === 0) {
-    lines.push('No JDF pallets put away in F8 on that date.')
+  if (d.totalReceived === 0) {
+    lines.push('No JDF pallets received in F8 today yet.')
   } else {
-    lines.push(`${d.putAway} pallet${d.putAway === 1 ? '' : 's'} put away`)
+    lines.push(`${d.totalReceived} pallet${d.totalReceived === 1 ? '' : 's'} received, ${d.putAway} put away`)
+    if (d.stillStaged > 0) lines.push(`Still in receiving/staging: ${d.stillStaged}`)
     lines.push(`Same item, same tier: ${d.sameItemTier} (${pct(d.sameItemTier, d.putAway)}%)`)
     lines.push(`Also same MAN date: ${d.sameItemTierDate} (${pct(d.sameItemTierDate, d.putAway)}%)`)
     lines.push(`Mixed: ${d.putAway - d.sameItemTier} (${pct(d.putAway - d.sameItemTier, d.putAway)}%)`)
@@ -208,9 +241,9 @@ async function runDigest({ settingsRow, isManualTest }) {
   if (!conversationId) {
     return { ok: false, reason: 'No front_conversation_id configured for jdf_putaway_scorecard' }
   }
-  const yesterday = centralYesterdayDateStr()
-  const { daily, building } = await runQueries(yesterday)
-  const body = buildDigestBody(daily, building, yesterday)
+  const today = centralTodayDateStr()
+  const { daily, building, received } = await runQueries(today)
+  const body = buildDigestBody(daily, building, received, today)
 
   const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
@@ -225,16 +258,16 @@ async function runDigest({ settingsRow, isManualTest }) {
   }
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.${FACILITY}&dashboard_type=eq.${DASHBOARD_TYPE}`, { last_sent_date: yesterday })
+    await sbPatch(`prepick_notify_settings?facility=eq.${FACILITY}&dashboard_type=eq.${DASHBOARD_TYPE}`, { last_sent_date: today })
   }
 
-  return { ok: true, date: yesterday, conversationId, commentId: frontJson.id }
+  return { ok: true, date: today, conversationId, commentId: frontJson.id }
 }
 
 module.exports = {
   SUPABASE_URL, SUPABASE_KEY, FRONT_TOKEN, MOTHERDUCK_TOKEN,
   FACILITY, DASHBOARD_TYPE,
   sbFetch, sbPatch,
-  centralYesterdayDateStr, isNotifyTimeMatch,
+  centralYesterdayDateStr, centralTodayDateStr, isNotifyTimeMatch,
   runDigest,
 }
