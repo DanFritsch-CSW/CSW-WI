@@ -39,10 +39,13 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 // dailyScorecard/buildingWide keys -- see that file's 2026-08-11 header
 // note), so these numbers can never drift from the aisle/rack-type
 // breakdown below -- same underlying loc_class classification throughout.
-// Daily is intentionally "yesterday," not "today" -- a same-day pull is
+// Daily was originally "yesterday," not "today" -- a same-day pull is
 // mostly still sitting in receiving (validated live: 16 of 109 same-day
-// vs. 120 of 143 the next day), so grading the team on today's number
-// would be measuring an empty box, not their actual work.
+// vs. 120 of 143 the next day). CHANGED 2026-08-12 per Dan's explicit call:
+// shows today instead, with a "still in receiving/staging" count called out
+// directly on the card so the incompleteness is visible instead of hidden
+// behind a one-day lag. See motherduck-jdf-putaways.cjs's 2026-08-12 header
+// note for the stillStaged/totalReceived field definitions.
 //
 // Notify settings (2026-08-11): reuses the same NotifySettingsPanel shared
 // component every other digest in this app already uses -- M-F day
@@ -268,7 +271,7 @@ export default function JdfPutaways() {
     )
   }
 
-  const daily = data?.dailyScorecard ?? { date: null, putAway: 0, sameItemTier: 0, sameItemTierDate: 0 }
+  const daily = data?.dailyScorecard ?? { date: null, totalReceived: 0, putAway: 0, stillStaged: 0, sameItemTier: 0, sameItemTierDate: 0 }
   const building = data?.buildingWide ?? { totalActive: 0, sameItemTier: 0, sameItemTierDate: 0 }
   const dailyMixed = daily.putAway - daily.sameItemTier
   const buildingMixed = building.totalActive - building.sameItemTier
@@ -285,7 +288,7 @@ export default function JdfPutaways() {
       <div style={{ marginBottom: 12 }}>
         <div className="section-label" style={{ marginBottom: 4 }}>JDF Putaways — Same Item, Same Tier</div>
         <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', maxWidth: 640 }}>
-          Same item, same tier. Two numbers: how the team executed yesterday, and where the whole building stands right now.
+          Same item, same tier. Two numbers: how the team is executing today, and where the whole building stands right now.
         </div>
         <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
           {data?.fetchedAt && <span>as of {new Date(data.fetchedAt).toLocaleTimeString()}</span>}
@@ -303,6 +306,7 @@ export default function JdfPutaways() {
               <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>same item/tier of pallets put away</div>
             </div>
             <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
+              <div>{daily.totalReceived} received</div>
               <div>{daily.putAway} put away</div>
             </div>
           </div>
@@ -316,6 +320,15 @@ export default function JdfPutaways() {
               <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 6 }}>mixed</span>
             </div>
           </div>
+          {daily.stillStaged > 0 && (
+            <div style={{
+              marginTop: 12, padding: '6px 10px', borderRadius: 6, background: 'var(--bg3)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>still in receiving / staging — not yet put away</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--yellow)' }}>{daily.stillStaged}</span>
+            </div>
+          )}
         </div>
 
         <div style={{ ...scoreCardStyle, borderTop: '2px solid var(--green)' }}>
@@ -346,7 +359,7 @@ export default function JdfPutaways() {
               <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>of all pallets put away {dailyDateLabel}</div>
             </div>
             <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
-              <div>{daily.putAway} put away</div>
+              <div>{daily.putAway} put away{daily.stillStaged > 0 ? ` (${daily.stillStaged} staged)` : ''}</div>
               <div>{daily.sameItemTier} same item/tier</div>
               <div style={{ color: 'var(--blue)' }}>{daily.sameItemTierDate} also same date</div>
             </div>
@@ -376,9 +389,9 @@ export default function JdfPutaways() {
         facility="mad"
         dashboardType="jdf_putaway_scorecard"
         functionName="jdf-scorecard-digest-test"
-        contentDateLabel="yesterday"
+        contentDateLabel="today"
         showSkipToNextValidDay={false}
-        digestDescription="Posts the Daily Putaway Scorecard (same item/tier + also same MAN date) and the Building-Wide baseline as a Front comment."
+        digestDescription="Posts the Daily Putaway Scorecard (same item/tier + also same MAN date, plus a still-staged count) and the Building-Wide baseline as a Front comment."
       />
 
       <div style={{ ...cardStyle, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 8 }}>
