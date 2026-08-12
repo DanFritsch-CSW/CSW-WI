@@ -12,7 +12,7 @@
 const {
   FACILITY, DASHBOARD_TYPE,
   SUPABASE_URL, SUPABASE_KEY, FRONT_TOKEN, MOTHERDUCK_TOKEN,
-  sbFetch, centralYesterdayDateStr, isNotifyTimeMatch, runDigest,
+  sbFetch, centralTodayDateStr, isNotifyTimeMatch, runDigest,
 } = require('./lib/jdf-scorecard-digest-shared.cjs')
 
 const NO_CACHE_HEADERS = { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
@@ -35,15 +35,19 @@ async function runScheduledDigest() {
     return { ok: true, skipped: true, reason: 'Not the configured send time yet' }
   }
 
-  const yesterday = centralYesterdayDateStr()
+  // Content date now equals the send date (2026-08-12 change -- see
+  // lib/jdf-scorecard-digest-shared.cjs's header for the full before/after),
+  // so this is just "is today a checked day," same as every other digest in
+  // this app -- no more separate content-date-vs-send-day distinction.
+  const today = centralTodayDateStr()
   const notifyDays = row.notify_days ?? [1, 2, 3, 4, 5]
-  const contentWeekday = new Date(`${yesterday}T00:00:00Z`).getUTCDay() // 0=Sun..6=Sat
-  const isoWeekday = contentWeekday === 0 ? 7 : contentWeekday
+  const todayWeekday = new Date(`${today}T00:00:00Z`).getUTCDay() // 0=Sun..6=Sat
+  const isoWeekday = todayWeekday === 0 ? 7 : todayWeekday
   if (!notifyDays.includes(isoWeekday)) {
-    return { ok: true, skipped: true, reason: `Content date ${yesterday} is not a checked day` }
+    return { ok: true, skipped: true, reason: `Today (${today}) is not a checked day` }
   }
 
-  if (row.last_sent_date === yesterday) {
+  if (row.last_sent_date === today) {
     return { ok: true, skipped: true, reason: 'Already sent for this date' }
   }
 
