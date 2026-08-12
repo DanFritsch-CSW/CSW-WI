@@ -519,6 +519,50 @@ async function motherduckB2eQuery(payload) {
   return rows
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+// ── B2E fetch retry wrapper ──────────────────────────────────────────────
+// Found 2026-08-12 (Dean): fetchB2eRoster's prior-night carryover sub-fetch
+// had NO retry at all — a single MotherDuck hiccup silently dropped the
+// "UNTIL 6:30AM" carryover tiles (and their labor-availability contribution)
+// for that whole page load, logged only to a console.warn nobody would see.
+// Compare to FacilityPanel.jsx's fetchWithPersistentRetry for Omni
+// appointment data, which retries up to ~3 min for a sustained outage —
+// this is a lighter-weight version (short bounded backoff, not the long
+// persistent kind) since MotherDuck B2E queries are typically sub-second;
+// this is aimed at smoothing over occasional transient blips, not riding
+// out a sustained outage.
+//
+// Wrapped at the motherduckB2eQuery transport layer so every caller
+// benefits at once: fetchB2eRosterForEntryDate (both the "today" and
+// "prior night" carryover sub-fetches), fetchB2eRosterForRange,
+// fetchActiveB2eEmployees, fetchActiveB2eEmployeesFull. Callers' existing
+// .catch() fallbacks are left in place as a last-resort safety net for a
+// genuinely sustained outage — they just won't fire on a single blip
+// anymore.
+const B2E_RETRY_DELAYS = [0, 1000, 2000, 4000]
+
+async function motherduckB2eQueryWithRetry(payload) {
+  let lastErr
+  for (let attempt = 0; attempt < B2E_RETRY_DELAYS.length; attempt++) {
+    if (B2E_RETRY_DELAYS[attempt] > 0) await sleep(B2E_RETRY_DELAYS[attempt])
+    try {
+      const result = await motherduckB2eQuery(payload)
+      if (attempt > 0) {
+        console.log(`[B2E] ${payload.kind} recovered after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`)
+      }
+      return result
+    } catch (e) {
+      lastErr = e
+      if (attempt === 0) {
+        console.log(`[B2E] ${payload.kind} failed (${e.message}) — retrying`)
+      }
+    }
+  }
+  console.warn(`[B2E] ${payload.kind} gave up after ${B2E_RETRY_DELAYS.length} attempts:`, lastErr?.message)
+  throw lastErr
+}
+
 function activityDateFilter(date, view = VIEW_H) {
   return {
     [`${view}.activity_date`]: {
@@ -1266,9 +1310,10 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
   // MotherDuck-direct fetch (was two sequential omniQuery calls before
   // the 2026-07-08 pivot away from Omni for B2E reads). Parallelised
   // because we're no longer chasing Omni's connection reuse behaviour.
+  // Retry-wrapped as of 2026-08-12 — see motherduckB2eQueryWithRetry header.
   const [rosterRows, scheduleRows] = await Promise.all([
-    motherduckB2eQuery({ kind: 'active_roster_all_jobcodes', facilityId }),
-    motherduckB2eQuery({ kind: 'schedule_date', facilityId, fromDate: entryDate }),
+    motherduckB2eQueryWithRetry({ kind: 'active_roster_all_jobcodes', facilityId }),
+    motherduckB2eQueryWithRetry({ kind: 'schedule_date', facilityId, fromDate: entryDate }),
   ])
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
@@ -1388,10 +1433,11 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
   const isCal = facilityId === 'cal'
 
   // MotherDuck-direct fetch (was two omniQuery calls before the
-  // 2026-07-08 pivot away from Omni for B2E reads).
+  // 2026-07-08 pivot away from Omni for B2E reads). Retry-wrapped as of
+  // 2026-08-12 — see motherduckB2eQueryWithRetry header.
   const [rosterRows, scheduleRows, dockAssignments] = await Promise.all([
-    motherduckB2eQuery({ kind: 'active_roster_all_jobcodes', facilityId }),
-    motherduckB2eQuery({ kind: 'schedule_range', facilityId, fromDate, daysForward }),
+    motherduckB2eQueryWithRetry({ kind: 'active_roster_all_jobcodes', facilityId }),
+    motherduckB2eQueryWithRetry({ kind: 'schedule_range', facilityId, fromDate, daysForward }),
     isCal ? fetchCal2DockAssignments() : Promise.resolve(new Map()),
   ])
 
@@ -1470,7 +1516,7 @@ export async function fetchActiveB2eEmployees(facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return new Set()
   try {
-    const rosterRows = await motherduckB2eQuery({ kind: 'active_roster', facilityId })
+    const rosterRows = await motherduckB2eQueryWithRetry({ kind: 'active_roster', facilityId })
     return new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
   } catch (e) {
     console.warn('fetchActiveB2eEmployees failed (non-fatal):', e.message)
@@ -1490,7 +1536,7 @@ export async function fetchActiveB2eEmployeesFull(facilityId) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
   try {
-    const rows = await motherduckB2eQuery({ kind: 'active_roster_named', facilityId })
+    const rows = await motherduckB2eQueryWithRetry({ kind: 'active_roster_named', facilityId })
     return rows
       .map(r => ({
         id:   String(r[`${ROSTER}.employee_id`]),
