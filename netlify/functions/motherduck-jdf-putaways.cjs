@@ -37,11 +37,15 @@
 // derived from the lot code — this is the FEFO/pick-efficiency layer). Two
 // cuts of the same underlying classification:
 //   - dailyScorecard: LPs whose license plate was CREATED (received) on the
-//     previous CENTRAL calendar day, and where they landed. Deliberately
-//     lagged one full day rather than "today" — a same-day pull is mostly
-//     still sitting in receiving/staging (validated live: 16 of 109 same-day
-//     vs. 120 of 143 the next day), so "today" would grade the team on a
-//     tiny, misleading slice of the day's actual work.
+//     CURRENT Central calendar day, and where they landed. Originally shipped
+//     lagged one day (yesterday) since a same-day pull is mostly still
+//     sitting in receiving/staging (validated live 2026-08-11: 16 of 109
+//     same-day vs. 120 of 143 the next day) — CHANGED 2026-08-12 per Dan's
+//     explicit call to show today instead, with the incompleteness made
+//     VISIBLE rather than hidden: `stillStaged` (total received today, any
+//     location, minus how many have reached F8) is now a first-class field
+//     on the payload instead of being avoided by lagging the date. `putAway`
+//     still means "reached an actual F8 rack location," same as before.
 //   - buildingWide: every active LP right now, regardless of receipt date —
 //     the slow-moving cumulative baseline, not a daily execution number.
 // Both reuse the SAME jdf-only per-location classification as the existing
@@ -87,6 +91,17 @@ function centralYesterdayDateStr() {
   const d = new Date(Date.UTC(year, month - 1, day))
   d.setUTCDate(d.getUTCDate() - 1)
   return d.toISOString().slice(0, 10)
+}
+
+// centralTodayDateStr — added 2026-08-12 when the Daily Putaway Scorecard
+// switched from "yesterday" to "today" (see the 2026-08-11 addition comment
+// above for the full before/after). centralYesterdayDateStr is left in place
+// even though nothing in this file calls it anymore -- Claude has no
+// file-delete tool, and it's cheap/harmless to leave a small unused helper
+// versus risking a stale reference elsewhere.
+function centralTodayDateStr() {
+  const { year, month, day } = centralNowParts()
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10)
 }
 
 exports.handler = async (event) => {
@@ -168,11 +183,11 @@ exports.handler = async (event) => {
       GROUP BY location
     `)
 
-    const yesterday = centralYesterdayDateStr()
+    const today = centralTodayDateStr()
 
     const [
       locationRows, itemDetailRows, materialNameRows, customerNameRows,
-      employeeEventRows, allMoveRows, dailyRows, buildingWideRows,
+      employeeEventRows, allMoveRows, dailyRows, buildingWideRows, receivedTodayRows,
     ] = await Promise.all([
       runQuery(`
         SELECT location, aisle, jdf_lp, distinct_materials, distinct_mfg_dates, earliest, latest, other_lp, other_customers
@@ -220,12 +235,14 @@ exports.handler = async (event) => {
           AND t.completed_date_time >= now() - INTERVAL ${EVENT_WINDOW_DAYS} DAY
         ORDER BY t.completed_date_time DESC
       `),
-      // Daily Putaway Scorecard (2026-08-11) -- LPs created (received) on the
-      // previous Central calendar day. "put away" = landed somewhere in the F8
-      // onhand snapshot at all (still-staged/receiving LPs live outside F8's
-      // location namespace and so never enter `onhand` in the first place --
-      // this correctly excludes them from the denominator rather than
-      // miscounting them as either correct or mixed).
+      // Daily Putaway Scorecard -- LPs created (received) TODAY (Central).
+      // Switched from "yesterday" to "today" 2026-08-12 per Dan's call. "put
+      // away" = landed somewhere in the F8 onhand snapshot at all
+      // (still-staged/receiving LPs live outside F8's location namespace and
+      // so never enter `onhand` in the first place -- correctly excluded
+      // from this query's numerator/denominator; the staging count itself
+      // comes from the separate receivedTodayRows query below, NOT from
+      // trying to make this query see outside-F8 locations).
       runQuery(`
         SELECT
           count(distinct o.license_plate_id) AS put_away,
@@ -234,7 +251,7 @@ exports.handler = async (event) => {
         FROM onhand o
         JOIN loc_class lc ON lc.location = o.location
         WHERE o.project_id = ${JDF_PROJECT_ID}
-          AND o.created_date = DATE '${yesterday}'
+          AND o.created_date = DATE '${today}'
       `),
       // Building-Wide baseline (2026-08-11) -- every active JDF LP right now,
       // regardless of receipt date. Same classification, no date filter.
@@ -246,6 +263,24 @@ exports.handler = async (event) => {
         FROM onhand o
         JOIN loc_class lc ON lc.location = o.location
         WHERE o.project_id = ${JDF_PROJECT_ID}
+      `),
+      // Received-anywhere-today (2026-08-12, added for the staging callout).
+      // Deliberately NOT scoped to F8/onhand -- this counts every JDF LP
+      // created today regardless of which location it's currently in
+      // (F8 rack, C1 Receiving, a dock door, another freezer, etc). The gap
+      // between this count and `put_away` above IS the "still in receiving
+      // or staging" number, computed in JS below rather than trying to do a
+      // location-exclusion join here (simpler, and avoids double-counting
+      // if a location naming edge case doesn't match either pattern).
+      runQuery(`
+        SELECT count(distinct lpc.license_plate_id) AS total_received
+        FROM production_db.silver.datex_slv_licenseplates lp
+        JOIN production_db.silver.datex_slv_licenseplatecontents lpc ON lpc.license_plate_id = lp.license_plate_id
+        JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
+        JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
+        WHERE m.project_id = ${JDF_PROJECT_ID}
+          AND CAST(lp.created_sys_date_time AS DATE) = DATE '${today}'
+          AND (lp.Archived IS NULL OR lp.Archived = false)
       `),
     ])
 
@@ -273,9 +308,13 @@ exports.handler = async (event) => {
 
     const dailyRow = dailyRows[0] || {}
     const buildingRow = buildingWideRows[0] || {}
+    const totalReceived = num(receivedTodayRows?.[0]?.total_received)
+    const putAway = num(dailyRow.put_away)
     const dailyScorecard = {
-      date: yesterday,
-      putAway: num(dailyRow.put_away),
+      date: today,
+      totalReceived,
+      putAway,
+      stillStaged: Math.max(totalReceived - putAway, 0),
       sameItemTier: num(dailyRow.same_item_tier),
       sameItemTierDate: num(dailyRow.same_item_tier_date),
     }
