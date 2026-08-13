@@ -19,6 +19,15 @@ import '../styles/jdf-lp-locator.css'
 // server-generated PDF file — no native PDF library needed, and the
 // browser's own "Save as PDF" print destination produces the same result
 // the person asked for. See jdf-lp-locator.css for the print-only view.
+//
+// FIXED 2026-08-13 (same day): dropped the `jdflp-no-print` class from the
+// wrapper below -- confirmed live that it wasn't enough, since this
+// component is only one section inside JdfPutaways and everything ELSE on
+// that tab (scorecards, Notify panel, aisle breakdown, Same-Item Reference
+// table, app nav) was still printing alongside the worksheet. The CSS now
+// hides the whole page during print and re-shows only `.jdflp-print-only`
+// (see jdf-lp-locator.css's header for the full story), so no no-print
+// class is needed on this wrapper anymore.
 
 export default function JdfLpLocator() {
   const [materials, setMaterials] = useState([])
@@ -75,7 +84,7 @@ export default function JdfLpLocator() {
   const btnStyle = { padding: '7px 14px', borderRadius: 'var(--r-md)', border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text-primary)', fontSize: 12, fontWeight: 500, cursor: 'pointer' }
 
   return (
-    <div className="jdflp-no-print" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 16, marginTop: 8, marginBottom: 16 }}>
+    <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 16, marginTop: 8, marginBottom: 16 }}>
       <div className="section-label" style={{ marginBottom: 4 }}>JDF LP Locator — Print Pallet Locations by Material</div>
       <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10, maxWidth: 640 }}>
         Select a material to see every active pallet and its current location, live from MotherDuck. Use this to work a
