@@ -4,6 +4,7 @@ import { fetchJdfPutaways } from '../lib/jdfPutaways.js'
 import { pct, classifyLocation, getWindowStart, windowLabel } from '../lib/jdfPutawaysLogic.js'
 import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 import JdfLpLocator from './JdfLpLocator.jsx'
+import JdfSameItemReference from './JdfSameItemReference.jsx'
 
 // ─── JDF Putaways ───────────────────────────────────────────────────────
 // Visibility tool for F8 (Madison) JDF slotting: how well putaways are
@@ -63,6 +64,15 @@ import JdfLpLocator from './JdfLpLocator.jsx'
 // (motherduck-jdf-lp-locations.cjs) since it answers a JDF-wide question
 // (any location, not just F8) rather than reusing this tab's F8-scoped
 // onhand data.
+//
+// JDF Same-Item Reference table (2026-08-13, same day): live version of
+// the ad hoc "Rank / SKU / Description / Active LPs / % Same Item" table
+// built in chat earlier this project, added to the very bottom of the tab
+// per Dan's ask ("so I have a reference"). See
+// src/components/JdfSameItemReference.jsx -- reuses the same
+// motherduck-jdf-lp-locations.cjs picklist-mode call as JdfLpLocator (that
+// response gained a `referenceTable` field), so this is a second
+// independent fetch of a fast/cheap query rather than a new endpoint.
 
 const STATUS_ORDER = { clean: 0, mixed_date: 1, mixed_item: 2 }
 
@@ -694,6 +704,8 @@ export default function JdfPutaways() {
           <span><span style={{ display: 'inline-block', width: 8, height: 8, background: '#f0c14b', marginRight: 4, borderRadius: 2 }} />Mixed man date</span>
         </div>
       </div>
+
+      <JdfSameItemReference />
     </div>
   )
 }
