@@ -1,39 +1,55 @@
 /* Print stylesheet for the JDF LP Locator (inside the JDF Putaways tab),
-   added 2026-08-13. Same body-class-toggle pattern as
-   src/styles/inventory-report.css (chrome hidden only during this
-   component's own print action, cleaned up on 'afterprint') so this
-   stylesheet staying loaded in the SPA doesn't affect printing from any
-   other tab.
+   added 2026-08-13.
 
-   Deliberately simpler than inventory-report.css's 2-column cycle-count
-   sheet: single-column plain <table>, natural browser page-flow instead
-   of JS-computed row-chunking. Inventory's sheet needed manual chunking
-   because it force-splits into a fixed 2-column grid per page (see that
-   file's rev-history comment for why that combination is fragile in
-   Chromium's print engine) -- this sheet doesn't attempt a multi-column
-   layout at all, so there's nothing to chunk: `thead` repeats natively via
-   display:table-header-group and rows break wherever a real page boundary
-   falls. Simpler and more robust for this table's much shorter row height
-   and the widely varying LP counts per material (single digits up to 300+). */
+   FIXED 2026-08-13 (same day): the original approach only marked THIS
+   component's own on-screen view as `.jdflp-no-print` -- but this section
+   sits inside JdfPutaways, which has a lot of other content above and
+   below it (the 4 scorecard cards, Notify panel, aisle breakdown, employee
+   volume, the Same-Item Reference table), plus the app's own top nav/tab
+   chrome. None of that was marked no-print, so it all printed alongside
+   the worksheet (confirmed live: "Total: 2 sheets of paper" in the print
+   preview, showing the full Labor Planning page). Hiding page-by-page as
+   new sections get added around this component isn't sustainable.
+
+   Switched to the standard "print only this element" technique instead:
+   hide EVERYTHING on the page during print (`body.jdflp-printing * {
+   visibility: hidden }`), then explicitly re-show only the print-only
+   subtree and its children, then pull it out of normal document flow
+   (position: absolute, full width) so it renders as its own single-purpose
+   page regardless of where it sits in the DOM or what else is on the page
+   around it -- this makes the stylesheet robust to future additions to
+   JdfPutaways.jsx without needing another opt-out fix.
+
+   Table structure below is unchanged: plain single-column <table>, natural
+   browser page-flow (thead repeats via display:table-header-group, rows
+   never split via break-inside:avoid) -- no JS row-chunking needed, unlike
+   inventory-report.css's 2-column cycle-count sheet (see that file's
+   header for why nested multi-column layout is fragile in Chromium's
+   print engine; this sheet never attempts that layout in the first place). */
 
 .jdflp-print-only { display: none; }
 
-.jdflp-no-print { display: initial; }
-
 @media print {
-  .jdflp-no-print { display: none !important; }
-
-  .jdflp-print-only { display: block !important; }
-
   @page { size: portrait; margin: 0.6in; }
 
-  body.jdflp-printing .util-bar,
-  body.jdflp-printing .top-nav {
-    display: none !important;
+  /* Hide literally everything on the page -- app chrome, every other
+     section of this tab, everything -- then re-show only the print
+     target. This is intentionally broad (not scoped to specific known
+     classes like .util-bar/.top-nav) so it stays correct even as more
+     sections get added to JdfPutaways.jsx around this component. */
+  body.jdflp-printing * {
+    visibility: hidden !important;
   }
-  body.jdflp-printing .page-content {
-    padding-top: 0 !important;
-    margin-top: 0 !important;
+  body.jdflp-printing .jdflp-print-only,
+  body.jdflp-printing .jdflp-print-only * {
+    visibility: visible !important;
+  }
+  body.jdflp-printing .jdflp-print-only {
+    display: block !important;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
   }
 
   .jdflp-print-header { margin-bottom: 10px; }
