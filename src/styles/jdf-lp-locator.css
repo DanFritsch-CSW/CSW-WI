@@ -29,15 +29,16 @@
    header for why nested multi-column layout is fragile in Chromium's
    print engine; this sheet never attempts that layout in the first place).
 
-   BUMPED font sizes 2026-08-13 (third pass same day): Dan's first real
-   print showed the original sizes (10.5px table / 9px header / 15px title)
-   as too small to read comfortably on paper. Sized up across the board --
-   table 10.5px->13px, column header 9px->11px, title 15px->18px, meta
-   11px->13px -- with padding widened to match so rows don't feel cramped
-   at the larger type size. Column % widths unchanged; wider text wraps
-   within its column rather than overflowing (LP Code and Sharing With are
-   the two columns most likely to wrap on a long value -- acceptable, this
-   is a working floor document, not a formatted report). */
+   Font sizes bumped twice 2026-08-13 (both same day, after real prints):
+   - pass 1: too small (10.5px table / 9px header / 15px title) -> sized up
+     to 13px / 11px / 18px.
+   - pass 2 (current): still "just a tad" small per Dan's read of the pass-1
+     print -> nudged up again, table 13px->14px, column header 11px->12px,
+     title 18px->19px, meta 13px->14px, summary 13px->14px/15px->16px.
+   Column % widths unchanged both passes; wider text wraps within its
+   column rather than overflowing (LP Code and Sharing With are the two
+   columns most likely to wrap on a long value -- acceptable, this is a
+   working floor document, not a formatted report). */
 
 .jdflp-print-only { display: none; }
 
@@ -64,32 +65,32 @@
     width: 100%;
   }
 
-  .jdflp-print-header { margin-bottom: 12px; }
-  .jdflp-print-header .title { font-size: 18px; font-weight: 700; color: #000; margin-bottom: 3px; }
-  .jdflp-print-header .meta { font-size: 13px; color: #333; margin-bottom: 2px; }
-  .jdflp-print-header .summary { display: flex; gap: 22px; font-size: 13px; color: #000; margin-top: 8px; margin-bottom: 10px; }
-  .jdflp-print-header .summary b { font-size: 15px; }
-  .jdflp-print-header .meta.small { font-size: 11px; color: #666; margin-top: 5px; font-style: italic; }
+  .jdflp-print-header { margin-bottom: 13px; }
+  .jdflp-print-header .title { font-size: 19px; font-weight: 700; color: #000; margin-bottom: 3px; }
+  .jdflp-print-header .meta { font-size: 14px; color: #333; margin-bottom: 2px; }
+  .jdflp-print-header .summary { display: flex; gap: 24px; font-size: 14px; color: #000; margin-top: 8px; margin-bottom: 11px; }
+  .jdflp-print-header .summary b { font-size: 16px; }
+  .jdflp-print-header .meta.small { font-size: 11.5px; color: #666; margin-top: 5px; font-style: italic; }
 
   .jdflp-print-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: 14px;
     table-layout: fixed;
   }
   .jdflp-print-table thead { display: table-header-group; }
   .jdflp-print-table th {
     text-align: left;
     border-bottom: 1.5px solid #000;
-    padding: 6px 7px;
-    font-size: 11px;
+    padding: 6.5px 7px;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: #000;
   }
   .jdflp-print-table td {
     border-bottom: 1px solid #ccc;
-    padding: 6px 7px;
+    padding: 6.5px 7px;
     color: #000;
   }
   .jdflp-print-table tr { break-inside: avoid; }
