@@ -18,14 +18,26 @@
    (position: absolute, full width) so it renders as its own single-purpose
    page regardless of where it sits in the DOM or what else is on the page
    around it -- this makes the stylesheet robust to future additions to
-   JdfPutaways.jsx without needing another opt-out fix.
+   JdfPutaways.jsx without needing another opt-out fix. Confirmed live: now
+   shows only the worksheet, correctly paginated (3 clean sheets for a
+   47-row material, no bleed-through of the rest of the tab).
 
    Table structure below is unchanged: plain single-column <table>, natural
    browser page-flow (thead repeats via display:table-header-group, rows
    never split via break-inside:avoid) -- no JS row-chunking needed, unlike
    inventory-report.css's 2-column cycle-count sheet (see that file's
    header for why nested multi-column layout is fragile in Chromium's
-   print engine; this sheet never attempts that layout in the first place). */
+   print engine; this sheet never attempts that layout in the first place).
+
+   BUMPED font sizes 2026-08-13 (third pass same day): Dan's first real
+   print showed the original sizes (10.5px table / 9px header / 15px title)
+   as too small to read comfortably on paper. Sized up across the board --
+   table 10.5px->13px, column header 9px->11px, title 15px->18px, meta
+   11px->13px -- with padding widened to match so rows don't feel cramped
+   at the larger type size. Column % widths unchanged; wider text wraps
+   within its column rather than overflowing (LP Code and Sharing With are
+   the two columns most likely to wrap on a long value -- acceptable, this
+   is a working floor document, not a formatted report). */
 
 .jdflp-print-only { display: none; }
 
@@ -52,32 +64,32 @@
     width: 100%;
   }
 
-  .jdflp-print-header { margin-bottom: 10px; }
-  .jdflp-print-header .title { font-size: 15px; font-weight: 700; color: #000; margin-bottom: 2px; }
-  .jdflp-print-header .meta { font-size: 11px; color: #333; margin-bottom: 1px; }
-  .jdflp-print-header .summary { display: flex; gap: 18px; font-size: 11px; color: #000; margin-top: 6px; margin-bottom: 8px; }
-  .jdflp-print-header .summary b { font-size: 13px; }
-  .jdflp-print-header .meta.small { font-size: 9.5px; color: #666; margin-top: 4px; font-style: italic; }
+  .jdflp-print-header { margin-bottom: 12px; }
+  .jdflp-print-header .title { font-size: 18px; font-weight: 700; color: #000; margin-bottom: 3px; }
+  .jdflp-print-header .meta { font-size: 13px; color: #333; margin-bottom: 2px; }
+  .jdflp-print-header .summary { display: flex; gap: 22px; font-size: 13px; color: #000; margin-top: 8px; margin-bottom: 10px; }
+  .jdflp-print-header .summary b { font-size: 15px; }
+  .jdflp-print-header .meta.small { font-size: 11px; color: #666; margin-top: 5px; font-style: italic; }
 
   .jdflp-print-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 10.5px;
+    font-size: 13px;
     table-layout: fixed;
   }
   .jdflp-print-table thead { display: table-header-group; }
   .jdflp-print-table th {
     text-align: left;
-    border-bottom: 1px solid #000;
-    padding: 4px 6px;
-    font-size: 9px;
+    border-bottom: 1.5px solid #000;
+    padding: 6px 7px;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: #000;
   }
   .jdflp-print-table td {
     border-bottom: 1px solid #ccc;
-    padding: 4px 6px;
+    padding: 6px 7px;
     color: #000;
   }
   .jdflp-print-table tr { break-inside: avoid; }
