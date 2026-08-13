@@ -1,0 +1,80 @@
+/* Print stylesheet for the JDF LP Locator (inside the JDF Putaways tab),
+   added 2026-08-13. Same body-class-toggle pattern as
+   src/styles/inventory-report.css (chrome hidden only during this
+   component's own print action, cleaned up on 'afterprint') so this
+   stylesheet staying loaded in the SPA doesn't affect printing from any
+   other tab.
+
+   Deliberately simpler than inventory-report.css's 2-column cycle-count
+   sheet: single-column plain <table>, natural browser page-flow instead
+   of JS-computed row-chunking. Inventory's sheet needed manual chunking
+   because it force-splits into a fixed 2-column grid per page (see that
+   file's rev-history comment for why that combination is fragile in
+   Chromium's print engine) -- this sheet doesn't attempt a multi-column
+   layout at all, so there's nothing to chunk: `thead` repeats natively via
+   display:table-header-group and rows break wherever a real page boundary
+   falls. Simpler and more robust for this table's much shorter row height
+   and the widely varying LP counts per material (single digits up to 300+). */
+
+.jdflp-print-only { display: none; }
+
+.jdflp-no-print { display: initial; }
+
+@media print {
+  .jdflp-no-print { display: none !important; }
+
+  .jdflp-print-only { display: block !important; }
+
+  @page { size: portrait; margin: 0.6in; }
+
+  body.jdflp-printing .util-bar,
+  body.jdflp-printing .top-nav {
+    display: none !important;
+  }
+  body.jdflp-printing .page-content {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+  }
+
+  .jdflp-print-header { margin-bottom: 10px; }
+  .jdflp-print-header .title { font-size: 15px; font-weight: 700; color: #000; margin-bottom: 2px; }
+  .jdflp-print-header .meta { font-size: 11px; color: #333; margin-bottom: 1px; }
+  .jdflp-print-header .summary { display: flex; gap: 18px; font-size: 11px; color: #000; margin-top: 6px; margin-bottom: 8px; }
+  .jdflp-print-header .summary b { font-size: 13px; }
+  .jdflp-print-header .meta.small { font-size: 9.5px; color: #666; margin-top: 4px; font-style: italic; }
+
+  .jdflp-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10.5px;
+    table-layout: fixed;
+  }
+  .jdflp-print-table thead { display: table-header-group; }
+  .jdflp-print-table th {
+    text-align: left;
+    border-bottom: 1px solid #000;
+    padding: 4px 6px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #000;
+  }
+  .jdflp-print-table td {
+    border-bottom: 1px solid #ccc;
+    padding: 4px 6px;
+    color: #000;
+  }
+  .jdflp-print-table tr { break-inside: avoid; }
+
+  .jdflp-print-table .lp     { font-family: monospace; white-space: nowrap; }
+  .jdflp-print-table .loc    { font-family: monospace; font-weight: 700; white-space: nowrap; }
+  .jdflp-print-table .clean  { color: #15803d; font-weight: 700; }
+  .jdflp-print-table .mixed  { color: #b91c1c; font-weight: 700; }
+
+  .jdflp-print-table .loc-col     { width: 14%; }
+  .jdflp-print-table .lp-col      { width: 20%; }
+  .jdflp-print-table .date-col    { width: 13%; }
+  .jdflp-print-table .units-col   { width: 9%;  }
+  .jdflp-print-table .status-col  { width: 11%; }
+  .jdflp-print-table .share-col   { width: 33%; }
+}
