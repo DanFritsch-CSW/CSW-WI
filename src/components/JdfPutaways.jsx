@@ -3,6 +3,7 @@ import { RACK_TYPE, RACK_GROUP, CUSTOMER_NAMES } from '../lib/jdfPutawaysLocatio
 import { fetchJdfPutaways } from '../lib/jdfPutaways.js'
 import { pct, classifyLocation, getWindowStart, windowLabel } from '../lib/jdfPutawaysLogic.js'
 import NotifySettingsPanel from './NotifySettingsPanel.jsx'
+import JdfLpLocator from './JdfLpLocator.jsx'
 
 // ─── JDF Putaways ───────────────────────────────────────────────────────
 // Visibility tool for F8 (Madison) JDF slotting: how well putaways are
@@ -53,6 +54,15 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 // "Send test digest now" -- backed by prepick_notify_settings
 // (facility='mad', dashboard_type='jdf_putaway_scorecard'). See
 // lib/jdf-scorecard-digest-shared.cjs for the digest itself.
+//
+// JDF LP Locator (2026-08-13): a repeatable, printable "where is every
+// pallet of material X right now" tool, added directly into this tab (not
+// a separate top-level tab, per Dan's explicit placement request) right
+// below the Notify panel. See src/components/JdfLpLocator.jsx for the
+// component itself -- backed by its own function
+// (motherduck-jdf-lp-locations.cjs) since it answers a JDF-wide question
+// (any location, not just F8) rather than reusing this tab's F8-scoped
+// onhand data.
 
 const STATUS_ORDER = { clean: 0, mixed_date: 1, mixed_item: 2 }
 
@@ -393,6 +403,8 @@ export default function JdfPutaways() {
         showSkipToNextValidDay={false}
         digestDescription="Posts the Daily Putaway Scorecard (same item/tier + also same MAN date, plus a still-staged count) and the Building-Wide baseline as a Front comment."
       />
+
+      <JdfLpLocator />
 
       <div style={{ ...cardStyle, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 8 }}>
         <strong style={{ color: 'var(--text-primary)' }}>About shared lanes:</strong> in the 7-deep drive-in racks (A, G, H),
