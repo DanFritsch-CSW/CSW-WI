@@ -18,35 +18,48 @@
 // clean PDF from scratch via pdf-lib (same library already used by
 // wr-secondary-repl-pdf.cjs).
 //
-// PDF NOTE (2026-08-02, fourth pass — CURRENT LAYOUT): Dean Dioguardi
-// (via Slack, forwarded by Dan) asked the form match "our formatted
-// sheet" exactly — Dan's earlier pass (third pass, matching a completed
-// Gary Yeoman docx example) was "very much the same but still slightly
-// different." Rebuilt to follow the ACTUAL uploaded fillable AcroForm
-// (Attendance_Policy__non-union_.pdf) line-for-line instead: title
-// "Attendance Policy / Disciplinary Action Form", Date/Name line,
-// "Program: 10-point system in a rolling 6-month period." (static text
-// on the real form, not a fillable field), the exact "Employees will be
-// charged points..." intro + 3 point-value lines, "Disciplinary Action"
-// header + the exact "When an employee reaches..." line + 3 separate
-// "N Points: <Action>" lines (not combined onto one line), the exact
-// "This document is to confirm in writing the disciplinary action for
-// attendance." sentence, "Dates Missed (excused or unexcused):" (blank
-// rows on the real form — this is where the automation adds real value:
-// every known B2E transaction, dated, with points, instead of a human
-// hand-writing them in), "Action Taken" header (no colon, per the real
-// form) with the exact 2x2 grid (Current Point Count + Written Warning
-// on one row; Final Written Warning + Termination on the next — field
-// positions confirmed by inspecting the real PDF's AcroForm annotation
-// rects), "Employee Signature:" and "Supervisor or Ops Mgr Signature:"
-// each on their OWN line (not side-by-side), and the exact all-caps
-// footer sentence.
+// PDF NOTE (2026-08-14, fifth pass — CURRENT LAYOUT): Dan supplied a real
+// completed example (Miguel Rodriguez, WR, 08/13/2026) as a .docx, and
+// the exact extracted text was diffed against this generator line-by-
+// line before rewriting. Layout now matches that real form exactly:
+//   - Title is ONE line, "Attendance Disciplinary Action Form" (not two
+//     lines "Attendance Policy" / "Disciplinary Action Form" as before).
+//   - DATE / NAME / POSITION each on their own line (previous pass had
+//     Date+Name on one line, and had no Position line at all).
+//   - POSITION IS LEFT BLANK. Checked b2e_slv_pointsbalance and
+//     b2e_slv_employeeroster — the only job-related field anywhere in
+//     the warehouse is default_job_code, a raw numeric code (e.g. "601")
+//     with NO lookup table anywhere mapping it to a readable title like
+//     "Order Selector". Rather than guess or hardcode an incomplete
+//     code->title map, Position is left blank for a human to fill by
+//     hand — same treatment as the signature lines. Revisit only if
+//     given a real code->title mapping.
+//   - "ACTION TAKEN:" is a real bordered 2x2 grid (previous pass drew
+//     inline checkboxes with no borders): row 1 = [X-if-6pts | "Written
+//     Warning"] [X-if-8pts | "Final Written Warning"]; row 2 = [blank |
+//     blank] [X-if-10pts | "Discharge"].
+//   - Real form's checkbox label at 10 points is literally "Discharge",
+//     NOT "Termination" — even though the intro paragraph above it says
+//     "10 Points: Termination". This is an inconsistency in CSW's own
+//     source form, preserved exactly rather than "corrected."
+//   - "Current Point Count: N" is its OWN standalone bold/underlined
+//     line, positioned AFTER Dates Missed and BEFORE Signatures — it is
+//     NOT part of the Action Taken grid (previous pass folded it into
+//     that section).
+//   - Dates Missed list is just Date + Points, two columns, no "Type"
+//     column (previous pass added one; the real form doesn't have it).
+//     Dates render as MM/DD/YYYY (e.g. "08/05/2026") matching the real
+//     form — previous pass rendered ISO (YYYY-MM-DD).
+//   - "EMPLOYEE: ___ SUPERVISOR: ___" are SIDE BY SIDE on one line. (The
+//     immediately prior pass, per Dean Dioguardi's feedback on a
+//     DIFFERENT reference example, had put these on separate lines —
+//     that reference apparently didn't match this real one. Side-by-side
+//     is now confirmed correct against an actual completed form.)
 //
-// Known, deliberate deviation from the real form (flagged to Dan/Dean,
-// not silently added): a "Facility" note appended to the Date/Name line.
+// Known, deliberate deviation from the real form (flagged to Dan, not
+// silently added): a small "(Facility: X)" note next to the Name line.
 // The real form has no facility field, but this automation covers 5
-// locations and HR needs to know which one a given notice is for. Easy
-// to remove if it should match 100%.
+// locations and HR needs to know which one a given notice is for.
 //
 // KNOWN LIMITATION AT BUILD TIME (documented so it isn't silently lost):
 // both b2e_slv_pointsbalance and b2e_slv_detailedpointsreport have
@@ -67,6 +80,15 @@
 // active flag flips to true and the daily schedule takes over
 // unattended. No code change needed to flip a facility on — same
 // active-flag gate as every other digest in this app.
+//
+// SIGNED-COPY LOOP (2026-08-14): this function only handles generation +
+// delivery (PDF -> Front). The rest of Dan's described loop — supervisor
+// gets it signed, scans it, uploads the signed copy back into the app,
+// HR downloads it later to manually enter into B2E — is handled
+// separately by hr_signed_documents (Supabase table) + the 'hr-documents'
+// Storage bucket + src/lib/hrDocuments.js + the SignedDocumentCell
+// component wired into AttendancePointsTab's Recent Actions Log. See
+// those files, not this one, for that half of the workflow.
 
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib')
 
@@ -203,6 +225,17 @@ async function queryEmployeeTransactions(employeeIds) {
   }
 }
 
+// Real form uses MM/DD/YYYY (e.g. "08/05/2026"), not ISO — matches the
+// exact Miguel Rodriguez reference example.
+function formatMmDdYyyy(v) {
+  if (!v) return ''
+  const d = new Date(v)
+  if (isNaN(d.getTime())) return ''
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${mm}/${dd}/${d.getFullYear()}`
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
@@ -221,7 +254,7 @@ function buildFormComment({ employeeName, facility, threshold, points, category,
   if (pdfError) {
     lines.push(`<br>PDF attachment failed to generate (${escapeHtml(pdfError)}) — pull the form manually.`)
   } else {
-    lines.push(`<br>Filled Disciplinary Action Form attached, including the full dated point history on file. Confirm against B2E, then complete Employee/Supervisor signatures — this is a system-generated notice, not a substitute for the signed paper form.`)
+    lines.push(`<br>Filled Disciplinary Action Form attached, including the full dated point history on file. Confirm against B2E, then complete Position/Employee/Supervisor signatures by hand — this is a system-generated notice, not a substitute for the signed paper form. Once signed, scan and upload it back into the dashboard's Attendance Points tab so HR can retrieve it for B2E filing.`)
   }
   return lines.join('\n')
 }
@@ -257,16 +290,16 @@ async function frontPostCommentWithPdf(conversationId, body, pdfBytes, filename)
   return json
 }
 
-// Builds a filled Disciplinary Action Form PDF, following the REAL
-// uploaded fillable form (Attendance_Policy__non-union_.pdf) line-for-
-// line — see file header for the full mapping. Signature lines are
-// blank underscores — NEVER filled. The one deliberate addition beyond
-// the real form is the small "Facility" note (5-location automation,
-// no facility field on the original) and the populated Dates Missed
-// table (the real form leaves this section blank for hand-writing).
+// Builds a filled Disciplinary Action Form PDF matching the real
+// completed example (Miguel Rodriguez, WR, 2026-08-13) line-for-line —
+// see file header for the full diff against the previous pass. Position
+// and both signature lines are always left blank — a human fills those
+// by hand on the printed/scanned copy.
 async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points, thresholdPoints, transactions }) {
   const PAGE_W = 612, PAGE_H = 792 // US Letter
   const MARGIN = 54
+  const CONTENT_W = PAGE_W - MARGIN * 2
+  const INK = rgb(0.08, 0.08, 0.1)
 
   const doc = await PDFDocument.create()
   const font = await doc.embedFont(StandardFonts.Helvetica)
@@ -275,82 +308,137 @@ async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points,
 
   let y = PAGE_H - MARGIN
 
-  const text = (str, x, size, bold = false, color = rgb(0.08, 0.08, 0.1)) => {
+  const text = (str, x, size, bold = false, color = INK) => {
     page.drawText(str, { x, y, size, font: bold ? fontBold : font, color })
   }
-  const checkbox = (label, checked, x) => {
-    page.drawRectangle({ x, y: y - 9, width: 10, height: 10, borderColor: rgb(0.2, 0.2, 0.2), borderWidth: 1 })
-    if (checked) page.drawText('X', { x: x + 1.5, y: y - 8, size: 9, font: fontBold })
-    page.drawText(label, { x: x + 16, y, size: 9, font })
+  const underlineAt = (x, width, size, thisY = y) => {
+    page.drawLine({ start: { x, y: thisY - size * 0.16 }, end: { x: x + width, y: thisY - size * 0.16 }, thickness: 0.6, color: INK })
+  }
+  const textUnderlined = (str, x, size, bold = false) => {
+    const f = bold ? fontBold : font
+    text(str, x, size, bold)
+    underlineAt(x, f.widthOfTextAtSize(str, size), size)
+  }
+  const centeredText = (str, size, bold = false) => {
+    const f = bold ? fontBold : font
+    const w = f.widthOfTextAtSize(str, size)
+    const x = MARGIN + (CONTENT_W - w) / 2
+    page.drawText(str, { x, y, size, font: f, color: INK })
+    return x
+  }
+  const centeredUnderlined = (str, size, bold = false) => {
+    const f = bold ? fontBold : font
+    const w = f.widthOfTextAtSize(str, size)
+    const x = centeredText(str, size, bold)
+    underlineAt(x, w, size)
   }
 
-  // ── Title (matches the real form exactly) ───────────────
-  text('Attendance Policy', MARGIN, 14, true)
-  y -= 16
-  text('Disciplinary Action Form', MARGIN, 13, true)
+  // ── Title ──────────────────────────────────────────────
+  centeredUnderlined('Attendance Disciplinary Action Form', 14, true)
   y -= 22
 
-  // ── Date / Name (+ Facility — the one deliberate addition) ─
-  text(`Date: ${new Date().toLocaleDateString('en-US')}`, MARGIN, 10)
-  text(`Name: ${employeeName}`, MARGIN + 190, 10)
-  text(`(Facility: ${facilityDisplay})`, MARGIN + 380, 9, false, rgb(0.45, 0.45, 0.5))
+  // ── Date / Name / Position — each its own line ─────────
+  text(`DATE: ${formatMmDdYyyy(new Date())}`, MARGIN, 10, true)
+  text(`(Facility: ${facilityDisplay})`, MARGIN + 340, 9, false, rgb(0.45, 0.45, 0.5))
+  y -= 15
+  text(`NAME: ${employeeName}`, MARGIN, 10, true)
+  y -= 15
+  // POSITION deliberately left blank — see file header note.
+  text('POSITION:', MARGIN, 10, true)
+  y -= 18
+
+  textUnderlined('Program', MARGIN, 10, true)
+  y -= 13
+  text('10-point system in a rolling 6 month period', MARGIN, 10)
   y -= 16
 
-  // "Program:" on the real form is static text, not a fillable field.
-  text('Program:', MARGIN, 10)
-  y -= 13
-  text('10-point system in a rolling 6-month period.', MARGIN, 10)
+  text('Employees will be charged points based on the schedule below:', MARGIN, 10, true)
+  y -= 14
+  text('+4 Points', MARGIN, 9, true)
+  text('Absence without advanced notification (no-call/no-show)', MARGIN + 58, 9)
+  y -= 12
+  text('+2 Points', MARGIN, 9, true)
+  text('Unexcused absence', MARGIN + 58, 9)
+  y -= 12
+  text('+1/2 Point', MARGIN, 9, true)
+  text('Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN + 58, 9)
   y -= 18
 
-  text('Employees will be charged points based on the schedule below:', MARGIN, 10)
+  textUnderlined('Disciplinary Action', MARGIN, 11, true)
   y -= 14
-  text('+4 Points   Absence without advanced notification (no-call/no-show)', MARGIN, 9)
-  y -= 12
-  text('+2 Points   Unexcused absence', MARGIN, 9)
-  y -= 12
-  text('+1/2 Point  Unexcused tardy or departure of more than 15 minutes of assigned shift', MARGIN, 9)
-  y -= 20
-
-  text('Disciplinary Action', MARGIN, 11, true)
+  text('When an employee reaches the following points, the corresponding disciplinary action may result:', MARGIN, 9, true)
   y -= 14
-  text('When an employee reaches the following points, the corresponding disciplinary action may result:', MARGIN, 9)
-  y -= 13
   text('6 Points: Written Warning', MARGIN, 9)
-  y -= 12
-  text('8 Points: Final Warning', MARGIN, 9)
-  y -= 12
-  text('10 Points: Termination', MARGIN, 9)
+  text('8 Points: Final Warning', MARGIN + 190, 9)
+  text('10 Points: Termination', MARGIN + 360, 9)
+  y -= 26
+
+  // Big centered banner line, wraps 2 lines like the real form.
+  centeredText('THIS IS TO CONFIRM IN WRITING THE DISCIPLINARY ACTION FOR', 13, true)
+  y -= 16
+  centeredText('ATTENDANCE', 13, true)
+  y -= 26
+
+  // ── Action Taken — real bordered 2x2 grid ───────────────
+  textUnderlined('ACTION TAKEN:', MARGIN, 11, true)
   y -= 18
 
-  text('This document is to confirm in writing the disciplinary action for attendance.', MARGIN, 9)
-  y -= 20
+  {
+    const rowH = 22
+    const col1W = 22   // checkbox col
+    const col2W = 220  // label col
+    const col3W = 22
+    const col4W = CONTENT_W - col1W - col2W - col3W
+    const tableTop = y + 15
+    const tableLeft = MARGIN
 
-  // ── Dates Missed (blank on the real form — populated here) ─
-  text('Dates Missed (excused or unexcused):', MARGIN, 10, true)
+    page.drawLine({ start: { x: tableLeft, y: tableTop }, end: { x: tableLeft + CONTENT_W, y: tableTop }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) })
+    page.drawLine({ start: { x: tableLeft, y: tableTop - rowH }, end: { x: tableLeft + CONTENT_W, y: tableTop - rowH }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) })
+    page.drawLine({ start: { x: tableLeft, y: tableTop - rowH * 2 }, end: { x: tableLeft + CONTENT_W, y: tableTop - rowH * 2 }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) })
+    let cx = tableLeft
+    for (const w of [col1W, col2W, col3W, col4W]) {
+      page.drawLine({ start: { x: cx, y: tableTop }, end: { x: cx, y: tableTop - rowH * 2 }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) })
+      cx += w
+    }
+    page.drawLine({ start: { x: cx, y: tableTop }, end: { x: cx, y: tableTop - rowH * 2 }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) })
+
+    const cellText = (str, colX, rowTopY, bold = false) => {
+      page.drawText(str, { x: colX + 5, y: rowTopY - rowH / 2 - 3, size: 9, font: bold ? fontBold : font, color: INK })
+    }
+    // Row 1: [X-if-6pts | Written Warning] [X-if-8pts | Final Written Warning]
+    if (thresholdPoints === 6) cellText('X', tableLeft, tableTop, true)
+    cellText('Written Warning', tableLeft + col1W, tableTop)
+    if (thresholdPoints === 8) cellText('X', tableLeft + col1W + col2W, tableTop, true)
+    cellText('Final Written Warning', tableLeft + col1W + col2W + col3W, tableTop)
+    // Row 2: [blank | blank] [X-if-10pts | Discharge] — "Discharge" is the
+    // real form's exact wording here, not "Termination" (see file header).
+    if (thresholdPoints === 10) cellText('X', tableLeft + col1W + col2W, tableTop - rowH, true)
+    cellText('Discharge', tableLeft + col1W + col2W + col3W, tableTop - rowH)
+
+    y = tableTop - rowH * 2 - 16
+  }
+
+  // ── Dates Missed — just Date + Points, no Type column ───
+  textUnderlined('Dates Missed:', MARGIN, 10, true)
   y -= 14
 
-  const MAX_ROWS = 12
+  const MAX_ROWS = 14
   const shown = (transactions || []).slice(0, MAX_ROWS)
   if (shown.length === 0) {
-    text('No individual transaction history available — see B2E detailed points report.', MARGIN + 4, 9, false, rgb(0.5, 0.5, 0.5))
+    text('No individual transaction history available — see B2E detailed points report.', MARGIN + 20, 9, false, rgb(0.5, 0.5, 0.5))
     y -= 13
   } else {
-    text('Type', MARGIN + 4, 8, true, rgb(0.4, 0.4, 0.45))
-    text('Date', MARGIN + 140, 8, true, rgb(0.4, 0.4, 0.45))
-    text('Points', MARGIN + 250, 8, true, rgb(0.4, 0.4, 0.45))
-    y -= 11
     let sum = 0
     for (const tx of shown) {
-      const dateStr = tx.modified_ts ? String(tx.modified_ts).slice(0, 10) : (tx.modified || '—')
+      const dateStr = formatMmDdYyyy(tx.modified_ts) || tx.modified || '—'
       const pts = Number(tx.points)
       sum += pts
-      text(tx.transaction_type || '—', MARGIN + 4, 9)
-      text(dateStr, MARGIN + 140, 9)
-      text(String(pts), MARGIN + 250, 9)
-      y -= 12
+      text(dateStr, MARGIN + 20, 9)
+      text(String(pts), MARGIN + 140, 9)
+      y -= 13
     }
     if ((transactions || []).length > MAX_ROWS) {
-      text(`+${transactions.length - MAX_ROWS} more — see B2E for full history`, MARGIN + 4, 8, false, rgb(0.5, 0.5, 0.5))
+      text(`+${transactions.length - MAX_ROWS} more — see B2E for full history`, MARGIN + 20, 8, false, rgb(0.5, 0.5, 0.5))
       y -= 12
     }
     if (Math.abs(sum - points) > 0.01) {
@@ -360,27 +448,19 @@ async function buildDisciplinaryFormPdf({ employeeName, facilityDisplay, points,
       y -= 12
     }
   }
-  y -= 10
+  y -= 12
 
-  // ── Action Taken (real form's 2x2 grid — field positions confirmed ─
-  // via the real PDF's AcroForm annotation rects)                    ─
-  text('Action Taken', MARGIN, 11, true)
-  y -= 16
-  text(`Current Point Count: ${points}`, MARGIN, 10, true)
-  checkbox('Written Warning (6 pts)', thresholdPoints === 6, MARGIN + 250)
+  // Current Point Count — its OWN standalone line, not part of the grid.
+  textUnderlined(`Current Point Count: ${points}`, MARGIN, 11, true)
+  y -= 30
+
+  textUnderlined('SIGNATURES', MARGIN, 11, true)
   y -= 20
-  checkbox('Final Written Warning (8 pts)', thresholdPoints === 8, MARGIN)
-  checkbox('Termination (10 pts)', thresholdPoints === 10, MARGIN + 250)
-  y -= 34
+  // Side by side, per the real form.
+  text('EMPLOYEE: _____________________', MARGIN, 10)
+  text('SUPERVISOR: ______________________', MARGIN + 280, 10)
+  y -= 30
 
-  // ── Signatures — each on its own line, per the real form ──
-  text('Employee Signature: ______________________________________', MARGIN, 10)
-  y -= 24
-  text('Supervisor or Ops Mgr Signature: ______________________________________', MARGIN, 10)
-  y -= 26
-
-  text('FUTURE VIOLATIONS WILL RESULT IN DISCIPLINARY ACTION LEADING UP TO AND INCLUDING TERMINATION.', MARGIN, 8, true)
-  y -= 16
   text('Generated by CSW-WI Attendance Points automation — verify against source B2E data before filing.', MARGIN, 7, false, rgb(0.55, 0.55, 0.55))
 
   return doc.save()
