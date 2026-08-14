@@ -6,6 +6,13 @@
 //
 // Confirmed live 2026-08-07 via Microsoft 365 connector before writing any
 // parsing logic. 3 sheets: Attendance Write Up, Misconduct, PIPs.
+//
+// 2026-08-14 fix — HR dashboard connect meeting flagged the HR-sent/GM-sent
+// date columns rendering as raw numbers instead of dates. Root cause: these
+// were read with str() instead of parseDate(), so an Excel date serial
+// number (e.g. 46215) passed through unconverted. parseDate() added below
+// (was missing from this file, unlike the other sharepoint-*.cjs functions)
+// and applied to hrSentDate / gmSentBack.
 
 const TENANT_ID     = process.env.SHAREPOINT_TENANT_ID
 const CLIENT_ID     = process.env.SHAREPOINT_CLIENT_ID
@@ -88,6 +95,13 @@ function str(v) {
   const s = String(v).trim()
   return ['null', 'nan', 'none', 'n/a'].includes(s.toLowerCase()) ? '' : s
 }
+function parseDate(v) {
+  if (v == null || v === '') return ''
+  if (typeof v === 'number') return new Date((v - 25569) * 86400 * 1000).toISOString().slice(0, 10)
+  const s = String(v).trim()
+  if (!s) return ''
+  try { const d = new Date(s); return isNaN(d.getTime()) ? s : d.toISOString().slice(0, 10) } catch { return s }
+}
 function marked(v) {
   return str(v).toLowerCase() === 'x'
 }
@@ -129,7 +143,7 @@ function parseAttendance(headerRow, dataRows) {
     else if (marked(row[i.verbal])) step = 'Verbal Warning/Coaching'
     return {
       id: `ATT-${String(idx + 1).padStart(3, '0')}`, rowIndex, name, location: str(row[i.loc]), shift: str(row[i.shift]),
-      step, hrSentDate: str(row[i.hrSent]), b2eStatus: str(row[i.b2e]),
+      step, hrSentDate: parseDate(row[i.hrSent]), b2eStatus: str(row[i.b2e]),
       _colMap: { b2e: i.b2e >= 0 ? colLetter(i.b2e) : null },
     }
   }).filter(Boolean)
@@ -156,7 +170,7 @@ function parseMisconduct(headerRow, dataRows) {
     else if (marked(row[i.coaching])) step = 'Coaching'
     return {
       id: `MIS-${String(idx + 1).padStart(3, '0')}`, rowIndex, name, location: str(row[i.loc]), shift: str(row[i.shift]),
-      step, gmSentBack: str(row[i.gmSent]), b2eStatus: str(row[i.b2e]),
+      step, gmSentBack: parseDate(row[i.gmSent]), b2eStatus: str(row[i.b2e]),
       _colMap: { b2e: i.b2e >= 0 ? colLetter(i.b2e) : null },
     }
   }).filter(Boolean)
@@ -176,8 +190,8 @@ function parsePips(headerRow, dataRows) {
     if (!name) return null
     return {
       id: `PIP-${String(idx + 1).padStart(3, '0')}`, rowIndex, name, site: str(row[i.site]), shifts: str(row[i.shifts]),
-      startDate: str(row[i.start]), weeks: [str(row[i.w1]), str(row[i.w2]), str(row[i.w3]), str(row[i.w4])],
-      result: str(row[i.result]), endDate: str(row[i.end]), uploadedB2E: marked(row[i.b2e]), notes: str(row[i.notes]),
+      startDate: parseDate(row[i.start]), weeks: [str(row[i.w1]), str(row[i.w2]), str(row[i.w3]), str(row[i.w4])],
+      result: str(row[i.result]), endDate: parseDate(row[i.end]), uploadedB2E: marked(row[i.b2e]), notes: str(row[i.notes]),
     }
   }).filter(Boolean)
 }
