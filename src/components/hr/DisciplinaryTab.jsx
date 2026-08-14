@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import AttendancePointsTab from './AttendancePointsTab.jsx'
+import SignedDocumentCell from './SignedDocumentCell.jsx'
 
 // Disciplinary Action Tracker — HR sub-tab (added 2026-08-07). Same
 // conventions as the other HR sub-tabs: no page-content/page-header
@@ -18,6 +19,12 @@ import AttendancePointsTab from './AttendancePointsTab.jsx'
 // conceptually. AttendancePointsTab manages its own data fetching
 // (MotherDuck/Supabase, not sharepoint-disciplinary.cjs) so it's excluded
 // from this component's fetch-on-tab-change effect and KPI row below.
+//
+// 2026-08-14 (later) — SignedDocumentCell wired into StepTable and
+// PipsTable ("Signed Form" column) — manual upload only here (no
+// auto-generated PDF for these three, unlike Attendance Points), per
+// Dan's answer that Misconduct/PIPs/Attendance Write-Ups get
+// upload-only support.
 
 const FN_BASE = '/.netlify/functions/sharepoint-disciplinary'
 
@@ -29,6 +36,11 @@ const STEP_COLOR = {
   'Final Written': 'var(--red)',
   'Termination': 'var(--red)',
 }
+
+// tracker key used by hr_signed_documents — kept distinct from the
+// sharepoint-disciplinary.cjs `tab` param since 'attendance' there could
+// be confused with the Attendance Points tracker.
+const DOC_TRACKER = { attendance: 'attendance_writeup', misconduct: 'misconduct', pips: 'pips' }
 
 const PREVIEW = {
   attendance: [
@@ -158,6 +170,7 @@ function StepTable({ records, type }) {
             <tr>
               <th>Name</th><th>Location</th><th>Shift</th><th>Step</th>
               <th>{type === 'misconduct' ? 'GM Sent Back to HR' : 'HR Sent to GMs'}</th><th>B2E Status</th>
+              <th>Signed Form</th>
             </tr>
           </thead>
           <tbody>
@@ -175,6 +188,14 @@ function StepTable({ records, type }) {
                 </td>
                 <td className="appt-list-mono">{type === 'misconduct' ? r.gmSentBack : r.hrSentDate}</td>
                 <td className="appt-list-col-notes">{r.b2eStatus || '—'}</td>
+                <td>
+                  <SignedDocumentCell
+                    tracker={DOC_TRACKER[type]}
+                    recordRef={r.id}
+                    facility={r.location}
+                    employeeName={r.name}
+                  />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -194,7 +215,7 @@ function PipsTable({ records }) {
             <tr>
               <th>Name</th><th>Site</th><th>Shift</th><th>Start</th>
               <th>Wk1</th><th>Wk2</th><th>Wk3</th><th>Wk4</th>
-              <th>Result</th><th>End Date</th><th>Notes</th>
+              <th>Result</th><th>End Date</th><th>Notes</th><th>Signed Form</th>
             </tr>
           </thead>
           <tbody>
@@ -216,6 +237,14 @@ function PipsTable({ records }) {
                 </td>
                 <td className="appt-list-mono">{r.endDate || '—'}</td>
                 <td className="appt-list-col-notes">{r.notes}</td>
+                <td>
+                  <SignedDocumentCell
+                    tracker={DOC_TRACKER.pips}
+                    recordRef={r.id}
+                    facility={r.site}
+                    employeeName={r.name}
+                  />
+                </td>
               </tr>
             ))}
           </tbody>
