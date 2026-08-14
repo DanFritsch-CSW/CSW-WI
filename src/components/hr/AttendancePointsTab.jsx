@@ -4,6 +4,7 @@ import {
   fetchNotifySettings, upsertNotifySettings,
   fetchPointBalances, triggerDigestTest, fetchRecentActions,
 } from '../../lib/attendancePoints.js'
+import SignedDocumentCell from './SignedDocumentCell.jsx'
 
 const FACILITY_COLOR_VAR = { cal: 'var(--cal)', ken: 'var(--ken)', mad: 'var(--mad)', wr: 'var(--wr)', ec: 'var(--ec)' }
 
@@ -168,6 +169,7 @@ function RecentActionsLog({ facility, refreshKey }) {
             <th>Category</th>
             <th>Triggering Date</th>
             <th>Posted</th>
+            <th>Signed Form</th>
           </tr>
         </thead>
         <tbody>
@@ -179,6 +181,14 @@ function RecentActionsLog({ facility, refreshKey }) {
               <td>{r.triggering_category || '—'}</td>
               <td>{r.triggering_date || '—'}</td>
               <td>{r.front_comment_id ? '✓ Front' : '—'}</td>
+              <td>
+                <SignedDocumentCell
+                  tracker="attendance_points"
+                  recordRef={r.id}
+                  facility={facility}
+                  employeeName={String(r.employee_id)}
+                />
+              </td>
             </tr>
           ))}
         </tbody>
