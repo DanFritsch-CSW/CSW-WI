@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import AttendancePointsTab from './AttendancePointsTab.jsx'
 
 // Disciplinary Action Tracker — HR sub-tab (added 2026-08-07). Same
 // conventions as the other HR sub-tabs: no page-content/page-header
@@ -9,6 +10,14 @@ import { useState, useEffect, useMemo } from 'react'
 // Misconduct: Coaching→Verbal→Written→Final→Termination; PIPs: 4-week plan
 // with a pass/fail outcome). Preview fallback uses generic placeholder
 // names, not real employees — same reasoning as ActiveLeaveTab.jsx.
+//
+// 2026-08-14 — Attendance Points (the B2E point-balance digest tool,
+// previously its own top-level HR sub-tab) merged in here as a 4th
+// internal view, per the "HR dashboard connect" call — Tim/Maria/Amy felt
+// attendance points and disciplinary write-ups belong together
+// conceptually. AttendancePointsTab manages its own data fetching
+// (MotherDuck/Supabase, not sharepoint-disciplinary.cjs) so it's excluded
+// from this component's fetch-on-tab-change effect and KPI row below.
 
 const FN_BASE = '/.netlify/functions/sharepoint-disciplinary'
 
@@ -35,6 +44,7 @@ const PREVIEW = {
 }
 
 const TABS = [
+  { key: 'points', label: 'Attendance Points' },
   { key: 'attendance', label: 'Attendance Write-Ups' },
   { key: 'misconduct', label: 'Misconduct' },
   { key: 'pips', label: 'PIPs' },
@@ -47,12 +57,13 @@ async function fetchTab(tab) {
 }
 
 export default function DisciplinaryTab() {
-  const [activeType, setActiveType] = useState('attendance')
+  const [activeType, setActiveType] = useState('points')
   const [records, setRecords] = useState(null)
   const [live, setLive] = useState(false)
   const [error, setError] = useState(null)
 
   useEffect(() => {
+    if (activeType === 'points') return // AttendancePointsTab handles its own data
     let cancelled = false
     setRecords(null)
     fetchTab(activeType)
@@ -71,7 +82,7 @@ export default function DisciplinaryTab() {
   }, [activeType])
 
   const terminationCount = useMemo(
-    () => (activeType !== 'pips' && records ? records.filter((r) => r.step === 'Termination').length : 0),
+    () => (activeType !== 'pips' && activeType !== 'points' && records ? records.filter((r) => r.step === 'Termination').length : 0),
     [records, activeType]
   )
 
@@ -79,11 +90,11 @@ export default function DisciplinaryTab() {
     <div style={{ marginTop: 16 }}>
       <div className="page-header" style={{ marginBottom: 0 }}>
         <div>
-          <div className="page-subtitle">Attendance write-ups, misconduct escalations, and performance improvement plans</div>
+          <div className="page-subtitle">Attendance points, write-ups, misconduct escalations, and performance improvement plans</div>
         </div>
       </div>
 
-      {!live && records !== null && (
+      {activeType !== 'points' && !live && records !== null && (
         <div className="omni-warning-banner">
           <span className="omni-warning-icon">⚠</span>
           <span className="omni-warning-text">
@@ -105,27 +116,33 @@ export default function DisciplinaryTab() {
         ))}
       </div>
 
-      {activeType !== 'pips' && records && (
-        <div className="kpi-row">
-          <div className="kpill">
-            <span className="kpill-label">Records</span>
-            <span className="kpill-value">{records.length}</span>
-          </div>
-          <div className="kpill">
-            <span className="kpill-label">Terminations</span>
-            <span className="kpill-value" style={{ color: 'var(--red)' }}>{terminationCount}</span>
-          </div>
-        </div>
-      )}
-
-      {records === null ? (
-        <div className="stub-page" style={{ opacity: 0.6 }}>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</p>
-        </div>
-      ) : activeType === 'pips' ? (
-        <PipsTable records={records} />
+      {activeType === 'points' ? (
+        <AttendancePointsTab />
       ) : (
-        <StepTable records={records} type={activeType} />
+        <>
+          {activeType !== 'pips' && records && (
+            <div className="kpi-row">
+              <div className="kpill">
+                <span className="kpill-label">Records</span>
+                <span className="kpill-value">{records.length}</span>
+              </div>
+              <div className="kpill">
+                <span className="kpill-label">Terminations</span>
+                <span className="kpill-value" style={{ color: 'var(--red)' }}>{terminationCount}</span>
+              </div>
+            </div>
+          )}
+
+          {records === null ? (
+            <div className="stub-page" style={{ opacity: 0.6 }}>
+              <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading…</p>
+            </div>
+          ) : activeType === 'pips' ? (
+            <PipsTable records={records} />
+          ) : (
+            <StepTable records={records} type={activeType} />
+          )}
+        </>
       )}
     </div>
   )
