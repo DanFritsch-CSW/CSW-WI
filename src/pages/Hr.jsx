@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import AttendancePointsTab from '../components/hr/AttendancePointsTab.jsx'
 import RecruitingTab from '../components/hr/RecruitingTab.jsx'
 import ThirtySixtyNinetyTab from '../components/hr/ThirtySixtyNinetyTab.jsx'
 import ActiveLeaveTab from '../components/hr/ActiveLeaveTab.jsx'
@@ -34,9 +33,14 @@ import ReferralBonusTab from '../components/hr/ReferralBonusTab.jsx'
 // 1 year, per-milestone "Mark Paid" action. This completes the tracker
 // list from Dan/Tim's original HR call, aside from EEOC/Legal and
 // Workman's Comp (no file link provided) and the survey response files.
+//
+// 2026-08-14 — "HR dashboard connect" call: Attendance Points, formerly its
+// own top-level sub-tab here, was merged INTO the Disciplinary Action tab
+// as a 4th internal view (Tim/Maria/Amy felt points and write-ups belong
+// together conceptually). This page now has 5 sub-tabs, not 6 — see
+// DisciplinaryTab.jsx for the merged Attendance Points view.
 
 const TABS = [
-  { id: 'attendance', label: 'Attendance Points' },
   { id: 'recruiting', label: 'Recruiting' },
   { id: 'checkins', label: '30/60/90 Check-Ins' },
   { id: 'leave', label: 'Active Leave' },
@@ -45,14 +49,14 @@ const TABS = [
 ]
 
 export default function Hr() {
-  const [activeTab, setActiveTab] = useState('attendance')
+  const [activeTab, setActiveTab] = useState('recruiting')
 
   return (
     <div className="page-content">
       <div className="page-header">
         <div>
           <div className="page-title">HR</div>
-          <div className="page-subtitle">Attendance points, recruiting, 30/60/90 check-ins, leave tracking, disciplinary action, referral bonuses, and other HR automation tools.</div>
+          <div className="page-subtitle">Recruiting, 30/60/90 check-ins, leave tracking, disciplinary action (including attendance points), referral bonuses, and other HR automation tools.</div>
         </div>
       </div>
 
@@ -68,7 +72,6 @@ export default function Hr() {
         ))}
       </div>
 
-      {activeTab === 'attendance' && <AttendancePointsTab />}
       {activeTab === 'recruiting' && <RecruitingTab />}
       {activeTab === 'checkins' && <ThirtySixtyNinetyTab />}
       {activeTab === 'leave' && <ActiveLeaveTab />}
