@@ -241,6 +241,33 @@ const FACILITY_WAREHOUSE_ID = {
   cal: 1, ec: 3, mad: 4, ken: 5, wr: 6,
 }
 
+// EXCLUDED_LOCATIONS_BY_WAREHOUSE — added 2026-08-17 per Nate Williams
+// (Front cnv_1bsg2ihg, screenshot from Dean/Hill/Nate discussion). These
+// are locations dedicated to inventory personnel at KEN — stock that gets
+// unpicked to an inactive LP there is, per Nate, "more than likely
+// damages" and never actually getting (re)allocated, so it was just
+// clutter on the FEFO report. Confirmed via MotherDuck: BG001A and BG010A
+// both exist at warehouse_id=5 (KEN). Deliberately does NOT include
+// BG000A — Nate explicitly called that one out as an INACTIVE location
+// where something being mislocated there is exactly the real risk worth
+// keeping visible, unlike BG001A/BG010A.
+//   Cases in these locations are excluded from cases_onhand/cases_held/
+// cases_available ENTIRELY in the onhand/REM query (not just flagged as
+// "blocked" the way receiving/staging locations are) — this is
+// deliberately different from NON_ALLOCATABLE_LOCATION_PATTERNS below:
+// that pattern assumes the stock is legitimate and will eventually ship,
+// producing a "correctly skipped" verdict; this is stock Nate says is
+// most likely damaged and never shipping, so it shouldn't factor into
+// FEFO availability at all, not even as a visible-but-skipped candidate.
+//   Scoped to warehouse_id=5 (KEN) only, deliberately — BG001A/BG010A also
+// exist as SEPARATE, unrelated physical locations at CAL (warehouse_id=1,
+// confirmed via MotherDuck), and this ask was specific to the KEN Front
+// conversation. Add a CAL entry here only if that's confirmed as wanted
+// too — don't assume the name match implies the same intent applies.
+const EXCLUDED_LOCATIONS_BY_WAREHOUSE = {
+  5: ['BG001A', 'BG010A'],
+}
+
 const HOLD_STATUS_NAMES = new Set([
   'HOLD', 'Pending Hold', 'QA Hold', 'Food Safety',
   'NOT RELEASED', 'Damaged / Hold', 'Administrative',
@@ -595,6 +622,15 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
   let onhandRows = []
   if (materialIds.length > 0) {
     const matIdList = materialIds.join(',')
+    // excludedLocations — see EXCLUDED_LOCATIONS_BY_WAREHOUSE above. Empty
+    // for every warehouse except KEN today, so this is a no-op everywhere
+    // else (excludedLocationClause becomes '' and the extra JOIN just adds
+    // an always-true left join with no filtering effect).
+    const excludedLocations = EXCLUDED_LOCATIONS_BY_WAREHOUSE[warehouseId] || []
+    const excludedLocationsSql = excludedLocations.map(loc => `'${loc.replace(/'/g, "''")}'`).join(',')
+    const excludedLocationClause = excludedLocations.length
+      ? `AND COALESCE(exloc.location_container_name, '') NOT IN (${excludedLocationsSql})`
+      : ''
     // scope_lots CTE — ONLY lots with active on-site inventory for our
     // in-scope materials. Filters at lot creation source (licenseplatecontents
     // + licenseplates.archived=false + qty>0). Cuts row count by 20× vs the
@@ -752,6 +788,13 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       JOIN production_db.silver.datex_slv_licenseplates lp ON lpc.license_plate_id = lp.license_plate_id
       LEFT JOIN committed c ON c.lot_id = l.lot_id
       LEFT JOIN lot_locations ll ON ll.lot_id = l.lot_id
+      -- exloc — added 2026-08-17 alongside EXCLUDED_LOCATIONS_BY_WAREHOUSE
+      -- above. Separate join from lot_locations (which aggregates a
+      -- DISPLAY string across possibly-multiple locations per lot) since
+      -- this one needs to filter individual license-plate rows, not
+      -- describe the lot as a whole.
+      LEFT JOIN production_db.silver.datex_slv_locationcontainers exloc
+        ON exloc.location_container_id = lp.location_id
       -- vendorlots — same 1:1 real-expiration-date join as allocSql above,
       -- needed here too since REM candidates come from unallocated on-hand
       -- lots (added 2026-07-17).
@@ -761,6 +804,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
         AND lp.warehouse_id = ${warehouseId}
         AND lp.Archived = false
         AND lpc.packaged_amount > 0
+        ${excludedLocationClause}
       GROUP BY l.material_id, l.lot_id, l.lookup_code, l.status_name
     `
     onhandRows = await runQuery(onhandSql)
