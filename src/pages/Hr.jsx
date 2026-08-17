@@ -4,6 +4,7 @@ import ThirtySixtyNinetyTab from '../components/hr/ThirtySixtyNinetyTab.jsx'
 import ActiveLeaveTab from '../components/hr/ActiveLeaveTab.jsx'
 import DisciplinaryTab from '../components/hr/DisciplinaryTab.jsx'
 import ReferralBonusTab from '../components/hr/ReferralBonusTab.jsx'
+import CoachingTab from '../components/hr/CoachingTab.jsx'
 
 // HR — top-level tab (added 2026-08-02). Structured as a tab row (like
 // Settings.jsx) so future HR tools land here as additional sub-tabs
@@ -37,8 +38,17 @@ import ReferralBonusTab from '../components/hr/ReferralBonusTab.jsx'
 // 2026-08-14 — "HR dashboard connect" call: Attendance Points, formerly its
 // own top-level sub-tab here, was merged INTO the Disciplinary Action tab
 // as a 4th internal view (Tim/Maria/Amy felt points and write-ups belong
-// together conceptually). This page now has 5 sub-tabs, not 6 — see
+// together conceptually). Page went from 6 sub-tabs to 5 — see
 // DisciplinaryTab.jsx for the merged Attendance Points view.
+//
+// 2026-08-17 — Coaching added as a sixth sub-tab. This is Tim Morris's own
+// prototype (built with Claude, sent via Front cnv_1c58erkk) — a manager
+// coaching log (Lines of Effort, session recaps, homework) fed by a
+// separate SharePoint workbook, wrapped the same way as every other
+// tracker (CoachingTab.jsx -> sharepoint-coaching.cjs). Read-only by
+// design — edits happen in Excel or by asking Claude to process a Fathom
+// transcript, not through this dashboard. BLOCKED on Tim confirming
+// whether the workbook is on SharePoint yet.
 
 const TABS = [
   { id: 'recruiting', label: 'Recruiting' },
@@ -46,6 +56,7 @@ const TABS = [
   { id: 'leave', label: 'Active Leave' },
   { id: 'disciplinary', label: 'Disciplinary Action' },
   { id: 'referral', label: 'Referral Bonus' },
+  { id: 'coaching', label: 'Coaching' },
 ]
 
 export default function Hr() {
@@ -56,7 +67,7 @@ export default function Hr() {
       <div className="page-header">
         <div>
           <div className="page-title">HR</div>
-          <div className="page-subtitle">Recruiting, 30/60/90 check-ins, leave tracking, disciplinary action (including attendance points), referral bonuses, and other HR automation tools.</div>
+          <div className="page-subtitle">Recruiting, 30/60/90 check-ins, leave tracking, disciplinary action (including attendance points), referral bonuses, manager coaching, and other HR automation tools.</div>
         </div>
       </div>
 
@@ -77,6 +88,7 @@ export default function Hr() {
       {activeTab === 'leave' && <ActiveLeaveTab />}
       {activeTab === 'disciplinary' && <DisciplinaryTab />}
       {activeTab === 'referral' && <ReferralBonusTab />}
+      {activeTab === 'coaching' && <CoachingTab />}
     </div>
   )
 }
