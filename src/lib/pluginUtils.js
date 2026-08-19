@@ -280,3 +280,46 @@ export function buildMergedSlot(slot, shared, nameToId) {
     project_datex_id: slot.project ? slot.project_datex_id : nameToId.projects?.[shared.project?.toLowerCase()] ?? null,
   }
 }
+
+// ── Labor-insights display helpers ──────────────────────────────────────
+// Added 2026-08-19 alongside moving the short-staffed signal from Day
+// Insights to directly under the arrival-time picker (per Dan's request).
+// Shared between PluginView.jsx (the picker-adjacent banner) and
+// AppointmentInsights.jsx (the per-hour breakdown rows), so both render
+// hours/deltas identically.
+
+/** Formats a 24-hour integer as a short 12-hour label, e.g. 14 -> "2p". */
+export function formatHour(h) {
+  if (h === 0) return '12a'
+  if (h === 12) return '12p'
+  if (h < 12) return `${h}a`
+  return `${h - 12}p`
+}
+
+/** Formats a signed hours delta with an explicit "+", e.g. 2.3 -> "+2.3". */
+export function fmtHrs(n) {
+  const sign = n > 0 ? '+' : ''
+  return `${sign}${n.toFixed(1)}`
+}
+
+/**
+ * Finds the best hour to suggest for a NEW appointment, from a
+ * scheduling-labor-planning-insights.cjs `hours` array (each row has
+ * {hour, labor_available, labor_required, final, drops}). "Best" = the
+ * hour with the largest surplus (avail - req), since the goal is
+ * minimizing the chance this appointment causes a shortage — not simply
+ * the hour with the most raw available hours, which could still be
+ * short if that hour also has heavy demand.
+ *
+ * Returns null (no suggestion) if every hour is at or below zero surplus
+ * — auto-filling a still-short hour would be worse than leaving the
+ * field blank for a human to decide.
+ */
+export function findBestHour(laborRows) {
+  if (!laborRows?.length) return null
+  let best = null
+  for (const row of laborRows) {
+    if (best === null || row.final > best.final) best = row
+  }
+  return best && best.final > 0 ? best : null
+}
