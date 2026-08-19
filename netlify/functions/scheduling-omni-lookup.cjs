@@ -10,12 +10,29 @@
  * dock doors, carriers) — is unchanged verbatim; it's reference data, not
  * logic, and matches the source repo exactly as of 2026-04-11.
  *
+ * UPDATED 2026-08-19 per Kay's long-standing "carriers disappearing"
+ * feedback (cnv_1ayy4w9g, first raised June 2026, repeated four times
+ * since). Root cause: carriers were ranked live by appointment count in a
+ * ROLLING 6-month window and capped at the top 250 (queryTopCarriers
+ * below) — a carrier falls out of that list just by losing ground in
+ * recent volume, with nothing needing to change in Datex at all.
+ *
+ * Fix: carriers now read from Supabase's scheduling_carriers table first
+ * — the COMPLETE distinct carrier list, synced weekly by
+ * carriers-sync-run.cjs (see lib/carriers-sync-shared.cjs), with no
+ * ranking cutoff. queryTopCarriers/the live-Omni carrier path below are
+ * kept as a fallback for the (should-be-rare) case where the Supabase
+ * table is empty — e.g. before the first sync has ever run — so a fresh
+ * deploy never regresses to "no carriers at all."
+ *
  * Returns sorted distinct values for Datex reference fields.
  *
  * GET /.netlify/functions/scheduling-omni-lookup?type=warehouses
  * GET /.netlify/functions/scheduling-omni-lookup?type=owners&with_ids=true  → [{name, id}]
  * GET /.netlify/functions/scheduling-omni-lookup?type=owners               → string[]
  */
+
+const { createClient } = require('@supabase/supabase-js')
 
 const MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const TOPIC = 'gold__truck_appointments'
@@ -375,6 +392,41 @@ function omniProxyUrl() {
   return `${base}/.netlify/functions/omni-query`
 }
 
+// Reads the complete carrier list from Supabase (synced weekly by
+// carriers-sync-run.cjs) — see this file's 2026-08-19 header note. Sorted
+// by appointment_count DESC (most-used first, matching the old dropdown's
+// UX) then name, but NEVER truncated — that's the entire point of this
+// table existing. Returns null (not []) on any failure/empty-table
+// condition so the caller can tell "no data yet" apart from "genuinely
+// zero carriers" and fall through to the live-Omni path.
+async function fetchCarriersFromSupabase(withIds) {
+  const SUPA_URL = process.env.VITE_SUPABASE_URL
+  const SUPA_KEY = process.env.VITE_SUPABASE_ANON_KEY
+  if (!SUPA_URL || !SUPA_KEY) return null
+
+  try {
+    const supabase = createClient(SUPA_URL, SUPA_KEY)
+    const { data, error } = await supabase
+      .from('scheduling_carriers')
+      .select('carrier_name, carrier_id, appointment_count')
+      .order('appointment_count', { ascending: false })
+      .order('carrier_name', { ascending: true })
+    if (error) {
+      console.warn('[scheduling-omni-lookup] scheduling_carriers read failed:', error.message)
+      return null
+    }
+    if (!data || data.length === 0) return null
+
+    if (withIds) {
+      return data.map((r) => ({ name: r.carrier_name, id: r.carrier_id }))
+    }
+    return data.map((r) => r.carrier_name)
+  } catch (err) {
+    console.warn('[scheduling-omni-lookup] scheduling_carriers read threw:', err.message)
+    return null
+  }
+}
+
 // Proxies through omni-query.cjs instead of calling Omni directly.
 async function omniPost(fields, table = TOPIC) {
   const res = await fetch(omniProxyUrl(), {
@@ -582,6 +634,19 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ type, values: names }) }
     }
     console.warn('[scheduling-omni-lookup] Unknown warehouse for dock_doors filter:', warehouse)
+  }
+
+  // Carriers: read the complete list from Supabase first (see this file's
+  // 2026-08-19 header note) — this doesn't need OMNI_API_KEY at all, so it
+  // runs before that check below. Falls through to the live-Omni paths
+  // further down only if the table is empty or unreachable (e.g. before
+  // the first weekly sync has ever run).
+  if (type === 'carriers') {
+    const fromSupabase = await fetchCarriersFromSupabase(withIds)
+    if (fromSupabase) {
+      return { statusCode: 200, headers, body: JSON.stringify({ type, values: fromSupabase }) }
+    }
+    console.warn('[scheduling-omni-lookup] scheduling_carriers empty/unreachable — falling back to live Omni')
   }
 
   function fallbackResponse() {
