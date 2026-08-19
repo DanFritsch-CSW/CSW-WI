@@ -1,25 +1,35 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  fetchAllExceptionCategories, retryDatexPush, frontConversationUrl,
+  fetchAllExceptionCategories, retryDatexPush, deleteSubmission, frontConversationUrl,
 } from '../lib/schedulingExceptions.js'
 
-// Scheduling Tab — Datex Exceptions view (2026-08-03). First piece of the
-// scheduling app (DanFritsch-CSW/front_netlify_datex) surfaced inside CSW-WI:
-// gives visibility into carrier appointments stuck between Front and Datex,
-// which previously had no view at all — Kay/CSRs had no way to see what was
-// stuck without someone manually querying Supabase. Reads the `submissions`
-// table directly (already in this Supabase project, no migration needed);
-// the retry action calls netlify/functions/datex-retry-push.cjs since it
-// needs Datex's Azure AD client secret, which can never reach the browser.
+// Scheduling Tab — Datex Exceptions view (2026-08-03, delete added
+// 2026-08-18). First piece of the scheduling app
+// (DanFritsch-CSW/front_netlify_datex) surfaced inside CSW-WI: gives
+// visibility into carrier appointments stuck between Front and Datex,
+// which previously had no view at all — Kay/CSRs had no way to see what
+// was stuck without someone manually querying Supabase. Reads the
+// `submissions` table directly (already in this Supabase project, no
+// migration needed); retry and delete both go through Netlify functions —
+// retry because it needs Datex's Azure AD client secret, which can never
+// reach the browser; delete for one consistent write path even though no
+// RLS policy currently gates it (confirmed RLS is disabled table-wide on
+// `submissions`, so this isn't the usual silent-no-op risk).
 //
 // Four categories, each a different flavor of "stuck":
 //   Failed               — push attempted, Datex returned an error
 //   Stuck Processing     — push started, function never returned (orphaned)
 //   Approved Unconfirmed — marked approved but no Datex appointment ID ever
 //                          confirmed (silently unverified success)
-//   Stale Pending (7d+)  — never approved at all; view-only, since these
-//                          rows may never have captured the owner/project/
-//                          dock door/carrier IDs a real push needs
+//   Stale Pending (7d+)  — never approved at all; retry disabled (rows may
+//                          never have captured the owner/project/dock
+//                          door/carrier IDs a real push needs), but delete
+//                          is available here too — this is where most of
+//                          the backlog piles up (1000+ rows).
+//
+// Delete is available on all four categories. It's a hard delete with a
+// confirm() prompt — no soft-delete/undo, so the prompt names the record
+// being removed rather than a generic "are you sure?".
 
 const CATEGORIES = [
   {
@@ -36,7 +46,7 @@ const CATEGORIES = [
   },
   {
     key: 'stalePending', label: 'Stale Pending (7+ days)', canRetry: false,
-    blurb: 'Never approved — no push has been attempted. Retry is disabled here since required fields (owner/project/dock door/carrier) may never have been captured.',
+    blurb: 'Never approved — no push has been attempted. Retry is disabled here since required fields (owner/project/dock door/carrier) may never have been captured. Delete is still available for clearing out backlog.',
   },
 ]
 
@@ -88,7 +98,45 @@ function RetryButton({ row, onDone }) {
         {loading ? 'Retrying…' : 'Retry Push'}
       </button>
       {err && (
-        <div style={{ color: 'var(--red)', fontSize: 10, marginTop: 4, maxWidth: 220 }}>{err}</div>
+        <div style={{ color: 'var(--red)', fontSize: 10, marginTop: 4, maxWidth: 220, whiteSpace: 'normal', wordBreak: 'break-word' }}>{err}</div>
+      )}
+    </div>
+  )
+}
+
+function DeleteButton({ row, onDone }) {
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState(null)
+
+  async function handleClick() {
+    const label = row.appointment_lookup_code || row.reference_number || row.id
+    if (!window.confirm(`Permanently delete this record (${label})? This cannot be undone.`)) return
+    setLoading(true)
+    setErr(null)
+    try {
+      await deleteSubmission(row.id)
+      onDone(row.id, { removed: true })
+    } catch (e) {
+      setErr(e.message)
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        onClick={handleClick}
+        disabled={loading}
+        style={{
+          padding: '4px 12px', borderRadius: 'var(--r-md)', fontSize: 11, fontWeight: 700,
+          border: '1px solid rgba(224,90,90,0.4)', cursor: loading ? 'default' : 'pointer',
+          background: 'rgba(224,90,90,0.08)', color: '#c0392b', whiteSpace: 'nowrap',
+        }}
+      >
+        {loading ? 'Deleting…' : 'Delete'}
+      </button>
+      {err && (
+        <div style={{ color: 'var(--red)', fontSize: 10, marginTop: 4, maxWidth: 220, whiteSpace: 'normal', wordBreak: 'break-word' }}>{err}</div>
       )}
     </div>
   )
@@ -103,18 +151,18 @@ function ExceptionsTable({ rows, canRetry, onRowResolved }) {
     )
   }
   return (
-    <table className="appt-list-table" style={{ width: '100%' }}>
+    <table className="appt-list-table" style={{ width: '100%', tableLayout: 'fixed' }}>
       <thead>
         <tr>
-          <th>Warehouse</th>
-          <th>Type</th>
-          <th>PO / Ref #</th>
-          <th>Carrier</th>
-          <th>Owner / Project</th>
-          <th>Age</th>
-          <th>Error</th>
-          <th>Front</th>
-          {canRetry && <th>Action</th>}
+          <th style={{ width: '9%' }}>Warehouse</th>
+          <th style={{ width: '7%' }}>Type</th>
+          <th style={{ width: '10%' }}>PO / Ref #</th>
+          <th style={{ width: '7%' }}>Carrier</th>
+          <th style={{ width: '13%' }}>Owner / Project</th>
+          <th style={{ width: '5%' }}>Age</th>
+          <th style={{ width: '20%' }}>Error</th>
+          <th style={{ width: '13%' }}>Front Conversation ID</th>
+          <th style={{ width: '16%' }}>Action</th>
         </tr>
       </thead>
       <tbody>
@@ -122,25 +170,35 @@ function ExceptionsTable({ rows, canRetry, onRowResolved }) {
           const frontUrl = frontConversationUrl(r.front_conversation_id)
           return (
             <tr key={r.id}>
-              <td>{r.warehouse || '—'}</td>
-              <td>{r.type || '—'}</td>
-              <td style={{ fontFamily: 'var(--font-mono)' }}>{r.reference_number || '—'}</td>
-              <td>{r.carrier || '—'}</td>
-              <td>{[r.owner, r.project].filter(Boolean).join(' / ') || '—'}</td>
+              <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.warehouse || '—'}</td>
+              <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.type || '—'}</td>
+              <td style={{ fontFamily: 'var(--font-mono)', whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.reference_number || '—'}</td>
+              <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.carrier || '—'}</td>
+              <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{[r.owner, r.project].filter(Boolean).join(' / ') || '—'}</td>
               <td>{fmtAge(r.created_at)}</td>
-              <td style={{ color: r.datex_error ? 'var(--red)' : 'var(--text-dim)', fontSize: 11, maxWidth: 240 }}>
+              <td style={{ color: r.datex_error ? 'var(--red)' : 'var(--text-dim)', fontSize: 11, whiteSpace: 'normal', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
                 {r.datex_error || '—'}
               </td>
-              <td>
-                {frontUrl
-                  ? <a href={frontUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--text-secondary)' }}>Open ↗</a>
+              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10, whiteSpace: 'normal', wordBreak: 'break-all' }}>
+                {r.front_conversation_id
+                  ? (
+                    <>
+                      <div>{r.front_conversation_id}</div>
+                      {frontUrl && (
+                        <a href={frontUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-display)', fontSize: 11 }}>
+                          Open ↗
+                        </a>
+                      )}
+                    </>
+                  )
                   : '—'}
               </td>
-              {canRetry && (
-                <td>
-                  <RetryButton row={r} onDone={onRowResolved} />
-                </td>
-              )}
+              <td>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+                  {canRetry && <RetryButton row={r} onDone={onRowResolved} />}
+                  <DeleteButton row={r} onDone={onRowResolved} />
+                </div>
+              </td>
             </tr>
           )
         })}
