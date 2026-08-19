@@ -4,7 +4,15 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 // Ported from front_netlify_datex/src/components/AppointmentInsights.jsx
 // (2026-08-03). UPDATED 2026-08-18 per Dan's request to tie this panel's
 // labor numbers to the real Labor Planning tab instead of a lookalike Omni
-// topic — see scheduling-labor-planning-insights.cjs. Changes in this pass:
+// topic — see scheduling-labor-planning-insights.cjs. UPDATED AGAIN
+// 2026-08-19 after Dan reported the numbers still didn't match: this
+// component was silently folding EST Drops into the "Inbound" stat
+// (totalInbound = inbound + totalDrops), which is why Inbound showed 45
+// instead of 9 — Labor Planning shows Drops as its OWN separate stat, not
+// merged into Inbound. Fixed: now shows Total / Inbound / Outbound / Drops
+// as four separate numbers, matching Labor Planning's card layout exactly.
+//
+// Changes across both passes:
 //   1. New day-level labor summary row (Available/Required/Delta hrs),
 //      mirroring the appointment summary row above it.
 //   2. Per-hour rows now show the actual surplus/deficit number
@@ -17,6 +25,7 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 //   4. "Est." badge (in place of "LIVE") when the labor data came from the
 //      Omni-topic fallback rather than the real roster — see `source` on
 //      the getLaborInsights response.
+//   5. (2026-08-19) Drops is its own stat card now, not folded into Inbound.
 
 const COLOR_INBOUND = '#378ADD'
 const COLOR_DROPS = '#A78BFA'
@@ -139,9 +148,9 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
   if (!warehouse || !date) return null
 
   const totalDrops = laborData.reduce((s, l) => s + (l.drops || 0), 0)
-  const totalInbound = hourlyData.reduce((s, h) => s + h.inbound, 0) + totalDrops
+  const totalInbound = hourlyData.reduce((s, h) => s + h.inbound, 0)
   const totalOutbound = hourlyData.reduce((s, h) => s + h.outbound, 0)
-  const totalAppts = totalInbound + totalOutbound
+  const totalAppts = totalInbound + totalOutbound + totalDrops
 
   const maxTotal = Math.max(
     1,
@@ -270,25 +279,33 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
 
             {!loading && hasLiveData && (
               <>
-                <div className="flex gap-1.5 mb-1.5">
-                  <div className="flex-1 bg-gray-50 rounded-lg px-2 py-1.5 text-center">
-                    <div className="text-[10px] font-medium text-gray-400 leading-none mb-0.5">Total</div>
+                <div className="flex gap-1 mb-1.5">
+                  <div className="flex-1 bg-gray-50 rounded-lg px-1.5 py-1.5 text-center">
+                    <div className="text-[9px] font-medium text-gray-400 leading-none mb-0.5">Total</div>
                     <div className="text-sm font-bold text-gray-800 leading-none">{totalAppts}</div>
                   </div>
-                  <div className="flex-1 rounded-lg px-2 py-1.5 text-center" style={{ backgroundColor: '#EBF3FB' }}>
-                    <div className="text-[10px] font-medium leading-none mb-0.5" style={{ color: COLOR_INBOUND }}>
+                  <div className="flex-1 rounded-lg px-1.5 py-1.5 text-center" style={{ backgroundColor: '#EBF3FB' }}>
+                    <div className="text-[9px] font-medium leading-none mb-0.5" style={{ color: COLOR_INBOUND }}>
                       Inbound
                     </div>
                     <div className="text-sm font-bold leading-none" style={{ color: COLOR_INBOUND }}>
                       {totalInbound}
                     </div>
                   </div>
-                  <div className="flex-1 rounded-lg px-2 py-1.5 text-center" style={{ backgroundColor: '#FBF0EB' }}>
-                    <div className="text-[10px] font-medium leading-none mb-0.5" style={{ color: COLOR_OUTBOUND }}>
+                  <div className="flex-1 rounded-lg px-1.5 py-1.5 text-center" style={{ backgroundColor: '#FBF0EB' }}>
+                    <div className="text-[9px] font-medium leading-none mb-0.5" style={{ color: COLOR_OUTBOUND }}>
                       Outbound
                     </div>
                     <div className="text-sm font-bold leading-none" style={{ color: COLOR_OUTBOUND }}>
                       {totalOutbound}
+                    </div>
+                  </div>
+                  <div className="flex-1 rounded-lg px-1.5 py-1.5 text-center" style={{ backgroundColor: '#F2EFFB' }}>
+                    <div className="text-[9px] font-medium leading-none mb-0.5" style={{ color: COLOR_DROPS }}>
+                      Drops
+                    </div>
+                    <div className="text-sm font-bold leading-none" style={{ color: COLOR_DROPS }}>
+                      {totalDrops}
                     </div>
                   </div>
                 </div>
