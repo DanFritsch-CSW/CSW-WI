@@ -21,6 +21,7 @@ import AppointmentInsights from '../../components/scheduling/AppointmentInsights
 import PluginSettingsPanel from '../../components/scheduling/PluginSettingsPanel.jsx'
 import PluginLoadContainerTab from '../../components/scheduling/PluginLoadContainerTab.jsx'
 import PluginMultiApptTab from '../../components/scheduling/PluginMultiApptTab.jsx'
+import { CSW_BEAR_LOGO } from '../../lib/csw-logo.js'
 import {
   WAREHOUSE_FALLBACK,
   TYPE_FALLBACK,
@@ -64,11 +65,27 @@ import {
  * to the original and avoid the higher risk of splitting stateful logic
  * across files without a live test environment.
  *
- * NOT yet embedded in Front's actual sidebar — that requires the CSP/iframe
- * header work and Front plugin URL re-pointing discussed separately. Until
- * then, contextType will always resolve to 'noConversation' outside of a
- * real Front iframe context, which is expected and handled below.
+ * Verified live in Front's sidebar 2026-08-18 (real MAD Appointments
+ * conversation). Per Dan's follow-up that day: App.jsx now skips TopNav on
+ * this route entirely (see NO_TOPNAV_ROUTES there), and this file renders
+ * its own compact CSW brand header below instead — the full bear mark +
+ * wordmark, without the utility bar or the other pages' nav links, which
+ * don't apply inside Front's narrow sidebar.
  */
+
+function CswBrandHeader() {
+  return (
+    <div className="flex items-center gap-2.5 mb-3 pb-3 border-b border-gray-100">
+      <div className="w-9 h-9 rounded flex items-center justify-center bg-[#a07818] shrink-0">
+        <img src={CSW_BEAR_LOGO} alt="Central Storage & Warehouse" className="w-6 h-6 object-contain" />
+      </div>
+      <div className="flex flex-col leading-none">
+        <span className="font-bold text-[15px] tracking-wide text-[#a07818]">CSW</span>
+        <span className="text-[8px] font-mono tracking-widest text-gray-400 uppercase mt-0.5">Ops Hub</span>
+      </div>
+    </div>
+  )
+}
 
 function SelectField({ label, fieldKey, value, options, onChange }) {
   return (
@@ -1173,6 +1190,8 @@ export default function PluginView() {
 
   return (
     <div className="bg-white min-h-full p-4">
+      <CswBrandHeader />
+
       {/* Tab switcher */}
       <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5 mb-4">
         <button
