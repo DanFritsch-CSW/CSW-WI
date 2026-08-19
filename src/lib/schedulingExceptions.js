@@ -9,6 +9,8 @@ import { supabase } from './supabase.js'
 //
 // The retry action can't run client-side (it needs Datex's Azure AD client
 // secret), so that goes through netlify/functions/datex-retry-push.cjs.
+// Delete also goes through a function (scheduling-delete-submission.cjs)
+// rather than a direct client-side Supabase call, to keep one write path.
 
 const STALE_PENDING_DAYS = 7
 const STUCK_PROCESSING_MINUTES = 30
@@ -95,6 +97,22 @@ export async function retryDatexPush(id) {
     err.status = res.status
     err.submission = json?.submission
     throw err
+  }
+  return json
+}
+
+// deleteSubmission — permanently removes a submissions row. Added
+// 2026-08-18 so junk/duplicate/unrecoverable records (e.g. old Stale
+// Pending rows) can be cleared instead of only viewed or retried.
+export async function deleteSubmission(id) {
+  const res = await fetch('/.netlify/functions/scheduling-delete-submission', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  const json = await res.json().catch(() => null)
+  if (!res.ok) {
+    throw new Error(json?.error || `HTTP ${res.status}`)
   }
   return json
 }
