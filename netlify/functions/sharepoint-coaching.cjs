@@ -13,10 +13,9 @@
 // pull a Fathom transcript and draft the recap/homework/LOE fields — not
 // through this dashboard. No POST handler needed.
 //
-// BLOCKED as of 2026-08-17: SHAREPOINT_COACHING_URL not set — Tim needs
-// to confirm whether this workbook lives on SharePoint yet, or is still
-// local/email-only. Once it's there, add the env var in Netlify and this
-// goes live with no code change, same as every other tracker in this app.
+// LIVE as of 2026-08-17 (later): Tim confirmed the workbook's SharePoint
+// location and Dan sent the real share link — SHAREPOINT_COACHING_URL is
+// set in Netlify.
 
 const TENANT_ID     = process.env.SHAREPOINT_TENANT_ID
 const CLIENT_ID     = process.env.SHAREPOINT_CLIENT_ID
