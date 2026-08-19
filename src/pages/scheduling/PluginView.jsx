@@ -13,6 +13,8 @@ import {
   getOwnerProjectMap,
   getSettings,
   saveSettings,
+  getAppointmentInsights,
+  getLaborInsights,
 } from '../../lib/schedulingApi.js'
 import StatusBadge from '../../components/scheduling/StatusBadge.jsx'
 import ComboBox from '../../components/scheduling/ComboBox.jsx'
@@ -46,6 +48,9 @@ import {
   buildEmptySlot,
   buildDraft,
   buildMergedSlot,
+  formatHour,
+  fmtHrs,
+  findBestHour,
 } from '../../lib/pluginUtils.js'
 
 /**
@@ -71,6 +76,24 @@ import {
  * its own compact CSW brand header below instead — the full bear mark +
  * wordmark, without the utility bar or the other pages' nav links, which
  * don't apply inside Front's narrow sidebar.
+ *
+ * UPDATED 2026-08-19 — two changes per Dan's feedback:
+ *   1. BUG FIX: the Single APPT tab label was showing the submission's
+ *      carrier name (e.g. "TQL") once an appointment had been pushed to
+ *      Datex, overriding the "Single APPT" label. Dan flagged this as
+ *      unwanted — the tab label now always reads "Single APPT" regardless
+ *      of submission state.
+ *   2. The short-staffed/traffic banner for the currently-selected arrival
+ *      hour moved from AppointmentInsights (buried down in Day Insights)
+ *      to directly under the Arrival Time picker here, so the signal is
+ *      visible at the moment of choosing a time. Added alongside it: for
+ *      brand-new manual entries (notFound === true) with no time chosen
+ *      yet, the arrival time auto-fills to the hour with the greatest
+ *      labor surplus (see findBestHour in pluginUtils.js) once labor data
+ *      loads for that warehouse+date — a human can still freely override
+ *      it afterward. Auto-suggestion only fires once per warehouse+date
+ *      combination per mount (tracked via autoSuggestedRef) so clearing
+ *      the field doesn't cause it to keep re-suggesting.
  */
 
 function CswBrandHeader() {
@@ -182,6 +205,19 @@ export default function PluginView() {
   ownerProjectMapRef.current = ownerProjectMap
   const projectOwnerMapRef = useRef(projectOwnerMap)
   projectOwnerMapRef.current = projectOwnerMap
+
+  // ── Picker-adjacent labor insights (added 2026-08-19) ───────────────────
+  // Powers the traffic/staffing banner directly under the Arrival Time
+  // picker, and the auto-suggest-best-hour behavior for brand-new manual
+  // entries. Independent of AppointmentInsights' own fetch below — but
+  // since both call the same getAppointmentInsights/getLaborInsights
+  // functions with the same (warehouse, date) cache key, a warm
+  // localStorage cache means this doesn't cost a second network round
+  // trip in practice.
+  const [pickerHourly, setPickerHourly] = useState([])
+  const [pickerLabor, setPickerLabor] = useState([])
+  const [pickerLoaded, setPickerLoaded] = useState(false)
+  const autoSuggestedRef = useRef(new Set())
 
   // ── Multiple APPT tab state ──────────────────────────────────────────────
   const [multiDrafts, setMultiDrafts] = useState([])
@@ -345,6 +381,62 @@ export default function PluginView() {
       .finally(() => setDockDoorsLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.warehouse])
+
+  // Derived values for the picker-adjacent banner + auto-suggest, computed
+  // fresh each render (cheap string ops) rather than memoized — used by
+  // both the effects below and the render section further down.
+  const draftDateOnly = (draft.scheduled_arrival || '').split('T')[0]
+  const draftTimePart = (draft.scheduled_arrival || '').includes('T') ? draft.scheduled_arrival.split('T')[1] : ''
+  const draftSelectedHour = draftTimePart ? parseInt(draftTimePart.split(':')[0], 10) : null
+
+  // Fetch appointment + labor data for the picker banner whenever the
+  // warehouse or arrival DATE changes (independent of which hour is
+  // picked — the banner reads the specific hour out of this data below).
+  useEffect(() => {
+    if (!draft.warehouse || !draftDateOnly) {
+      setPickerHourly([])
+      setPickerLabor([])
+      setPickerLoaded(false)
+      return
+    }
+    let cancelled = false
+    setPickerLoaded(false)
+    Promise.all([getAppointmentInsights(draft.warehouse, draftDateOnly), getLaborInsights(draft.warehouse, draftDateOnly)])
+      .then(([apptRes, laborRes]) => {
+        if (cancelled) return
+        setPickerHourly(apptRes.hours || [])
+        setPickerLabor(laborRes.hours || [])
+        setPickerLoaded(true)
+      })
+      .catch(() => {
+        if (!cancelled) setPickerLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.warehouse, draftDateOnly])
+
+  // Auto-suggest the best hour (greatest labor surplus) for a brand-new
+  // manual entry once labor data has loaded — only if no time is chosen
+  // yet, and only once per warehouse+date combination so clearing the
+  // field afterward doesn't cause it to keep re-suggesting. The human can
+  // always override the suggested time; this only ever fills a blank.
+  useEffect(() => {
+    if (!notFound) return
+    if (!pickerLoaded || pickerLabor.length === 0) return
+    if (!draft.warehouse || !draftDateOnly) return
+    if (draftTimePart) return
+    const comboKey = `${draft.warehouse}|${draftDateOnly}`
+    if (autoSuggestedRef.current.has(comboKey)) return
+    autoSuggestedRef.current.add(comboKey)
+    const best = findBestHour(pickerLabor)
+    if (best) {
+      const hh = String(best.hour).padStart(2, '0')
+      handleFieldChange('scheduled_arrival', `${draftDateOnly}T${hh}:00`)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notFound, pickerLoaded, pickerLabor, draft.warehouse, draftDateOnly, draftTimePart])
 
   const filteredProjects = useMemo(() => {
     if (!draft.owner || Object.keys(ownerProjectMap).length === 0) return lookups.projects
@@ -1188,6 +1280,45 @@ export default function PluginView() {
     return <p className="mt-16 text-sm text-gray-400 text-center px-4 leading-relaxed">{msg}</p>
   })()
 
+  // Picker-adjacent traffic/staffing banner for the currently-selected
+  // arrival hour — moved here from AppointmentInsights 2026-08-19 per
+  // Dan's request, so it's visible at the moment of choosing a time
+  // instead of requiring a scroll down to Day Insights.
+  const pickerBanner = (() => {
+    if (draftSelectedHour == null || !pickerLoaded) return null
+    const appts = pickerHourly.find((h) => h.hour === draftSelectedHour)
+    const labor = pickerLabor.find((l) => l.hour === draftSelectedHour)
+    if (!labor) return null
+    const drops = labor.drops || 0
+    const total = (appts ? appts.inbound + appts.outbound : 0) + drops
+    const density = total === 0 ? 'no appointments' : total <= 3 ? 'light traffic' : total <= 8 ? 'moderate traffic' : 'heavy traffic'
+    const isShort = labor.final < 0
+
+    if (isShort) {
+      return (
+        <div className="px-3 py-2.5 rounded-lg border-2 border-red-500 bg-red-100 shadow-sm">
+          <div className="flex items-center gap-1.5">
+            <span className="text-base leading-none">⚠️</span>
+            <span className="text-sm font-extrabold text-red-700 uppercase tracking-wide leading-none">
+              Short {Math.abs(labor.final).toFixed(1)} Staff
+            </span>
+          </div>
+          <div className="text-[11px] text-red-800 mt-1">
+            <span className="font-semibold">{formatHour(draftSelectedHour)}</span> has {density} — {total} appt
+            {total !== 1 ? 's' : ''}
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div className="px-2 py-1.5 rounded-lg text-[11px] border bg-indigo-50 border-indigo-100 text-indigo-800">
+        <span className="font-semibold">{formatHour(draftSelectedHour)}</span> has {density} — {total} appt
+        {total !== 1 ? 's' : ''} · Avail {fmtHrs(labor.final)} hrs
+      </div>
+    )
+  })()
+
   return (
     <div className="bg-white min-h-full p-4">
       <CswBrandHeader />
@@ -1198,7 +1329,7 @@ export default function PluginView() {
           onClick={() => setPluginView('appointment')}
           className={`flex-1 py-1 rounded-md text-xs font-medium transition-colors ${pluginView === 'appointment' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
         >
-          {submission ? submission.carrier || 'Single APPT' : 'Single APPT'}
+          Single APPT
         </button>
         <button
           onClick={() => {
@@ -1422,6 +1553,9 @@ export default function PluginView() {
                 </select>
               </div>
             </div>
+
+            {pickerBanner}
+
             <div className="grid grid-cols-2 gap-2">
               <ComboBox small label="Dock Door" fieldKey="scheduled_dock_door" value={draft.scheduled_dock_door} options={lookups.dock_doors} loading={dockDoorsLoading} onChange={handleFieldChange} />
               <ComboBox small label="Carrier" fieldKey="carrier" value={draft.carrier} options={lookups.carriers} loading={lookupsLoading} onChange={handleFieldChange} />
@@ -1637,12 +1771,7 @@ export default function PluginView() {
               const d = (draft.scheduled_arrival || '').split('T')[0]
               return d || null
             })()}
-            selectedHour={(() => {
-              const timePart = (draft.scheduled_arrival || '').includes('T') ? draft.scheduled_arrival.split('T')[1] : null
-              if (!timePart) return null
-              const h = parseInt(timePart.split(':')[0], 10)
-              return isNaN(h) ? null : h
-            })()}
+            selectedHour={draftSelectedHour}
             selectedOwner={draft.owner || null}
             project={draft.project || null}
           />
