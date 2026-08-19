@@ -15,16 +15,25 @@
  *   - Per-project Hours-Per-Appointment overrides (project_labor_assumptions)
  *     weren't applied at all.
  *
- * FIXED AGAIN 2026-08-19 (same day, after Avail Hrs matched exactly but Req
- * Hrs was still off by ~8): the HPA-override blend below was querying
- * MotherDuck's projectHourly mode using the NORMALIZED display name (e.g.
- * "Fair Oaks Farms") instead of the RAW project_name values the underlying
- * gold table actually stores (e.g. "FAIR OAKS FARMS" / "FAIR OAKS FARMS
- * WEST"). For any KEN-merged project that also has an HPA override, that
- * silently returned zero live appointments for the override calc, pushing
- * those appointments into the default-HPA bucket instead. Fixed via
- * buildReverseNameMap below — queries projectHourly with ALL raw names
- * that fold into each override's display name.
+ * FIXED AGAIN 2026-08-19 (same day, after appointment counts + Avail Hrs
+ * matched exactly but Req Hrs was still off by ~8): found a genuine latent
+ * bug in FacilityPanel.jsx's own perHourReq memo, not something introduced
+ * here. perHourReq looks up a project's live appointment count via
+ * `perProjectHourly[h][name]`, but the data that's built from
+ * (fetchProjectHourlyAppointments -> motherduck-appointments.cjs's
+ * projectHourly mode) returns a FLAT {inb, out} object per hour — an
+ * aggregate across ALL requested projects combined, never broken out per
+ * project name. So `perProjectHourly[h][name]` always resolves to
+ * `undefined` in the real app, and override-HPA projects never actually
+ * get credit for their live appointments — only their EST Drops forecast
+ * counts toward the override rate. An earlier version of this file fetched
+ * each override project's REAL live count (correctly) — more accurate than
+ * the real app, but for that exact reason didn't match its displayed
+ * number. Now replicates the bug on purpose (see the override-blend
+ * comment below) rather than silently being "more correct" than what
+ * Dan's team actually sees. Worth fixing in FacilityPanel.jsx itself at
+ * some point, but that's a separate decision since it would change Labor
+ * Planning's own displayed Req Hrs number.
  *
  * This version replicates FacilityPanel.jsx's full pipeline:
  *   1. roster_assignments (Supabase) — today's synced roster, as before.
@@ -39,8 +48,8 @@
  *   4. Live appointment counts — via motherduck-appointments.cjs (the same
  *      MotherDuck-direct source Labor Planning uses), NOT Omni.
  *   5. Per-project HPA overrides — project_labor_assumptions (Supabase),
- *      blended exactly like FacilityPanel.jsx's perHourReq memo, with the
- *      raw/normalized name reconciliation described above.
+ *      blended exactly like FacilityPanel.jsx's perHourReq memo — drops
+ *      only, per the bug described above.
  *
  * FALLBACK: unchanged from the first version — if roster_assignments has
  * zero rows for this facility+date, falls back to the old Omni-topic-based
@@ -91,24 +100,6 @@ function normalizeProjectName(facilityId, rawName, customNameMap) {
   if (customNameMap.has(rawName)) return customNameMap.get(rawName)
   if (facilityId === 'ken' && KEN_OMNI_NAME_MAP.has(rawName)) return KEN_OMNI_NAME_MAP.get(rawName)
   return rawName
-}
-
-// Reverse of normalizeProjectName: normalized display name -> raw MotherDuck
-// project_name values that fold into it. Needed because motherduck-appointments'
-// projectHourly mode filters on the RAW project_name column, not the display
-// name — passing a merged display name like "Fair Oaks Farms" straight into
-// that query silently matches zero rows. See top-of-file 2026-08-19 fix note.
-function buildReverseNameMap(facilityId, customNameMap) {
-  const reverse = new Map()
-  function add(raw, normalized) {
-    if (!reverse.has(normalized)) reverse.set(normalized, [])
-    reverse.get(normalized).push(raw)
-  }
-  if (facilityId === 'ken') {
-    for (const [raw, normalized] of KEN_OMNI_NAME_MAP.entries()) add(raw, normalized)
-  }
-  for (const [raw, normalized] of customNameMap.entries()) add(raw, normalized)
-  return reverse
 }
 
 function parseB2eTime(s) {
@@ -454,11 +445,31 @@ exports.handler = async (event) => {
     const totalApptsPerHour = apptsPerHour.map((n, h) => n + (estDropsPerHour[h] || 0))
 
     // ── Per-project HPA override blend (only runs if any overrides exist
-    // for this facility) — mirrors FacilityPanel.jsx's perHourReq memo.
+    // for this facility) — mirrors FacilityPanel.jsx's perHourReq memo
+    // EXACTLY, including a genuine latent bug discovered 2026-08-19 while
+    // chasing this exact mismatch: perHourReq looks up a project's live
+    // appointment count via `perProjectHourly[h][name]`, but the
+    // server-side data it's built from (fetchProjectHourlyAppointments ->
+    // motherduck-appointments.cjs's projectHourly mode) returns a FLAT
+    // {inb, out} object per hour — an aggregate across ALL requested
+    // projects combined, not broken out per project name. So
+    // `perProjectHourly[h][name]` always resolves to `undefined` in the
+    // real app, and override-HPA projects NEVER actually get credit for
+    // their live appointments — only their EST Drops forecast counts
+    // toward the override rate. Every live appointment, override project
+    // or not, silently falls into the default-rate "remaining" bucket.
+    //
+    // An earlier version of this file fetched each override project's
+    // REAL live count (correctly) — which is more accurate than the real
+    // app, but for that exact reason didn't match it. Replicating the bug
+    // here on purpose: only dropCount ever contributes to
+    // overrideHours/overrideAppts, live appointments never do. This is a
+    // real bug in FacilityPanel.jsx worth fixing there too at some point —
+    // but fixing it would change what the real Labor Planning tab
+    // displays, so that's a separate decision, not something to silently
+    // do here.
     let reqPerHour
     if (projectHpa.size > 0) {
-      const reverseNameMap = buildReverseNameMap(facility, customNameMap)
-
       let projectDataRows = []
       try {
         const resp = await mdAppointments('projectData', facility, date)
@@ -473,45 +484,22 @@ exports.handler = async (event) => {
         if (projectHpa.has(name)) overrideNames.add(name)
       }
 
-      // Per-name hourly appt fetch — projectHourly's SQL filters on RAW
-      // project_name values, so each override name is resolved back to its
-      // raw MotherDuck name(s) via reverseNameMap before querying (falls
-      // back to the name itself for the common case where raw === display).
-      // One call per override name (not one aggregate call) because
-      // projectHourly doesn't tag rows with which requested name matched,
-      // so results can't be split back out per project otherwise.
-      const perNameHourly = {}
-      await Promise.all(
-        [...overrideNames].map(async (name) => {
-          const rawNames = reverseNameMap.get(name) || [name]
-          try {
-            const resp = await mdAppointments('projectHourly', facility, date, rawNames)
-            perNameHourly[name] = resp.hourMap || {}
-          } catch {
-            perNameHourly[name] = {}
-          }
-        })
-      )
-
       reqPerHour = new Array(24).fill(0)
       for (let h = 0; h < 24; h++) {
         let overrideHours = 0
         let overrideAppts = 0
         for (const name of overrideNames) {
           if (!projectHpa.has(name)) continue
-          const row = perNameHourly[name]?.[h]
-          const liveAppts = row ? (row.inb || 0) + (row.out || 0) : 0
           const dropCount = Number(estDropsByProjectHour?.[name]?.[h] ?? 0) || 0
-          const projectTotal = liveAppts + dropCount
-          if (projectTotal === 0) continue
-          overrideHours += projectTotal * projectHpa.get(name)
-          overrideAppts += projectTotal
+          if (dropCount === 0) continue
+          overrideHours += dropCount * projectHpa.get(name)
+          overrideAppts += dropCount
         }
         const remainingAppts = Math.max(0, totalApptsPerHour[h] - overrideAppts)
         reqPerHour[h] = Math.round((overrideHours + remainingAppts * hpa) * 10) / 10
       }
 
-      console.log(`[scheduling-labor-planning-insights] HPA overrides applied for ${[...overrideNames].join(', ')}`)
+      console.log(`[scheduling-labor-planning-insights] HPA overrides applied (drops-only, matching FacilityPanel.jsx's real behavior) for ${[...overrideNames].join(', ')}`)
     } else {
       reqPerHour = totalApptsPerHour.map((n) => Math.round(n * hpa * 10) / 10)
     }
