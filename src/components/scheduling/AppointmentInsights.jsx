@@ -2,7 +2,21 @@ import { useState, useEffect, useRef } from 'react'
 import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppointmentList } from '../../lib/schedulingApi.js'
 
 // Ported from front_netlify_datex/src/components/AppointmentInsights.jsx
-// (2026-08-03), verbatim aside from the updated import path.
+// (2026-08-03). UPDATED 2026-08-18 per Dan's request to tie this panel's
+// labor numbers to the real Labor Planning tab instead of a lookalike Omni
+// topic — see scheduling-labor-planning-insights.cjs. Changes in this pass:
+//   1. New day-level labor summary row (Available/Required/Delta hrs),
+//      mirroring the appointment summary row above it.
+//   2. Per-hour rows now show the actual surplus/deficit number
+//      (e.g. "-2.3") instead of only a red/green dot.
+//   3. NOT built this pass: flagging in the arrival-time PICKER itself
+//      whether adding this appointment would push an hour into deficit.
+//      That needs the picker to know hours_per_appt, which lives in
+//      facility_settings and isn't plumbed into PluginView today — real
+//      next step, scoped out for now rather than half-built.
+//   4. "Est." badge (in place of "LIVE") when the labor data came from the
+//      Omni-topic fallback rather than the real roster — see `source` on
+//      the getLaborInsights response.
 
 const COLOR_INBOUND = '#378ADD'
 const COLOR_DROPS = '#A78BFA'
@@ -20,6 +34,11 @@ function formatHour(h) {
   return `${h - 12}p`
 }
 
+function fmtHrs(n) {
+  const sign = n > 0 ? '+' : ''
+  return `${sign}${n.toFixed(1)}`
+}
+
 /**
  * AppointmentInsights — Day Insights panel for the Front sidebar plugin.
  *
@@ -35,6 +54,8 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
   const [loading, setLoading] = useState(false)
   const [hourlyData, setHourlyData] = useState([])
   const [laborData, setLaborData] = useState([])
+  const [laborDaily, setLaborDaily] = useState(null)
+  const [laborSource, setLaborSource] = useState(null) // 'roster' | 'omni_fallback' | null
   const [ownerData, setOwnerData] = useState(null)
   const [ownerLoading, setOwnerLoading] = useState(false)
   const [hasLiveData, setHasLiveData] = useState(false)
@@ -56,6 +77,8 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
     if (!warehouse || !date) {
       setHourlyData([])
       setLaborData([])
+      setLaborDaily(null)
+      setLaborSource(null)
       setHasLiveData(false)
       return
     }
@@ -65,6 +88,8 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
     if (cached) {
       setHourlyData(cached.hourlyData)
       setLaborData(cached.laborData)
+      setLaborDaily(cached.laborDaily)
+      setLaborSource(cached.laborSource)
       setHasLiveData(true)
       return
     }
@@ -77,12 +102,16 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
       .then(([apptRes, laborRes]) => {
         const hourly = apptRes.hours || []
         const labor = laborRes.hours || []
+        const daily = laborRes.daily || null
+        const source = laborRes.source || null
         setHourlyData(hourly)
         setLaborData(labor)
+        setLaborDaily(daily)
+        setLaborSource(source)
         setHasLiveData(true)
         const err = apptRes.error || laborRes.error || null
         setFetchError(err)
-        apptLaborCacheRef.current[cacheKey] = { hourlyData: hourly, laborData: labor }
+        apptLaborCacheRef.current[cacheKey] = { hourlyData: hourly, laborData: labor, laborDaily: daily, laborSource: source }
       })
       .catch((err) => {
         console.warn('[AppointmentInsights] fetch failed:', err.message)
@@ -216,6 +245,14 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
         <button onClick={() => setOpen((v) => !v)} className="flex items-center justify-between w-full text-left">
           <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">{dateHeader}</span>
           <div className="flex items-center gap-1.5">
+            {hasLiveData && laborSource === 'omni_fallback' && (
+              <span
+                className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full leading-none"
+                title="No roster synced for this date yet — labor numbers are an Omni estimate, not the real roster."
+              >
+                EST.
+              </span>
+            )}
             {hasLiveData && (
               <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full leading-none">
                 LIVE
@@ -233,7 +270,7 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
 
             {!loading && hasLiveData && (
               <>
-                <div className="flex gap-1.5 mb-2.5">
+                <div className="flex gap-1.5 mb-1.5">
                   <div className="flex-1 bg-gray-50 rounded-lg px-2 py-1.5 text-center">
                     <div className="text-[10px] font-medium text-gray-400 leading-none mb-0.5">Total</div>
                     <div className="text-sm font-bold text-gray-800 leading-none">{totalAppts}</div>
@@ -255,6 +292,34 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
                     </div>
                   </div>
                 </div>
+
+                {/* Day-level labor summary — mirrors the appointment summary above,
+                    added 2026-08-18. Available/Required come straight from the real
+                    Labor Planning roster calc (or the Omni-estimate fallback — see
+                    the EST. badge above if so). */}
+                {laborDaily && (
+                  <div className="flex gap-1.5 mb-2.5">
+                    <div className="flex-1 bg-gray-50 rounded-lg px-2 py-1.5 text-center">
+                      <div className="text-[10px] font-medium text-gray-400 leading-none mb-0.5">Avail Hrs</div>
+                      <div className="text-sm font-bold text-gray-800 leading-none">{laborDaily.totalAvailable.toFixed(1)}</div>
+                    </div>
+                    <div className="flex-1 bg-gray-50 rounded-lg px-2 py-1.5 text-center">
+                      <div className="text-[10px] font-medium text-gray-400 leading-none mb-0.5">Req Hrs</div>
+                      <div className="text-sm font-bold text-gray-800 leading-none">{laborDaily.totalRequired.toFixed(1)}</div>
+                    </div>
+                    <div
+                      className="flex-1 rounded-lg px-2 py-1.5 text-center"
+                      style={{ backgroundColor: laborDaily.delta < 0 ? '#FBEBEB' : '#EBFBF2' }}
+                    >
+                      <div className="text-[10px] font-medium leading-none mb-0.5" style={{ color: laborDaily.delta < 0 ? COLOR_SHORT : COLOR_STAFFED }}>
+                        Delta
+                      </div>
+                      <div className="text-sm font-bold leading-none" style={{ color: laborDaily.delta < 0 ? COLOR_SHORT : COLOR_STAFFED }}>
+                        {fmtHrs(laborDaily.delta)}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {selectedHour != null &&
                   (() => {
@@ -324,6 +389,22 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
                             </div>
                             <span className="text-[10px] text-gray-400 w-4 text-right shrink-0">{total > 0 ? total : ''}</span>
                           </div>
+
+                          {/* Per-hour labor surplus/deficit — added 2026-08-18. Was a
+                              dot-only indicator before; now shows the actual number
+                              so a CSR can see how short/staffed an hour is at a glance
+                              instead of inferring it from a color. */}
+                          {hasLabor ? (
+                            <span
+                              className="text-[10px] font-mono font-semibold w-9 text-right shrink-0"
+                              style={{ color: isShort ? COLOR_SHORT : COLOR_STAFFED }}
+                              title={`Available ${labor.labor_available.toFixed(1)} hrs — Required ${labor.labor_required.toFixed(1)} hrs`}
+                            >
+                              {fmtHrs(labor.final)}
+                            </span>
+                          ) : (
+                            <span className="w-9 shrink-0" />
+                          )}
 
                           {hasAppts ? (
                             <span className="text-[9px] text-gray-300 shrink-0 w-2.5 text-center">{isExpanded ? '▾' : '▸'}</span>
