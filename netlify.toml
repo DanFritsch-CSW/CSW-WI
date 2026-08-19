@@ -26,6 +26,14 @@
 [functions."omni-query"]
   timeout = 26
 
+# Scheduling plugin labor insights -- added 2026-08-18. Makes a Supabase
+# roster_assignments/facility_settings/employee_breaks read plus two
+# chained internal function calls (scheduling-omni-appointments, and
+# scheduling-omni-labor on the fallback path) -- 26s gives it the same
+# headroom as omni-query itself, which it calls transitively.
+[functions."scheduling-labor-planning-insights"]
+  timeout = 26
+
 # --- duckdb-needing functions below (native module: external_node_modules
 # + included_files scoped here only, not globally -- see [functions] header
 # above for the 2026-08-06 ENOSPC fix story) ---
