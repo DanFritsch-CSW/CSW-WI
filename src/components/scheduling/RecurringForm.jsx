@@ -5,6 +5,10 @@ import ComboBox from './ComboBox.jsx'
 // Ported from front_netlify_datex/src/components/RecurringForm.jsx
 // (2026-08-03). Changes: import paths updated, and the raw fetch to
 // create-recurring updated to scheduling-create-recurring.
+//
+// UPDATED 2026-08-19 per Kay/Anne's "disappearing dock door in Recurring"
+// report — see the dock-door-loading effect below for the root cause and
+// fix (a missing stale-request guard).
 
 const WAREHOUSES = ['CSW-Eau Claire', 'CSW-Franksville', 'CSW-Kenosha', 'CSW-Madison', 'CSW-Wisconsin Rapids']
 
@@ -239,9 +243,21 @@ export default function RecurringForm({ compact = false }) {
       setDockDoors([])
       return
     }
+    // Stale-request guard — added 2026-08-19 per Kay/Anne's "disappearing
+    // dock door in Recurring" report. Without this, switching warehouses
+    // quickly (or just landing on the form while a slow dock-door fetch
+    // is still in flight) let an OLD warehouse's fetch resolve AFTER the
+    // user had already picked a valid dock door for the NEW warehouse.
+    // That old fetch's own cleanup check ("is the currently selected door
+    // in MY list?") would then see the new door isn't in its stale list
+    // and wipe the selection back to blank — matching the exact report:
+    // dock door disappears, works again on a second click (by then the
+    // stale fetch has already resolved and can no longer interfere).
+    let cancelled = false
     setDockDoorsLoading(true)
     getLookupOptionsWithIds('dock_doors', fields.warehouse)
       .then((raw) => {
+        if (cancelled) return
         const normalized = normalizePairs(raw)
         setDockDoors(normalized)
         setFields((prev) => {
@@ -254,7 +270,12 @@ export default function RecurringForm({ compact = false }) {
         })
       })
       .catch(() => {})
-      .finally(() => setDockDoorsLoading(false))
+      .finally(() => {
+        if (!cancelled) setDockDoorsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [fields.warehouse])
 
   useEffect(() => {
