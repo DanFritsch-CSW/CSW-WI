@@ -35,6 +35,15 @@
  * some point, but that's a separate decision since it would change Labor
  * Planning's own displayed Req Hrs number.
  *
+ * FIXED AGAIN 2026-08-19 (same day, after Req Hrs also matched): Dan
+ * pointed out the `delta` field mirrors Labor Planning's "Daily +/-" pill,
+ * not "Daily +/- After Adj" — the number that also folds in manual hourly
+ * labor adjustments ops enters directly (the ADJ column in the Hourly
+ * Breakdown table). Added `totalAdj`/`laborAfterAdj`/`deltaAfterAdj` to the
+ * `daily` response, mirroring KpiPills.jsx's exact formulas:
+ *   laborAfterAdj = totalAvailable + totalAdj
+ *   deltaAfterAdj = laborAfterAdj - totalRequired
+ *
  * This version replicates FacilityPanel.jsx's full pipeline:
  *   1. roster_assignments (Supabase) — today's synced roster, as before.
  *   2. Carryover employees — live fetch via motherduck-b2e-roster.cjs,
@@ -50,15 +59,20 @@
  *   5. Per-project HPA overrides — project_labor_assumptions (Supabase),
  *      blended exactly like FacilityPanel.jsx's perHourReq memo — drops
  *      only, per the bug described above.
+ *   6. Manual hourly labor adjustments (hourly_labor_adjustments, Supabase)
+ *      — summed into totalAdj/laborAfterAdj/deltaAfterAdj, per Dan's
+ *      2026-08-19 follow-up above.
  *
  * FALLBACK: unchanged from the first version — if roster_assignments has
  * zero rows for this facility+date, falls back to the old Omni-topic-based
- * scheduling-omni-labor.cjs and tags source: 'omni_fallback'.
+ * scheduling-omni-labor.cjs and tags source: 'omni_fallback'. (The
+ * fallback path doesn't compute totalAdj/laborAfterAdj/deltaAfterAdj —
+ * those fields are omitted, matching the original omni_fallback shape.)
  *
  * GET /.netlify/functions/scheduling-labor-planning-insights?warehouse=CSW-Caledonia&date=2026-08-19
  * Response: {
  *   hours: [{ hour, labor_required, labor_available, final, drops, staffed }],
- *   daily: { totalRequired, totalAvailable, delta } | null,
+ *   daily: { totalRequired, totalAvailable, delta, totalAdj, laborAfterAdj, deltaAfterAdj } | null,
  *   source: 'roster' | 'omni_fallback',
  * }
  */
@@ -312,6 +326,23 @@ async function fetchCustomProjectNameMap(supabase, facility) {
   return map
 }
 
+// Sum of manual hourly labor adjustments — mirrors FacilityPanel.jsx's
+// totalAdj exactly (Σ Object.values(hourlyAdjustments)). These are the
+// per-hour +/- corrections ops enters directly in the Hourly Breakdown's
+// ADJ column (e.g. "we sent 3 people home at 2pm" = -3 that hour).
+async function fetchTotalAdj(supabase, facility, date) {
+  const { data, error } = await supabase
+    .from('hourly_labor_adjustments')
+    .select('adjustment')
+    .eq('facility', facility)
+    .eq('plan_date', date)
+  if (error) {
+    console.warn('[scheduling-labor-planning-insights] hourly_labor_adjustments fetch failed:', error.message)
+    return 0
+  }
+  return (data || []).reduce((s, r) => s + (Number(r.adjustment) || 0), 0)
+}
+
 // Fallback path — the original Omni-topic-based labor query.
 async function fetchOmniFallback(warehouse, date) {
   const url = `${baseUrl()}/.netlify/functions/scheduling-omni-labor?warehouse=${encodeURIComponent(warehouse)}&date=${date}`
@@ -379,6 +410,7 @@ exports.handler = async (event) => {
       estDropsByProjectHour,
       projectHpa,
       customNameMap,
+      totalAdj,
     ] = await Promise.all([
       supabase.from('facility_settings').select('*').eq('facility', facility).maybeSingle(),
       supabase.from('employee_breaks').select('*').eq('facility', facility),
@@ -394,6 +426,7 @@ exports.handler = async (event) => {
       fetchEstDropsByProjectHour(supabase, facility, date),
       fetchProjectHpa(supabase, facility),
       fetchCustomProjectNameMap(supabase, facility),
+      fetchTotalAdj(supabase, facility, date),
     ])
 
     const settings = settingsResult.data || { ...SETTINGS_DEFAULTS, facility }
@@ -522,10 +555,16 @@ exports.handler = async (event) => {
       })
     }
 
+    const totalRequiredR = Math.round(totalRequired * 10) / 10
+    const totalAvailableR = Math.round(totalAvailable * 10) / 10
+    const laborAfterAdj = Math.round((totalAvailableR + totalAdj) * 10) / 10
     const daily = {
-      totalRequired: Math.round(totalRequired * 10) / 10,
-      totalAvailable: Math.round(totalAvailable * 10) / 10,
-      delta: Math.round((totalAvailable - totalRequired) * 10) / 10,
+      totalRequired: totalRequiredR,
+      totalAvailable: totalAvailableR,
+      delta: Math.round((totalAvailableR - totalRequiredR) * 10) / 10,
+      totalAdj: Math.round(totalAdj * 10) / 10,
+      laborAfterAdj,
+      deltaAfterAdj: Math.round((laborAfterAdj - totalRequiredR) * 10) / 10,
     }
 
     // Diagnostic log — kept verbose on purpose. If a future mismatch shows
