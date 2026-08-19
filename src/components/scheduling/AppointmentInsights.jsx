@@ -21,6 +21,13 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 // Falls back to the plain delta for the Omni-fallback source, which doesn't
 // compute an after-adj figure (see scheduling-labor-planning-insights.cjs).
 //
+// UPDATED AGAIN 2026-08-19 (later still) — per Dan's request, the
+// short-staffed banner is now deliberately loud instead of a subtle
+// red-on-red text line: bigger text, thick border, solid fill, and the
+// shortage stated as the headline (not tacked on after the traffic
+// description). This is the actual "should I book this appointment"
+// warning and it was easy to miss while scanning the panel before.
+//
 // Changes across all passes:
 //   1. Day-level labor summary row (Available/Required/Delta hrs),
 //      mirroring the appointment summary row above it.
@@ -37,6 +44,8 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 //   5. Drops is its own stat card, not folded into Inbound.
 //   6. Delta reflects the after-adjustments figure, matching what ops
 //      actually treats as the real number.
+//   7. Short-staffed selected-hour banner is bold/high-contrast, not a
+//      subtle inline note.
 
 const COLOR_INBOUND = '#378ADD'
 const COLOR_DROPS = '#A78BFA'
@@ -370,11 +379,35 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
                     const total = (appts ? appts.inbound + appts.outbound : 0) + drops
                     const density = total === 0 ? 'no appointments' : total <= 3 ? 'light traffic' : total <= 8 ? 'moderate traffic' : 'heavy traffic'
                     const isShort = labor && labor.final < 0
+
+                    // Short-staffed banner made deliberately loud per Dan's
+                    // request (2026-08-19) — this is the actual "should I
+                    // book this appointment" signal, and the original subtle
+                    // red-on-red text line was easy to miss while scanning
+                    // the panel. Bigger text, thick border, solid fill,
+                    // headline-first layout (shortage stated before the
+                    // traffic description, not tacked on after it).
+                    if (isShort) {
+                      return (
+                        <div className="mb-2 px-3 py-2.5 rounded-lg border-2 border-red-500 bg-red-100 shadow-sm">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-base leading-none">⚠️</span>
+                            <span className="text-sm font-extrabold text-red-700 uppercase tracking-wide leading-none">
+                              Short {Math.abs(labor.final).toFixed(1)} Staff
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-red-800 mt-1">
+                            <span className="font-semibold">{formatHour(selectedHour)}</span> has {density} — {total} appt
+                            {total !== 1 ? 's' : ''}
+                          </div>
+                        </div>
+                      )
+                    }
+
                     return (
-                      <div className={`mb-2 px-2 py-1.5 rounded-lg text-[11px] border ${isShort ? 'bg-red-50 border-red-100 text-red-800' : 'bg-indigo-50 border-indigo-100 text-indigo-800'}`}>
+                      <div className="mb-2 px-2 py-1.5 rounded-lg text-[11px] border bg-indigo-50 border-indigo-100 text-indigo-800">
                         <span className="font-semibold">{formatHour(selectedHour)}</span> has {density} — {total} appt
                         {total !== 1 ? 's' : ''}
-                        {isShort && <span className="text-red-600 font-medium"> · ⚠ Short {Math.abs(labor.final).toFixed(1)} staff</span>}
                       </div>
                     )
                   })()}
