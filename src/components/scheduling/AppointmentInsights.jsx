@@ -12,11 +12,20 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 // merged into Inbound. Fixed: now shows Total / Inbound / Outbound / Drops
 // as four separate numbers, matching Labor Planning's card layout exactly.
 //
-// Changes across both passes:
-//   1. New day-level labor summary row (Available/Required/Delta hrs),
+// UPDATED AGAIN 2026-08-19 (later same day): the "Delta" tile was showing
+// Labor Planning's "Daily +/-" pill (raw Avail − Req), not "Daily +/- After
+// Adj" — the number that also folds in manual hourly labor adjustments ops
+// enters in the Hourly Breakdown's ADJ column. Delta now shows the
+// after-adj number when available (laborDaily.deltaAfterAdj), with the
+// raw pre-adj delta + adjustment total available on hover for transparency.
+// Falls back to the plain delta for the Omni-fallback source, which doesn't
+// compute an after-adj figure (see scheduling-labor-planning-insights.cjs).
+//
+// Changes across all passes:
+//   1. Day-level labor summary row (Available/Required/Delta hrs),
 //      mirroring the appointment summary row above it.
-//   2. Per-hour rows now show the actual surplus/deficit number
-//      (e.g. "-2.3") instead of only a red/green dot.
+//   2. Per-hour rows show the actual surplus/deficit number (e.g. "-2.3")
+//      instead of only a red/green dot.
 //   3. NOT built this pass: flagging in the arrival-time PICKER itself
 //      whether adding this appointment would push an hour into deficit.
 //      That needs the picker to know hours_per_appt, which lives in
@@ -25,7 +34,9 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 //   4. "Est." badge (in place of "LIVE") when the labor data came from the
 //      Omni-topic fallback rather than the real roster — see `source` on
 //      the getLaborInsights response.
-//   5. (2026-08-19) Drops is its own stat card now, not folded into Inbound.
+//   5. Drops is its own stat card, not folded into Inbound.
+//   6. Delta reflects the after-adjustments figure, matching what ops
+//      actually treats as the real number.
 
 const COLOR_INBOUND = '#378ADD'
 const COLOR_DROPS = '#A78BFA'
@@ -196,6 +207,16 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
     }
   }
 
+  // Prefer the after-adjustments delta (matches Labor Planning's "Daily
+  // +/- After Adj" pill, the number ops treats as real) — falls back to
+  // the raw delta for the Omni-fallback source, which has no ADJ concept.
+  const displayDelta = laborDaily ? (laborDaily.deltaAfterAdj ?? laborDaily.delta) : null
+  const hasAdj = laborDaily?.totalAdj != null && laborDaily.totalAdj !== 0
+  const deltaTitle =
+    laborDaily && laborDaily.deltaAfterAdj != null
+      ? `Daily +/-: ${fmtHrs(laborDaily.delta)}${hasAdj ? ` · Adjustments: ${fmtHrs(laborDaily.totalAdj)} · After Adj: ${fmtHrs(laborDaily.deltaAfterAdj)}` : ' (no adjustments entered)'}`
+      : undefined
+
   return (
     <>
       {selectedOwner && (
@@ -313,7 +334,9 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
                 {/* Day-level labor summary — mirrors the appointment summary above,
                     added 2026-08-18. Available/Required come straight from the real
                     Labor Planning roster calc (or the Omni-estimate fallback — see
-                    the EST. badge above if so). */}
+                    the EST. badge above if so). Delta shows the AFTER-ADJUSTMENTS
+                    figure (matches Labor Planning's "Daily +/- After Adj" pill) —
+                    hover for the raw pre-adj delta and adjustment total. */}
                 {laborDaily && (
                   <div className="flex gap-1.5 mb-2.5">
                     <div className="flex-1 bg-gray-50 rounded-lg px-2 py-1.5 text-center">
@@ -326,13 +349,14 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
                     </div>
                     <div
                       className="flex-1 rounded-lg px-2 py-1.5 text-center"
-                      style={{ backgroundColor: laborDaily.delta < 0 ? '#FBEBEB' : '#EBFBF2' }}
+                      style={{ backgroundColor: displayDelta < 0 ? '#FBEBEB' : '#EBFBF2' }}
+                      title={deltaTitle}
                     >
-                      <div className="text-[10px] font-medium leading-none mb-0.5" style={{ color: laborDaily.delta < 0 ? COLOR_SHORT : COLOR_STAFFED }}>
+                      <div className="text-[10px] font-medium leading-none mb-0.5" style={{ color: displayDelta < 0 ? COLOR_SHORT : COLOR_STAFFED }}>
                         Delta
                       </div>
-                      <div className="text-sm font-bold leading-none" style={{ color: laborDaily.delta < 0 ? COLOR_SHORT : COLOR_STAFFED }}>
-                        {fmtHrs(laborDaily.delta)}
+                      <div className="text-sm font-bold leading-none" style={{ color: displayDelta < 0 ? COLOR_SHORT : COLOR_STAFFED }}>
+                        {fmtHrs(displayDelta)}
                       </div>
                     </div>
                   </div>
