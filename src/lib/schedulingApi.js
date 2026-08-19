@@ -14,6 +14,17 @@ const BASE = '/.netlify/functions'
 const LOOKUP_CACHE_TTL_MS = 60 * 60 * 1000 // 60 minutes — dropdown/reference data
 const INSIGHTS_CACHE_TTL_MS = 15 * 60 * 1000 // 15 minutes — matches Datex→Omni lag
 
+// Bump this whenever the appointment/labor insights response SHAPE or DATA
+// SOURCE changes server-side (e.g. the 2026-08-19 Omni→MotherDuck switch).
+// Without this, anyone with a still-warm 15-min localStorage cache entry
+// keeps seeing pre-change numbers even after the underlying function is
+// fixed and redeployed — exactly what happened testing the 08-19 labor/
+// appointment-source fixes, where a stale cached value looked identical to
+// the bug being chased and cost a round of confused re-testing. Bumping
+// this invalidates every existing cache key automatically — no manual
+// localStorage clearing needed on Dan's end.
+const INSIGHTS_CACHE_VERSION = 'v2'
+
 function getCached(key, ttl = LOOKUP_CACHE_TTL_MS) {
   try {
     const raw = localStorage.getItem(key)
@@ -199,7 +210,7 @@ export async function triggerMultiFrontDraft(frontConvId, createdAfter, draftTem
 
 // Returns hourly appointment counts for a warehouse + date (5am-5am shift window).
 export async function getAppointmentInsights(warehouse, date) {
-  const cacheKey = `omni_appts:${warehouse}:${date}`
+  const cacheKey = `${INSIGHTS_CACHE_VERSION}:omni_appts:${warehouse}:${date}`
   const cached = getCached(cacheKey, INSIGHTS_CACHE_TTL_MS)
   if (cached) return cached
   const res = await fetch(`${BASE}/scheduling-omni-appointments?warehouse=${encodeURIComponent(warehouse)}&date=${date}`)
@@ -217,7 +228,7 @@ export async function getAppointmentInsights(warehouse, date) {
 // {totalRequired, totalAvailable, delta} for the Day Insights summary row.
 // Replaces the old direct call to scheduling-omni-labor (2026-08-18).
 export async function getLaborInsights(warehouse, date) {
-  const cacheKey = `labor_planning_insights:${warehouse}:${date}`
+  const cacheKey = `${INSIGHTS_CACHE_VERSION}:labor_planning_insights:${warehouse}:${date}`
   const cached = getCached(cacheKey, INSIGHTS_CACHE_TTL_MS)
   if (cached) return cached
   const res = await fetch(`${BASE}/scheduling-labor-planning-insights?warehouse=${encodeURIComponent(warehouse)}&date=${date}`)
@@ -230,7 +241,7 @@ export async function getLaborInsights(warehouse, date) {
 
 // Returns individual appointment records for a warehouse + date (5am-5am shift window).
 export async function getHourAppointmentList(warehouse, date) {
-  const cacheKey = `omni_appt_list:${warehouse}:${date}`
+  const cacheKey = `${INSIGHTS_CACHE_VERSION}:omni_appt_list:${warehouse}:${date}`
   const cached = getCached(cacheKey, INSIGHTS_CACHE_TTL_MS)
   if (cached) return cached
   const res = await fetch(`${BASE}/scheduling-omni-appointment-list?warehouse=${encodeURIComponent(warehouse)}&date=${date}`)
@@ -242,7 +253,7 @@ export async function getHourAppointmentList(warehouse, date) {
 // Returns today's owner appointments + 120-day day-of-week average for a
 // warehouse + date + owner + project.
 export async function getOwnerInsights(warehouse, date, owner, project) {
-  const cacheKey = `omni_owner:${warehouse}:${date}:${owner}:${project ?? ''}`
+  const cacheKey = `${INSIGHTS_CACHE_VERSION}:omni_owner:${warehouse}:${date}:${owner}:${project ?? ''}`
   const cached = getCached(cacheKey, INSIGHTS_CACHE_TTL_MS)
   if (cached) return cached
   const params = new URLSearchParams({ warehouse, date, owner })
