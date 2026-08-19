@@ -77,7 +77,7 @@ import {
  * wordmark, without the utility bar or the other pages' nav links, which
  * don't apply inside Front's narrow sidebar.
  *
- * UPDATED 2026-08-19 — two changes per Dan's feedback:
+ * UPDATED 2026-08-19 — three changes per Dan's feedback:
  *   1. BUG FIX: the Single APPT tab label was showing the submission's
  *      carrier name (e.g. "TQL") once an appointment had been pushed to
  *      Datex, overriding the "Single APPT" label. Dan flagged this as
@@ -94,6 +94,18 @@ import {
  *      it afterward. Auto-suggestion only fires once per warehouse+date
  *      combination per mount (tracked via autoSuggestedRef) so clearing
  *      the field doesn't cause it to keep re-suggesting.
+ *   3. PERF FIX (later same day, after Dan reported slow load times): the
+ *      picker-adjacent fetch added in #2 was NOT actually sharing work
+ *      with AppointmentInsights' own fetch as originally assumed — both
+ *      fired independent live requests to the heavy
+ *      scheduling-labor-planning-insights endpoint (7+ Supabase queries
+ *      plus several MotherDuck calls) on every mount, racing each other
+ *      before either could populate the shared localStorage cache. Fixed
+ *      by making this file the SINGLE owner of the fetch: it now passes
+ *      pickerHourly/pickerLabor/pickerLaborDaily/pickerLaborSource/
+ *      pickerFetchError down to AppointmentInsights as props instead of
+ *      that component fetching them independently. See
+ *      AppointmentInsights.jsx's header for the other half of this fix.
  */
 
 function CswBrandHeader() {
@@ -206,16 +218,17 @@ export default function PluginView() {
   const projectOwnerMapRef = useRef(projectOwnerMap)
   projectOwnerMapRef.current = projectOwnerMap
 
-  // ── Picker-adjacent labor insights (added 2026-08-19) ───────────────────
-  // Powers the traffic/staffing banner directly under the Arrival Time
-  // picker, and the auto-suggest-best-hour behavior for brand-new manual
-  // entries. Independent of AppointmentInsights' own fetch below — but
-  // since both call the same getAppointmentInsights/getLaborInsights
-  // functions with the same (warehouse, date) cache key, a warm
-  // localStorage cache means this doesn't cost a second network round
-  // trip in practice.
+  // ── Appointment/labor insights (added 2026-08-18, made the SINGLE owner
+  // of this data 2026-08-19 — see the perf-fix note in this file's header
+  // comment above). Powers three things: the traffic/staffing banner
+  // directly under the Arrival Time picker, the auto-suggest-best-hour
+  // behavior for brand-new manual entries, and (passed down as props) the
+  // full Day Insights breakdown rendered by AppointmentInsights.jsx.
   const [pickerHourly, setPickerHourly] = useState([])
   const [pickerLabor, setPickerLabor] = useState([])
+  const [pickerLaborDaily, setPickerLaborDaily] = useState(null)
+  const [pickerLaborSource, setPickerLaborSource] = useState(null)
+  const [pickerFetchError, setPickerFetchError] = useState(null)
   const [pickerLoaded, setPickerLoaded] = useState(false)
   const autoSuggestedRef = useRef(new Set())
 
@@ -389,27 +402,40 @@ export default function PluginView() {
   const draftTimePart = (draft.scheduled_arrival || '').includes('T') ? draft.scheduled_arrival.split('T')[1] : ''
   const draftSelectedHour = draftTimePart ? parseInt(draftTimePart.split(':')[0], 10) : null
 
-  // Fetch appointment + labor data for the picker banner whenever the
-  // warehouse or arrival DATE changes (independent of which hour is
-  // picked — the banner reads the specific hour out of this data below).
+  // SINGLE fetch of appointment + labor data for the given warehouse+date —
+  // feeds the picker banner, the auto-suggest effect below, AND (via
+  // props) AppointmentInsights' Day Insights breakdown. See this file's
+  // header comment (perf-fix note) for why this consolidation matters:
+  // AppointmentInsights used to run this exact fetch independently, and
+  // the two calls raced each other on every mount before either could
+  // populate the shared cache.
   useEffect(() => {
     if (!draft.warehouse || !draftDateOnly) {
       setPickerHourly([])
       setPickerLabor([])
+      setPickerLaborDaily(null)
+      setPickerLaborSource(null)
+      setPickerFetchError(null)
       setPickerLoaded(false)
       return
     }
     let cancelled = false
     setPickerLoaded(false)
+    setPickerFetchError(null)
     Promise.all([getAppointmentInsights(draft.warehouse, draftDateOnly), getLaborInsights(draft.warehouse, draftDateOnly)])
       .then(([apptRes, laborRes]) => {
         if (cancelled) return
         setPickerHourly(apptRes.hours || [])
         setPickerLabor(laborRes.hours || [])
+        setPickerLaborDaily(laborRes.daily || null)
+        setPickerLaborSource(laborRes.source || null)
+        setPickerFetchError(apptRes.error || laborRes.error || null)
         setPickerLoaded(true)
       })
-      .catch(() => {
-        if (!cancelled) setPickerLoaded(true)
+      .catch((err) => {
+        if (cancelled) return
+        setPickerFetchError(err.message)
+        setPickerLoaded(true)
       })
     return () => {
       cancelled = true
@@ -1771,6 +1797,12 @@ export default function PluginView() {
               const d = (draft.scheduled_arrival || '').split('T')[0]
               return d || null
             })()}
+            hourlyData={pickerHourly}
+            laborData={pickerLabor}
+            laborDaily={pickerLaborDaily}
+            laborSource={pickerLaborSource}
+            loading={!pickerLoaded}
+            fetchError={pickerFetchError}
             selectedHour={draftSelectedHour}
             selectedOwner={draft.owner || null}
             project={draft.project || null}
