@@ -208,14 +208,23 @@ export async function getAppointmentInsights(warehouse, date) {
   return data
 }
 
-// Returns hourly labor staffing data for a warehouse + date (5am-5am shift window).
+// Returns hourly labor staffing data for a warehouse + date (5am-5am shift
+// window), sourced from the SAME roster-based calculation the real Labor
+// Planning tab uses — see scheduling-labor-planning-insights.cjs. Falls
+// back server-side to the old Omni-topic estimate when no roster is synced
+// for that facility+date; `data.source` tells you which one you got
+// ('roster' | 'omni_fallback'). Also returns `data.daily` — day-level
+// {totalRequired, totalAvailable, delta} for the Day Insights summary row.
+// Replaces the old direct call to scheduling-omni-labor (2026-08-18).
 export async function getLaborInsights(warehouse, date) {
-  const cacheKey = `omni_labor:${warehouse}:${date}`
+  const cacheKey = `labor_planning_insights:${warehouse}:${date}`
   const cached = getCached(cacheKey, INSIGHTS_CACHE_TTL_MS)
   if (cached) return cached
-  const res = await fetch(`${BASE}/scheduling-omni-labor?warehouse=${encodeURIComponent(warehouse)}&date=${date}`)
+  const res = await fetch(`${BASE}/scheduling-labor-planning-insights?warehouse=${encodeURIComponent(warehouse)}&date=${date}`)
   const data = await res.json()
-  setCached(cacheKey, data, INSIGHTS_CACHE_TTL_MS)
+  // Never cache a fallback response — it should keep retrying the real
+  // roster source on the next load rather than locking in an estimate.
+  if (data.source === 'roster') setCached(cacheKey, data, INSIGHTS_CACHE_TTL_MS)
   return data
 }
 
