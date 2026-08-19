@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppointmentList } from '../../lib/schedulingApi.js'
+import { formatHour, fmtHrs } from '../../lib/pluginUtils.js'
 
 // Ported from front_netlify_datex/src/components/AppointmentInsights.jsx
 // (2026-08-03). UPDATED 2026-08-18 per Dan's request to tie this panel's
@@ -21,31 +22,33 @@ import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppo
 // Falls back to the plain delta for the Omni-fallback source, which doesn't
 // compute an after-adj figure (see scheduling-labor-planning-insights.cjs).
 //
-// UPDATED AGAIN 2026-08-19 (later still) — per Dan's request, the
-// short-staffed banner is now deliberately loud instead of a subtle
-// red-on-red text line: bigger text, thick border, solid fill, and the
-// shortage stated as the headline (not tacked on after the traffic
-// description). This is the actual "should I book this appointment"
-// warning and it was easy to miss while scanning the panel before.
+// UPDATED AGAIN 2026-08-19 (later still, first pass) — the short-staffed
+// banner was made deliberately loud instead of a subtle red-on-red text
+// line.
+//
+// UPDATED AGAIN 2026-08-19 (later still, second pass) — per Dan's request,
+// the selected-hour traffic/staffing banner MOVED out of this panel
+// entirely, to directly under the arrival-time picker in PluginView.jsx,
+// so the signal is visible at the moment of choosing a time instead of
+// requiring a scroll down to Day Insights. formatHour/fmtHrs are now
+// imported from pluginUtils.js (shared with PluginView) instead of
+// defined locally here, since both files need identical formatting. The
+// `selectedHour` prop still drives row highlighting in the per-hour list
+// below — that stays here, only the banner itself moved.
 //
 // Changes across all passes:
 //   1. Day-level labor summary row (Available/Required/Delta hrs),
 //      mirroring the appointment summary row above it.
 //   2. Per-hour rows show the actual surplus/deficit number (e.g. "-2.3")
 //      instead of only a red/green dot.
-//   3. NOT built this pass: flagging in the arrival-time PICKER itself
-//      whether adding this appointment would push an hour into deficit.
-//      That needs the picker to know hours_per_appt, which lives in
-//      facility_settings and isn't plumbed into PluginView today — real
-//      next step, scoped out for now rather than half-built.
+//   3. Selected-hour banner moved to PluginView.jsx, directly under the
+//      arrival-time picker (see PluginView's PickerLaborBanner).
 //   4. "Est." badge (in place of "LIVE") when the labor data came from the
 //      Omni-topic fallback rather than the real roster — see `source` on
 //      the getLaborInsights response.
 //   5. Drops is its own stat card, not folded into Inbound.
 //   6. Delta reflects the after-adjustments figure, matching what ops
 //      actually treats as the real number.
-//   7. Short-staffed selected-hour banner is bold/high-contrast, not a
-//      subtle inline note.
 
 const COLOR_INBOUND = '#378ADD'
 const COLOR_DROPS = '#A78BFA'
@@ -56,18 +59,6 @@ const COLOR_STAFFED = '#1D9E75'
 // Full 5am-5am shift window in display order
 const HOURS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4]
 
-function formatHour(h) {
-  if (h === 0) return '12a'
-  if (h === 12) return '12p'
-  if (h < 12) return `${h}a`
-  return `${h - 12}p`
-}
-
-function fmtHrs(n) {
-  const sign = n > 0 ? '+' : ''
-  return `${sign}${n.toFixed(1)}`
-}
-
 /**
  * AppointmentInsights — Day Insights panel for the Front sidebar plugin.
  *
@@ -75,6 +66,9 @@ function fmtHrs(n) {
  *   warehouse     — e.g. "CSW-Caledonia"
  *   date          — ISO date string "2026-04-13"
  *   selectedHour  — 24-hour integer from the arrival time picker, or null
+ *                   (used only to highlight that row in the per-hour list
+ *                   below — the traffic/staffing banner itself now lives
+ *                   in PluginView.jsx, directly under the picker)
  *   selectedOwner — owner name string from the owner dropdown, or null
  *   project       — project name string from the project field, or null
  */
@@ -370,47 +364,6 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
                     </div>
                   </div>
                 )}
-
-                {selectedHour != null &&
-                  (() => {
-                    const appts = hourlyData.find((h) => h.hour === selectedHour)
-                    const labor = laborData.find((l) => l.hour === selectedHour)
-                    const drops = labor ? labor.drops || 0 : 0
-                    const total = (appts ? appts.inbound + appts.outbound : 0) + drops
-                    const density = total === 0 ? 'no appointments' : total <= 3 ? 'light traffic' : total <= 8 ? 'moderate traffic' : 'heavy traffic'
-                    const isShort = labor && labor.final < 0
-
-                    // Short-staffed banner made deliberately loud per Dan's
-                    // request (2026-08-19) — this is the actual "should I
-                    // book this appointment" signal, and the original subtle
-                    // red-on-red text line was easy to miss while scanning
-                    // the panel. Bigger text, thick border, solid fill,
-                    // headline-first layout (shortage stated before the
-                    // traffic description, not tacked on after it).
-                    if (isShort) {
-                      return (
-                        <div className="mb-2 px-3 py-2.5 rounded-lg border-2 border-red-500 bg-red-100 shadow-sm">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-base leading-none">⚠️</span>
-                            <span className="text-sm font-extrabold text-red-700 uppercase tracking-wide leading-none">
-                              Short {Math.abs(labor.final).toFixed(1)} Staff
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-red-800 mt-1">
-                            <span className="font-semibold">{formatHour(selectedHour)}</span> has {density} — {total} appt
-                            {total !== 1 ? 's' : ''}
-                          </div>
-                        </div>
-                      )
-                    }
-
-                    return (
-                      <div className="mb-2 px-2 py-1.5 rounded-lg text-[11px] border bg-indigo-50 border-indigo-100 text-indigo-800">
-                        <span className="font-semibold">{formatHour(selectedHour)}</span> has {density} — {total} appt
-                        {total !== 1 ? 's' : ''}
-                      </div>
-                    )
-                  })()}
 
                 <div className="space-y-0.5">
                   {HOURS.map((h) => {
