@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getAppointmentInsights, getLaborInsights, getOwnerInsights, getHourAppointmentList } from '../../lib/schedulingApi.js'
+import { getOwnerInsights, getHourAppointmentList } from '../../lib/schedulingApi.js'
 import { formatHour, fmtHrs } from '../../lib/pluginUtils.js'
 
 // Ported from front_netlify_datex/src/components/AppointmentInsights.jsx
@@ -15,40 +15,46 @@ import { formatHour, fmtHrs } from '../../lib/pluginUtils.js'
 //
 // UPDATED AGAIN 2026-08-19 (later same day): the "Delta" tile was showing
 // Labor Planning's "Daily +/-" pill (raw Avail − Req), not "Daily +/- After
-// Adj" — the number that also folds in manual hourly labor adjustments ops
-// enters in the Hourly Breakdown's ADJ column. Delta now shows the
-// after-adj number when available (laborDaily.deltaAfterAdj), with the
-// raw pre-adj delta + adjustment total available on hover for transparency.
-// Falls back to the plain delta for the Omni-fallback source, which doesn't
-// compute an after-adj figure (see scheduling-labor-planning-insights.cjs).
+// Adj" — Delta now shows the after-adj number when available.
 //
 // UPDATED AGAIN 2026-08-19 (later still, first pass) — the short-staffed
 // banner was made deliberately loud instead of a subtle red-on-red text
 // line.
 //
-// UPDATED AGAIN 2026-08-19 (later still, second pass) — per Dan's request,
-// the selected-hour traffic/staffing banner MOVED out of this panel
-// entirely, to directly under the arrival-time picker in PluginView.jsx,
-// so the signal is visible at the moment of choosing a time instead of
-// requiring a scroll down to Day Insights. formatHour/fmtHrs are now
-// imported from pluginUtils.js (shared with PluginView) instead of
-// defined locally here, since both files need identical formatting. The
-// `selectedHour` prop still drives row highlighting in the per-hour list
-// below — that stays here, only the banner itself moved.
+// UPDATED AGAIN 2026-08-19 (later still, second pass) — the selected-hour
+// traffic/staffing banner MOVED out of this panel entirely, to directly
+// under the arrival-time picker in PluginView.jsx.
 //
-// Changes across all passes:
-//   1. Day-level labor summary row (Available/Required/Delta hrs),
-//      mirroring the appointment summary row above it.
-//   2. Per-hour rows show the actual surplus/deficit number (e.g. "-2.3")
-//      instead of only a red/green dot.
-//   3. Selected-hour banner moved to PluginView.jsx, directly under the
-//      arrival-time picker (see PluginView's PickerLaborBanner).
-//   4. "Est." badge (in place of "LIVE") when the labor data came from the
-//      Omni-topic fallback rather than the real roster — see `source` on
-//      the getLaborInsights response.
-//   5. Drops is its own stat card, not folded into Inbound.
-//   6. Delta reflects the after-adjustments figure, matching what ops
-//      actually treats as the real number.
+// UPDATED AGAIN 2026-08-19 (later still, third pass) — Dan reported the
+// panel felt slow to load. Root cause: when the picker banner moved to
+// PluginView.jsx in the prior pass, PluginView started fetching this same
+// appointment+labor data ITSELF (for the banner + auto-suggest), on its
+// own independent effect — racing this component's own fetch on every
+// mount. Both fired a live request to scheduling-labor-planning-insights
+// (the heavy one — 7+ Supabase queries plus several MotherDuck calls)
+// before either had a chance to populate the shared localStorage cache,
+// so the two fetches doubled the real backend work on every load instead
+// of sharing one result. Fixed by making PluginView the SINGLE owner of
+// this fetch: it now passes hourlyData/laborData/laborDaily/laborSource/
+// loading/fetchError down as props instead of this component fetching
+// them independently. The getOwnerInsights fetch (a different endpoint,
+// only used here) is unaffected and still lives in this file.
+//
+// Props:
+//   warehouse, date       — for the section header only (display text)
+//   hourlyData            — appointment hours array, fetched by PluginView
+//   laborData             — labor hours array, fetched by PluginView
+//   laborDaily            — { totalAvailable, totalRequired, delta,
+//                             totalAdj, laborAfterAdj, deltaAfterAdj } | null
+//   laborSource           — 'roster' | 'omni_fallback' | null
+//   loading               — true while PluginView's fetch is in flight
+//   fetchError            — error string from PluginView's fetch, or null
+//   selectedHour          — 24-hour integer from the arrival time picker,
+//                           or null (used only to highlight that row in
+//                           the per-hour list below — the traffic/staffing
+//                           banner itself lives in PluginView.jsx)
+//   selectedOwner         — owner name string from the owner dropdown, or null
+//   project               — project name string from the project field, or null
 
 const COLOR_INBOUND = '#378ADD'
 const COLOR_DROPS = '#A78BFA'
@@ -59,90 +65,31 @@ const COLOR_STAFFED = '#1D9E75'
 // Full 5am-5am shift window in display order
 const HOURS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4]
 
-/**
- * AppointmentInsights — Day Insights panel for the Front sidebar plugin.
- *
- * Props:
- *   warehouse     — e.g. "CSW-Caledonia"
- *   date          — ISO date string "2026-04-13"
- *   selectedHour  — 24-hour integer from the arrival time picker, or null
- *                   (used only to highlight that row in the per-hour list
- *                   below — the traffic/staffing banner itself now lives
- *                   in PluginView.jsx, directly under the picker)
- *   selectedOwner — owner name string from the owner dropdown, or null
- *   project       — project name string from the project field, or null
- */
-export default function AppointmentInsights({ warehouse, date, selectedHour, selectedOwner, project }) {
+export default function AppointmentInsights({
+  warehouse,
+  date,
+  hourlyData = [],
+  laborData = [],
+  laborDaily = null,
+  laborSource = null,
+  loading = false,
+  fetchError = null,
+  selectedHour,
+  selectedOwner,
+  project,
+}) {
   const [open, setOpen] = useState(true)
-  const [loading, setLoading] = useState(false)
-  const [hourlyData, setHourlyData] = useState([])
-  const [laborData, setLaborData] = useState([])
-  const [laborDaily, setLaborDaily] = useState(null)
-  const [laborSource, setLaborSource] = useState(null) // 'roster' | 'omni_fallback' | null
   const [ownerData, setOwnerData] = useState(null)
   const [ownerLoading, setOwnerLoading] = useState(false)
-  const [hasLiveData, setHasLiveData] = useState(false)
-  const [fetchError, setFetchError] = useState(null)
 
   const [expandedHours, setExpandedHours] = useState(new Set())
   const [apptList, setApptList] = useState({ status: 'idle', data: [] })
   const apptListStatusRef = useRef('idle')
 
-  const apptLaborCacheRef = useRef({})
-
   useEffect(() => {
     setExpandedHours(new Set())
     setApptList({ status: 'idle', data: [] })
     apptListStatusRef.current = 'idle'
-  }, [warehouse, date])
-
-  useEffect(() => {
-    if (!warehouse || !date) {
-      setHourlyData([])
-      setLaborData([])
-      setLaborDaily(null)
-      setLaborSource(null)
-      setHasLiveData(false)
-      return
-    }
-
-    const cacheKey = `${warehouse}|${date}`
-    const cached = apptLaborCacheRef.current[cacheKey]
-    if (cached) {
-      setHourlyData(cached.hourlyData)
-      setLaborData(cached.laborData)
-      setLaborDaily(cached.laborDaily)
-      setLaborSource(cached.laborSource)
-      setHasLiveData(true)
-      return
-    }
-
-    setLoading(true)
-    setHasLiveData(false)
-    setFetchError(null)
-
-    Promise.all([getAppointmentInsights(warehouse, date), getLaborInsights(warehouse, date)])
-      .then(([apptRes, laborRes]) => {
-        const hourly = apptRes.hours || []
-        const labor = laborRes.hours || []
-        const daily = laborRes.daily || null
-        const source = laborRes.source || null
-        setHourlyData(hourly)
-        setLaborData(labor)
-        setLaborDaily(daily)
-        setLaborSource(source)
-        setHasLiveData(true)
-        const err = apptRes.error || laborRes.error || null
-        setFetchError(err)
-        apptLaborCacheRef.current[cacheKey] = { hourlyData: hourly, laborData: labor, laborDaily: daily, laborSource: source }
-      })
-      .catch((err) => {
-        console.warn('[AppointmentInsights] fetch failed:', err.message)
-        setHasLiveData(false)
-        setFetchError(err.message)
-      })
-      .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [warehouse, date])
 
   useEffect(() => {
@@ -160,6 +107,8 @@ export default function AppointmentInsights({ warehouse, date, selectedHour, sel
   }, [selectedOwner, project, warehouse, date])
 
   if (!warehouse || !date) return null
+
+  const hasLiveData = !loading && (hourlyData.length > 0 || laborData.length > 0 || laborDaily != null)
 
   const totalDrops = laborData.reduce((s, l) => s + (l.drops || 0), 0)
   const totalInbound = hourlyData.reduce((s, h) => s + h.inbound, 0)
