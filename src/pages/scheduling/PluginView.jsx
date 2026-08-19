@@ -106,6 +106,15 @@ import {
  *      pickerFetchError down to AppointmentInsights as props instead of
  *      that component fetching them independently. See
  *      AppointmentInsights.jsx's header for the other half of this fix.
+ *   4. BUG FIX (later same day, after fixing the identical bug in
+ *      RecurringForm.jsx per Kay/Anne's report): the same missing
+ *      stale-request guard existed in three places here — the Single
+ *      APPT dock-door effect (which actually wiped a valid selection on
+ *      a late-resolving stale fetch, same as Recurring's bug), and
+ *      fetchLcDockDoors/fetchMultiDockDoors (which didn't wipe a
+ *      selection but could still apply a stale warehouse's dock-door
+ *      list). All three now guard against applying a fetch result once a
+ *      newer request for a different warehouse has superseded it.
  */
 
 function CswBrandHeader() {
@@ -365,6 +374,13 @@ export default function PluginView() {
 
   useEffect(() => {
     if (!draft.warehouse) return
+    // Stale-request guard — added 2026-08-19, same fix as RecurringForm.jsx's
+    // identical bug (see that file's header for the root-cause writeup).
+    // Without this, switching warehouses quickly could let an OLD
+    // warehouse's fetch resolve AFTER the user had picked a valid dock
+    // door for the NEW warehouse, and its own cleanup check below would
+    // wipe that selection back to blank.
+    let cancelled = false
     setDockDoorsLoading(true)
     getLookupOptionsWithIds('dock_doors', draft.warehouse)
       .then(async (pairs) => {
@@ -376,6 +392,7 @@ export default function PluginView() {
         return pairs
       })
       .then((normalized) => {
+        if (cancelled) return
         setLookups((prev) => ({ ...prev, dock_doors: normalized.map((p) => p.name) }))
         setNameToId((prev) => ({
           ...prev,
@@ -391,7 +408,12 @@ export default function PluginView() {
         })
       })
       .catch(() => {})
-      .finally(() => setDockDoorsLoading(false))
+      .finally(() => {
+        if (!cancelled) setDockDoorsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.warehouse])
 
@@ -747,15 +769,23 @@ export default function PluginView() {
         pairs = names.map((n) => ({ name: n, id: null }))
       }
       if (pairs.length > 0 && typeof pairs[0] !== 'object') pairs = pairs.map((n) => ({ name: n, id: null }))
+      // Stale-response guard — added 2026-08-19, same root cause as the
+      // RecurringForm.jsx dock-door bug (see that file's header). This
+      // function is called both from an effect keyed on lcDraft.warehouse
+      // AND imperatively from the Load Container tab-switch handler, so a
+      // simple effect-cleanup flag isn't enough here — instead check
+      // whether the LC warehouse has changed again since this fetch
+      // started before applying the result.
+      if (lcDraftRef.current.warehouse !== warehouse) return
       setLcDockDoors(pairs.map((p) => p.name))
       setNameToId((prev) => ({
         ...prev,
         dock_doors: { ...prev.dock_doors, ...Object.fromEntries(pairs.map((p) => [p.name.toLowerCase(), p.id])) },
       }))
     } catch {
-      setLcDockDoors([])
+      if (lcDraftRef.current.warehouse === warehouse) setLcDockDoors([])
     } finally {
-      setLcDockDoorsLoading(false)
+      if (lcDraftRef.current.warehouse === warehouse) setLcDockDoorsLoading(false)
     }
   }
 
@@ -980,15 +1010,22 @@ export default function PluginView() {
         pairs = names.map((n) => ({ name: n, id: null }))
       }
       if (pairs.length > 0 && typeof pairs[0] !== 'object') pairs = pairs.map((n) => ({ name: n, id: null }))
+      // Stale-response guard — added 2026-08-19, same root cause as the
+      // RecurringForm.jsx dock-door bug (see that file's header) and
+      // fetchLcDockDoors above. Called from an effect keyed on
+      // multiShared.warehouse AND imperatively elsewhere, so check
+      // whether the shared warehouse has changed again since this fetch
+      // started before applying the result.
+      if (multiSharedRef.current.warehouse !== warehouse) return
       setMultiDockDoors(pairs.map((p) => p.name))
       setNameToId((prev) => ({
         ...prev,
         dock_doors: { ...prev.dock_doors, ...Object.fromEntries(pairs.map((p) => [p.name.toLowerCase(), p.id])) },
       }))
     } catch {
-      setMultiDockDoors([])
+      if (multiSharedRef.current.warehouse === warehouse) setMultiDockDoors([])
     } finally {
-      setMultiDockDoorsLoading(false)
+      if (multiSharedRef.current.warehouse === warehouse) setMultiDockDoorsLoading(false)
     }
   }
 
