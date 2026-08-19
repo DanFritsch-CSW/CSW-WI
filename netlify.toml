@@ -34,6 +34,22 @@
 [functions."scheduling-labor-planning-insights"]
   timeout = 26
 
+# Scheduling plugin carrier list sync -- added 2026-08-19 per Kay's
+# long-standing "carriers disappearing" feedback (cnv_1ayy4w9g). Weekly is
+# plenty -- new carriers in Datex don't need same-day visibility, and this
+# replaces the old live-on-every-load Omni query entirely. Monday 8am UTC
+# (~3am Central), well outside business hours. See
+# lib/carriers-sync-shared.cjs for the full root-cause writeup.
+[functions."carriers-sync-run"]
+  schedule = "0 8 * * 1"
+  timeout = 26
+
+# Manual test -- no schedule, so this can be POSTed directly to refresh
+# the list immediately instead of waiting for Monday. NOT a dry run -- it
+# really replaces scheduling_carriers' contents with a fresh Omni pull.
+[functions."carriers-sync-test"]
+  timeout = 26
+
 # --- duckdb-needing functions below (native module: external_node_modules
 # + included_files scoped here only, not globally -- see [functions] header
 # above for the 2026-08-06 ENOSPC fix story) ---
