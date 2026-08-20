@@ -35,6 +35,21 @@
 //
 // No skip-to-next-valid-day concept — see NotifySettingsPanel's
 // showSkipToNextValidDay=false on this tab, same as FEFO.
+//
+// EMPLOYEE MOVE REPORT (2026-08-13): per today's Madison 1st Shift Daily
+// Check-In (Fathom 175194244) — "Create an auto-generated daily report...
+// showing put-away effectiveness per person (per shift)." Now attaches a
+// PDF (one page per employee who moved a JDF pallet into F8 that day) to
+// this same digest comment, using the exact PDF-attached-to-Front-comment
+// pattern already proven in attendance-points-shared.cjs/
+// wr-secondary-repl-digest-shared.cjs. See lib/jdf-employee-report-shared.cjs
+// for the query + PDF builder — that module's header also documents a
+// timezone bug found and fixed the same day: silver.datex_slv_tasks'
+// completed_date_time is already Central local time, NOT UTC (confirmed
+// against a live Datex lookup) — do not re-derive that conversion here or
+// anywhere else that reads this column without checking that file first.
+
+const { queryEmployeeMoves, buildEmployeeReportPdf } = require('./jdf-employee-report-shared.cjs')
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -194,7 +209,7 @@ async function runQueries(today) {
   }
 }
 
-function buildDigestBody(daily, building, received, today) {
+function buildDigestBody(daily, building, received, today, hasEmployeeReport) {
   const num = v => Number(v ?? 0) || 0
   const totalReceived = num(received.total_received)
   const putAway = num(daily.put_away)
@@ -233,7 +248,43 @@ function buildDigestBody(daily, building, received, today) {
   lines.push(`Total active pallets: ${b.totalActive}`)
   lines.push(`Same item, same tier: ${b.sameItemTier} (${pct(b.sameItemTier, b.totalActive)}%)`)
   lines.push(`Also same MAN date: ${b.sameItemTierDate} (${pct(b.sameItemTierDate, b.totalActive)}%)`)
+  if (hasEmployeeReport) {
+    lines.push('')
+    lines.push('Per-employee daily move report attached (one page per person).')
+  }
   return lines.join('\n')
+}
+
+// Front comment WITH a PDF attachment — same multipart pattern already
+// proven in attendance-points-shared.cjs's frontPostCommentWithPdf /
+// wr-secondary-repl-digest-shared.cjs's postCommentWithPdf.
+async function frontPostCommentWithPdf(conversationId, body, pdfBytes, filename) {
+  const form = new FormData()
+  form.set('body', body)
+  form.set('attachments[]', new Blob([pdfBytes], { type: 'application/pdf' }), filename)
+  const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, Accept: 'application/json' },
+    body: form,
+  })
+  const text = await res.text()
+  let json
+  try { json = JSON.parse(text) } catch { json = { raw: text } }
+  if (!res.ok) throw Object.assign(new Error('Front comment+PDF failed'), { detail: json })
+  return json
+}
+
+async function frontPostComment(conversationId, body) {
+  const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ body }),
+  })
+  const text = await res.text()
+  let json
+  try { json = JSON.parse(text) } catch { json = { raw: text } }
+  if (!res.ok) throw Object.assign(new Error('Front comment failed'), { detail: json })
+  return json
 }
 
 async function runDigest({ settingsRow, isManualTest }) {
@@ -243,25 +294,38 @@ async function runDigest({ settingsRow, isManualTest }) {
   }
   const today = centralTodayDateStr()
   const { daily, building, received } = await runQueries(today)
-  const body = buildDigestBody(daily, building, received, today)
 
-  const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ body }),
-  })
-  const frontText = await frontRes.text()
-  let frontJson
-  try { frontJson = JSON.parse(frontText) } catch { frontJson = { raw: frontText } }
-  if (!frontRes.ok) {
-    return { ok: false, reason: 'Front API error posting comment', detail: frontJson }
+  // Employee move report -- built as a separate MotherDuck connection
+  // (queryEmployeeMoves opens its own), so a failure here doesn't take
+  // down the core scorecard numbers above. Falls back to the plain text
+  // comment (no attachment) if PDF generation fails for any reason,
+  // rather than losing the whole day's digest.
+  let pdfBytes = null
+  let pdfError = null
+  try {
+    const byEmployee = await queryEmployeeMoves(today, MOTHERDUCK_TOKEN)
+    if (byEmployee.size > 0) {
+      pdfBytes = await buildEmployeeReportPdf(byEmployee, today)
+    }
+  } catch (e) {
+    pdfError = e.message
+  }
+
+  const body = buildDigestBody(daily, building, received, today, !!pdfBytes)
+  const finalBody = pdfError ? `${body}\n\n(Employee move report failed to generate: ${pdfError})` : body
+
+  let posted
+  if (pdfBytes) {
+    posted = await frontPostCommentWithPdf(conversationId, finalBody, pdfBytes, `jdf-employee-moves-${today}.pdf`)
+  } else {
+    posted = await frontPostComment(conversationId, finalBody)
   }
 
   if (!isManualTest) {
     await sbPatch(`prepick_notify_settings?facility=eq.${FACILITY}&dashboard_type=eq.${DASHBOARD_TYPE}`, { last_sent_date: today })
   }
 
-  return { ok: true, date: today, conversationId, commentId: frontJson.id }
+  return { ok: true, date: today, conversationId, commentId: posted.id, employeeReportAttached: !!pdfBytes, pdfError }
 }
 
 module.exports = {
