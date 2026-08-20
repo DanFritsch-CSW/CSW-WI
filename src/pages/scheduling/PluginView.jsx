@@ -120,6 +120,17 @@ import {
  *      attempt logged to load_container_attempts can be traced back to
  *      the Front conversation it came from on the Scheduling Datex
  *      Exceptions page's new Load Container Timeouts tab.
+ *
+ * UPDATED 2026-08-20 — fixed "No approved records found for this batch"
+ * (Kay's urgent report). handleApproveAll now passes pushedIds (the exact
+ * submission IDs created in this batch) to triggerMultiFrontDraft as
+ * record_ids, instead of relying solely on the client-clock-computed
+ * created_after timestamp — confirmed via direct Supabase query that a
+ * real, successfully-approved appointment (datex_appointment_id: 340624)
+ * was still failing that query, pointing to clock-skew between the
+ * client and server rather than an actual approval failure. See
+ * schedulingApi.js's triggerMultiFrontDraft header for the full
+ * root-cause writeup.
  */
 
 function CswBrandHeader() {
@@ -1168,7 +1179,12 @@ export default function PluginView() {
         }
         if (sessionRef.current !== sessionToken) return
         try {
-          await triggerMultiFrontDraft(conversationIdRef.current, batchStartedAt, multiDraftTemplate)
+          // FIXED 2026-08-20: pass pushedIds as record_ids instead of
+          // relying solely on the batchStartedAt timestamp — see
+          // schedulingApi.js's triggerMultiFrontDraft header for the full
+          // root-cause writeup (client/server clock skew was excluding
+          // genuinely successful, just-approved appointments).
+          await triggerMultiFrontDraft(conversationIdRef.current, batchStartedAt, multiDraftTemplate, pushedIds)
           if (sessionRef.current !== sessionToken) return
           setMultiDraftCreated(true)
         } catch (e) {
