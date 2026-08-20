@@ -29,14 +29,25 @@
 // LOCATION, not a target plate. Getting this backwards silently returns
 // zero rows for most real moves. Every query below uses the source field.
 //
-// FIXED 2026-08-13 (caught before any real run): the query's final JOIN
-// referenced `em.final_location` -- but that name only exists as an
-// OUTPUT alias in the outer SELECT list (`em.target_location AS
-// final_location`), not as an actual column on the emp_moves CTE, which
-// only has `target_location`. Referencing a SELECT-list alias inside a
-// JOIN's ON clause isn't valid in standard SQL and would have thrown
-// (or, worse, silently misbehaved) the first time this ran for real --
-// fixed to join on `em.target_location`, the CTE's real column.
+// FIXED 2026-08-13, TWICE: this query's OUTER SELECT list defines aliases
+// `final_location` (= em.target_location) and `final_ts` (=
+// em.completed_date_time) for the JS code below to consume -- but the
+// emp_moves CTE itself has NO columns by those names, only
+// `target_location` and `completed_date_time`/`first_ts`. Two separate
+// clauses wrongly referenced the alias as if it were a real qualified
+// column on `em`:
+//   1. The JOIN's ON clause used `em.final_location` -- fixed to
+//      `em.target_location`.
+//   2. The ORDER BY used `em.final_ts` -- same mistake, fixed to
+//      `em.completed_date_time`. This one actually reached production
+//      and threw live in the real digest (Binder Error, confirmed from
+//      the actual Front comment) before being caught and fixed here.
+// General lesson, not just for this file: a qualified reference like
+// `alias.name` always looks for a REAL column on that relation --
+// output-list aliases are only safely referable unqualified (or not at
+// all, inside a CTE chain like this). Verified this exact corrected query
+// against live MotherDuck data (both 2026-08-13 and 2026-08-20 dates)
+// before pushing.
 //
 // DEDUPE NOTE: a pallet moved more than once by the same person on the
 // same day (confirmed live: two of csw-madison1's pallets moved twice
@@ -126,7 +137,7 @@ async function queryEmployeeMoves(dateStr, motherduckToken) {
       JOIN onhand o ON o.license_plate_id = em.license_plate_id AND o.project_id = ${JDF_PROJECT_ID}
       JOIN loc_class lc ON lc.location = em.target_location
       WHERE em.rn = 1
-      ORDER BY em.employee, em.final_ts
+      ORDER BY em.employee, em.completed_date_time
     `)
 
     const byEmployee = new Map()
