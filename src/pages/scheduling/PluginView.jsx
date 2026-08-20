@@ -115,6 +115,11 @@ import {
  *      selection but could still apply a stale warehouse's dock-door
  *      list). All three now guard against applying a fetch result once a
  *      newer request for a different warehouse has superseded it.
+ *   5. Load container creation now passes front_conversation_id through
+ *      to scheduling-create-load-container.cjs, so an ambiguous-timeout
+ *      attempt logged to load_container_attempts can be traced back to
+ *      the Front conversation it came from on the Scheduling Datex
+ *      Exceptions page's new Load Container Timeouts tab.
  */
 
 function CswBrandHeader() {
@@ -827,7 +832,12 @@ export default function PluginView() {
 
     try {
       const orderTypeId = deriveOrderTypeId(currentDraft.type)
-      const lcResult = await createLoadContainer({ lookupcode: currentDraft.container_lookup_code, orderTypeId, priority: 5 })
+      const lcResult = await createLoadContainer({
+        lookupcode: currentDraft.container_lookup_code,
+        orderTypeId,
+        priority: 5,
+        front_conversation_id: capturedConvId,
+      })
 
       if (sessionRef.current !== sessionToken) return
       if (lcResult.dry_run) {
