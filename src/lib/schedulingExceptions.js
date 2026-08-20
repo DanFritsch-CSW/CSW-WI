@@ -11,6 +11,16 @@ import { supabase } from './supabase.js'
 // secret), so that goes through netlify/functions/datex-retry-push.cjs.
 // Delete also goes through a function (scheduling-delete-submission.cjs)
 // rather than a direct client-side Supabase call, to keep one write path.
+//
+// UPDATED 2026-08-19: added Load Container Timeouts — a 5th category
+// reading `load_container_attempts` instead of `submissions`. This tracks
+// an EARLIER, separate failure mode Dan flagged after reviewing this page:
+// load container creation (scheduling-create-load-container.cjs) can time
+// out ambiguously too, but that happens BEFORE a `submissions` row ever
+// exists, so the original four categories here had no way to see it. See
+// that function's header for the full root-cause writeup. Resolution goes
+// through scheduling-resolve-load-container-attempt.cjs (server-side, same
+// one-write-path convention as retry/delete above).
 
 const STALE_PENDING_DAYS = 7
 const STUCK_PROCESSING_MINUTES = 30
@@ -72,14 +82,31 @@ export async function fetchStalePending() {
   return data ?? []
 }
 
+// Load Container Timeouts — added 2026-08-19. Unresolved (status='ambiguous')
+// load_container_attempts rows: a create-load-container call timed out and
+// we genuinely don't know whether Datex created the container. Blocks a
+// new attempt for the same lookupcode until resolved here — see
+// scheduling-create-load-container.cjs's header for the full story.
+export async function fetchLoadContainerTimeouts() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('load_container_attempts')
+    .select('*')
+    .eq('status', 'ambiguous')
+    .order('created_at', { ascending: false })
+  if (error) { console.error('fetchLoadContainerTimeouts:', error); return [] }
+  return data ?? []
+}
+
 export async function fetchAllExceptionCategories() {
-  const [failed, stuckProcessing, approvedUnconfirmed, stalePending] = await Promise.all([
+  const [failed, stuckProcessing, approvedUnconfirmed, stalePending, loadContainerTimeouts] = await Promise.all([
     fetchFailed(),
     fetchStuckProcessing(),
     fetchApprovedUnconfirmed(),
     fetchStalePending(),
+    fetchLoadContainerTimeouts(),
   ])
-  return { failed, stuckProcessing, approvedUnconfirmed, stalePending }
+  return { failed, stuckProcessing, approvedUnconfirmed, stalePending, loadContainerTimeouts }
 }
 
 // retryDatexPush — calls the server-side retry function. Never attempted
@@ -97,6 +124,24 @@ export async function retryDatexPush(id) {
     err.status = res.status
     err.submission = json?.submission
     throw err
+  }
+  return json
+}
+
+// resolveLoadContainerAttempt — calls the server-side resolve function for
+// an ambiguous load_container_attempts row. resolution is 'found' (pass
+// loadcontainerId — the ID confirmed to exist in Datex) or 'not_found'
+// (confirmed the container was never created; unblocks retries for that
+// lookupcode).
+export async function resolveLoadContainerAttempt(id, resolution, loadcontainerId) {
+  const res = await fetch('/.netlify/functions/scheduling-resolve-load-container-attempt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, resolution, loadcontainer_id: loadcontainerId }),
+  })
+  const json = await res.json().catch(() => null)
+  if (!res.ok) {
+    throw new Error(json?.error || `HTTP ${res.status}`)
   }
   return json
 }
