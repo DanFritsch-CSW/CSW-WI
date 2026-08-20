@@ -191,12 +191,25 @@ export async function triggerFrontDraft(id, frontConvId, draftTemplate) {
   return res.json()
 }
 
-export async function triggerMultiFrontDraft(frontConvId, createdAfter, draftTemplate) {
+// Kept created_after for backward-compat / as a fallback signal, but the
+// primary mechanism is now recordIds — the EXACT submission IDs created in
+// this batch, which the caller already has (handleApproveAll's pushedIds).
+// FIXED 2026-08-20 after Kay hit "No approved records found for this
+// batch" on a batch that had genuinely succeeded (real datex_appointment_id,
+// confirmed via direct Supabase query). Root cause: created_after alone
+// compares a CLIENT-computed timestamp (Date.now() in the browser) against
+// a SERVER-generated created_at column — if the client and server clocks
+// drift by more than the 5-second buffer built into that timestamp, a
+// genuinely successful, just-created appointment can fall outside the
+// window and get silently excluded. record_ids sidesteps clock skew
+// entirely by asking for those specific rows instead of a time window.
+export async function triggerMultiFrontDraft(frontConvId, createdAfter, draftTemplate, recordIds) {
   const res = await fetch(`${BASE}/scheduling-create-multi-front-draft`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       front_conversation_id: frontConvId,
+      ...(recordIds?.length ? { record_ids: recordIds } : {}),
       created_after: createdAfter,
       ...(draftTemplate ? { draft_template: draftTemplate } : {}),
     }),
