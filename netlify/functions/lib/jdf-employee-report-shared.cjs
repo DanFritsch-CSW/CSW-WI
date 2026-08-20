@@ -29,6 +29,15 @@
 // LOCATION, not a target plate. Getting this backwards silently returns
 // zero rows for most real moves. Every query below uses the source field.
 //
+// FIXED 2026-08-13 (caught before any real run): the query's final JOIN
+// referenced `em.final_location` -- but that name only exists as an
+// OUTPUT alias in the outer SELECT list (`em.target_location AS
+// final_location`), not as an actual column on the emp_moves CTE, which
+// only has `target_location`. Referencing a SELECT-list alias inside a
+// JOIN's ON clause isn't valid in standard SQL and would have thrown
+// (or, worse, silently misbehaved) the first time this ran for real --
+// fixed to join on `em.target_location`, the CTE's real column.
+//
 // DEDUPE NOTE: a pallet moved more than once by the same person on the
 // same day (confirmed live: two of csw-madison1's pallets moved twice
 // within minutes, e.g. F8A37-2A -> F8A37-3A) collapses to ONE row keyed
@@ -115,7 +124,7 @@ async function queryEmployeeMoves(dateStr, motherduckToken) {
              lc.distinct_materials, lc.skus_here
       FROM emp_moves em
       JOIN onhand o ON o.license_plate_id = em.license_plate_id AND o.project_id = ${JDF_PROJECT_ID}
-      JOIN loc_class lc ON lc.location = em.final_location
+      JOIN loc_class lc ON lc.location = em.target_location
       WHERE em.rn = 1
       ORDER BY em.employee, em.final_ts
     `)
