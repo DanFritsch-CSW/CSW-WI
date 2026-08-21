@@ -7,9 +7,48 @@
  * recipients, not just the sender, in the reply's "to" list).
  *
  * Used by scheduling-push-to-datex-background.cjs.
+ *
+ * UPDATED 2026-08-20 — two fixes to draft reliability, both diagnosed
+ * directly from this file's own logic (no live test needed, unlike the
+ * earlier "does Front auto-resolve recipients" question this replaces):
+ *
+ *   1. RECIPIENT BUG ("sometimes only replies to one person"):
+ *      getReplyAllRecipients used to look at only the SINGLE most recent
+ *      inbound message's recipient list. On a thread with multiple
+ *      messages over time, anyone CC'd earlier but not on the latest
+ *      message silently dropped off. Now unions recipients across EVERY
+ *      message in the conversation instead — using data already returned
+ *      by the same /messages call, no extra API cost. Also no longer
+ *      silently swallows API errors into an empty {to:[],cc:[]} — errors
+ *      now propagate so a draft-creation failure is visible instead of
+ *      quietly producing a recipient-less draft.
+ *
+ *   2. CHANNEL/THREADING BUG (Richelieu/O&H: replies show up as a new
+ *      thread instead of an actual reply): resolveChannelId used to pick
+ *      the send channel from a STATIC warehouse-name lookup table
+ *      (WAREHOUSE_MAP), never checking which channel the conversation
+ *      actually arrived on. If that static mapping was ever wrong or
+ *      stale, the reply would go out from a DIFFERENT email identity than
+ *      the one the customer originally wrote to — most email clients
+ *      thread by matching sender/message headers, not just subject line,
+ *      so a mismatched "from" address shows up as an unrelated new email
+ *      even though Front's own UI still shows it threaded correctly on
+ *      our side. Now resolves the channel from the conversation's own
+ *      inbound message (the real "to" address the customer emailed,
+ *      matched against Front's actual channel directory) FIRST, falling
+ *      back to the static WAREHOUSE_MAP only if that lookup fails.
+ *
+ * Both fixes share one fetch of /channels and one fetch of /messages per
+ * draft, rather than each function refetching independently.
  */
 
 // Maps normalized warehouse names to their appointments inbox channel IDs.
+// Kept as a FALLBACK only as of 2026-08-20 — the real channel is now
+// resolved from the conversation's own inbound message first (see
+// resolveChannelId below). This table only matters if that resolution
+// fails (e.g. Front API hiccup, or a conversation with no inbound message
+// yet, such as one created entirely inside the plugin with no incoming
+// email at all).
 const WAREHOUSE_MAP = {
   'csw-franksville':      { channel: 'cha_ema1g', inbox: 'inb_aut78' }, // CAL Appointments
   'csw-kenosha':          { channel: 'cha_ema6s', inbox: 'inb_awl90' }, // KEN Appointments
@@ -60,34 +99,103 @@ async function frontGet(path, apiKey) {
   return res.json();
 }
 
-// Reply-all recipients — includes original 'from' AND 'to' recipients in the
-// new "to" line (the fix shipped 2026-08-03), only original 'cc' in "cc".
-async function getReplyAllRecipients(conversationId, apiKey) {
-  try {
-    const data = await frontGet(`/conversations/${conversationId}/messages?limit=50`, apiKey);
-    const messages = data._results || [];
-    const inbound = messages.slice().reverse().find(m => m.is_inbound) || messages[messages.length - 1];
-    if (!inbound) return { to: [], cc: [] };
-    const recipients = inbound.recipients || [];
-    const to = recipients.filter(r => r.role === 'from' || r.role === 'to').map(r => r.handle).filter(Boolean);
-    const cc = recipients.filter(r => r.role === 'cc').map(r => r.handle).filter(Boolean);
-    return { to, cc };
-  } catch {
-    return { to: [], cc: [] };
+// Fetches Front's channel directory ONCE per draft-creation call, shared
+// by both channel resolution and recipient filtering below. Returns:
+//   byId       — Map(channel_id -> address)
+//   byAddress  — Map(lowercased address -> channel_id)
+//   addressSet — Set(lowercased address) of every CSW channel's own
+//                address, used to exclude our own identity from
+//                recipient lists (we should never "reply to" ourselves).
+async function fetchChannelDirectory(apiKey) {
+  const r = await frontGet('/channels', apiKey);
+  const channels = r._results || [];
+  const byId = new Map();
+  const byAddress = new Map();
+  const addressSet = new Set();
+  for (const ch of channels) {
+    if (!ch.id || !ch.address) continue;
+    const lower = ch.address.toLowerCase();
+    byId.set(ch.id, ch.address);
+    byAddress.set(lower, ch.id);
+    addressSet.add(lower);
   }
+  return { byId, byAddress, addressSet };
 }
 
-async function resolveChannelId(warehouse, apiKey) {
-  if (process.env.FRONT_CHANNEL_ID) return process.env.FRONT_CHANNEL_ID;
+// Fetches every message in the conversation ONCE, shared by both channel
+// resolution and recipient unioning below.
+async function fetchConversationMessages(conversationId, apiKey) {
+  const data = await frontGet(`/conversations/${conversationId}/messages?limit=50`, apiKey);
+  return data._results || [];
+}
 
+// Reply-all recipients — UPDATED 2026-08-20: unions recipients across
+// EVERY message in the conversation (not just the latest inbound one), so
+// someone CC'd earlier in a growing thread but absent from the most
+// recent message doesn't silently drop off a later reply. Excludes our
+// own channel addresses (ownAddressSet) from both lists — we never want
+// to "reply to" our own inbox. No longer swallows errors into an empty
+// result; a caller that wants best-effort behavior should catch this
+// itself (createFrontDraft/createFrontMultiDraft/sendFrontEmail do NOT
+// catch it — a recipient-resolution failure should surface as a real
+// error, not a silently recipient-less draft).
+function computeReplyAllRecipients(messages, ownAddressSet) {
+  const toMap = new Map(); // lowercase handle -> original-case handle
+  const ccMap = new Map();
+  for (const msg of messages) {
+    const recipients = msg.recipients || [];
+    for (const r of recipients) {
+      if (!r.handle) continue;
+      const lower = r.handle.toLowerCase();
+      if (ownAddressSet.has(lower)) continue; // never include our own channel identity
+      if (r.role === 'from' || r.role === 'to') {
+        if (!toMap.has(lower)) toMap.set(lower, r.handle);
+      } else if (r.role === 'cc') {
+        if (!ccMap.has(lower)) ccMap.set(lower, r.handle);
+      }
+    }
+  }
+  return { to: [...toMap.values()], cc: [...ccMap.values()] };
+}
+
+// Resolves the channel to send from. UPDATED 2026-08-20: prefers the
+// REAL channel the conversation arrived on (read from the inbound
+// message's "to" address, matched against Front's actual channel
+// directory) over the static warehouse-name lookup table. A stale/wrong
+// static mapping used to be able to silently send the reply from a
+// DIFFERENT email identity than the one the customer originally
+// emailed — most email clients thread by matching sender/message
+// headers, so that mismatch is a plausible direct cause of replies
+// showing up as a new thread instead of an actual reply.
+function resolveChannelIdFromMessages(messages, directory) {
+  const inbound = messages.find((m) => m.is_inbound);
+  if (!inbound) return null;
+  const toHandle = (inbound.recipients || []).find((r) => r.role === 'to')?.handle;
+  if (!toHandle) return null;
+  return directory.byAddress.get(toHandle.toLowerCase()) || null;
+}
+
+function resolveChannelIdFallback(warehouse, directory) {
+  if (process.env.FRONT_CHANNEL_ID) return process.env.FRONT_CHANNEL_ID;
   const key = warehouseKey(warehouse);
   const mapping = WAREHOUSE_MAP[key];
   if (mapping?.channel) return mapping.channel;
+  const first = [...directory.byId.keys()][0];
+  if (!first) throw new Error('Could not resolve a sending channel. Set FRONT_CHANNEL_ID in Netlify env vars.');
+  return first;
+}
 
-  const r = await frontGet('/channels', apiKey);
-  const ch = r._results?.find(c => ['smtp','office365','gmail','imap'].includes(c.type)) || r._results?.[0];
-  if (!ch?.id) throw new Error('Could not resolve a sending channel. Set FRONT_CHANNEL_ID in Netlify env vars.');
-  return ch.id;
+// Fetches everything shared between channel resolution and recipient
+// unioning in one place: the channel directory, the conversation's
+// messages, the resolved channel ID, and the resolved to/cc lists.
+async function resolveDraftContext(conversationId, warehouse, apiKey) {
+  const [directory, messages] = await Promise.all([
+    fetchChannelDirectory(apiKey),
+    fetchConversationMessages(conversationId, apiKey),
+  ]);
+  const channelId = resolveChannelIdFromMessages(messages, directory) || resolveChannelIdFallback(warehouse, directory);
+  const { to, cc } = computeReplyAllRecipients(messages, directory.addressSet);
+  return { channelId, to, cc };
 }
 
 const DEFAULT_DRAFT_TEMPLATE = [
@@ -130,10 +238,7 @@ function toHtml(text) {
 }
 
 async function createFrontDraft(record, apiKey, template) {
-  const [channelId, { to, cc }] = await Promise.all([
-    resolveChannelId(record.warehouse, apiKey),
-    getReplyAllRecipients(record.front_conversation_id, apiKey),
-  ]);
+  const { channelId, to, cc } = await resolveDraftContext(record.front_conversation_id, record.warehouse, apiKey);
 
   const payload = { channel_id: channelId, body: toHtml(buildBody(record, template)), mode: 'shared', type: 'replyAll' };
   if (to.length) payload.to = to;
@@ -155,10 +260,7 @@ async function createFrontDraft(record, apiKey, template) {
 }
 
 async function sendFrontEmail(record, apiKey, template) {
-  const [channelId, { to, cc }] = await Promise.all([
-    resolveChannelId(record.warehouse, apiKey),
-    getReplyAllRecipients(record.front_conversation_id, apiKey),
-  ]);
+  const { channelId, to, cc } = await resolveDraftContext(record.front_conversation_id, record.warehouse, apiKey);
 
   const payload = { channel_id: channelId, body: toHtml(buildBody(record, template)), type: 'replyAll' };
   if (to.length) payload.to = to;
@@ -243,10 +345,7 @@ function buildMultiBody(records, template = DEFAULT_MULTI_DRAFT_TEMPLATE) {
 async function createFrontMultiDraft(records, apiKey, template) {
   if (!records.length) throw new Error('No records provided');
   const conversationId = records[0].front_conversation_id;
-  const [channelId, { to, cc }] = await Promise.all([
-    resolveChannelId(records[0].warehouse, apiKey),
-    getReplyAllRecipients(conversationId, apiKey),
-  ]);
+  const { channelId, to, cc } = await resolveDraftContext(conversationId, records[0].warehouse, apiKey);
 
   const payload = { channel_id: channelId, body: toHtml(buildMultiBody(records, template)), mode: 'shared', type: 'replyAll' };
   if (to.length) payload.to = to;
