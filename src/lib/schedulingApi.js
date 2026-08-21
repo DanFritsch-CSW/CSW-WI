@@ -343,3 +343,23 @@ export async function pushToDatexBackground(id, source, draftTemplate, sendEmail
     throw new Error(`Background push failed to trigger (${res.status})`)
   }
 }
+
+// Kenosha Order Search, Phase 1 — added 2026-08-21 per Dan/Kay's
+// 2026-08-20 meeting. Checks whether an order exists in Datex by owner
+// reference, vendor reference, or lookup code — see
+// scheduling-order-search.cjs for the full design writeup. Not cached:
+// order data changes far more often than the lookup/reference data cached
+// elsewhere in this file, and staleness here would directly undermine the
+// point of the tool (confirming an order exists RIGHT NOW).
+export async function searchOrder(query) {
+  const res = await fetch(`${BASE}/scheduling-order-search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  })
+  const data = await res.json().catch(() => null)
+  if (!res.ok) {
+    throw new Error(data?.error || `Order search failed (${res.status})`)
+  }
+  return data // { found, count, orders, query }
+}
