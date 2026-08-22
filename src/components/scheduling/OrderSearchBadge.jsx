@@ -12,6 +12,16 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 // found/not-found badge directly under the field. No manual "Search"
 // button, no separate screen — it just tells you as you type.
 //
+// UPDATED 2026-08-22 (later) after Kay hit a false positive: a reference
+// number coincidentally matched an unrelated, long-Completed order for a
+// different customer. Now passes owner/project (the draft's currently
+// selected values) through to searchOrder(), so the backend can scope the
+// match to the specific customer/project being worked on and exclude
+// closed orders — see scheduling-order-search.cjs's header for the full
+// story. owner/project are also in the debounce effect's dependency
+// array, so changing either after typing a reference re-checks
+// automatically rather than leaving a stale result on screen.
+//
 // The old PluginOrderSearchTab.jsx file is left in place (no file-delete
 // tool) but is no longer imported or rendered anywhere — dead code, same
 // convention as other superseded files in this app (see netlify.toml's
@@ -19,7 +29,7 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 
 const DEBOUNCE_MS = 600
 
-export default function OrderSearchBadge({ reference }) {
+export default function OrderSearchBadge({ reference, owner, project }) {
   const [status, setStatus] = useState('idle') // idle | loading | found | notfound | error
   const [result, setResult] = useState(null)
   const debounceRef = useRef(null)
@@ -38,7 +48,7 @@ export default function OrderSearchBadge({ reference }) {
     setStatus('loading')
     debounceRef.current = setTimeout(() => {
       const token = ++requestRef.current
-      searchOrder(trimmed)
+      searchOrder(trimmed, owner, project)
         .then((data) => {
           if (requestRef.current !== token) return // a newer keystroke superseded this search
           if (data.found && data.orders?.length) {
@@ -62,7 +72,7 @@ export default function OrderSearchBadge({ reference }) {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [reference])
+  }, [reference, owner, project])
 
   if (status === 'idle' || status === 'error') return null
 
@@ -73,7 +83,8 @@ export default function OrderSearchBadge({ reference }) {
   if (status === 'notfound') {
     return (
       <div className="mt-1 px-2 py-1.5 rounded-lg text-[11px] border bg-amber-50 border-amber-200 text-amber-800">
-        ⚠ No matching order found in Datex for this reference.
+        ⚠ No matching active order found in Datex{owner ? ` for ${owner}` : ''}
+        {project && project !== owner ? ` / ${project}` : ''}.
       </div>
     )
   }
