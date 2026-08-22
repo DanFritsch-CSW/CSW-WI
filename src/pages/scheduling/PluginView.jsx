@@ -147,6 +147,12 @@ import {
  *      search step required. PluginOrderSearchTab.jsx is left in place
  *      (no file-delete tool) but is no longer imported or rendered
  *      anywhere.
+ *   3. Later same day: OrderSearchBadge now also receives draft.owner and
+ *      draft.project, forwarded to searchOrder() so the backend can scope
+ *      matches to the specific customer/project being worked on — see
+ *      OrderSearchBadge.jsx and scheduling-order-search.cjs for the
+ *      false-positive this fixes (a reference number coincidentally
+ *      matched an unrelated, long-closed order for a different customer).
  */
 
 function CswBrandHeader() {
@@ -1666,7 +1672,7 @@ export default function PluginView() {
               <ComboBox small label="Carrier" fieldKey="carrier" value={draft.carrier} options={lookups.carriers} loading={lookupsLoading} onChange={handleFieldChange} />
             </div>
             <EditableField label="Reference #" fieldKey="reference_number" value={draft.reference_number} onChange={handleFieldChange} />
-            <OrderSearchBadge reference={draft.reference_number} />
+            <OrderSearchBadge reference={draft.reference_number} owner={draft.owner} project={draft.project} />
             <EditableField label="Appointment Code" fieldKey="appointment_lookup_code" value={draft.appointment_lookup_code} onChange={handleFieldChange} />
             <EditableField label="Notes" fieldKey="notes" value={draft.notes} onChange={handleFieldChange} />
           </div>
