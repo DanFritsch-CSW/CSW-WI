@@ -351,11 +351,22 @@ export async function pushToDatexBackground(id, source, draftTemplate, sendEmail
 // order data changes far more often than the lookup/reference data cached
 // elsewhere in this file, and staleness here would directly undermine the
 // point of the tool (confirming an order exists RIGHT NOW).
-export async function searchOrder(query) {
+//
+// UPDATED 2026-08-22 — now takes optional owner/project (the draft's
+// currently selected Owner/Project), passed through so the server can
+// scope the match and exclude Completed/Cancelled orders. See
+// scheduling-order-search.cjs's header for the false-positive this fixes
+// (a reference number that coincidentally matched an unrelated, long-
+// closed order for a different customer).
+export async function searchOrder(query, owner, project) {
   const res = await fetch(`${BASE}/scheduling-order-search`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({
+      query,
+      ...(owner ? { owner } : {}),
+      ...(project ? { project } : {}),
+    }),
   })
   const data = await res.json().catch(() => null)
   if (!res.ok) {
