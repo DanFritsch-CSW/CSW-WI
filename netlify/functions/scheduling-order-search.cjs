@@ -44,12 +44,26 @@
 //      aren't yet set on the draft, falls back to the unscoped search
 //      (still status-filtered) rather than returning nothing.
 //
+// PHASE 2 added 2026-08-22 (later still): requestedShipDate and notes,
+// pulled from datex_slv_orders.requested_delivery_date and .Notes
+// (exact column names confirmed via DESCRIBE before writing this — Notes
+// is capitalized, unlike every other column here). Both are display-only
+// additions to the same query Phase 1 already ran — no new joins, no new
+// tables. requested_delivery_date is a TIMESTAMP but observed values are
+// always midnight (date-only data wearing a timestamp type), so it's
+// formatted as a plain date (YYYY-MM-DD) rather than a full timestamp.
+// Notes is frequently Datex-auto-generated summary text (e.g.
+// " [Total 1344 42819.84 LB 1510.65 CF]") rather than free-text human
+// notes — passed through as-is, trimmed, since Kay still finds it useful
+// context even when it's just a quantity summary.
+//
 // Response contract matches what PluginOrderSearchTab.jsx and
 // searchOrder() already expect on main — verified directly against both
 // files before writing this, not re-guessed:
 //   { found, count, query, orders: [{
 //       orderId, lookupCode, statusName, ownerName, projectName,
-//       warehouseName, ownerReference, vendorReference, backOrder
+//       warehouseName, ownerReference, vendorReference, backOrder,
+//       requestedShipDate, notes
 //   }] }
 //
 // Matches the given query against ALL THREE reference fields Kay checks
@@ -65,10 +79,6 @@
 // assumption here would silently hide a real order exactly when Kay needs
 // a real answer. warehouseName is a best-effort label for a human to
 // sanity-check, never used to filter results.
-//
-// Phase 2 (ship date + notes) is a deliberate follow-up, not built here —
-// see PluginOrderSearchTab.jsx's own header for why that's a display-only
-// change on top of this same query, not new backend work.
 //
 // POST body: { query: string, owner?: string, project?: string }
 
@@ -137,7 +147,9 @@ exports.handler = async (event) => {
       COALESCE(a.account_name, '') AS owner_name,
       COALESCE(p.project_name, '') AS project_name,
       o.preferred_warehouse_id,
-      o.back_order
+      o.back_order,
+      o.requested_delivery_date,
+      COALESCE(o.Notes, '') AS order_notes
     FROM production_db.silver.datex_slv_orders o
     LEFT JOIN production_db.silver.datex_slv_orderstatuses s
       ON s.order_status_id = o.order_status_id
@@ -179,17 +191,30 @@ exports.handler = async (event) => {
     conn.close()
     db.close()
 
-    const orders = rows.map((r) => ({
-      orderId: Number(r.order_id),
-      lookupCode: String(r.lookup_code || ''),
-      statusName: String(r.status_name || ''),
-      ownerName: String(r.owner_name || ''),
-      projectName: String(r.project_name || ''),
-      warehouseName: WAREHOUSE_NAMES[Number(r.preferred_warehouse_id)] || '',
-      ownerReference: String(r.owner_reference || ''),
-      vendorReference: String(r.vendor_reference || ''),
-      backOrder: Boolean(r.back_order),
-    }))
+    const orders = rows.map((r) => {
+      // requested_delivery_date observed values are always midnight
+      // (date-only data wearing a TIMESTAMP type) — format as a plain
+      // date, not a full timestamp, to match how Kay actually thinks
+      // about a ship date.
+      let requestedShipDate = null
+      if (r.requested_delivery_date) {
+        const d = new Date(r.requested_delivery_date)
+        if (!isNaN(d.getTime())) requestedShipDate = d.toISOString().slice(0, 10)
+      }
+      return {
+        orderId: Number(r.order_id),
+        lookupCode: String(r.lookup_code || ''),
+        statusName: String(r.status_name || ''),
+        ownerName: String(r.owner_name || ''),
+        projectName: String(r.project_name || ''),
+        warehouseName: WAREHOUSE_NAMES[Number(r.preferred_warehouse_id)] || '',
+        ownerReference: String(r.owner_reference || ''),
+        vendorReference: String(r.vendor_reference || ''),
+        backOrder: Boolean(r.back_order),
+        requestedShipDate,
+        notes: String(r.order_notes || '').trim(),
+      }
+    })
 
     return {
       statusCode: 200,
