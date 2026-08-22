@@ -153,6 +153,12 @@ import {
  *      OrderSearchBadge.jsx and scheduling-order-search.cjs for the
  *      false-positive this fixes (a reference number coincidentally
  *      matched an unrelated, long-closed order for a different customer).
+ *   4. Phase 2 (same day, later still): handleOrderFound auto-fills the
+ *      appointment's Notes field with the Requested Ship Date + Order
+ *      Notes pulled from Datex once a match is found — never overwrites
+ *      existing Notes content, and fires at most once per distinct
+ *      matched order (autoFilledOrderIdRef). See handleOrderFound's own
+ *      comment for the full guard-rail writeup.
  */
 
 function CswBrandHeader() {
@@ -793,6 +799,41 @@ export default function PluginView() {
       }
       return next
     })
+  }
+
+  // Order Search Phase 2 — added 2026-08-22. Auto-fills the appointment's
+  // Notes field with the Requested Ship Date + Order Notes pulled from
+  // Datex once OrderSearchBadge finds a match, per Dan's request to pull
+  // this "within the APPT note section" rather than just showing it in
+  // the badge. Two guards, both deliberate:
+  //   1. autoFilledOrderIdRef ensures this only fires ONCE per distinct
+  //      matched order — OrderSearchBadge's debounce effect can re-run
+  //      for reasons unrelated to the match itself (e.g. owner/project
+  //      changing), and without this guard every re-run would re-append
+  //      or re-fire against the same order.
+  //   2. Never overwrites existing Notes content — checked twice: once
+  //      as a fast bail-out via draftRef, and again inside the functional
+  //      setDraft updater against the freshest state, since React batches
+  //      updates and the draftRef check alone isn't guaranteed current by
+  //      the time this runs. If Kay has already typed something in Notes,
+  //      this does nothing — it only ever fills a blank field, same
+  //      "never clobber user input" principle as the auto-suggest-best-
+  //      hour behavior elsewhere in this file.
+  const autoFilledOrderIdRef = useRef(null)
+  function handleOrderFound(order) {
+    if (autoFilledOrderIdRef.current === order.orderId) return
+    autoFilledOrderIdRef.current = order.orderId
+    if (draftRef.current.notes) return
+    const parts = []
+    if (order.requestedShipDate) {
+      const [y, m, d] = order.requestedShipDate.split('-')
+      const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+      const monthName = months[parseInt(m, 10) - 1] || m
+      parts.push(`Requested Ship Date: ${monthName} ${parseInt(d, 10)}, ${y}`)
+    }
+    if (order.notes) parts.push(`Order Notes: ${order.notes}`)
+    if (parts.length === 0) return
+    setDraft((prev) => (prev.notes ? prev : { ...prev, notes: parts.join('\n') }))
   }
 
   // ── Load Container handlers ──────────────────────────────────────────────
@@ -1672,7 +1713,7 @@ export default function PluginView() {
               <ComboBox small label="Carrier" fieldKey="carrier" value={draft.carrier} options={lookups.carriers} loading={lookupsLoading} onChange={handleFieldChange} />
             </div>
             <EditableField label="Reference #" fieldKey="reference_number" value={draft.reference_number} onChange={handleFieldChange} />
-            <OrderSearchBadge reference={draft.reference_number} owner={draft.owner} project={draft.project} />
+            <OrderSearchBadge reference={draft.reference_number} owner={draft.owner} project={draft.project} onOrderFound={handleOrderFound} />
             <EditableField label="Appointment Code" fieldKey="appointment_lookup_code" value={draft.appointment_lookup_code} onChange={handleFieldChange} />
             <EditableField label="Notes" fieldKey="notes" value={draft.notes} onChange={handleFieldChange} />
           </div>
