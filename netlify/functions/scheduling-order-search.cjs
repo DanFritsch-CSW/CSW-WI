@@ -21,6 +21,29 @@
 // there is deduped to the latest ingested version per project ID, since
 // bronze.datex_projects carries historical CDC-style versions.
 //
+// UPDATED 2026-08-22 (later) after Kay hit a real false-positive: a
+// reference number ("31553") coincidentally matched an unrelated,
+// long-Completed Palermo's/Caledonia order while she was scheduling a
+// Pedone Pinsa/Kenosha appointment — reference numbers are apparently not
+// globally unique across customers over Datex's full history. Two fixes,
+// both confirmed against live data before writing (see
+// silver.datex_slv_orderstatuses counts: Created=3,939 orders,
+// Processing=892, Completed=660,876, Cancelled=60,731 — Completed/
+// Cancelled dwarf the active statuses, so an unscoped search is
+// overwhelmingly likely to surface stale/irrelevant history):
+//   1. Always restricts to order_status_id IN (1, 2) — Created and
+//      Processing, the only two statuses with real "this order is still
+//      active" meaning. Completed and Cancelled orders are never
+//      returned, regardless of reference match.
+//   2. Accepts optional owner/project params (the draft's currently
+//      selected Owner/Project in the plugin) and, when provided, requires
+//      an exact case-insensitive match on BOTH — scoping the search to
+//      the specific customer/project Kay is actually working on, so a
+//      coincidental reference collision with a different customer's
+//      order can no longer surface as a false "found." When owner/project
+//      aren't yet set on the draft, falls back to the unscoped search
+//      (still status-filtered) rather than returning nothing.
+//
 // Response contract matches what PluginOrderSearchTab.jsx and
 // searchOrder() already expect on main — verified directly against both
 // files before writing this, not re-guessed:
@@ -47,7 +70,7 @@
 // see PluginOrderSearchTab.jsx's own header for why that's a display-only
 // change on top of this same query, not new backend work.
 //
-// POST body: { query: string }
+// POST body: { query: string, owner?: string, project?: string }
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -57,6 +80,11 @@ const NO_CACHE_HEADERS = {
 
 // Best-effort label only — see header note on why this isn't used to filter.
 const WAREHOUSE_NAMES = { 1: 'CAL', 3: 'EC', 4: 'MAD', 5: 'KEN', 6: 'WR' }
+
+// Only statuses with real "this order is still active" meaning — see
+// header note for the live counts that justified this. Everything else
+// (Completed, Cancelled, and the zero-volume statuses) is excluded.
+const ACTIVE_STATUS_IDS = [1, 2] // Created, Processing
 
 function sqlLit(s) {
   return `'${String(s).replace(/'/g, "''")}'`
@@ -83,8 +111,13 @@ exports.handler = async (event) => {
   if (!query) {
     return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Missing query' }) }
   }
+  const owner = (body.owner || '').trim()
+  const project = (body.project || '').trim()
 
   const refLit = sqlLit(query)
+  const statusList = ACTIVE_STATUS_IDS.join(', ')
+  const ownerFilter = owner ? `AND LOWER(a.account_name) = LOWER(${sqlLit(owner)})` : ''
+  const projectFilter = project ? `AND LOWER(p.project_name) = LOWER(${sqlLit(project)})` : ''
 
   const sql = `
     WITH latest_projects AS (
@@ -112,10 +145,14 @@ exports.handler = async (event) => {
       ON a.account_id = o.account_id
     LEFT JOIN latest_projects p
       ON p.project_id = o.project_id
-    WHERE
+    WHERE (
       LOWER(o.lookup_code) = LOWER(${refLit})
       OR LOWER(o.owner_reference) = LOWER(${refLit})
       OR LOWER(o.vendor_reference) = LOWER(${refLit})
+    )
+    AND o.order_status_id IN (${statusList})
+    ${ownerFilter}
+    ${projectFilter}
     ORDER BY o.created_sys_date_time DESC
     LIMIT 10
   `
