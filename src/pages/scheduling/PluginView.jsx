@@ -23,7 +23,7 @@ import AppointmentInsights from '../../components/scheduling/AppointmentInsights
 import PluginSettingsPanel from '../../components/scheduling/PluginSettingsPanel.jsx'
 import PluginLoadContainerTab from '../../components/scheduling/PluginLoadContainerTab.jsx'
 import PluginMultiApptTab from '../../components/scheduling/PluginMultiApptTab.jsx'
-import PluginOrderSearchTab from '../../components/scheduling/PluginOrderSearchTab.jsx'
+import OrderSearchBadge from '../../components/scheduling/OrderSearchBadge.jsx'
 import { CSW_BEAR_LOGO } from '../../lib/csw-logo.js'
 import {
   WAREHOUSE_FALLBACK,
@@ -133,14 +133,20 @@ import {
  * schedulingApi.js's triggerMultiFrontDraft header for the full
  * root-cause writeup.
  *
- * UPDATED 2026-08-22 — wired in the Order Search tab (Kenosha Order
- * Search Phase 1, per the 2026-08-20 Dan<>Kay meeting). The component
- * (PluginOrderSearchTab.jsx), its client wrapper (searchOrder in
- * schedulingApi.js), and the backend function
- * (scheduling-order-search.cjs) had all already been built in a parallel
- * session, but the tab was never actually added to this file's switcher —
- * meaning none of it was reachable yet. Self-contained component (no
- * shared state needed), same pattern as RecurringForm/PluginLoadContainerTab.
+ * UPDATED 2026-08-22 (twice) — Order Search:
+ *   1. First wired in a standalone "Order Search" tab (PluginOrderSearchTab.jsx),
+ *      since the component/wrapper/backend for it had already been built
+ *      in a parallel session but never actually connected to this file's
+ *      switcher.
+ *   2. Then REMOVED that tab per Dan's direct feedback on seeing it live:
+ *      Kay shouldn't have to switch tabs and re-type a reference to check
+ *      Datex — the check belongs right on the Reference # field she's
+ *      already filling in. Replaced with OrderSearchBadge, a small
+ *      component that debounces on draft.reference_number and shows a
+ *      compact found/not-found badge directly under the field, no manual
+ *      search step required. PluginOrderSearchTab.jsx is left in place
+ *      (no file-delete tool) but is no longer imported or rendered
+ *      anywhere.
  */
 
 function CswBrandHeader() {
@@ -206,7 +212,7 @@ function ReadOnlyField({ label, value }) {
 }
 
 export default function PluginView() {
-  const [pluginView, setPluginView] = useState('appointment') // 'appointment' | 'loadContainer' | 'multi' | 'recurring' | 'orderSearch' | 'settings'
+  const [pluginView, setPluginView] = useState('appointment') // 'appointment' | 'loadContainer' | 'multi' | 'recurring' | 'settings'
   const [contextType, setContextType] = useState('noConversation')
   const [conversationId, setConversationId] = useState(null)
   const [submission, setSubmission] = useState(null)
@@ -1478,12 +1484,6 @@ export default function PluginView() {
           Recurring
         </button>
         <button
-          onClick={() => setPluginView('orderSearch')}
-          className={`flex-1 py-1 rounded-md text-xs font-medium transition-colors ${pluginView === 'orderSearch' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
-        >
-          Order Search
-        </button>
-        <button
           onClick={() => setPluginView('settings')}
           title="Settings"
           className={`py-1 px-2.5 rounded-md text-sm font-medium transition-colors ${pluginView === 'settings' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
@@ -1506,8 +1506,6 @@ export default function PluginView() {
         />
       ) : pluginView === 'recurring' ? (
         <RecurringForm compact />
-      ) : pluginView === 'orderSearch' ? (
-        <PluginOrderSearchTab />
       ) : pluginView === 'loadContainer' ? (
         <PluginLoadContainerTab
           contextType={contextType}
@@ -1668,6 +1666,7 @@ export default function PluginView() {
               <ComboBox small label="Carrier" fieldKey="carrier" value={draft.carrier} options={lookups.carriers} loading={lookupsLoading} onChange={handleFieldChange} />
             </div>
             <EditableField label="Reference #" fieldKey="reference_number" value={draft.reference_number} onChange={handleFieldChange} />
+            <OrderSearchBadge reference={draft.reference_number} />
             <EditableField label="Appointment Code" fieldKey="appointment_lookup_code" value={draft.appointment_lookup_code} onChange={handleFieldChange} />
             <EditableField label="Notes" fieldKey="notes" value={draft.notes} onChange={handleFieldChange} />
           </div>
