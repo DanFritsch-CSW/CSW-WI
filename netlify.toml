@@ -50,16 +50,18 @@
 [functions."carriers-sync-test"]
   timeout = 26
 
-# Kenosha Order Search, Phase 1 -- added 2026-08-21 per Dan/Kay's
-# 2026-08-20 meeting. Plain read-only POST against
-# production_db.bronze.datex_orders -- confirmed via MotherDuck catalog
-# search that no silver/gold layer exists for orders, so this reads
-# bronze directly (verified against real data before writing the
-# function: one row per order, no CDC-style versioning to dedupe). Same
-# duckdb single-query pattern as the other motherduck-*.cjs functions
-# above. See the function's own header for the full design writeup (three
-# lookup keys checked, Phase 2 fields already selected but not yet
-# surfaced in the UI).
+# Order Search, Phase 1 -- added 2026-08-21 per Dan/Kay's 2026-08-20
+# meeting, wired into the plugin's tab switcher 2026-08-22. Plain
+# read-only POST against production_db.silver.datex_slv_orders (a silver
+# view DOES exist for orders -- confirmed via direct MotherDuck catalog
+# search; an earlier version of this function's comment claimed otherwise
+# and was wrong), joined to silver.datex_slv_orderstatuses and
+# silver.datex_slv_accounts for status/owner names, plus
+# bronze.datex_projects (deduped to latest version) for project name,
+# since no silver view exists for projects specifically. Same duckdb
+# single-query pattern as the other motherduck-*.cjs functions above. See
+# the function's own header for the full design writeup and its response
+# contract (matches PluginOrderSearchTab.jsx exactly).
 [functions."scheduling-order-search"]
   timeout = 26
   external_node_modules = ["duckdb"]
