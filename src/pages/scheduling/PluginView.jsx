@@ -23,6 +23,7 @@ import AppointmentInsights from '../../components/scheduling/AppointmentInsights
 import PluginSettingsPanel from '../../components/scheduling/PluginSettingsPanel.jsx'
 import PluginLoadContainerTab from '../../components/scheduling/PluginLoadContainerTab.jsx'
 import PluginMultiApptTab from '../../components/scheduling/PluginMultiApptTab.jsx'
+import PluginOrderSearchTab from '../../components/scheduling/PluginOrderSearchTab.jsx'
 import { CSW_BEAR_LOGO } from '../../lib/csw-logo.js'
 import {
   WAREHOUSE_FALLBACK,
@@ -131,6 +132,15 @@ import {
  * client and server rather than an actual approval failure. See
  * schedulingApi.js's triggerMultiFrontDraft header for the full
  * root-cause writeup.
+ *
+ * UPDATED 2026-08-22 — wired in the Order Search tab (Kenosha Order
+ * Search Phase 1, per the 2026-08-20 Dan<>Kay meeting). The component
+ * (PluginOrderSearchTab.jsx), its client wrapper (searchOrder in
+ * schedulingApi.js), and the backend function
+ * (scheduling-order-search.cjs) had all already been built in a parallel
+ * session, but the tab was never actually added to this file's switcher —
+ * meaning none of it was reachable yet. Self-contained component (no
+ * shared state needed), same pattern as RecurringForm/PluginLoadContainerTab.
  */
 
 function CswBrandHeader() {
@@ -196,7 +206,7 @@ function ReadOnlyField({ label, value }) {
 }
 
 export default function PluginView() {
-  const [pluginView, setPluginView] = useState('appointment') // 'appointment' | 'loadContainer' | 'multi' | 'recurring' | 'settings'
+  const [pluginView, setPluginView] = useState('appointment') // 'appointment' | 'loadContainer' | 'multi' | 'recurring' | 'orderSearch' | 'settings'
   const [contextType, setContextType] = useState('noConversation')
   const [conversationId, setConversationId] = useState(null)
   const [submission, setSubmission] = useState(null)
@@ -1468,6 +1478,12 @@ export default function PluginView() {
           Recurring
         </button>
         <button
+          onClick={() => setPluginView('orderSearch')}
+          className={`flex-1 py-1 rounded-md text-xs font-medium transition-colors ${pluginView === 'orderSearch' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
+        >
+          Order Search
+        </button>
+        <button
           onClick={() => setPluginView('settings')}
           title="Settings"
           className={`py-1 px-2.5 rounded-md text-sm font-medium transition-colors ${pluginView === 'settings' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
@@ -1490,6 +1506,8 @@ export default function PluginView() {
         />
       ) : pluginView === 'recurring' ? (
         <RecurringForm compact />
+      ) : pluginView === 'orderSearch' ? (
+        <PluginOrderSearchTab />
       ) : pluginView === 'loadContainer' ? (
         <PluginLoadContainerTab
           contextType={contextType}
