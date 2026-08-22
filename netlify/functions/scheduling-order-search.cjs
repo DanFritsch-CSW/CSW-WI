@@ -14,12 +14,7 @@
 // bronze.datex_orders with the stated reason "no silver/gold layer exists
 // for orders." That reason doesn't hold up: a direct MotherDuck catalog
 // search confirms silver.datex_slv_orders exists and is exactly what's
-// needed here. This version reads FROM SILVER for orders/statuses/
-// accounts (all three have silver views), and falls back to BRONZE only
-// for project names specifically, since no silver view exists for
-// projects (confirmed via the same catalog search, not assumed) — bronze
-// there is deduped to the latest ingested version per project ID, since
-// bronze.datex_projects carries historical CDC-style versions.
+// needed here.
 //
 // UPDATED 2026-08-22 (later) after Kay hit a real false-positive: a
 // reference number ("31553") coincidentally matched an unrelated,
@@ -33,33 +28,35 @@
 // overwhelmingly likely to surface stale/irrelevant history):
 //   1. Always restricts to order_status_id IN (1, 2) — Created and
 //      Processing, the only two statuses with real "this order is still
-//      active" meaning. Completed and Cancelled orders are never
-//      returned, regardless of reference match.
-//   2. Accepts optional owner/project params (the draft's currently
-//      selected Owner/Project in the plugin) and, when provided, requires
-//      an exact case-insensitive match on BOTH — scoping the search to
-//      the specific customer/project Kay is actually working on, so a
-//      coincidental reference collision with a different customer's
-//      order can no longer surface as a false "found." When owner/project
-//      aren't yet set on the draft, falls back to the unscoped search
-//      (still status-filtered) rather than returning nothing.
+//      active" meaning.
+//   2. Accepts optional owner/project params and, when provided, requires
+//      an exact case-insensitive match on BOTH.
 //
 // PHASE 2 added 2026-08-22 (later still): requestedShipDate and notes,
-// pulled from datex_slv_orders.requested_delivery_date and .Notes
-// (exact column names confirmed via DESCRIBE before writing this — Notes
-// is capitalized, unlike every other column here). Both are display-only
-// additions to the same query Phase 1 already ran — no new joins, no new
-// tables. requested_delivery_date is a TIMESTAMP but observed values are
-// always midnight (date-only data wearing a timestamp type), so it's
-// formatted as a plain date (YYYY-MM-DD) rather than a full timestamp.
-// Notes is frequently Datex-auto-generated summary text (e.g.
-// " [Total 1344 42819.84 LB 1510.65 CF]") rather than free-text human
-// notes — passed through as-is, trimmed, since Kay still finds it useful
-// context even when it's just a quantity summary.
+// pulled from datex_slv_orders.requested_delivery_date and .Notes.
+//
+// FIXED 2026-08-22 (later still) — the owner-scoping filter added above
+// was joining through the WRONG table and broke real orders. Confirmed
+// against live data (order 776740, Kay's own Pedone Pinsa/Kenosha test
+// case): datex_slv_orders.account_id -> datex_slv_accounts.account_name
+// resolves to "Greco and Sons, of Wisconsin" — the SHIP-TO/consignee on
+// that specific order, not Datex's actual "Owner" concept (the "Owner *"
+// field shown on the Datex order screen, which read "Pedone Pinsa" for
+// this same order). Once the owner-scoping filter compared draft.owner
+// ("Pedone Pinsa", correctly sourced elsewhere in this app) against that
+// wrong field, it could never match, and a real active order came back as
+// "not found."
+//
+// The correct chain, confirmed live: datex_slv_orders.project_id ->
+// bronze.datex_projects.OwnerId -> bronze.datex_owners.Name. Both
+// datex_projects and datex_owners carry historical CDC-style versions
+// (VersionId/ingestion_ts), so both are deduped to latest via the same
+// ROW_NUMBER pattern already used for project names. The datex_slv_accounts
+// join is removed entirely — it was only ever providing the wrong value
+// for ownerName and isn't used for anything else.
 //
 // Response contract matches what PluginOrderSearchTab.jsx and
-// searchOrder() already expect on main — verified directly against both
-// files before writing this, not re-guessed:
+// searchOrder() already expect on main:
 //   { found, count, query, orders: [{
 //       orderId, lookupCode, statusName, ownerName, projectName,
 //       warehouseName, ownerReference, vendorReference, backOrder,
@@ -126,15 +123,23 @@ exports.handler = async (event) => {
 
   const refLit = sqlLit(query)
   const statusList = ACTIVE_STATUS_IDS.join(', ')
-  const ownerFilter = owner ? `AND LOWER(a.account_name) = LOWER(${sqlLit(owner)})` : ''
+  const ownerFilter = owner ? `AND LOWER(ow.owner_name) = LOWER(${sqlLit(owner)})` : ''
   const projectFilter = project ? `AND LOWER(p.project_name) = LOWER(${sqlLit(project)})` : ''
 
   const sql = `
     WITH latest_projects AS (
-      SELECT Id AS project_id, Name AS project_name
+      SELECT Id AS project_id, Name AS project_name, OwnerId AS owner_id
+      FROM (
+        SELECT Id, Name, OwnerId, ROW_NUMBER() OVER (PARTITION BY Id ORDER BY ingestion_ts DESC) AS rn
+        FROM production_db.bronze.datex_projects
+      )
+      WHERE rn = 1
+    ),
+    latest_owners AS (
+      SELECT Id AS owner_id, Name AS owner_name
       FROM (
         SELECT Id, Name, ROW_NUMBER() OVER (PARTITION BY Id ORDER BY ingestion_ts DESC) AS rn
-        FROM production_db.bronze.datex_projects
+        FROM production_db.bronze.datex_owners
       )
       WHERE rn = 1
     )
@@ -144,7 +149,7 @@ exports.handler = async (event) => {
       COALESCE(o.owner_reference, '') AS owner_reference,
       COALESCE(o.vendor_reference, '') AS vendor_reference,
       COALESCE(s.status_name, '') AS status_name,
-      COALESCE(a.account_name, '') AS owner_name,
+      COALESCE(ow.owner_name, '') AS owner_name,
       COALESCE(p.project_name, '') AS project_name,
       o.preferred_warehouse_id,
       o.back_order,
@@ -153,10 +158,10 @@ exports.handler = async (event) => {
     FROM production_db.silver.datex_slv_orders o
     LEFT JOIN production_db.silver.datex_slv_orderstatuses s
       ON s.order_status_id = o.order_status_id
-    LEFT JOIN production_db.silver.datex_slv_accounts a
-      ON a.account_id = o.account_id
     LEFT JOIN latest_projects p
       ON p.project_id = o.project_id
+    LEFT JOIN latest_owners ow
+      ON ow.owner_id = p.owner_id
     WHERE (
       LOWER(o.lookup_code) = LOWER(${refLit})
       OR LOWER(o.owner_reference) = LOWER(${refLit})
