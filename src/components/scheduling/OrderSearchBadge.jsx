@@ -22,6 +22,16 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 // array, so changing either after typing a reference re-checks
 // automatically rather than leaving a stale result on screen.
 //
+// PHASE 2 added 2026-08-22 (later still): displays requestedShipDate and
+// notes in the found badge, and calls the new onOrderFound(order) prop
+// once per distinct match (tracked via notifiedOrderIdRef, so it fires
+// exactly once even though the debounce effect can re-run for unrelated
+// reasons) — PluginView.jsx uses this to auto-fill the appointment's
+// Notes field with the ship date + order notes pulled from Datex. This
+// component itself never touches the Notes field directly; it only
+// reports what it found and lets the parent decide whether/how to use it
+// (e.g. not clobbering notes the user already typed).
+//
 // The old PluginOrderSearchTab.jsx file is left in place (no file-delete
 // tool) but is no longer imported or rendered anywhere — dead code, same
 // convention as other superseded files in this app (see netlify.toml's
@@ -29,11 +39,20 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 
 const DEBOUNCE_MS = 600
 
-export default function OrderSearchBadge({ reference, owner, project }) {
+function formatShipDate(iso) {
+  if (!iso) return null
+  const [y, m, d] = iso.split('-')
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const monthName = months[parseInt(m, 10) - 1] || m
+  return `${monthName} ${parseInt(d, 10)}, ${y}`
+}
+
+export default function OrderSearchBadge({ reference, owner, project, onOrderFound }) {
   const [status, setStatus] = useState('idle') // idle | loading | found | notfound | error
   const [result, setResult] = useState(null)
   const debounceRef = useRef(null)
   const requestRef = useRef(0)
+  const notifiedOrderIdRef = useRef(null)
 
   useEffect(() => {
     const trimmed = (reference || '').trim()
@@ -52,8 +71,13 @@ export default function OrderSearchBadge({ reference, owner, project }) {
         .then((data) => {
           if (requestRef.current !== token) return // a newer keystroke superseded this search
           if (data.found && data.orders?.length) {
+            const order = data.orders[0]
             setStatus('found')
-            setResult(data.orders[0])
+            setResult(order)
+            if (onOrderFound && notifiedOrderIdRef.current !== order.orderId) {
+              notifiedOrderIdRef.current = order.orderId
+              onOrderFound(order)
+            }
           } else {
             setStatus('notfound')
             setResult(null)
@@ -91,11 +115,16 @@ export default function OrderSearchBadge({ reference, owner, project }) {
 
   // found
   const parts = [result.ownerName, result.projectName, result.warehouseName].filter(Boolean)
+  const shipDateLabel = formatShipDate(result.requestedShipDate)
   return (
     <div className="mt-1 px-2 py-1.5 rounded-lg text-[11px] border bg-green-50 border-green-200 text-green-800">
-      ✓ Found in Datex{parts.length ? ` — ${parts.join(' / ')}` : ''}
-      {result.statusName ? ` (${result.statusName})` : ''}
-      {result.backOrder && <span className="ml-1 font-semibold text-amber-700">⚠ Back order</span>}
+      <div>
+        ✓ Found in Datex{parts.length ? ` — ${parts.join(' / ')}` : ''}
+        {result.statusName ? ` (${result.statusName})` : ''}
+        {result.backOrder && <span className="ml-1 font-semibold text-amber-700">⚠ Back order</span>}
+      </div>
+      {shipDateLabel && <div className="mt-0.5 text-green-700">Requested Ship Date: {shipDateLabel}</div>}
+      {result.notes && <div className="mt-0.5 text-green-700 break-words">Order Notes: {result.notes}</div>}
     </div>
   )
 }
