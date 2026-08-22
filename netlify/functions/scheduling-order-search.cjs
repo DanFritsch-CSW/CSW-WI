@@ -1,32 +1,41 @@
 'use strict'
 
-// scheduling-order-search.cjs — added 2026-08-21, Phase 1 of the Kenosha
-// order search automation discussed in the 2026-08-20 Dan<>Kay meeting
-// (Fathom recording 175274133). Kay's biggest daily time-sink for Kenosha
+// scheduling-order-search.cjs — Phase 1 of the Kenosha order search
+// automation discussed in the 2026-08-20 Dan<>Kay meeting (Fathom
+// recording 175274133). Kay's biggest daily time-sink for Kenosha
 // appointments is manually checking Datex to confirm an order exists
 // before scheduling it, and to pull its Owner Reference / Vendor
 // Reference / Requested Ship Date / Notes.
 //
-// Per that meeting's agreed phasing:
-//   Phase 1 (this function): given a reference string, confirm whether a
-//     matching order exists in Datex at all — the simple yes/no flag.
-//   Phase 2: surface the requested delivery date + notes alongside it.
+// REWRITTEN 2026-08-21 to match the response contract PluginOrderSearchTab.jsx
+// and schedulingApi.js's searchOrder() already expect (both already
+// existed on main — this function itself was the missing piece). Original
+// draft of this function used a different {reference,facilityId} /
+// {exists,matches} shape before that existing UI was discovered; rebuilt
+// against the real contract instead of asking the UI to adapt to it.
 //
-// Both phases are served by the SAME query here — there's no reason to
-// build this twice, since fetching a few extra columns costs nothing once
-// the row is already being read. Phase 1's UI only needs to show
-// exists/not-exists; Phase 2's UI can show the rest of what this function
-// already returns. See PluginView.jsx for how Phase 1 surfaces this
-// (a simple "Order found / not found" check next to Reference #).
+// Per that meeting's agreed phasing:
+//   Phase 1: given a reference string, confirm whether a matching order
+//     exists in Datex at all, showing identifying info (owner/project/
+//     warehouse/status) — the simple yes/no + "which one" flag.
+//   Phase 2: surface requestedDeliveryDate + notes in the UI card. Both
+//     fields are ALREADY returned by this function (no reason to fetch
+//     the row twice later) — Phase 2 is purely a PluginOrderSearchTab.jsx
+//     display change, no backend work.
+//
+// Search is intentionally NOT scoped to a facility — the existing UI
+// takes a single reference string with no facility selector, matching
+// Kay's actual workflow (she often doesn't know which facility an order
+// is filed under until she's found it).
 //
 // Root data source: production_db.bronze.datex_orders — there is no
-// silver/gold layer for orders (confirmed via MotherDuck catalog search
-// 2026-08-21), so this reads bronze directly. Confirmed via direct query
-// that this table has exactly one row per order Id (no CDC-style
-// versioning to dedupe) and currently has zero soft-deleted rows, but the
-// DeletedSysUser filter is kept for correctness going forward. Query
-// logic itself was validated end-to-end against a real Kenosha order
-// (TO277949) before this function was written, not just tested after.
+// silver/gold layer for orders (confirmed via MotherDuck catalog search),
+// so this reads bronze directly. Confirmed via direct query that this
+// table has exactly one row per order Id (no CDC-style versioning to
+// dedupe) and currently has zero soft-deleted rows, but the
+// DeletedSysUser filter is kept for correctness going forward. Full
+// query (including the owner/project/status joins) was validated against
+// a real Kenosha order (TO277949) before writing this function.
 //
 // Per the meeting: Order Lookup Code matches Owner Reference for ~90% of
 // customers, but not all — this searches LookupCode, OwnerReference, AND
@@ -36,10 +45,11 @@
 // more for PARSING an inbound email's free text, not for this lookup
 // itself.
 //
-// POST body: { reference: string, facilityId?: 'cal'|'mad'|'ken'|'wr'|'ec' }
-// Response: { exists: boolean, matches: [{ id, lookupCode, ownerReference,
-//   vendorReference, requestedDeliveryDate, notes, statusId, statusName,
-//   ownerName, warehouseId }] }
+// POST body: { query: string }
+// Response: { found: boolean, count: number, query: string, orders: [{
+//   orderId, lookupCode, ownerReference, vendorReference,
+//   requestedDeliveryDate, notes, statusName, ownerName, projectName,
+//   warehouseName, backOrder }] }
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -47,15 +57,16 @@ const NO_CACHE_HEADERS = {
   'Pragma': 'no-cache',
 }
 
-// warehouse_id map — matches production_db.gold.truck_appointments and
-// every other motherduck-*.cjs function in this app.
+// warehouse_id -> display name. Matches the facility names used
+// throughout this app (see WAREHOUSE_ADDRESSES in front-draft-shared.cjs
+// and the WAREHOUSE_ID map in motherduck-appointments.cjs).
 // CAL=1, EC=3, MAD=4, KEN=5, WR=6
-const WAREHOUSE_ID = {
-  cal: 1,
-  ec: 3,
-  mad: 4,
-  ken: 5,
-  wr: 6,
+const WAREHOUSE_NAME = {
+  1: 'CSW-Franksville',
+  3: 'CSW-Eau Claire',
+  4: 'CSW-Madison',
+  5: 'CSW-Kenosha',
+  6: 'CSW-Wisconsin Rapids',
 }
 
 // Escape a string for embedding in a SQL literal — duckdb-node's .all()
@@ -65,48 +76,49 @@ function sqlLit(s) {
   return `'${String(s).replace(/'/g, "''")}'`
 }
 
-function buildSql(reference, warehouseId) {
-  const normalizedRef = sqlLit(reference.trim().toUpperCase())
-  const warehouseFilter = warehouseId ? `AND o.PreferredWarehouseId = ${warehouseId}` : ''
+function buildSql(query) {
+  const normalizedRef = sqlLit(query.trim().toUpperCase())
   return `
     SELECT
-      o.Id                       AS id,
+      o.Id                       AS order_id,
       o.LookupCode               AS lookup_code,
       o.OwnerReference           AS owner_reference,
       o.VendorReference          AS vendor_reference,
       o.RequestedDeliveryDate    AS requested_delivery_date,
       o.Notes                    AS notes,
-      o.OrderStatusId            AS status_id,
+      o.BackOrder                AS back_order,
       s.Name                     AS status_name,
       a.Name                     AS owner_name,
+      p.Name                     AS project_name,
       o.PreferredWarehouseId     AS warehouse_id
     FROM production_db.bronze.datex_orders o
     LEFT JOIN production_db.bronze.datex_orderstatuses s ON s.Id = o.OrderStatusId
     LEFT JOIN production_db.bronze.datex_accounts a ON a.Id = o.AccountId
+    LEFT JOIN production_db.bronze.datex_projects p ON p.Id = o.ProjectId
     WHERE o.DeletedSysUser IS NULL
       AND (
         UPPER(TRIM(o.LookupCode)) = ${normalizedRef}
         OR UPPER(TRIM(o.OwnerReference)) = ${normalizedRef}
         OR UPPER(TRIM(o.VendorReference)) = ${normalizedRef}
       )
-      ${warehouseFilter}
     ORDER BY o.Id DESC
     LIMIT 20
   `
 }
 
-function toMatches(rows) {
+function toOrders(rows) {
   return rows.map((r) => ({
-    id: Number(r.id),
+    orderId: Number(r.order_id),
     lookupCode: r.lookup_code || null,
     ownerReference: r.owner_reference || null,
     vendorReference: r.vendor_reference || null,
     requestedDeliveryDate: r.requested_delivery_date || null,
     notes: r.notes || null,
-    statusId: r.status_id != null ? Number(r.status_id) : null,
     statusName: r.status_name || null,
     ownerName: r.owner_name || null,
-    warehouseId: r.warehouse_id != null ? Number(r.warehouse_id) : null,
+    projectName: r.project_name || null,
+    warehouseName: WAREHOUSE_NAME[Number(r.warehouse_id)] || null,
+    backOrder: r.back_order === true,
   }))
 }
 
@@ -127,17 +139,12 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Invalid JSON body' }) }
   }
 
-  const { reference, facilityId } = body
-  if (!reference || !String(reference).trim()) {
-    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Missing reference' }) }
+  const { query } = body
+  if (!query || !String(query).trim()) {
+    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: 'Missing query' }) }
   }
 
-  const warehouseId = facilityId ? WAREHOUSE_ID[facilityId] : undefined
-  if (facilityId && !warehouseId) {
-    return { statusCode: 400, headers: NO_CACHE_HEADERS, body: JSON.stringify({ error: `Unknown facilityId "${facilityId}"` }) }
-  }
-
-  const sql = buildSql(String(reference), warehouseId)
+  const sql = buildSql(String(query))
 
   // Netlify Functions requires HOME=/tmp for the duckdb native module to
   // have a writable scratch dir — same pattern as every other
@@ -161,11 +168,11 @@ exports.handler = async (event) => {
     conn.close()
     db.close()
 
-    const matches = toMatches(rows)
+    const orders = toOrders(rows)
     return {
       statusCode: 200,
       headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({ exists: matches.length > 0, matches }),
+      body: JSON.stringify({ found: orders.length > 0, count: orders.length, query: String(query), orders }),
     }
   } catch (e) {
     return {
