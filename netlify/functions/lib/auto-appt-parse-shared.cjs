@@ -290,6 +290,137 @@ async function createPendingSubmission({ conversationId, project, dockDoor, refe
   return rows?.[0] || null
 }
 
+// ── Scan orchestration ───────────────────────────────────────────────────
+// Lives here (not in the run/test function files) so both
+// auto-appt-parse-run.cjs (scheduled) and auto-appt-parse-test.cjs
+// (manual, no schedule entry — see that file's header for why the split
+// exists) call the exact same logic rather than each having their own
+// copy that could drift.
+
+async function processMessage(message) {
+  const messageId = message.id
+  const subject = message.subject || ''
+
+  if (await alreadyProcessed(messageId)) {
+    return { messageId, outcome: 'skipped_already_processed' }
+  }
+
+  const text = getMessageText(message)
+  const parsed = parseBody(text)
+
+  if (!parsed) {
+    await logAttempt({
+      front_message_id: messageId,
+      sender: ELIGIBLE_SENDER,
+      subject,
+      outcome: 'parse_failed',
+    })
+    return { messageId, outcome: 'parse_failed' }
+  }
+
+  const { reference, scheduledArrival } = parsed
+  const conversationId = await getConversationId(message).catch(() => null)
+
+  let order
+  try {
+    order = await lookupOrder(reference)
+  } catch (err) {
+    await logAttempt({
+      front_message_id: messageId,
+      front_conversation_id: conversationId,
+      sender: ELIGIBLE_SENDER,
+      subject,
+      matched_reference: reference,
+      parsed_arrival: scheduledArrival,
+      outcome: 'error',
+      error_detail: `Order lookup failed: ${err.message}`,
+    })
+    return { messageId, outcome: 'error', error: err.message }
+  }
+
+  if (!order) {
+    await logAttempt({
+      front_message_id: messageId,
+      front_conversation_id: conversationId,
+      sender: ELIGIBLE_SENDER,
+      subject,
+      matched_reference: reference,
+      parsed_arrival: scheduledArrival,
+      outcome: 'order_not_found',
+    })
+    return { messageId, outcome: 'order_not_found', reference }
+  }
+
+  if (order.owner_name !== PALERMO_OWNER_NAME) {
+    await logAttempt({
+      front_message_id: messageId,
+      front_conversation_id: conversationId,
+      sender: ELIGIBLE_SENDER,
+      subject,
+      matched_reference: reference,
+      parsed_arrival: scheduledArrival,
+      outcome: 'owner_mismatch',
+      owner_name: order.owner_name,
+      project_name: order.project_name,
+    })
+    return { messageId, outcome: 'owner_mismatch', reference, foundOwner: order.owner_name }
+  }
+
+  const dockDoorRules = await getDockDoorRules()
+  const dockDoor = findDockDoorRule(CAL_WAREHOUSE, order.project_name, 'Outbound', dockDoorRules)
+  const laborWarning = await checkLabor(CAL_WAREHOUSE, scheduledArrival)
+
+  let submission
+  try {
+    submission = await createPendingSubmission({
+      conversationId,
+      project: order.project_name,
+      dockDoor,
+      reference,
+      scheduledArrival,
+    })
+  } catch (err) {
+    await logAttempt({
+      front_message_id: messageId,
+      front_conversation_id: conversationId,
+      sender: ELIGIBLE_SENDER,
+      subject,
+      matched_reference: reference,
+      parsed_arrival: scheduledArrival,
+      outcome: 'error',
+      owner_name: order.owner_name,
+      project_name: order.project_name,
+      error_detail: `Submission creation failed: ${err.message}`,
+    })
+    return { messageId, outcome: 'error', error: err.message }
+  }
+
+  await logAttempt({
+    front_message_id: messageId,
+    front_conversation_id: conversationId,
+    sender: ELIGIBLE_SENDER,
+    subject,
+    matched_reference: reference,
+    parsed_arrival: scheduledArrival,
+    outcome: 'pending_created',
+    submission_id: submission?.id || null,
+    owner_name: order.owner_name,
+    project_name: order.project_name,
+    labor_warning: laborWarning,
+  })
+
+  return { messageId, outcome: 'pending_created', reference, submissionId: submission?.id }
+}
+
+async function runScan() {
+  const messages = await fetchRecentEligibleMessages()
+  const results = []
+  for (const message of messages) {
+    results.push(await processMessage(message))
+  }
+  return results
+}
+
 module.exports = {
   CAL_CHANNEL_ID,
   ELIGIBLE_SENDER,
@@ -306,4 +437,5 @@ module.exports = {
   getDockDoorRules,
   checkLabor,
   createPendingSubmission,
+  runScan,
 }
