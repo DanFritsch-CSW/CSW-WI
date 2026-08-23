@@ -67,6 +67,52 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Automated Appointment Creation pilot (Palermo's / Sam Rohde) -- added
+# 2026-08-22 per Dan's explicit "tread lightly" framing. Scans CAL's
+# Appointments inbox every 15 min for emails from s.rohde@palermospizza.com
+# matching a strict "TO###### - M/D (needed Ham/pm)" pattern, looks up the
+# order in Datex (reusing scheduling-order-search.cjs's exact matching
+# logic, including the owner-name join-chain fix), and creates a PENDING
+# submission -- NEVER pushes to Datex. A CSR still reviews and clicks
+# Approve & Push via the existing Single APPT tab, exactly as if they'd
+# typed it manually. Every attempt (success or not) is logged to
+# auto_appt_attempts and reviewed via the daily digest below. See
+# lib/auto-appt-parse-shared.cjs for the full design writeup and every
+# guard rail (owner verification, dedup via front_message_id, active-
+# status-only order matching).
+[functions."auto-appt-parse-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# Manual test -- no schedule, so this can be POSTed directly. NOT a dry
+# run -- really creates pending submissions and really logs to
+# auto_appt_attempts, same as the scheduled path.
+[functions."auto-appt-parse-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# Daily review digest for the pilot above -- posts a summary comment to
+# Dan's dedicated Front thread (cnv_1c7dl7mc, confirmed 2026-08-22) once
+# daily rather than the */15 cadence other digests in this app use, since
+# this is a review summary, not a responsiveness-sensitive alert. Only
+# posts when there was at least one attempt in the last 24 hours -- no
+# daily "nothing happened" noise post. 13:00 UTC = 8am Central (7am during
+# DST -- same caveat as every other scheduled function in this app, see
+# nightly-b2e-sync.cjs). Posts to ONE persistent thread, deliberately the
+# opposite of front-daily-discussion-run.cjs's "new discussion every day"
+# pattern -- see lib/auto-appt-review-digest-shared.cjs for why.
+[functions."auto-appt-review-digest-run"]
+  schedule = "0 13 * * *"
+  timeout = 26
+
+# Manual test -- no schedule, so direct POST works. NOT a dry run -- really
+# posts to cnv_1c7dl7mc if there's activity in the window.
+[functions."auto-appt-review-digest-test"]
+  timeout = 26
+
 # --- duckdb-needing functions below (native module: external_node_modules
 # + included_files scoped here only, not globally -- see [functions] header
 # above for the 2026-08-06 ENOSPC fix story) ---
