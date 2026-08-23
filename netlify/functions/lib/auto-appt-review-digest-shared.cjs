@@ -13,6 +13,12 @@
 // day (Sam Rohde didn't email) produces no comment at all, rather than a
 // daily "nothing happened" noise post.
 //
+// UPDATED 2026-08-23: pending_created rows now show the needed-by ->
+// appointment-time pair explicitly (e.g. "needed 3pm → appt 12pm"), so
+// the 3-hour lead-time adjustment (see lib/auto-appt-parse-shared.cjs) is
+// visible at a glance in the review rather than hidden inside the
+// submission itself.
+//
 // Same run/test split as every other digest in this app.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
@@ -40,6 +46,14 @@ async function fetchWindowAttempts() {
   return res.json()
 }
 
+function formatTimeShort(iso) {
+  if (!iso || !iso.includes('T')) return null
+  const hour24 = parseInt(iso.split('T')[1].split(':')[0], 10)
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12
+  const ampm = hour24 < 12 ? 'am' : 'pm'
+  return `${hour12}${ampm}`
+}
+
 function buildSummary(attempts) {
   const today = new Date().toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' })
   const lines = [`Auto-Parse Review — ${today}`, '']
@@ -58,6 +72,13 @@ function buildSummary(attempts) {
     lines.push(`${OUTCOME_LABELS[outcome] || outcome} (${rows.length})`)
     for (const r of rows) {
       const ref = r.matched_reference || '(no reference parsed)'
+      // pending_created shows the needed-by -> scheduled-appointment time
+      // pair explicitly, so the 3-hour lead-time adjustment is visible at
+      // a glance rather than hidden in the submission itself.
+      const timing =
+        outcome === 'pending_created' && r.needed_by && r.parsed_arrival
+          ? `needed ${formatTimeShort(r.needed_by)} → appt ${formatTimeShort(r.parsed_arrival)}`
+          : null
       const detail =
         outcome === 'owner_mismatch'
           ? `found under "${r.owner_name}" instead`
@@ -66,7 +87,8 @@ function buildSummary(attempts) {
           : outcome === 'pending_created' && r.labor_warning
           ? r.labor_warning
           : null
-      lines.push(`  • ${ref}${detail ? ` — ${detail}` : ''}`)
+      const parts = [timing, detail].filter(Boolean).join(', ')
+      lines.push(`  • ${ref}${parts ? ` — ${parts}` : ''}`)
     }
     lines.push('')
   }
