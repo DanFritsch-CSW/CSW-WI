@@ -17,6 +17,18 @@
 //     outcome, reviewed via a daily digest comment (see
 //     auto-appt-review-digest-run.cjs) — this is the audit trail Dan
 //     wants before ever considering full automation.
+//
+// UPDATED 2026-08-23 after Dan clarified the parsing logic: the time in
+// Sam Rohde's emails ("needed 3pm") is when the material needs to be
+// READY BY, not the truck appointment time itself — the actual
+// appointment should be scheduled 3 hours BEFORE that time. parseBody now
+// returns both neededBy (the time as literally stated in the email) and
+// scheduledArrival (neededBy minus 3 hours, via proper Date millisecond
+// arithmetic so day/month/year rollover is handled correctly — e.g.
+// "needed 1am" correctly rolls back to 10pm the PREVIOUS day). Both
+// values are logged to auto_appt_attempts (needed_by column) and the
+// needed-by time is included in the pending submission's notes, so a CSR
+// reviewing it can see exactly why that appointment time was chosen.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -29,6 +41,7 @@ const ELIGIBLE_SENDER = 's.rohde@palermospizza.com'
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuck query before writing this, not guessed
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
 const APPT_TYPE = 'Outbound' // every observed Sam Rohde order is an Outbound Sales Order in Datex
+const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by" time — confirmed with Dan 2026-08-23
 
 // Matches "TO446013 - 8/20 (needed 3pm)" — the exact, consistent format
 // confirmed from Sam Rohde's emails. Deliberately strict: no fuzzy
@@ -119,11 +132,27 @@ async function getConversationId(message) {
   return conv.id || null
 }
 
-// Parses "TO446013 - 8/20 (needed 3pm)" into { reference, scheduledArrival }.
-// Assumes the current year; if the resulting date is more than 60 days in
-// the past relative to today, rolls to next year — handles a message
-// arriving near a year boundary referencing a date just after it, without
-// overcomplicating the common case.
+function fmtLocal(d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  return `${y}-${m}-${dd}T${hh}:00`
+}
+
+// Parses "TO446013 - 8/20 (needed 3pm)" into { reference, neededBy,
+// scheduledArrival }. neededBy is the time as literally stated in the
+// email (material must be ready by then); scheduledArrival is
+// LEAD_TIME_HOURS earlier — the actual truck appointment time — computed
+// via plain millisecond arithmetic on a Date object so day/month/year
+// rollover is handled correctly (e.g. "needed 1am" correctly becomes
+// 10pm the PREVIOUS day, not a negative hour).
+//
+// Assumes the current year for the stated date; if the resulting
+// needed-by date is more than 60 days in the past relative to today,
+// rolls to next year — handles a message arriving near a year boundary
+// referencing a date just after it, without overcomplicating the common
+// case.
 function parseBody(text) {
   const match = BODY_PATTERN.exec(text)
   if (!match) return null
@@ -131,24 +160,25 @@ function parseBody(text) {
   const reference = `TO${digits}`
   const month = parseInt(monthStr, 10)
   const day = parseInt(dayStr, 10)
-  let hour = parseInt(hourStr, 10) % 12
-  if (ampm.toLowerCase() === 'pm') hour += 12
+  let neededHour = parseInt(hourStr, 10) % 12
+  if (ampm.toLowerCase() === 'pm') neededHour += 12
 
   const now = new Date()
   let year = now.getFullYear()
-  let candidate = new Date(year, month - 1, day)
-  const diffDays = (now - candidate) / (1000 * 60 * 60 * 24)
+  let neededByDate = new Date(year, month - 1, day, neededHour, 0, 0)
+  const diffDays = (now - neededByDate) / (1000 * 60 * 60 * 24)
   if (diffDays > 60) {
     year += 1
-    candidate = new Date(year, month - 1, day)
+    neededByDate = new Date(year, month - 1, day, neededHour, 0, 0)
   }
 
-  const mm = String(month).padStart(2, '0')
-  const dd = String(day).padStart(2, '0')
-  const hh = String(hour).padStart(2, '0')
-  const scheduledArrival = `${year}-${mm}-${dd}T${hh}:00`
+  const apptDate = new Date(neededByDate.getTime() - LEAD_TIME_HOURS * 60 * 60 * 1000)
 
-  return { reference, scheduledArrival }
+  return {
+    reference,
+    neededBy: fmtLocal(neededByDate),
+    scheduledArrival: fmtLocal(apptDate),
+  }
 }
 
 // Order lookup — SAME matching logic as scheduling-order-search.cjs
@@ -262,8 +292,20 @@ async function checkLabor(warehouse, scheduledArrival) {
 // constant needs updating too).
 const PALERMO_ABBR = 'PVI'
 
-async function createPendingSubmission({ conversationId, project, dockDoor, reference, scheduledArrival }) {
+function formatDisplayDatetime(iso) {
+  const [datePart, timePart] = iso.split('T')
+  const [y, m, d] = datePart.split('-')
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const monthName = months[parseInt(m, 10) - 1] || m
+  const hour24 = parseInt(timePart.split(':')[0], 10)
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12
+  const ampm = hour24 < 12 ? 'AM' : 'PM'
+  return `${monthName} ${parseInt(d, 10)}, ${y} ${hour12}:00 ${ampm}`
+}
+
+async function createPendingSubmission({ conversationId, project, dockDoor, reference, neededBy, scheduledArrival }) {
   const appointmentCode = `(${PALERMO_ABBR}) - ${reference}`
+  const notes = `Auto-parsed from Sam Rohde email — needed by ${formatDisplayDatetime(neededBy)}, appointment scheduled ${LEAD_TIME_HOURS} hours prior. Please verify all fields before pushing to Datex.`
   const fields = {
     warehouse: CAL_WAREHOUSE,
     type: APPT_TYPE,
@@ -273,7 +315,7 @@ async function createPendingSubmission({ conversationId, project, dockDoor, refe
     scheduled_dock_door: dockDoor || '',
     reference_number: reference,
     appointment_lookup_code: appointmentCode,
-    notes: 'Auto-parsed from Sam Rohde email — please verify all fields before pushing to Datex.',
+    notes,
     front_conversation_id: conversationId || null,
     status: 'pending',
   }
@@ -318,7 +360,7 @@ async function processMessage(message) {
     return { messageId, outcome: 'parse_failed' }
   }
 
-  const { reference, scheduledArrival } = parsed
+  const { reference, neededBy, scheduledArrival } = parsed
   const conversationId = await getConversationId(message).catch(() => null)
 
   let order
@@ -331,6 +373,7 @@ async function processMessage(message) {
       sender: ELIGIBLE_SENDER,
       subject,
       matched_reference: reference,
+      needed_by: neededBy,
       parsed_arrival: scheduledArrival,
       outcome: 'error',
       error_detail: `Order lookup failed: ${err.message}`,
@@ -345,6 +388,7 @@ async function processMessage(message) {
       sender: ELIGIBLE_SENDER,
       subject,
       matched_reference: reference,
+      needed_by: neededBy,
       parsed_arrival: scheduledArrival,
       outcome: 'order_not_found',
     })
@@ -358,6 +402,7 @@ async function processMessage(message) {
       sender: ELIGIBLE_SENDER,
       subject,
       matched_reference: reference,
+      needed_by: neededBy,
       parsed_arrival: scheduledArrival,
       outcome: 'owner_mismatch',
       owner_name: order.owner_name,
@@ -377,6 +422,7 @@ async function processMessage(message) {
       project: order.project_name,
       dockDoor,
       reference,
+      neededBy,
       scheduledArrival,
     })
   } catch (err) {
@@ -386,6 +432,7 @@ async function processMessage(message) {
       sender: ELIGIBLE_SENDER,
       subject,
       matched_reference: reference,
+      needed_by: neededBy,
       parsed_arrival: scheduledArrival,
       outcome: 'error',
       owner_name: order.owner_name,
@@ -401,6 +448,7 @@ async function processMessage(message) {
     sender: ELIGIBLE_SENDER,
     subject,
     matched_reference: reference,
+    needed_by: neededBy,
     parsed_arrival: scheduledArrival,
     outcome: 'pending_created',
     submission_id: submission?.id || null,
@@ -426,6 +474,7 @@ module.exports = {
   ELIGIBLE_SENDER,
   PALERMO_OWNER_NAME,
   CAL_WAREHOUSE,
+  LEAD_TIME_HOURS,
   fetchRecentEligibleMessages,
   alreadyProcessed,
   logAttempt,
