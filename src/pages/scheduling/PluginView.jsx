@@ -159,6 +159,23 @@ import {
  *      existing Notes content, and fires at most once per distinct
  *      matched order (autoFilledOrderIdRef). See handleOrderFound's own
  *      comment for the full guard-rail writeup.
+ *
+ * UPDATED 2026-08-24 — two fixes after Dan/Kay reported a real submission
+ * with an empty Notes field despite OrderSearchBadge showing a "Found in
+ * Datex" match with real data:
+ *   1. requestedShipDate was actually a DELIVERY date, not a ship date —
+ *      Datex tracks these as two separate fields (Order vs. linked
+ *      Shipment). handleOrderFound now uses shipExpectedDate/
+ *      shipPickupDate (the real ship date) AND requestedDeliveryDate
+ *      separately, matching scheduling-order-search.cjs's corrected
+ *      response shape.
+ *   2. autoFilledOrderIdRef moved up to be declared alongside the other
+ *      top-level refs (was previously declared down by handleOrderFound
+ *      itself) and is now reset to null on every conversation switch —
+ *      since the plugin panel likely stays mounted as a CSR switches
+ *      between Front emails, a ref that only ever got SET and never
+ *      CLEARED meant a second, unrelated conversation referencing the
+ *      SAME Datex order would silently skip the Notes auto-fill.
  */
 
 function CswBrandHeader() {
@@ -638,6 +655,11 @@ export default function PluginView() {
   const submitGuardRef = useRef(false)
   const sessionRef = useRef(0)
   const pollingIntervalRef = useRef(null)
+  // Order Search Phase 2 stale-ref fix (2026-08-24) — declared here
+  // (not down by handleOrderFound) so the conversation-switch effect
+  // below can reset it. See handleOrderFound's own comment for the full
+  // story on why this needs resetting per-conversation.
+  const autoFilledOrderIdRef = useRef(null)
   draftRef.current = draft
   lcDraftRef.current = lcDraft
   multiDraftsRef.current = multiDrafts
@@ -700,6 +722,9 @@ export default function PluginView() {
       setLcConfirming(false)
       setLcDraftCreated(false)
       setLcCreatedId(null)
+      // Order Search Phase 2 stale-ref fix (2026-08-24) — see
+      // handleOrderFound's comment above for the full story.
+      autoFilledOrderIdRef.current = null
       return () => controller.abort()
     }
 
@@ -733,6 +758,9 @@ export default function PluginView() {
     setLcConfirming(false)
     setLcDraftCreated(false)
     setLcCreatedId(null)
+    // Order Search Phase 2 stale-ref fix (2026-08-24) — see
+    // handleOrderFound's comment above for the full story.
+    autoFilledOrderIdRef.current = null
 
     getSubmissions({ front_conversation_id: conversationId }, controller.signal)
       .then((data) => {
@@ -802,7 +830,7 @@ export default function PluginView() {
   }
 
   // Order Search Phase 2 — added 2026-08-22. Auto-fills the appointment's
-  // Notes field with the Requested Ship Date + Order Notes pulled from
+  // Notes field with ship/delivery date info + Order Notes pulled from
   // Datex once OrderSearchBadge finds a match, per Dan's request to pull
   // this "within the APPT note section" rather than just showing it in
   // the badge. Two guards, both deliberate:
@@ -810,7 +838,13 @@ export default function PluginView() {
   //      matched order — OrderSearchBadge's debounce effect can re-run
   //      for reasons unrelated to the match itself (e.g. owner/project
   //      changing), and without this guard every re-run would re-append
-  //      or re-fire against the same order.
+  //      or re-fire against the same order. Reset to null on every
+  //      conversation switch (see the conversationId effect below) so a
+  //      stale value from a PREVIOUS, unrelated conversation never blocks
+  //      a new one that happens to reference the same Datex order — this
+  //      exact gap was confirmed 2026-08-24 after a real submission
+  //      ended up with an empty Notes field despite OrderSearchBadge
+  //      showing a "Found in Datex" match with real data.
   //   2. Never overwrites existing Notes content — checked twice: once
   //      as a fast bail-out via draftRef, and again inside the functional
   //      setDraft updater against the freshest state, since React batches
@@ -819,18 +853,30 @@ export default function PluginView() {
   //      this does nothing — it only ever fills a blank field, same
   //      "never clobber user input" principle as the auto-suggest-best-
   //      hour behavior elsewhere in this file.
-  const autoFilledOrderIdRef = useRef(null)
+  //
+  // FIXED 2026-08-24: requestedShipDate was actually a DELIVERY date, not
+  // a ship date — Datex tracks these as two separate fields (Order vs.
+  // linked Shipment). Now uses shipExpectedDate/shipPickupDate (the real
+  // ship date) AND requestedDeliveryDate separately, matching
+  // scheduling-order-search.cjs's corrected response shape. See that
+  // file's header for the full story.
+  //
+  // (autoFilledOrderIdRef itself is declared earlier, alongside the other
+  // top-level refs, so the conversation-switch effect above can reset it.)
+  function formatOrderDate(iso) {
+    const [y, m, d] = iso.split('-')
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+    const monthName = months[parseInt(m, 10) - 1] || m
+    return `${monthName} ${parseInt(d, 10)}, ${y}`
+  }
   function handleOrderFound(order) {
     if (autoFilledOrderIdRef.current === order.orderId) return
     autoFilledOrderIdRef.current = order.orderId
     if (draftRef.current.notes) return
     const parts = []
-    if (order.requestedShipDate) {
-      const [y, m, d] = order.requestedShipDate.split('-')
-      const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-      const monthName = months[parseInt(m, 10) - 1] || m
-      parts.push(`Requested Ship Date: ${monthName} ${parseInt(d, 10)}, ${y}`)
-    }
+    const shipDate = order.shipExpectedDate || order.shipPickupDate
+    if (shipDate) parts.push(`Ship Date: ${formatOrderDate(shipDate)}`)
+    if (order.requestedDeliveryDate) parts.push(`Requested Delivery Date: ${formatOrderDate(order.requestedDeliveryDate)}`)
     if (order.notes) parts.push(`Order Notes: ${order.notes}`)
     if (parts.length === 0) return
     setDraft((prev) => (prev.notes ? prev : { ...prev, notes: parts.join('\n') }))
