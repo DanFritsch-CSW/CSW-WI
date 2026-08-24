@@ -55,12 +55,33 @@
 // join is removed entirely — it was only ever providing the wrong value
 // for ownerName and isn't used for anything else.
 //
-// Response contract matches what PluginOrderSearchTab.jsx and
-// searchOrder() already expect on main:
+// FIXED 2026-08-24 — Dan/Kay flagged that the single date this function
+// returned (requested_delivery_date, labeled "Requested Ship Date") isn't
+// actually a ship date at all: it's genuinely a DELIVERY date, and
+// different customers populate it inconsistently relative to their real
+// ship date. Confirmed against live data (order 778492, Sargento
+// Cheese/Caledonia): datex_slv_orders.requested_delivery_date = Sep 2
+// (the delivery date), while the SEPARATE datex_shipments record linked
+// via datex_slv_shipmentorderlookup has ExpectedDate = Aug 29 (the real
+// ship date for this order). These are two genuinely different Datex
+// entities (Order vs. Shipment), not a labeling mistake — so rather than
+// guessing which one a given order "really" means, this now surfaces
+// BOTH, clearly separated as requestedDeliveryDate and shipExpectedDate,
+// and lets the human reviewing decide which applies. 724 orders in this
+// dataset link to more than one shipment (confirmed via direct count
+// before writing this join) — picks the most recently modified linked
+// shipment per order via ROW_NUMBER, so results stay one row per order
+// rather than fanning out.
+//
+// Response contract — orderNote: requestedShipDate was RENAMED to
+// requestedDeliveryDate (accurate name) and shipExpectedDate/
+// shipPickupDate were ADDED. Both OrderSearchBadge.jsx and PluginView.jsx
+// were updated in the same pass to match this shape — check both before
+// assuming the old requestedShipDate field name still works anywhere.
 //   { found, count, query, orders: [{
 //       orderId, lookupCode, statusName, ownerName, projectName,
 //       warehouseName, ownerReference, vendorReference, backOrder,
-//       requestedShipDate, notes
+//       requestedDeliveryDate, shipExpectedDate, shipPickupDate, notes
 //   }] }
 //
 // Matches the given query against ALL THREE reference fields Kay checks
@@ -95,6 +116,13 @@ const ACTIVE_STATUS_IDS = [1, 2] // Created, Processing
 
 function sqlLit(s) {
   return `'${String(s).replace(/'/g, "''")}'`
+}
+
+function toDateOnly(value) {
+  if (!value) return null
+  const d = new Date(value)
+  if (isNaN(d.getTime())) return null
+  return d.toISOString().slice(0, 10)
 }
 
 exports.handler = async (event) => {
@@ -142,6 +170,25 @@ exports.handler = async (event) => {
         FROM production_db.bronze.datex_owners
       )
       WHERE rn = 1
+    ),
+    latest_shipments AS (
+      SELECT Id AS shipment_id, ExpectedDate, PickupDate
+      FROM (
+        SELECT Id, ExpectedDate, PickupDate, ROW_NUMBER() OVER (PARTITION BY Id ORDER BY ingestion_ts DESC) AS rn
+        FROM production_db.bronze.datex_shipments
+      )
+      WHERE rn = 1
+    ),
+    order_shipment AS (
+      -- 724 orders link to more than one shipment (confirmed via direct
+      -- count before writing this) -- pick the most recently modified
+      -- linked shipment per order so results stay one row per order.
+      SELECT order_id, shipment_id
+      FROM (
+        SELECT order_id, shipment_id, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY modified_sys_date_time DESC) AS rn
+        FROM production_db.silver.datex_slv_shipmentorderlookup
+      )
+      WHERE rn = 1
     )
     SELECT
       o.order_id,
@@ -154,6 +201,8 @@ exports.handler = async (event) => {
       o.preferred_warehouse_id,
       o.back_order,
       o.requested_delivery_date,
+      sh.ExpectedDate AS ship_expected_date,
+      sh.PickupDate AS ship_pickup_date,
       COALESCE(o.Notes, '') AS order_notes
     FROM production_db.silver.datex_slv_orders o
     LEFT JOIN production_db.silver.datex_slv_orderstatuses s
@@ -162,6 +211,10 @@ exports.handler = async (event) => {
       ON p.project_id = o.project_id
     LEFT JOIN latest_owners ow
       ON ow.owner_id = p.owner_id
+    LEFT JOIN order_shipment os
+      ON os.order_id = o.order_id
+    LEFT JOIN latest_shipments sh
+      ON sh.shipment_id = os.shipment_id
     WHERE (
       LOWER(o.lookup_code) = LOWER(${refLit})
       OR LOWER(o.owner_reference) = LOWER(${refLit})
@@ -196,30 +249,25 @@ exports.handler = async (event) => {
     conn.close()
     db.close()
 
-    const orders = rows.map((r) => {
+    const orders = rows.map((r) => ({
+      orderId: Number(r.order_id),
+      lookupCode: String(r.lookup_code || ''),
+      statusName: String(r.status_name || ''),
+      ownerName: String(r.owner_name || ''),
+      projectName: String(r.project_name || ''),
+      warehouseName: WAREHOUSE_NAMES[Number(r.preferred_warehouse_id)] || '',
+      ownerReference: String(r.owner_reference || ''),
+      vendorReference: String(r.vendor_reference || ''),
+      backOrder: Boolean(r.back_order),
       // requested_delivery_date observed values are always midnight
-      // (date-only data wearing a TIMESTAMP type) — format as a plain
-      // date, not a full timestamp, to match how Kay actually thinks
-      // about a ship date.
-      let requestedShipDate = null
-      if (r.requested_delivery_date) {
-        const d = new Date(r.requested_delivery_date)
-        if (!isNaN(d.getTime())) requestedShipDate = d.toISOString().slice(0, 10)
-      }
-      return {
-        orderId: Number(r.order_id),
-        lookupCode: String(r.lookup_code || ''),
-        statusName: String(r.status_name || ''),
-        ownerName: String(r.owner_name || ''),
-        projectName: String(r.project_name || ''),
-        warehouseName: WAREHOUSE_NAMES[Number(r.preferred_warehouse_id)] || '',
-        ownerReference: String(r.owner_reference || ''),
-        vendorReference: String(r.vendor_reference || ''),
-        backOrder: Boolean(r.back_order),
-        requestedShipDate,
-        notes: String(r.order_notes || '').trim(),
-      }
-    })
+      // (date-only data wearing a TIMESTAMP type) -- format as a plain
+      // date. This is a genuinely DIFFERENT field from the ship dates
+      // below -- see this file's 2026-08-24 header note.
+      requestedDeliveryDate: toDateOnly(r.requested_delivery_date),
+      shipExpectedDate: toDateOnly(r.ship_expected_date),
+      shipPickupDate: toDateOnly(r.ship_pickup_date),
+      notes: String(r.order_notes || '').trim(),
+    }))
 
     return {
       statusCode: 200,
