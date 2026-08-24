@@ -29,6 +29,36 @@
 // values are logged to auto_appt_attempts (needed_by column) and the
 // needed-by time is included in the pending submission's notes, so a CSR
 // reviewing it can see exactly why that appointment time was chosen.
+//
+// FIXED 2026-08-24 — Dan reported a real email from Sam Rohde
+// (msg_2qb916ms, "TO450753 - 8/26 (needed 5pm)") that was never caught.
+// Traced this against live data before writing anything: the channel ID
+// was confirmed correct (cha_ema1g = cswcaledoniaappts@csw-wi.com,
+// exactly matches the "to" address on her email), the regex matched the
+// body exactly, and the sender matched exactly — every piece of parsing
+// logic was right. The actual cause: CAL Appointments had 136
+// conversation updates that same day (confirmed via Front search), and
+// fetchRecentEligibleMessages only ever fetched the 50 MOST RECENT
+// messages with no memory of what it had already scanned — Sam's message
+// was pushed completely out of that window by unrelated traffic within
+// hours, long before a 15-minute scan could realistically catch it. This
+// was a known risk flagged when the function was first built, confirmed
+// here as the actual cause.
+//
+// Fix: replaced the fixed "top 50 snapshot" with a persistent watermark
+// (last-scanned message timestamp, stored in the existing `settings`
+// table under key auto_appt_scan_watermark) and pagination that walks
+// forward through Front's API — using message.created_at, a Unix-seconds
+// timestamp per Front's documented API — until it reaches messages at or
+// before the watermark, capped at MAX_PAGES as a safety bound. This
+// guarantees nothing is missed regardless of channel volume, as long as
+// the volume between scans stays under MAX_PAGES * 50 messages (500 —
+// comfortably above the ~136/day observed here). The watermark advances
+// on every run regardless of whether anything matched, so quiet periods
+// of irrelevant traffic don't get needlessly re-scanned. On first run
+// (no watermark yet), defaults to a 24-hour lookback so anything already
+// sitting unprocessed — like Sam's stuck email — gets caught immediately
+// rather than only going forward from deploy time.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -36,12 +66,16 @@ const SUPABASE_KEY =
 const FRONT_API_KEY = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
 const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN || ''
 
-const CAL_CHANNEL_ID = 'cha_ema1g' // CAL Appointments — confirmed with Dan 2026-08-22
+const CAL_CHANNEL_ID = 'cha_ema1g' // CAL Appointments — confirmed with Dan 2026-08-22, re-confirmed against live channel address 2026-08-24
 const ELIGIBLE_SENDER = 's.rohde@palermospizza.com'
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuck query before writing this, not guessed
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
 const APPT_TYPE = 'Outbound' // every observed Sam Rohde order is an Outbound Sales Order in Datex
 const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by" time — confirmed with Dan 2026-08-23
+
+const WATERMARK_SETTINGS_KEY = 'auto_appt_scan_watermark'
+const WATERMARK_LOOKBACK_HOURS = 24 // first-ever run default — see header note
+const MAX_PAGES = 10 // safety cap: 10 * 50 = 500 messages per run, comfortably above the ~136/day observed for this channel
 
 // Matches "TO446013 - 8/20 (needed 3pm)" — the exact, consistent format
 // confirmed from Sam Rohde's emails. Deliberately strict: no fuzzy
@@ -79,9 +113,10 @@ async function frontFetch(path, options) {
   return res.json()
 }
 
-// Already-processed check — front_message_id is the dedup key. Returns
-// true if this message has been logged before, in ANY outcome, so it's
-// never re-processed across scan runs.
+// Already-processed check — front_message_id is the dedup key. Kept as a
+// defense-in-depth backstop (e.g. a watermark edge case, or the same
+// message somehow appearing twice in a page) even though the watermark
+// below is now the PRIMARY mechanism preventing re-scans.
 async function alreadyProcessed(messageId) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/auto_appt_attempts?front_message_id=eq.${encodeURIComponent(messageId)}&select=id&limit=1`,
@@ -104,14 +139,74 @@ async function logAttempt(fields) {
   }
 }
 
-// Fetches recent messages from the CAL Appointments channel and filters
-// to inbound messages from the eligible sender. Does NOT filter by
-// already-processed here — that check happens per-message in the caller
-// so each skip can still be reasoned about individually if needed.
+// Watermark persistence — reuses the existing generic `settings`
+// key/value table (already used for dock_door_rules etc.) rather than a
+// new table, since this is a single scalar value. Stored as Unix seconds
+// (matching Front's message.created_at format) to avoid any
+// timestamp-encoding ambiguity on read-back.
+async function getWatermarkSeconds() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/settings?select=value&key=eq.${WATERMARK_SETTINGS_KEY}`, {
+    headers: sbHeaders(),
+  })
+  if (!res.ok) return null
+  const rows = await res.json()
+  const value = rows?.[0]?.value
+  return typeof value === 'number' ? value : null
+}
+
+async function setWatermarkSeconds(seconds) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
+      method: 'POST',
+      headers: sbHeaders({ Prefer: 'resolution=merge-duplicates' }),
+      body: JSON.stringify({ key: WATERMARK_SETTINGS_KEY, value: seconds }),
+    })
+  } catch (err) {
+    console.warn('[auto-appt-parse] failed to persist watermark (non-fatal, will retry next run):', err.message)
+  }
+}
+
+// Fetches messages from the CAL Appointments channel newer than the
+// stored watermark, paginating forward through Front's API as needed
+// (see this file's 2026-08-24 header note for why a fixed "top 50" isn't
+// enough for this channel's real volume). Advances the watermark to the
+// newest message's created_at once done, REGARDLESS of whether anything
+// matched the eligible-sender filter — a quiet stretch of irrelevant
+// traffic still needs to count as "scanned" or every run would re-walk
+// the same ground.
 async function fetchRecentEligibleMessages() {
-  const data = await frontFetch(`/channels/${CAL_CHANNEL_ID}/messages?limit=50`)
-  const messages = data._results || []
-  return messages.filter((m) => {
+  const watermarkSeconds = await getWatermarkSeconds()
+  const sinceSeconds = watermarkSeconds ?? Math.floor(Date.now() / 1000) - WATERMARK_LOOKBACK_HOURS * 3600
+
+  let allMessages = []
+  let path = `/channels/${CAL_CHANNEL_ID}/messages?limit=50`
+  let pagesFetched = 0
+
+  while (path && pagesFetched < MAX_PAGES) {
+    const data = await frontFetch(path)
+    const pageMessages = data._results || []
+    allMessages.push(...pageMessages)
+    pagesFetched++
+
+    // Messages are newest-first (Front's documented default order for
+    // this endpoint). Stop paging once this page's OLDEST message is
+    // already at or before the watermark — everything newer has already
+    // been collected across this and prior pages.
+    const oldestOnPage = pageMessages[pageMessages.length - 1]
+    if (!oldestOnPage || (oldestOnPage.created_at ?? 0) <= sinceSeconds) break
+
+    const nextUrl = data._pagination?.next
+    path = nextUrl ? nextUrl.replace('https://api2.frontapp.com', '') : null
+  }
+
+  if (allMessages.length > 0) {
+    const newestSeconds = allMessages.reduce((max, m) => Math.max(max, m.created_at ?? 0), sinceSeconds)
+    await setWatermarkSeconds(newestSeconds)
+  }
+
+  const newMessages = allMessages.filter((m) => (m.created_at ?? 0) > sinceSeconds)
+
+  return newMessages.filter((m) => {
     if (!m.is_inbound) return false
     const fromHandle = (m.recipients || []).find((r) => r.role === 'from')?.handle
     return fromHandle && fromHandle.toLowerCase() === ELIGIBLE_SENDER
