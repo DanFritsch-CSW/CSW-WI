@@ -5,10 +5,9 @@
 // auto-appt-parse-test.cjs.
 //
 // Scope, per Dan's explicit "tread lightly" framing:
-//   - ONE sender (s.rohde@palermospizza.com), ONE format, ONE inbox
-//     (CAL Appointments, channel cha_ema1g). Anything that doesn't match
-//     both the sender AND the exact expected body pattern is left alone —
-//     no partial guesses, no fuzzy matching.
+//   - ONE inbox (CAL Appointments, channel cha_ema1g). Anything that
+//     doesn't match both a known sender AND that sender's exact expected
+//     body pattern is left alone — no partial guesses, no fuzzy matching.
 //   - NEVER pushes to Datex. Creates a 'pending' submissions row only —
 //     the existing human-approval flow in PluginView.jsx (Single APPT
 //     tab) picks it up exactly like a manually-entered draft. The CSR
@@ -59,6 +58,28 @@
 // (no watermark yet), defaults to a 24-hour lookback so anything already
 // sitting unprocessed — like Sam's stuck email — gets caught immediately
 // rather than only going forward from deploy time.
+//
+// EXTENDED 2026-08-24 (later) — added a second eligible sender, Daren
+// Peet (da.peet@palermospizza.com), per Dan's request after reviewing
+// cnv_1c6vdpjo. Daren's format is structurally different from Sam's:
+// "TO_447991 Print Transfer Status 8/24 1700" — underscore after TO, the
+// literal phrase "Print Transfer Status", and a raw 24-hour time (HHMM,
+// no colon, no am/pm) rather than "(needed Xam/pm)". Confirmed against
+// three real examples before writing the regex. Dan confirmed the SAME
+// 3-hour lead-time rule applies to Daren's format (the stated time is
+// also a "ready by" time, not the appointment time) — so this reuses
+// parseNeededByTime/LEAD_TIME_HOURS rather than introducing a second
+// lead-time constant. ELIGIBLE_SENDER (singular) is now
+// ELIGIBLE_SENDER_PATTERNS, an array of {sender, pattern} pairs — each
+// message is now matched against ONLY the pattern belonging to its
+// actual sender, not tried against both, so one sender's format can
+// never accidentally match on the other's text.
+//
+// Note: a THIRD Front automation ("PVI RELOAD REROUTE" rule) already
+// tags/reroutes Daren's conversations today, but per Dan (2026-08-24) it
+// only moves/tags the conversation — a human still creates the actual
+// appointment by hand today, which is exactly the manual step this pilot
+// automates. No conflict with that rule.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -67,21 +88,32 @@ const FRONT_API_KEY = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY |
 const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN || ''
 
 const CAL_CHANNEL_ID = 'cha_ema1g' // CAL Appointments — confirmed with Dan 2026-08-22, re-confirmed against live channel address 2026-08-24
-const ELIGIBLE_SENDER = 's.rohde@palermospizza.com'
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuck query before writing this, not guessed
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
-const APPT_TYPE = 'Outbound' // every observed Sam Rohde order is an Outbound Sales Order in Datex
-const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by" time — confirmed with Dan 2026-08-23
+const APPT_TYPE = 'Outbound' // every observed order from either sender is an Outbound Sales Order in Datex
+const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by"/stated time — confirmed with Dan 2026-08-23, and confirmed to apply identically to Daren Peet's format 2026-08-24
 
 const WATERMARK_SETTINGS_KEY = 'auto_appt_scan_watermark'
 const WATERMARK_LOOKBACK_HOURS = 24 // first-ever run default — see header note
 const MAX_PAGES = 10 // safety cap: 10 * 50 = 500 messages per run, comfortably above the ~136/day observed for this channel
 
-// Matches "TO446013 - 8/20 (needed 3pm)" — the exact, consistent format
-// confirmed from Sam Rohde's emails. Deliberately strict: no fuzzy
-// variations attempted. A body that doesn't match this exactly falls
-// through to outcome='parse_failed' rather than a best-effort guess.
-const BODY_PATTERN = /\bTO(\d{5,7})\s*-\s*(\d{1,2})\/(\d{1,2})\s*\(\s*needed\s*(\d{1,2})\s*(am|pm)\s*\)/i
+// Sam Rohde: "TO446013 - 8/20 (needed 3pm)". Deliberately strict — no
+// fuzzy variations attempted.
+const SAM_ROHDE_PATTERN = /\bTO(\d{5,7})\s*-\s*(\d{1,2})\/(\d{1,2})\s*\(\s*needed\s*(\d{1,2})\s*(am|pm)\s*\)/i
+
+// Daren Peet: "TO_447991 Print Transfer Status 8/24 1700". Requires the
+// literal "Print Transfer Status" phrase (not just TO_###### + a date +
+// a number) to stay strict and avoid accidental matches on unrelated
+// text. Confirmed against 3 real examples before writing.
+const DAREN_PEET_PATTERN = /\bTO_(\d{5,7})\s+Print\s+Transfer\s+Status\s+(\d{1,2})\/(\d{1,2})\s+(\d{3,4})\b/i
+
+// Each sender is matched ONLY against their own pattern — a message from
+// Sam Rohde is never tried against Daren's regex or vice versa, even
+// though both currently target the same reference-number style.
+const ELIGIBLE_SENDER_PATTERNS = [
+  { sender: 's.rohde@palermospizza.com', pattern: SAM_ROHDE_PATTERN, style: 'needed_ampm' },
+  { sender: 'da.peet@palermospizza.com', pattern: DAREN_PEET_PATTERN, style: 'raw_24h' },
+]
 
 function sbHeaders(extra) {
   return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) }
@@ -171,9 +203,10 @@ async function setWatermarkSeconds(seconds) {
 // (see this file's 2026-08-24 header note for why a fixed "top 50" isn't
 // enough for this channel's real volume). Advances the watermark to the
 // newest message's created_at once done, REGARDLESS of whether anything
-// matched the eligible-sender filter — a quiet stretch of irrelevant
-// traffic still needs to count as "scanned" or every run would re-walk
-// the same ground.
+// matched an eligible sender — a quiet stretch of irrelevant traffic
+// still needs to count as "scanned" or every run would re-walk the same
+// ground. Returns messages tagged with which sender pattern (if any)
+// applies, so the caller doesn't need to re-derive it.
 async function fetchRecentEligibleMessages() {
   const watermarkSeconds = await getWatermarkSeconds()
   const sinceSeconds = watermarkSeconds ?? Math.floor(Date.now() / 1000) - WATERMARK_LOOKBACK_HOURS * 3600
@@ -206,11 +239,15 @@ async function fetchRecentEligibleMessages() {
 
   const newMessages = allMessages.filter((m) => (m.created_at ?? 0) > sinceSeconds)
 
-  return newMessages.filter((m) => {
-    if (!m.is_inbound) return false
-    const fromHandle = (m.recipients || []).find((r) => r.role === 'from')?.handle
-    return fromHandle && fromHandle.toLowerCase() === ELIGIBLE_SENDER
-  })
+  const eligible = []
+  for (const m of newMessages) {
+    if (!m.is_inbound) continue
+    const fromHandle = (m.recipients || []).find((r) => r.role === 'from')?.handle?.toLowerCase()
+    if (!fromHandle) continue
+    const match = ELIGIBLE_SENDER_PATTERNS.find((p) => p.sender === fromHandle)
+    if (match) eligible.push({ message: m, senderConfig: match })
+  }
+  return eligible
 }
 
 function getMessageText(message) {
@@ -235,45 +272,73 @@ function fmtLocal(d) {
   return `${y}-${m}-${dd}T${hh}:00`
 }
 
-// Parses "TO446013 - 8/20 (needed 3pm)" into { reference, neededBy,
-// scheduledArrival }. neededBy is the time as literally stated in the
-// email (material must be ready by then); scheduledArrival is
-// LEAD_TIME_HOURS earlier — the actual truck appointment time — computed
-// via plain millisecond arithmetic on a Date object so day/month/year
-// rollover is handled correctly (e.g. "needed 1am" correctly becomes
-// 10pm the PREVIOUS day, not a negative hour).
-//
-// Assumes the current year for the stated date; if the resulting
-// needed-by date is more than 60 days in the past relative to today,
-// rolls to next year — handles a message arriving near a year boundary
-// referencing a date just after it, without overcomplicating the common
-// case.
-function parseBody(text) {
-  const match = BODY_PATTERN.exec(text)
-  if (!match) return null
-  const [, digits, monthStr, dayStr, hourStr, ampm] = match
+// Shared date/lead-time resolution once a pattern has produced
+// {digits, month, day, hour24}. Both sender formats funnel through this
+// so the lead-time rule (and its year-rollover/day-rollover handling)
+// stays in exactly one place regardless of which regex matched.
+function resolveDatesFromParts(digits, month, day, hour24) {
   const reference = `TO${digits}`
-  const month = parseInt(monthStr, 10)
-  const day = parseInt(dayStr, 10)
-  let neededHour = parseInt(hourStr, 10) % 12
-  if (ampm.toLowerCase() === 'pm') neededHour += 12
-
   const now = new Date()
   let year = now.getFullYear()
-  let neededByDate = new Date(year, month - 1, day, neededHour, 0, 0)
+  let neededByDate = new Date(year, month - 1, day, hour24, 0, 0)
   const diffDays = (now - neededByDate) / (1000 * 60 * 60 * 24)
   if (diffDays > 60) {
     year += 1
-    neededByDate = new Date(year, month - 1, day, neededHour, 0, 0)
+    neededByDate = new Date(year, month - 1, day, hour24, 0, 0)
   }
-
   const apptDate = new Date(neededByDate.getTime() - LEAD_TIME_HOURS * 60 * 60 * 1000)
-
   return {
     reference,
     neededBy: fmtLocal(neededByDate),
     scheduledArrival: fmtLocal(apptDate),
   }
+}
+
+// Parses a message body according to the pattern belonging to its
+// sender (see ELIGIBLE_SENDER_PATTERNS). Returns { reference, neededBy,
+// scheduledArrival } or null if the text doesn't match that sender's
+// expected format — a body that doesn't match exactly falls through to
+// outcome='parse_failed' rather than a best-effort guess.
+//
+// neededBy is the time as literally stated in the email (material must
+// be ready by then); scheduledArrival is LEAD_TIME_HOURS earlier — the
+// actual truck appointment time — computed via plain millisecond
+// arithmetic on a Date object so day/month/year rollover is handled
+// correctly (e.g. "needed 1am" correctly becomes 10pm the PREVIOUS day,
+// not a negative hour). Assumes the current year for the stated date; if
+// the resulting needed-by date is more than 60 days in the past relative
+// to today, rolls to next year.
+function parseBody(text, senderConfig) {
+  if (senderConfig.style === 'needed_ampm') {
+    const match = SAM_ROHDE_PATTERN.exec(text)
+    if (!match) return null
+    const [, digits, monthStr, dayStr, hourStr, ampm] = match
+    let hour24 = parseInt(hourStr, 10) % 12
+    if (ampm.toLowerCase() === 'pm') hour24 += 12
+    return resolveDatesFromParts(digits, parseInt(monthStr, 10), parseInt(dayStr, 10), hour24)
+  }
+
+  if (senderConfig.style === 'raw_24h') {
+    const match = DAREN_PEET_PATTERN.exec(text)
+    if (!match) return null
+    const [, digits, monthStr, dayStr, rawTime] = match
+    // rawTime is "1700" or "800" -- last two digits are minutes, whatever
+    // remains (1 or 2 digits) is the hour. Confirmed against 3 real
+    // examples (all on-the-hour, e.g. "1700", "1600", "1500") before
+    // writing this.
+    const mm = rawTime.slice(-2)
+    const hh = rawTime.length === 3 ? rawTime.slice(0, 1) : rawTime.slice(0, 2)
+    const hour24 = parseInt(hh, 10)
+    if (parseInt(mm, 10) !== 0) {
+      // Only ever observed on-the-hour times for this sender. A non-zero
+      // minute means the format has drifted from what was confirmed --
+      // treat as unparseable rather than silently rounding.
+      return null
+    }
+    return resolveDatesFromParts(digits, parseInt(monthStr, 10), parseInt(dayStr, 10), hour24)
+  }
+
+  return null
 }
 
 // Order lookup — SAME matching logic as scheduling-order-search.cjs
@@ -398,9 +463,9 @@ function formatDisplayDatetime(iso) {
   return `${monthName} ${parseInt(d, 10)}, ${y} ${hour12}:00 ${ampm}`
 }
 
-async function createPendingSubmission({ conversationId, project, dockDoor, reference, neededBy, scheduledArrival }) {
+async function createPendingSubmission({ conversationId, project, dockDoor, reference, neededBy, scheduledArrival, senderLabel }) {
   const appointmentCode = `(${PALERMO_ABBR}) - ${reference}`
-  const notes = `Auto-parsed from Sam Rohde email — needed by ${formatDisplayDatetime(neededBy)}, appointment scheduled ${LEAD_TIME_HOURS} hours prior. Please verify all fields before pushing to Datex.`
+  const notes = `Auto-parsed from ${senderLabel} email — needed by ${formatDisplayDatetime(neededBy)}, appointment scheduled ${LEAD_TIME_HOURS} hours prior. Please verify all fields before pushing to Datex.`
   const fields = {
     warehouse: CAL_WAREHOUSE,
     type: APPT_TYPE,
@@ -434,21 +499,22 @@ async function createPendingSubmission({ conversationId, project, dockDoor, refe
 // exists) call the exact same logic rather than each having their own
 // copy that could drift.
 
-async function processMessage(message) {
+async function processMessage(message, senderConfig) {
   const messageId = message.id
   const subject = message.subject || ''
+  const senderHandle = senderConfig.sender
 
   if (await alreadyProcessed(messageId)) {
     return { messageId, outcome: 'skipped_already_processed' }
   }
 
   const text = getMessageText(message)
-  const parsed = parseBody(text)
+  const parsed = parseBody(text, senderConfig)
 
   if (!parsed) {
     await logAttempt({
       front_message_id: messageId,
-      sender: ELIGIBLE_SENDER,
+      sender: senderHandle,
       subject,
       outcome: 'parse_failed',
     })
@@ -465,7 +531,7 @@ async function processMessage(message) {
     await logAttempt({
       front_message_id: messageId,
       front_conversation_id: conversationId,
-      sender: ELIGIBLE_SENDER,
+      sender: senderHandle,
       subject,
       matched_reference: reference,
       needed_by: neededBy,
@@ -480,7 +546,7 @@ async function processMessage(message) {
     await logAttempt({
       front_message_id: messageId,
       front_conversation_id: conversationId,
-      sender: ELIGIBLE_SENDER,
+      sender: senderHandle,
       subject,
       matched_reference: reference,
       needed_by: neededBy,
@@ -494,7 +560,7 @@ async function processMessage(message) {
     await logAttempt({
       front_message_id: messageId,
       front_conversation_id: conversationId,
-      sender: ELIGIBLE_SENDER,
+      sender: senderHandle,
       subject,
       matched_reference: reference,
       needed_by: neededBy,
@@ -519,12 +585,13 @@ async function processMessage(message) {
       reference,
       neededBy,
       scheduledArrival,
+      senderLabel: senderHandle,
     })
   } catch (err) {
     await logAttempt({
       front_message_id: messageId,
       front_conversation_id: conversationId,
-      sender: ELIGIBLE_SENDER,
+      sender: senderHandle,
       subject,
       matched_reference: reference,
       needed_by: neededBy,
@@ -540,7 +607,7 @@ async function processMessage(message) {
   await logAttempt({
     front_message_id: messageId,
     front_conversation_id: conversationId,
-    sender: ELIGIBLE_SENDER,
+    sender: senderHandle,
     subject,
     matched_reference: reference,
     needed_by: neededBy,
@@ -556,17 +623,17 @@ async function processMessage(message) {
 }
 
 async function runScan() {
-  const messages = await fetchRecentEligibleMessages()
+  const eligible = await fetchRecentEligibleMessages()
   const results = []
-  for (const message of messages) {
-    results.push(await processMessage(message))
+  for (const { message, senderConfig } of eligible) {
+    results.push(await processMessage(message, senderConfig))
   }
   return results
 }
 
 module.exports = {
   CAL_CHANNEL_ID,
-  ELIGIBLE_SENDER,
+  ELIGIBLE_SENDER_PATTERNS,
   PALERMO_OWNER_NAME,
   CAL_WAREHOUSE,
   LEAD_TIME_HOURS,
