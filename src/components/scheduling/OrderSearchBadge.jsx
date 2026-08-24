@@ -22,15 +22,35 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 // array, so changing either after typing a reference re-checks
 // automatically rather than leaving a stale result on screen.
 //
-// PHASE 2 added 2026-08-22 (later still): displays requestedShipDate and
-// notes in the found badge, and calls the new onOrderFound(order) prop
-// once per distinct match (tracked via notifiedOrderIdRef, so it fires
-// exactly once even though the debounce effect can re-run for unrelated
-// reasons) — PluginView.jsx uses this to auto-fill the appointment's
-// Notes field with the ship date + order notes pulled from Datex. This
-// component itself never touches the Notes field directly; it only
-// reports what it found and lets the parent decide whether/how to use it
-// (e.g. not clobbering notes the user already typed).
+// PHASE 2 added 2026-08-22 (later still): displays date/notes info in the
+// found badge, and calls the new onOrderFound(order) prop once per
+// distinct match (tracked via notifiedOrderIdRef) — PluginView.jsx uses
+// this to auto-fill the appointment's Notes field. This component itself
+// never touches the Notes field directly; it only reports what it found
+// and lets the parent decide whether/how to use it (e.g. not clobbering
+// notes the user already typed).
+//
+// FIXED 2026-08-24 (two issues, found together after Dan/Kay reported a
+// real submission with an empty Notes field despite a "Found in Datex"
+// badge showing real data):
+//   1. Field shape: requestedShipDate was actually a DELIVERY date, not a
+//      ship date — Datex tracks these as two genuinely separate things
+//      (Order vs. Shipment). Now shows requestedDeliveryDate AND
+//      shipExpectedDate separately, matching scheduling-order-search.cjs's
+//      corrected response shape. See that file's header for the full
+//      story (confirmed against live data: order 778492 had a Sep 2
+//      delivery date and a completely separate Aug 29 ship date).
+//   2. Stale-ref bug: notifiedOrderIdRef never reset between different
+//      Front conversations. Since the plugin panel likely stays mounted
+//      as a CSR switches between emails (Front.contextUpdates just fires
+//      a new conversationId, not a fresh page load), a ref that only
+//      ever gets SET and never CLEARED means a second, unrelated
+//      conversation that happens to reference the SAME Datex order would
+//      silently skip onOrderFound — exactly the kind of gap that could
+//      explain a real submission ending up with no auto-filled Notes.
+//      Now resets to null whenever reference goes empty (which happens
+//      on every conversation switch, per PluginView.jsx's setDraft({})
+//      reset), so each new conversation gets a fresh chance.
 //
 // The old PluginOrderSearchTab.jsx file is left in place (no file-delete
 // tool) but is no longer imported or rendered anywhere — dead code, same
@@ -39,7 +59,7 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 
 const DEBOUNCE_MS = 600
 
-function formatShipDate(iso) {
+function formatDateLabel(iso) {
   if (!iso) return null
   const [y, m, d] = iso.split('-')
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -61,6 +81,11 @@ export default function OrderSearchBadge({ reference, owner, project, onOrderFou
     if (!trimmed) {
       setStatus('idle')
       setResult(null)
+      // Reset on every "field went blank" — this happens on every
+      // conversation switch (PluginView.jsx clears draft between
+      // conversations), so a stale orderId from a PREVIOUS, unrelated
+      // conversation never blocks onOrderFound firing for a new one.
+      notifiedOrderIdRef.current = null
       return
     }
 
@@ -115,7 +140,8 @@ export default function OrderSearchBadge({ reference, owner, project, onOrderFou
 
   // found
   const parts = [result.ownerName, result.projectName, result.warehouseName].filter(Boolean)
-  const shipDateLabel = formatShipDate(result.requestedShipDate)
+  const deliveryDateLabel = formatDateLabel(result.requestedDeliveryDate)
+  const shipDateLabel = formatDateLabel(result.shipExpectedDate || result.shipPickupDate)
   return (
     <div className="mt-1 px-2 py-1.5 rounded-lg text-[11px] border bg-green-50 border-green-200 text-green-800">
       <div>
@@ -123,7 +149,8 @@ export default function OrderSearchBadge({ reference, owner, project, onOrderFou
         {result.statusName ? ` (${result.statusName})` : ''}
         {result.backOrder && <span className="ml-1 font-semibold text-amber-700">⚠ Back order</span>}
       </div>
-      {shipDateLabel && <div className="mt-0.5 text-green-700">Requested Ship Date: {shipDateLabel}</div>}
+      {shipDateLabel && <div className="mt-0.5 text-green-700">Ship Date: {shipDateLabel}</div>}
+      {deliveryDateLabel && <div className="mt-0.5 text-green-700">Requested Delivery Date: {deliveryDateLabel}</div>}
       {result.notes && <div className="mt-0.5 text-green-700 break-words">Order Notes: {result.notes}</div>}
     </div>
   )
