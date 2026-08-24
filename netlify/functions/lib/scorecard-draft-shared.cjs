@@ -70,6 +70,28 @@
 // note below for how the code now tolerates that gracefully instead of
 // silently failing.
 //
+// FIXED 2026-08-24: resolveChannelId (renamed resolveChannelIdForConversation)
+// previously guessed the draft's sending channel from a STATIC
+// warehouse-name → channel map (WAREHOUSE_MAP below), assuming one fixed
+// inbox per facility. Real bug found when Dan routed Omni's Grassland
+// delivery to a new shared "Madison" inbox (madison@csw-wi.com,
+// access_mode: everyone — the correct fix for the earlier restricted-
+// personal-inbox 403): that inbox's own channel (cha_duvx0) is DIFFERENT
+// from the "MAD Appointments" channel (cha_ema8k) the static map pointed
+// to for Madison. Front's drafts API requires channel_id to belong to one
+// of the conversation's own inboxes — using the wrong one would have
+// failed the exact same way the missing-channel_id bug did originally.
+// Fixed by resolving the channel dynamically from whatever inbox the
+// conversation ACTUALLY lives in (GET /conversations/{id}/inboxes, then
+// GET /inboxes/{inbox_id}/channels) as the PRIMARY path, falling back to
+// FRONT_CHANNEL_ID / WAREHOUSE_MAP / generic /channels only if that fails.
+// This means routing a customer's scorecard email to any shared inbox Dan
+// sets up going forward works automatically, without a future code change
+// per new inbox. NOT YET LIVE-VERIFIED — GET /conversations/{id}/inboxes
+// and GET /inboxes/{id}/channels are standard, documented Front API
+// endpoints, but this exact code path hasn't been exercised by a real
+// test yet; watch the next real draft attempt closely.
+//
 // FIXED 2026-08-07: fetchScorecardCandidates() previously only fell back
 // to subject search when resolveScorecardTagId() itself failed/returned
 // null — if the tag DID resolve but zero conversations were actually
@@ -88,11 +110,7 @@
 // satisfy requirements","details":["body.channel_id: missing"]}}". Front's
 // drafts API requires channel_id unconditionally — confirmed by
 // front-draft-shared.cjs (this app's other, already-working Front-draft
-// caller) always resolving and passing one. Fixed by copying that same
-// resolveChannelId logic (WAREHOUSE_MAP + FRONT_CHANNEL_ID env override +
-// GET /channels fallback) into this file rather than importing it, since
-// front-draft-shared.cjs doesn't export it and this is a small, self-
-// contained piece of logic — not worth changing that file's exports for.
+// caller) always resolving and passing one.
 //
 // FIXED 2026-08-06 (same first test's real output): buildClaudePrompt was
 // only fed OTT (2hr/3hr) and Case Pick Accuracy — Claude correctly wrote
@@ -104,6 +122,10 @@
 // for OTT) and its validation caveats. metricLines below now includes it
 // whenever motherduck-scorecard-metrics.cjs returns a non-null value.
 //
+// FIXED 2026-08-24 (separate fix, in scorecard-draft-run.cjs, not this
+// file): candidate window widened from 20 minutes to 7 days for the same
+// "narrow window with no safety net" reason as the tag fallback above.
+//
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Add a "tag conversation" action for "QBR - Case Study" on the existing
 //   "Scorecard Template" rule (rul_7kwwk) so it actually gets applied to
@@ -112,13 +134,20 @@
 //   subject-search fallback, not the tag path — confirmed this is fine
 //   functionally after the 2026-08-07 fix above, just weaker/slower than
 //   the intended design (depends on Omni's subject line never changing).
+//   Also confirmed 2026-08-24: this rule apparently doesn't fire at all
+//   for madison@csw-wi.com-delivered emails (no rule_action entry seen on
+//   a real one) — likely scoped to the older delivery address/channel.
+//   Doesn't block this pipeline (subject search doesn't depend on the
+//   rule), but worth fixing if the tag path is ever meant to go live.
 // - Omni dashboard document-state read (drift-proofing) not implemented —
 //   only the dashboard_id pointer is stored.
 // - Carrier % On-Time Arrival formula not fully validated against Omni's
 //   literal underlying definition — see motherduck-scorecard-metrics.cjs.
-// - End-to-end verified live once (cnv_1c1dcmvo, after the channel_id fix)
-//   — draft created successfully, Claude wrote a real narrative. Re-verify
-//   once more with the Carrier % metric now included.
+// - Grassland's actual MotherDuck data (project_name containing
+//   'Grassland', warehouse 'CSW-Madison') has never been spot-checked
+//   against a known-good week the way Bernatello's was during scoping —
+//   worth doing once a real draft succeeds, to confirm the numbers are
+//   sane, not just that the pipeline runs without erroring.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -148,12 +177,10 @@ const CONTEXT_KEYWORDS = ['urgent', 'hold', 'escalat', 'complaint', 'asap', 'imm
 // 2026-08-05 decision (numbers + last week's thread, not numbers alone).
 const THREAD_CONTEXT_DAYS = 7
 
-// Warehouse → Front appointments-inbox channel map, copied from
-// front-draft-shared.cjs (not exported there, so duplicated here rather
-// than changing that file's exports for one small lookup). Keys match
-// warehouseKey()'s normalization: lowercase, spaces → hyphens. This
-// customer_scorecard_config.warehouse_name value ("CSW-Wisconsin Rapids")
-// normalizes to "csw-wisconsin-rapids", which matches this map exactly.
+// Warehouse → Front appointments-inbox channel map — now a FALLBACK ONLY
+// (see 2026-08-24 FIXED note above), used only if a conversation's own
+// inbox can't be resolved to a channel for some reason. Keys match
+// warehouseKey()'s normalization: lowercase, spaces → hyphens.
 const WAREHOUSE_MAP = {
   'csw-franksville':      { channel: 'cha_ema1g', inbox: 'inb_aut78' }, // CAL Appointments
   'csw-kenosha':          { channel: 'cha_ema6s', inbox: 'inb_awl90' }, // KEN Appointments
@@ -297,15 +324,8 @@ async function searchRecentScorecardConversations(subjectContains, sinceMinutes)
 // Combined lookup used by scorecard-draft-run.cjs: tries the tag first,
 // falls back to subject search if the tag can't be resolved OR resolves
 // but finds zero tagged candidates for this customer (FIXED 2026-08-07 —
-// the original version only fell back when resolveScorecardTagId() itself
-// failed, so a conversation that simply hadn't been tagged yet — e.g. the
-// "Scorecard Template" rule not having a tag action added, or a brand-new
-// customer's first email landing before that rule catches up — would
-// silently never surface via the scheduled run, no matter how many ticks
-// passed. Confirmed this exact scenario live: Grassland's real inbound
-// email (cnv_1c3896fo) came back with tagIds: [] from Front). Returns
-// { candidates, usedTag: boolean } so results can report which path
-// actually produced the candidates.
+// see file header). Returns { candidates, usedTag: boolean } so results
+// can report which path actually produced the candidates.
 async function fetchScorecardCandidates(config, sinceMinutes) {
   let tagId = null
   try {
@@ -428,13 +448,43 @@ async function getReplyAllRecipients(conversationId) {
   }
 }
 
+// Lists the inbox IDs a conversation actually belongs to.
+async function resolveConversationInboxIds(conversationId) {
+  const data = await frontGet(`/conversations/${conversationId}/inboxes`)
+  return (data._results || []).map((i) => i.id)
+}
+
+// Lists channel IDs for a given inbox, preferring real email-type channels.
+async function resolveChannelForInbox(inboxId) {
+  const data = await frontGet(`/inboxes/${inboxId}/channels`)
+  const results = data._results || []
+  const ch = results.find((c) => ['smtp', 'office365', 'gmail', 'imap'].includes(c.type)) || results[0]
+  return ch?.id || null
+}
+
 // Resolves a Front channel_id to send from — REQUIRED by Front's drafts API
 // unconditionally (confirmed live 2026-08-06: omitting it 400s with
-// "body.channel_id: missing" even for a reply draft). Same fallback chain
-// as front-draft-shared.cjs's resolveChannelId: explicit FRONT_CHANNEL_ID
-// env override first, then the WAREHOUSE_MAP lookup, then GET /channels
-// and pick the first real email-type channel.
-async function resolveChannelId(warehouseName) {
+// "body.channel_id: missing" even for a reply draft).
+//
+// FIXED 2026-08-24 — PRIMARY path is now dynamic: look up the channel that
+// actually belongs to the conversation's own inbox(es), since a static
+// facility→channel guess breaks the moment a customer's email is routed to
+// a different shared inbox than the map expects (real example: Grassland's
+// Madison-routed email landed in a "Madison" inbox with its own channel,
+// cha_duvx0, not the "MAD Appointments" channel the old WAREHOUSE_MAP
+// pointed to for that facility). Falls back to FRONT_CHANNEL_ID env
+// override, then the static WAREHOUSE_MAP, then any available channel —
+// only if the dynamic lookup can't find anything, which shouldn't normally
+// happen for a real conversation.
+async function resolveChannelIdForConversation(conversationId, warehouseName) {
+  try {
+    const inboxIds = await resolveConversationInboxIds(conversationId)
+    for (const inboxId of inboxIds) {
+      const chId = await resolveChannelForInbox(inboxId)
+      if (chId) return chId
+    }
+  } catch (_) { /* fall through to the static fallbacks below */ }
+
   if (process.env.FRONT_CHANNEL_ID) return process.env.FRONT_CHANNEL_ID
 
   const key = warehouseKey(warehouseName)
@@ -449,10 +499,10 @@ async function resolveChannelId(warehouseName) {
 
 // Creates a Front DRAFT reply on the conversation. NEVER calls Front's
 // send-message endpoint — see file header. channel_id is REQUIRED (see
-// resolveChannelId above and the FIXED note at the top of this file).
+// resolveChannelIdForConversation above).
 async function createScorecardDraft(conversationId, bodyText, warehouseName) {
   const [channelId, { to, cc }] = await Promise.all([
-    resolveChannelId(warehouseName),
+    resolveChannelIdForConversation(conversationId, warehouseName),
     getReplyAllRecipients(conversationId),
   ])
   const payload = { channel_id: channelId, body: toHtml(bodyText), mode: 'shared', type: 'replyAll' }
