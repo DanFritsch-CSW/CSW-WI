@@ -7,13 +7,26 @@
 // scheduled-tick-ONLY, scorecard-draft-test.cjs is the manual-test sibling.
 //
 // DETECTION (updated 2026-08-06, later same day): now tries the
-// "qbr_case_study" Front tag FIRST via lib/scorecard-draft-shared.cjs's
+// "QBR - Case Study" Front tag FIRST via lib/scorecard-draft-shared.cjs's
 // fetchScorecardCandidates() — resolved by tag NAME each run, not a
 // hardcoded ID, since Dan may still be setting the tag/rule action up.
 // Falls back to the older subject-string Front search automatically if the
-// tag can't be resolved yet. Each result below reports which path fired
+// tag can't be resolved yet (or resolves but finds nothing tagged — see
+// that file's 2026-08-07 fix). Each result below reports which path fired
 // (usedTag: true/false) so it's visible in the run's own output whether the
 // tag is live yet.
+//
+// FIXED 2026-08-24: candidate window widened from 20 MINUTES to 7 DAYS.
+// Real bug found investigating why Grassland's cnv_1c7uwyfo never drafted:
+// the 20-minute window meant that if a scheduled tick ever missed catching
+// a conversation within 20 minutes of it landing (a deploy in progress, a
+// transient error, literally any reason), it would NEVER be retried —
+// silently, forever, no log entry, nothing. This is safe to widen freely
+// because runForConversation() already dedupes via scorecard_draft_log
+// (alreadyDrafted() checks customer_key + front_conversation_id before
+// doing any work) — a wider window can only mean "catch things the
+// previous ticks missed," never "draft the same email twice."
+const CANDIDATE_WINDOW_MINUTES = 60 * 24 * 7 // 7 days
 
 const { runForConversation, fetchScorecardCandidates } = require('./lib/scorecard-draft-shared.cjs')
 
@@ -44,7 +57,7 @@ exports.handler = async () => {
 
   for (const config of configs || []) {
     try {
-      const { candidates, usedTag } = await fetchScorecardCandidates(config, 20)
+      const { candidates, usedTag } = await fetchScorecardCandidates(config, CANDIDATE_WINDOW_MINUTES)
       for (const cnv of candidates) {
         const r = await runForConversation({ customerKey: config.customer_key, conversationId: cnv.id, isManualTest: false })
         results.push({ ...r, usedTag })
