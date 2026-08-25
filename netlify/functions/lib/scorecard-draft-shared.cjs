@@ -1,11 +1,11 @@
 'use strict'
 
-// Shared core for the Scorecard Draft Creator — added 2026-08-06, BERNATELLO'S
-// ONLY PILOT (see Notion changelog for the full scoping history: 2026-08-04/05
-// conversations with Dan/Hill). Goal: when Omni's weekly customer scorecard
-// email lands in Front, auto-generate a DRAFT (never send) reply with a
-// GM-style narrative, for a human to review/edit/send exactly as they do
-// today.
+// Shared core for the Scorecard Draft Creator — added 2026-08-06, PILOT
+// (Bernatello's + Grassland; see Notion changelog for the full scoping
+// history: 2026-08-04/05 conversations with Dan/Hill). Goal: when Omni's
+// weekly customer scorecard email lands in Front, auto-generate a DRAFT
+// (never send) reply with a GM-style narrative, for a human to
+// review/edit/send exactly as they do today.
 //
 // WHY THIS FILE IS SPLIT FROM THE -run/-test ENTRYPOINTS: same reason as
 // every other digest on this project (see fefo-digest-shared.cjs's header) —
@@ -14,140 +14,104 @@
 //
 // KEY DESIGN DECISIONS (from the scoping conversation, in order):
 // 1. Numbers come from THIS APP'S OWN already-validated MotherDuck queries
-//    (motherduck-scorecard-metrics.cjs, itself a project_name/week-scoped
-//    sibling of motherduck-ott.cjs / motherduck-case-pick-accuracy.cjs), not
-//    from parsing Omni's PNG image and not from Omni's fuzzy natural-language
-//    layer. Vision-reading the PNG was explicitly discussed and intentionally
-//    NOT used as the primary source — an LLM misreading a chart percentage
-//    into a customer-facing email is a worse failure mode than a wrong
-//    internal-dashboard number. (Room for PNG-as-secondary-cross-check later,
-//    not built this pass.)
+//    (motherduck-scorecard-metrics.cjs), not from parsing Omni's PNG image
+//    and not from Omni's fuzzy natural-language layer.
 // 2. Each customer's Omni dashboard ID is stored (customer_scorecard_config.
-//    omni_dashboard_id) as the drift-fix pointer for a FUTURE pass that reads
-//    the dashboard's live document state (GET /v2/documents/{id}) — not
-//    wired up yet in this pilot; flagged as not-yet-done below.
+//    omni_dashboard_id) as a drift-fix pointer for a FUTURE pass that reads
+//    the dashboard's live document state — not wired up yet.
 // 3. Per-customer PROMPT holds tone/emphasis guidance only, never metric
-//    definitions — those live in the MotherDuck query + Omni, so they can't
-//    silently drift out of sync with a hand-maintained prompt.
+//    definitions.
 // 4. Recent Front thread context is pulled and scanned for a short keyword
-//    list (urgent, hold, etc.) per Dan's ask — flagged lines are passed to
-//    Claude as explicit signals, not just dumped in as raw noise.
+//    list (urgent, hold, etc.) — flagged lines are passed to Claude as
+//    explicit signals.
 // 5. Output is ALWAYS a Front DRAFT, never sent automatically. No code path
-//    in this file calls Front's send-message endpoint. This must not change
-//    without an explicit re-review of the data-exposure risk (an internal
-//    ops comment ending up quoted in a customer-facing draft).
+//    in this file calls Front's send-message endpoint.
 //
-// TRIGGER/DETECTION (updated 2026-08-06, confirmed with Dan via screenshot):
-// scoped via a real Front tag, "QBR - Case Study" — a company-level tag
-// nested under Positive > Sentiment (Front Settings → Tags → Company). Note
-// the exact spelling: spaces + hyphen, NOT the "qbr_case_study" placeholder
-// name used earlier during scoping — that name was wrong, corrected once
-// Dan confirmed the real tag via a screenshot of Front's tag settings.
-// resolveScorecardTagId() looks this tag up BY NAME every run (GET /tags,
-// exact case-insensitive match) rather than hardcoding a tag ID. Confirmed
-// via Front's own API docs: GET /tags/{tag_id}/conversations is the real
-// "List tagged conversations" endpoint. Per-customer front_subject_contains
-// is still used to partition tagged conversations by customer (multiple
-// customers' scorecard emails likely share this one tag, per Hill's
-// original "tag anything with 'customer scorecard'" framing). If the tag
-// isn't found, falls back to the older subject-string-only Front search.
+// TRIGGER/DETECTION — REWRITTEN 2026-08-24. Full history, oldest to newest:
 //
-// UNVERIFIED RISK, flagged rather than assumed away: this session's Front
-// MCP tool (list_tags) could NOT find "QBR - Case Study" under any query
-// variant (exact name, partial, unfiltered listing, even searching for its
-// parent "Sentiment" tag) even after Dan confirmed via screenshot that it
-// exists at the company level, nested under a parent tag. That strongly
-// suggests company-level/nested tags aren't returned the same way by
-// whatever tags-listing surface that tool wraps. resolveScorecardTagId()
-// below calls Front's REST API directly (GET /tags) with FRONT_API_TOKEN —
-// NOT the same code path as the MCP tool — so it may or may not have the
-// same blind spot. This has NOT been verified live from inside a deployed
-// function. Confirmed live 2026-08-07 (Grassland's real inbound email,
-// cnv_1c3896fo) that the conversation itself carries zero tags regardless
-// (tagIds: []) — the "Scorecard Template" rule only posts a comment, it
-// has no tag action yet. Given BOTH of these gaps stack, the tag path is
-// realistically not doing anything useful yet either way — see the FIXED
-// note below for how the code now tolerates that gracefully instead of
-// silently failing.
+// (a) ORIGINAL DESIGN (2026-08-06): a shared Front tag ("QBR - Case Study",
+//     a company-level tag nested under Positive > Sentiment) was meant to
+//     scope detection cheaply across all customers. Never worked: this
+//     session's Front tools could not see the tag under any query variant
+//     (exact name, partial, parent tag), even after Dan confirmed via
+//     screenshot that it exists. The "Scorecard Template" rule that was
+//     meant to apply it also never got a tag action added, and separately
+//     doesn't even fire on newer delivery addresses (confirmed 2026-08-24:
+//     no rule_action on a real madison@csw-wi.com email). Fell back to a
+//     Front full-text subject search (see (b)).
+// (b) SUBJECT SEARCH FALLBACK (2026-08-06 through 2026-08-24): worked for
+//     the pilot's early manual tests, but the SCHEDULED path never
+//     successfully found and drafted a single real production email on
+//     its own — confirmed by an empty scorecard_draft_log across every
+//     scheduled tick since launch. Widened the candidate time window from
+//     20 minutes to 7 days on 2026-08-24 (see scorecard-draft-run.cjs) on
+//     the theory that ticks were narrowly missing new emails; that alone
+//     did not fix it. Root cause never fully confirmed (no access to
+//     Netlify's live function logs to see the actual API response), but
+//     Front's own docs note that an API token's search scope can be
+//     narrower than its direct resource-read access ("an API token with a
+//     scope limited to a specific team can only search for conversations
+//     in that team inbox") — a plausible, invisible explanation for why
+//     search silently returned nothing for inboxes that direct GETs (used
+//     everywhere else in this file) can read just fine.
+// (c) DIRECT INBOX POLLING — NEW PRIMARY PATH (2026-08-24): rather than
+//     keep debugging an opaque search/tag failure, replaced both with a
+//     deterministic approach: customer_scorecard_config.front_inbox_name
+//     stores the exact Front inbox NAME a customer's emails land in (e.g.
+//     "Madison" for Grassland). At runtime, resolve that name to an inbox
+//     ID (GET /inboxes) and list that inbox's conversations directly (GET
+//     /inboxes/{id}/conversations), filtered by subject + recency. This is
+//     the same class of call (a direct, scoped resource read) already
+//     proven reliable elsewhere in this file — resolveChannelIdForConversation
+//     and createScorecardDraft both work this way and have never failed
+//     due to search-scope ambiguity. Falls back to the tag, then subject
+//     search, only if front_inbox_name is unset or unresolvable — kept for
+//     backward compatibility, not because either is trusted going forward.
 //
-// FIXED 2026-08-24: resolveChannelId (renamed resolveChannelIdForConversation)
-// previously guessed the draft's sending channel from a STATIC
-// warehouse-name → channel map (WAREHOUSE_MAP below), assuming one fixed
-// inbox per facility. Real bug found when Dan routed Omni's Grassland
-// delivery to a new shared "Madison" inbox (madison@csw-wi.com,
-// access_mode: everyone — the correct fix for the earlier restricted-
-// personal-inbox 403): that inbox's own channel (cha_duvx0) is DIFFERENT
-// from the "MAD Appointments" channel (cha_ema8k) the static map pointed
-// to for Madison. Front's drafts API requires channel_id to belong to one
-// of the conversation's own inboxes — using the wrong one would have
-// failed the exact same way the missing-channel_id bug did originally.
-// Fixed by resolving the channel dynamically from whatever inbox the
-// conversation ACTUALLY lives in (GET /conversations/{id}/inboxes, then
-// GET /inboxes/{inbox_id}/channels) as the PRIMARY path, falling back to
-// FRONT_CHANNEL_ID / WAREHOUSE_MAP / generic /channels only if that fails.
-// This means routing a customer's scorecard email to any shared inbox Dan
-// sets up going forward works automatically, without a future code change
-// per new inbox. NOT YET LIVE-VERIFIED — GET /conversations/{id}/inboxes
-// and GET /inboxes/{id}/channels are standard, documented Front API
-// endpoints, but this exact code path hasn't been exercised by a real
-// test yet; watch the next real draft attempt closely.
+// IMPORTANT OPEN ITEM: this only works for a customer once their real
+// Omni delivery is routed to a SHARED inbox this app can read (confirmed
+// working: Grassland → "Madison", access_mode: everyone). Bernatello's
+// real production email is NOT yet on this path — it still lands in Dan's
+// personal restricted inbox (inb_azvro), which the app cannot read at all
+// (confirmed via a direct 403 earlier this session). Bernatello's
+// front_inbox_name is deliberately left NULL until Dan moves its Omni
+// delivery to a shared inbox the same way Grassland's was moved. Every
+// NEW customer being onboarded should get a shared-inbox destination
+// AND front_inbox_name set from the start — see the Scorecard Drafts UI
+// tab's Config panel.
 //
-// FIXED 2026-08-07: fetchScorecardCandidates() previously only fell back
-// to subject search when resolveScorecardTagId() itself failed/returned
-// null — if the tag DID resolve but zero conversations were actually
-// tagged for a given customer (exactly Grassland's real situation: no tag
-// action on the rule yet), the function returned zero candidates and
-// NEVER fell back, meaning that customer would silently never get a draft
-// no matter how many scheduled ticks passed. Now falls back to subject
-// search whenever the tag path yields zero candidates, not just when tag
-// resolution errors outright.
+// FIXED 2026-08-24: resolveChannelIdForConversation resolves the draft's
+// sending channel dynamically from whatever inbox the conversation
+// actually lives in (GET /conversations/{id}/inboxes → GET
+// /inboxes/{inbox_id}/channels), not a static warehouse→channel guess.
+// Real bug found: Grassland's Madison-inbox channel (cha_duvx0) differs
+// from the "MAD Appointments" channel the old static map pointed to for
+// that facility — using the wrong one would have 400'd. Live-verified
+// 2026-08-24 via a real successful test draft on cnv_1c7v4cgk.
 //
-// FIXED 2026-08-06 (first real test run via the new UI tab): createScorecardDraft
-// was wrongly assuming Front's drafts endpoint would default to the
-// conversation's own channel for a reply, omitting channel_id entirely.
-// Real error from the first live test: "Front drafts API → 400:
-// {"_errors":{"status":400,"title":"Bad request","message":"Body did not
-// satisfy requirements","details":["body.channel_id: missing"]}}". Front's
-// drafts API requires channel_id unconditionally — confirmed by
-// front-draft-shared.cjs (this app's other, already-working Front-draft
-// caller) always resolving and passing one.
+// FIXED 2026-08-06: createScorecardDraft requires channel_id explicitly —
+// Front's drafts API 400s without it even for a reply
+// ("body.channel_id: missing"), confirmed via the first live test.
 //
-// FIXED 2026-08-06 (same first test's real output): buildClaudePrompt was
-// only fed OTT (2hr/3hr) and Case Pick Accuracy — Claude correctly wrote
-// "Carrier Performance: not reported this period" rather than inventing a
-// number, but Dan pointed out Bernatello's real Omni dashboard DOES have a
-// "Carrier % On-Time Arrival" metric this function was simply never built
-// to compute. Added — see motherduck-scorecard-metrics.cjs's header for
-// the formula (derived from the same arrival_status data already computed
-// for OTT) and its validation caveats. metricLines below now includes it
-// whenever motherduck-scorecard-metrics.cjs returns a non-null value.
-//
-// FIXED 2026-08-24 (separate fix, in scorecard-draft-run.cjs, not this
-// file): candidate window widened from 20 minutes to 7 days for the same
-// "narrow window with no safety net" reason as the tag fallback above.
+// FIXED 2026-08-06: buildClaudePrompt now includes Carrier % On-Time
+// Arrival (see motherduck-scorecard-metrics.cjs) — the first live test's
+// output correctly said "not reported this period" for a metric this
+// function simply hadn't been built to compute yet; Bernatello's real
+// dashboard does report it.
 //
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
-// - Add a "tag conversation" action for "QBR - Case Study" on the existing
-//   "Scorecard Template" rule (rul_7kwwk) so it actually gets applied to
-//   incoming Omni scorecard emails — rule-editing isn't available through
-//   this session's tools. Until this exists, EVERY customer relies on the
-//   subject-search fallback, not the tag path — confirmed this is fine
-//   functionally after the 2026-08-07 fix above, just weaker/slower than
-//   the intended design (depends on Omni's subject line never changing).
-//   Also confirmed 2026-08-24: this rule apparently doesn't fire at all
-//   for madison@csw-wi.com-delivered emails (no rule_action entry seen on
-//   a real one) — likely scoped to the older delivery address/channel.
-//   Doesn't block this pipeline (subject search doesn't depend on the
-//   rule), but worth fixing if the tag path is ever meant to go live.
-// - Omni dashboard document-state read (drift-proofing) not implemented —
-//   only the dashboard_id pointer is stored.
+// - Bernatello's needs its real Omni delivery moved to a shared inbox
+//   (see IMPORTANT OPEN ITEM above) before front_inbox_name can be set
+//   for it and before its real weekly automation can work at all.
+// - Omni dashboard document-state read (drift-proofing) not implemented.
 // - Carrier % On-Time Arrival formula not fully validated against Omni's
-//   literal underlying definition — see motherduck-scorecard-metrics.cjs.
-// - Grassland's actual MotherDuck data (project_name containing
-//   'Grassland', warehouse 'CSW-Madison') has never been spot-checked
-//   against a known-good week the way Bernatello's was during scoping —
-//   worth doing once a real draft succeeds, to confirm the numbers are
-//   sane, not just that the pipeline runs without erroring.
+//   literal underlying definition.
+// - Grassland's MotherDuck numbers spot-checked once against Dan's own
+//   knowledge (42 outbound appointments, confirmed correct 2026-08-24) —
+//   a good first signal, not a full validation across several weeks.
+// - The tag and subject-search fallback paths are UNVERIFIED/likely
+//   broken in production (see (a)/(b) above) — kept only as a safety net
+//   for customers without front_inbox_name set, not something to rely on.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -157,30 +121,23 @@ const SITE_URL = process.env.URL || process.env.DEPLOY_URL
 
 const CLAUDE_MODEL = 'claude-sonnet-4-5'
 
-// The Front tag that scopes which conversations this feature looks at at
-// all. CORRECTED 2026-08-06 (later same day) — Dan confirmed via a Front
-// Settings screenshot that the real tag is "QBR - Case Study" (company
-// level, nested under Positive > Sentiment), not the "qbr_case_study"
-// placeholder name used earlier. Resolved by name at runtime (see
-// resolveScorecardTagId below), not hardcoded as an ID — see the
-// UNVERIFIED RISK note above regarding whether this lookup can actually
-// see a company-level/nested tag.
+// The Front tag original design relied on — see TRIGGER/DETECTION (a)
+// above. Kept only as a last-resort fallback; not trusted as primary.
 const SCORECARD_TAG_NAME = 'QBR - Case Study'
 
-// Keyword flags Dan asked for (2026-08-05 Front feedback thread) — lines in
-// recent thread context containing these are surfaced to Claude as explicit
-// "don't bury this" signals rather than left to be found (or missed) inside
-// a big raw text dump.
+// Keyword flags Dan asked for (2026-08-05) — lines in recent thread
+// context containing these are surfaced to Claude as explicit "don't bury
+// this" signals rather than left to be found (or missed) inside a big raw
+// text dump.
 const CONTEXT_KEYWORDS = ['urgent', 'hold', 'escalat', 'complaint', 'asap', 'immediately']
 
 // How far back to pull Front thread context for "ops context" per the
 // 2026-08-05 decision (numbers + last week's thread, not numbers alone).
 const THREAD_CONTEXT_DAYS = 7
 
-// Warehouse → Front appointments-inbox channel map — now a FALLBACK ONLY
-// (see 2026-08-24 FIXED note above), used only if a conversation's own
-// inbox can't be resolved to a channel for some reason. Keys match
-// warehouseKey()'s normalization: lowercase, spaces → hyphens.
+// Warehouse → Front appointments-inbox channel map — FALLBACK ONLY (see
+// resolveChannelIdForConversation's 2026-08-24 fix), used only if a
+// conversation's own inbox can't be resolved to a channel for some reason.
 const WAREHOUSE_MAP = {
   'csw-franksville':      { channel: 'cha_ema1g', inbox: 'inb_aut78' }, // CAL Appointments
   'csw-kenosha':          { channel: 'cha_ema6s', inbox: 'inb_awl90' }, // KEN Appointments
@@ -280,12 +237,36 @@ async function frontGetUrl(url) {
   return res.json()
 }
 
-// Resolves the "QBR - Case Study" tag's ID by name — see UNVERIFIED RISK
-// note in the file header regarding company-level/nested tag visibility.
-// Case-insensitive exact match. Paginates through /tags in case the
-// workspace has more than one page of tags. Returns null (not a throw) if
-// not found, so callers can gracefully fall back — a missing tag is an
-// expected, documented state during rollout, not a bug.
+// Resolves a Front inbox ID by exact NAME — PRIMARY detection mechanism as
+// of 2026-08-24 (see TRIGGER/DETECTION (c) in file header). Case-
+// insensitive exact match against GET /inboxes. Returns null if not
+// found, so callers can gracefully fall back to the tag/search paths.
+async function resolveInboxIdByName(inboxName) {
+  const data = await frontGet('/inboxes?limit=100')
+  const match = (data._results || []).find((i) => (i.name || '').toLowerCase() === inboxName.toLowerCase())
+  return match ? match.id : null
+}
+
+// Lists a specific inbox's conversations directly (GET
+// /inboxes/{inbox_id}/conversations), filtered by subject-contains and
+// recency. PRIMARY detection path when a customer has front_inbox_name
+// configured — a direct, scoped resource read, the same reliable class of
+// call as resolveChannelIdForConversation/createScorecardDraft elsewhere
+// in this file, not a fuzzy cross-workspace search.
+async function listRecentInboxConversations(inboxId, subjectContains, sinceMinutes) {
+  const data = await frontGet(`/inboxes/${inboxId}/conversations?limit=50`)
+  const cutoff = Date.now() - sinceMinutes * 60 * 1000
+  return (data._results || []).filter((c) =>
+    (c.subject || '').includes(subjectContains) &&
+    (c.last_message?.created_at || 0) * 1000 >= cutoff
+  )
+}
+
+// Resolves the "QBR - Case Study" tag's ID by name — LAST-RESORT FALLBACK
+// only (see TRIGGER/DETECTION (a) in file header; this has never
+// successfully resolved in this workspace as of 2026-08-24). Case-
+// insensitive exact match. Paginates through /tags. Returns null if not
+// found.
 async function resolveScorecardTagId() {
   let all = []
   let data = await frontGet('/tags?limit=100')
@@ -299,17 +280,18 @@ async function resolveScorecardTagId() {
 }
 
 // Lists conversations carrying the resolved tag, updated within the last
-// `sinceMinutes`. This is the PRIMARY detection path once the tag exists.
+// `sinceMinutes`. Fallback only — see above.
 async function listConversationsByTag(tagId, sinceMinutes) {
   const data = await frontGet(`/tags/${tagId}/conversations?limit=50`)
   const cutoff = Date.now() - sinceMinutes * 60 * 1000
   return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
 }
 
-// Searches Front for candidate conversations by subject string — FALLBACK
-// ONLY, used when the "QBR - Case Study" tag can't be resolved (see
-// UNVERIFIED RISK above). Weaker than the tag-based path since it depends
-// on Omni never changing its subject line wording.
+// Searches Front for candidate conversations by subject string —
+// LAST-RESORT FALLBACK (see TRIGGER/DETECTION (b) in file header; this
+// path never successfully surfaced a real production email via the
+// scheduled run in this workspace as of 2026-08-24, root cause unconfirmed
+// but plausibly a search-scope limitation on the API token).
 async function searchRecentScorecardConversations(subjectContains, sinceMinutes) {
   const res = await fetch(
     `https://api2.frontapp.com/conversations/search/${encodeURIComponent(subjectContains)}`,
@@ -321,12 +303,25 @@ async function searchRecentScorecardConversations(subjectContains, sinceMinutes)
   return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
 }
 
-// Combined lookup used by scorecard-draft-run.cjs: tries the tag first,
-// falls back to subject search if the tag can't be resolved OR resolves
-// but finds zero tagged candidates for this customer (FIXED 2026-08-07 —
-// see file header). Returns { candidates, usedTag: boolean } so results
-// can report which path actually produced the candidates.
+// Combined lookup used by scorecard-draft-run.cjs. Order of preference,
+// per TRIGGER/DETECTION in the file header:
+//   1. Direct inbox poll (config.front_inbox_name) — PRIMARY, deterministic.
+//   2. Tag (SCORECARD_TAG_NAME) — fallback, unverified/likely broken.
+//   3. Subject-string full-text search — last resort, unverified/likely
+//      broken for the scheduled path.
+// Returns { candidates, usedTag, usedInbox } so results can report which
+// path actually produced the candidates.
 async function fetchScorecardCandidates(config, sinceMinutes) {
+  if (config.front_inbox_name) {
+    try {
+      const inboxId = await resolveInboxIdByName(config.front_inbox_name)
+      if (inboxId) {
+        const candidates = await listRecentInboxConversations(inboxId, config.front_subject_contains, sinceMinutes)
+        return { candidates, usedTag: false, usedInbox: true }
+      }
+    } catch (_) { /* fall through to tag/search below */ }
+  }
+
   let tagId = null
   try {
     tagId = await resolveScorecardTagId()
@@ -335,13 +330,11 @@ async function fetchScorecardCandidates(config, sinceMinutes) {
   if (tagId) {
     const tagged = await listConversationsByTag(tagId, sinceMinutes)
     const candidates = tagged.filter((c) => (c.subject || '').includes(config.front_subject_contains))
-    if (candidates.length) return { candidates, usedTag: true }
-    // Tag resolved but nothing tagged yet for this customer — don't give up,
-    // fall through to the subject search below as a safety net.
+    if (candidates.length) return { candidates, usedTag: true, usedInbox: false }
   }
 
   const candidates = await searchRecentScorecardConversations(config.front_subject_contains, sinceMinutes)
-  return { candidates, usedTag: false }
+  return { candidates, usedTag: false, usedInbox: false }
 }
 
 // Pulls comments (internal discussion) from the last THREAD_CONTEXT_DAYS on
@@ -463,19 +456,10 @@ async function resolveChannelForInbox(inboxId) {
 }
 
 // Resolves a Front channel_id to send from — REQUIRED by Front's drafts API
-// unconditionally (confirmed live 2026-08-06: omitting it 400s with
-// "body.channel_id: missing" even for a reply draft).
-//
-// FIXED 2026-08-24 — PRIMARY path is now dynamic: look up the channel that
-// actually belongs to the conversation's own inbox(es), since a static
-// facility→channel guess breaks the moment a customer's email is routed to
-// a different shared inbox than the map expects (real example: Grassland's
-// Madison-routed email landed in a "Madison" inbox with its own channel,
-// cha_duvx0, not the "MAD Appointments" channel the old WAREHOUSE_MAP
-// pointed to for that facility). Falls back to FRONT_CHANNEL_ID env
-// override, then the static WAREHOUSE_MAP, then any available channel —
-// only if the dynamic lookup can't find anything, which shouldn't normally
-// happen for a real conversation.
+// unconditionally. PRIMARY path is dynamic: look up the channel that
+// actually belongs to the conversation's own inbox(es) — see 2026-08-24
+// FIXED note in file header. Falls back to FRONT_CHANNEL_ID env override,
+// then the static WAREHOUSE_MAP, then any available channel.
 async function resolveChannelIdForConversation(conversationId, warehouseName) {
   try {
     const inboxIds = await resolveConversationInboxIds(conversationId)
@@ -565,6 +549,7 @@ async function runForConversation({ customerKey, conversationId, isManualTest })
 
 module.exports = {
   fetchCustomerConfig, runForConversation,
+  resolveInboxIdByName, listRecentInboxConversations,
   resolveScorecardTagId, listConversationsByTag, searchRecentScorecardConversations,
   fetchScorecardCandidates, SCORECARD_TAG_NAME,
 }
