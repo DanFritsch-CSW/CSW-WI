@@ -30,6 +30,16 @@ import {
 // GET /channels fallback in scorecard-draft-shared.cjs instead of the
 // correct facility inbox) — a dropdown makes that class of error
 // impossible instead of relying on someone typing it exactly right.
+//
+// front_inbox_name (added 2026-08-24) — the PRIMARY detection field as of
+// that date. See scorecard-draft-shared.cjs's TRIGGER/DETECTION header
+// for the full story: the original Front tag + full-text search combo
+// never reliably worked for the scheduled path, replaced with direct
+// inbox polling. Must be the EXACT Front inbox name a customer's
+// scorecard emails land in, and that inbox must be a SHARED one the app
+// connection can actually read — not a personal/restricted inbox (that's
+// exactly why Bernatello's real automation still doesn't work: its emails
+// land in Dan's personal inbox, not a shared one).
 
 const WAREHOUSE_OPTIONS = [
   { warehouseName: 'CSW-Franksville',      facility: 'cal' },
@@ -64,9 +74,9 @@ function Field({ label, children }) {
 }
 
 // EditableConfigField — a single config value with inline edit-and-save.
-// Text fields (dashboard ID, project filter, subject match) get a plain
-// input; warehouse gets the fixed dropdown (also drives facility
-// automatically); case pick accuracy gets a checkbox.
+// Text fields (dashboard ID, project filter, subject match, inbox name)
+// get a plain input; warehouse gets the fixed dropdown (also drives
+// facility automatically); case pick accuracy gets a checkbox.
 function EditableConfigField({ label, field, value, customerKey, type = 'text', onSaved }) {
   const [draft, setDraft] = useState(value ?? (type === 'checkbox' ? false : ''))
   const [saving, setSaving] = useState(false)
@@ -139,6 +149,7 @@ function AddCustomerForm({ onAdded }) {
   const [warehouseName, setWarehouseName] = useState('')
   const [includeCasePickAccuracy, setIncludeCasePickAccuracy] = useState(false)
   const [frontSubjectContains, setFrontSubjectContains] = useState('')
+  const [frontInboxName, setFrontInboxName] = useState('')
   const [promptStyle, setPromptStyle] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
@@ -146,7 +157,7 @@ function AddCustomerForm({ onAdded }) {
   function reset() {
     setCustomerKey(''); setCustomerLabel(''); setOmniDashboardId('')
     setProjectNameContains(''); setWarehouseName(''); setIncludeCasePickAccuracy(false)
-    setFrontSubjectContains(''); setPromptStyle(''); setErr(null)
+    setFrontSubjectContains(''); setFrontInboxName(''); setPromptStyle(''); setErr(null)
   }
 
   async function handleCreate() {
@@ -157,7 +168,7 @@ function AddCustomerForm({ onAdded }) {
       const row = await insertScorecardConfig({
         customerKey, customerLabel, omniDashboardId, projectNameContains,
         warehouseName, facility: match?.facility, includeCasePickAccuracy,
-        frontSubjectContains, promptStyle,
+        frontSubjectContains, frontInboxName, promptStyle,
       })
       reset()
       setOpen(false)
@@ -222,6 +233,12 @@ function AddCustomerForm({ onAdded }) {
             <Field label="Front Subject Match">
               <input type="text" value={frontSubjectContains} onChange={(e) => setFrontSubjectContains(e.target.value)} style={inputStyle} placeholder="McCain YTD OTT Scorecard" />
             </Field>
+            <Field label="Front Inbox Name (must be a SHARED inbox)">
+              <input type="text" value={frontInboxName} onChange={(e) => setFrontInboxName(e.target.value)} style={inputStyle} placeholder="Madison" />
+            </Field>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
+            Route this customer's Omni scorecard email to a SHARED Front inbox (access mode: everyone) before setting this — a personal/restricted inbox will silently fail to draft, exactly like Bernatello's does today.
           </div>
           <div style={{ marginTop: 12 }}>
             <label style={labelStyle}>Prompt Style (tone/emphasis guidance — can refine later)</label>
@@ -377,12 +394,30 @@ export default function ScorecardDraftsTab() {
                 }}>
                   {c.active ? 'ACTIVE' : 'INACTIVE'}
                 </span>
+                {!c.front_inbox_name && (
+                  <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 10, background: 'var(--red)', color: '#fff' }}>
+                    NO INBOX SET
+                  </span>
+                )}
               </button>
             ))}
           </div>
 
           {selected && (
             <>
+              {!selected.front_inbox_name && (
+                <div style={{
+                  marginBottom: 16, padding: '10px 14px', borderRadius: 'var(--r-md)',
+                  border: '1px solid var(--red)', background: 'rgba(220,50,50,0.08)',
+                  fontSize: 12, color: 'var(--red)',
+                }}>
+                  No Front Inbox Name set — the scheduled auto-draft will fall back to a full-text search
+                  that has NEVER successfully found a real production email for this feature. Set Front
+                  Inbox Name below (must be a SHARED inbox the app can read) before relying on the
+                  schedule for this customer.
+                </div>
+              )}
+
               {/* Editable config — no longer read-only as of the Add Customer
                   pass. Each field saves independently. */}
               <div className="chart-card" style={{ marginBottom: 20 }}>
@@ -408,6 +443,10 @@ export default function ScorecardDraftsTab() {
                   />
                   <EditableConfigField
                     label="Front Subject Match" field="front_subject_contains" value={selected.front_subject_contains}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                  />
+                  <EditableConfigField
+                    label="Front Inbox Name (must be SHARED)" field="front_inbox_name" value={selected.front_inbox_name}
                     customerKey={selected.customer_key} onSaved={handleFieldSaved}
                   />
                   <Field label="Facility (auto-set from Warehouse)">
