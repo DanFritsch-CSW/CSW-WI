@@ -14,32 +14,29 @@ import {
 // be added entirely from this tab — no dev/Claude session needed, AS LONG
 // AS the new customer's scorecard only needs metrics this app already
 // computes (OTT 2hr/3hr, Case Pick Accuracy, Carrier % On-Time Arrival —
-// all from motherduck-scorecard-metrics.cjs). A customer needing a
-// genuinely new metric type still needs that MotherDuck query built once;
-// this form removes the "every customer needs a dev session" ceiling, not
-// the "every new METRIC TYPE needs a dev session" one. See the Notion
-// changelog entry for the fuller discussion of why (Omni dashboard IDs
-// aren't read dynamically yet — that's the actual fix for the metric-type
-// ceiling, not built this pass).
+// all from motherduck-scorecard-metrics.cjs).
 //
 // Warehouse names are a fixed dropdown, not free text — confirmed live via
 // Omni (gold__truck_appointments) that exactly 5 values exist: CSW-Eau
 // Claire, CSW-Franksville, CSW-Kenosha, CSW-Madison, CSW-Wisconsin Rapids.
-// A typo here would silently break both the MotherDuck metrics query
-// (wrong/no rows) and Front channel resolution (falls through to the
-// GET /channels fallback in scorecard-draft-shared.cjs instead of the
-// correct facility inbox) — a dropdown makes that class of error
-// impossible instead of relying on someone typing it exactly right.
 //
-// front_inbox_name (added 2026-08-24) — the PRIMARY detection field as of
-// that date. See scorecard-draft-shared.cjs's TRIGGER/DETECTION header
-// for the full story: the original Front tag + full-text search combo
-// never reliably worked for the scheduled path, replaced with direct
-// inbox polling. Must be the EXACT Front inbox name a customer's
-// scorecard emails land in, and that inbox must be a SHARED one the app
-// connection can actually read — not a personal/restricted inbox (that's
-// exactly why Bernatello's real automation still doesn't work: its emails
-// land in Dan's personal inbox, not a shared one).
+// front_inbox_name (added 2026-08-24) — the PRIMARY detection field. Must
+// be the EXACT Front inbox name a customer's scorecard emails land in,
+// and that inbox must be a SHARED one the app connection can actually
+// read — not a personal/restricted inbox.
+//
+// to_recipients / cc_recipients / reviewer_emails (added 2026-08-25) —
+// per Dan's ask: "we also need to add a place to TO, CC contact points
+// for this email draft -- and a place for us to 'notify' within Front the
+// different humans that need to review before sending." Real, load-
+// bearing fields: confirmed live on a real Grassland draft
+// (cnv_1c84haz8) that WITHOUT to_recipients set, the draft's actual
+// recipients defaulted to Omni's own delivery address + our own internal
+// inbox — never the real customer. If to_recipients is empty, this tab
+// shows a warning identical in severity to the missing-inbox one.
+// reviewer_emails adds Front teammates as conversation FOLLOWERS (not an
+// inline @mention — see scorecard-draft-shared.cjs for why) so the right
+// humans get notified to review before sending.
 
 const WAREHOUSE_OPTIONS = [
   { warehouseName: 'CSW-Franksville',      facility: 'cal' },
@@ -63,6 +60,11 @@ const primaryBtnStyle = (disabled) => ({
   background: 'var(--brand, #a07818)', color: '#fff', fontSize: 12, fontWeight: 600,
   cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
 })
+const warningBoxStyle = {
+  marginBottom: 16, padding: '10px 14px', borderRadius: 'var(--r-md)',
+  border: '1px solid var(--red)', background: 'rgba(220,50,50,0.08)',
+  fontSize: 12, color: 'var(--red)',
+}
 
 function Field({ label, children }) {
   return (
@@ -74,10 +76,9 @@ function Field({ label, children }) {
 }
 
 // EditableConfigField — a single config value with inline edit-and-save.
-// Text fields (dashboard ID, project filter, subject match, inbox name)
-// get a plain input; warehouse gets the fixed dropdown (also drives
-// facility automatically); case pick accuracy gets a checkbox.
-function EditableConfigField({ label, field, value, customerKey, type = 'text', onSaved }) {
+// Text fields get a plain input; warehouse gets the fixed dropdown (also
+// drives facility automatically); case pick accuracy gets a checkbox.
+function EditableConfigField({ label, field, value, customerKey, type = 'text', placeholder, onSaved }) {
   const [draft, setDraft] = useState(value ?? (type === 'checkbox' ? false : ''))
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
@@ -122,7 +123,7 @@ function EditableConfigField({ label, field, value, customerKey, type = 'text', 
           ))}
         </select>
       ) : (
-        <input type="text" value={draft} onChange={(e) => setDraft(e.target.value)} style={inputStyle} />
+        <input type="text" value={draft} onChange={(e) => setDraft(e.target.value)} style={inputStyle} placeholder={placeholder} />
       )}
       {dirty && (
         <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -137,9 +138,7 @@ function EditableConfigField({ label, field, value, customerKey, type = 'text', 
 }
 
 // AddCustomerForm — collapsible, creates a new customer_scorecard_config
-// row. Always inserted active=false — same "prove it via manual test
-// before turning on the schedule" convention as every digest onboarding
-// elsewhere in this app.
+// row. Always inserted active=false.
 function AddCustomerForm({ onAdded }) {
   const [open, setOpen] = useState(false)
   const [customerKey, setCustomerKey] = useState('')
@@ -150,6 +149,9 @@ function AddCustomerForm({ onAdded }) {
   const [includeCasePickAccuracy, setIncludeCasePickAccuracy] = useState(false)
   const [frontSubjectContains, setFrontSubjectContains] = useState('')
   const [frontInboxName, setFrontInboxName] = useState('')
+  const [toRecipients, setToRecipients] = useState('')
+  const [ccRecipients, setCcRecipients] = useState('')
+  const [reviewerEmails, setReviewerEmails] = useState('')
   const [promptStyle, setPromptStyle] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
@@ -157,7 +159,9 @@ function AddCustomerForm({ onAdded }) {
   function reset() {
     setCustomerKey(''); setCustomerLabel(''); setOmniDashboardId('')
     setProjectNameContains(''); setWarehouseName(''); setIncludeCasePickAccuracy(false)
-    setFrontSubjectContains(''); setFrontInboxName(''); setPromptStyle(''); setErr(null)
+    setFrontSubjectContains(''); setFrontInboxName('')
+    setToRecipients(''); setCcRecipients(''); setReviewerEmails('')
+    setPromptStyle(''); setErr(null)
   }
 
   async function handleCreate() {
@@ -168,7 +172,8 @@ function AddCustomerForm({ onAdded }) {
       const row = await insertScorecardConfig({
         customerKey, customerLabel, omniDashboardId, projectNameContains,
         warehouseName, facility: match?.facility, includeCasePickAccuracy,
-        frontSubjectContains, frontInboxName, promptStyle,
+        frontSubjectContains, frontInboxName,
+        toRecipients, ccRecipients, reviewerEmails, promptStyle,
       })
       reset()
       setOpen(false)
@@ -236,9 +241,19 @@ function AddCustomerForm({ onAdded }) {
             <Field label="Front Inbox Name (must be a SHARED inbox)">
               <input type="text" value={frontInboxName} onChange={(e) => setFrontInboxName(e.target.value)} style={inputStyle} placeholder="Madison" />
             </Field>
+            <Field label="To Recipients (real customer emails, comma-separated)">
+              <input type="text" value={toRecipients} onChange={(e) => setToRecipients(e.target.value)} style={inputStyle} placeholder="jsmith@customer.com, ops@customer.com" />
+            </Field>
+            <Field label="CC Recipients (comma-separated, optional)">
+              <input type="text" value={ccRecipients} onChange={(e) => setCcRecipients(e.target.value)} style={inputStyle} placeholder="manager@customer.com" />
+            </Field>
+            <Field label="Reviewer Emails (Front teammates to notify, comma-separated)">
+              <input type="text" value={reviewerEmails} onChange={(e) => setReviewerEmails(e.target.value)} style={inputStyle} placeholder="ayoung@csw-wi.com" />
+            </Field>
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
-            Route this customer's Omni scorecard email to a SHARED Front inbox (access mode: everyone) before setting this — a personal/restricted inbox will silently fail to draft, exactly like Bernatello's does today.
+            Route this customer's Omni scorecard email to a SHARED Front inbox before setting Front Inbox Name — a personal/restricted inbox will silently fail to draft.
+            To Recipients must be the real customer's own email address(es) — without it the draft has no recipients at all (safe default, but won't send until filled in).
           </div>
           <div style={{ marginTop: 12 }}>
             <label style={labelStyle}>Prompt Style (tone/emphasis guidance — can refine later)</label>
@@ -399,6 +414,11 @@ export default function ScorecardDraftsTab() {
                     NO INBOX SET
                   </span>
                 )}
+                {!c.to_recipients && (
+                  <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 10, background: 'var(--red)', color: '#fff' }}>
+                    NO RECIPIENTS SET
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -406,20 +426,22 @@ export default function ScorecardDraftsTab() {
           {selected && (
             <>
               {!selected.front_inbox_name && (
-                <div style={{
-                  marginBottom: 16, padding: '10px 14px', borderRadius: 'var(--r-md)',
-                  border: '1px solid var(--red)', background: 'rgba(220,50,50,0.08)',
-                  fontSize: 12, color: 'var(--red)',
-                }}>
+                <div style={warningBoxStyle}>
                   No Front Inbox Name set — the scheduled auto-draft will fall back to a full-text search
                   that has NEVER successfully found a real production email for this feature. Set Front
                   Inbox Name below (must be a SHARED inbox the app can read) before relying on the
                   schedule for this customer.
                 </div>
               )}
+              {!selected.to_recipients && (
+                <div style={warningBoxStyle}>
+                  No To Recipients set — confirmed live that without this, the draft's recipients default
+                  to Omni's own delivery address and our own internal inbox, NEVER the real customer.
+                  Set To Recipients below before sending any draft for this customer.
+                </div>
+              )}
 
-              {/* Editable config — no longer read-only as of the Add Customer
-                  pass. Each field saves independently. */}
+              {/* Editable config */}
               <div className="chart-card" style={{ marginBottom: 20 }}>
                 <div className="chart-header">
                   <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Config</span>
@@ -449,6 +471,21 @@ export default function ScorecardDraftsTab() {
                     label="Front Inbox Name (must be SHARED)" field="front_inbox_name" value={selected.front_inbox_name}
                     customerKey={selected.customer_key} onSaved={handleFieldSaved}
                   />
+                  <EditableConfigField
+                    label="To Recipients (real customer emails)" field="to_recipients" value={selected.to_recipients}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                    placeholder="jsmith@customer.com, ops@customer.com"
+                  />
+                  <EditableConfigField
+                    label="CC Recipients (optional)" field="cc_recipients" value={selected.cc_recipients}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                    placeholder="manager@customer.com"
+                  />
+                  <EditableConfigField
+                    label="Reviewer Emails (Front teammates to notify)" field="reviewer_emails" value={selected.reviewer_emails}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                    placeholder="ayoung@csw-wi.com"
+                  />
                   <Field label="Facility (auto-set from Warehouse)">
                     <div style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-primary, #fff)', padding: '6px 0' }}>
                       {selected.facility || '—'}
@@ -475,7 +512,7 @@ export default function ScorecardDraftsTab() {
                 </div>
               </div>
 
-              {/* Prompt style editor — the actual "see and test the prompt" ask. */}
+              {/* Prompt style editor */}
               <div className="chart-card" style={{ marginBottom: 20 }}>
                 <div className="chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Prompt Style</span>
@@ -509,8 +546,7 @@ export default function ScorecardDraftsTab() {
                 </div>
               </div>
 
-              {/* Manual test — creates a REAL Front draft and really calls
-                  Claude. Not a dry run. See scorecard-draft-test.cjs. */}
+              {/* Manual test */}
               <div className="chart-card">
                 <div className="chart-header">
                   <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Test the Prompt</span>
