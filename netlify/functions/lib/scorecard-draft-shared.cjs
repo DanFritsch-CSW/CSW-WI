@@ -13,19 +13,65 @@
 // in netlify.toml.
 //
 // KEY DESIGN DECISIONS (from the scoping conversation, in order):
-// 1. Numbers come from THIS APP'S OWN already-validated MotherDuck queries
-//    (motherduck-scorecard-metrics.cjs), not from parsing Omni's PNG image
-//    and not from Omni's fuzzy natural-language layer.
-// 2. Each customer's Omni dashboard ID is stored (customer_scorecard_config.
-//    omni_dashboard_id) as a drift-fix pointer for a FUTURE pass that reads
-//    the dashboard's live document state — not wired up yet.
-// 3. Per-customer PROMPT holds tone/emphasis guidance only, never metric
+// 1. Per-customer PROMPT holds tone/emphasis guidance only, never metric
 //    definitions.
-// 4. Recent Front thread context is pulled and scanned for a short keyword
+// 2. Recent Front thread context is pulled and scanned for a short keyword
 //    list (urgent, hold, etc.) — flagged lines are passed to Claude as
 //    explicit signals.
-// 5. Output is ALWAYS a Front DRAFT, never sent automatically. No code path
+// 3. Output is ALWAYS a Front DRAFT, never sent automatically. No code path
 //    in this file calls Front's send-message endpoint.
+//
+// METRICS ARCHITECTURE — REWRITTEN 2026-08-25, PER DAN'S EXPLICIT
+// PUSHBACK: "why are we using MD with I provide you the OMNI - this seems
+// like extra work and not scalable for when i start adding more
+// customers." He was right. Full history:
+//
+// ORIGINAL DESIGN (2026-08-06): numbers came from this app's OWN
+// hand-written MotherDuck SQL (motherduck-scorecard-metrics.cjs),
+// deliberately avoiding Omni's fuzzy natural-language layer and PNG
+// parsing. That reasoning was sound for AVOIDING Omni's NL layer, but got
+// over-applied to avoiding Omni's API entirely — including its exact,
+// governed dashboard queries, which are not fuzzy at all.
+//
+// THE PROBLEM THIS CAUSED: when Dan supplied the real Omni SQL for the
+// "CSW Performance (Last Week by Day)" tile (2026-08-25), building it
+// required hand-translating that SQL into DuckDB syntax, which surfaced
+// two real discrepancies vs. Omni's actual filters (owner_name +
+// exact-3-pattern project matching; scheduled_arrival vs completed_on
+// windowing) — discrepancies that existed ONLY because of the
+// translation step. Every new customer, every new tile, would need
+// another hand-translation + discrepancy-review + live-verification
+// cycle. Not scalable, exactly as Dan said.
+//
+// THE FIX: omni-scorecard-tiles.cjs (new, 2026-08-25) fetches a
+// dashboard's tile query OBJECTS directly (GET /v1/documents/{id}/queries
+// — confirmed via https://docs.omni.co/api/documents/get-document-queries
+// that each entry's `query` field is already structured for
+// POST /v1/query/run) and runs them AS-IS via Omni's own query engine —
+// the exact same endpoint omni-query.cjs already calls elsewhere in this
+// app. No translation step, so no discrepancy risk: whatever Omni's
+// dashboard shows is exactly what gets returned, filters and all.
+//
+// HOW THIS IS WIRED IN: customer_scorecard_config.metric_tile_names
+// (comma-separated exact Omni tile names, copied from the Dashboard
+// Coverage Check panel) is the opt-in switch. fetchMetrics() below checks
+// it FIRST — if set (and omni_dashboard_id is also set), the live-Omni-
+// tile path is used and REPLACES the old fixed-field MotherDuck path for
+// that customer entirely. If not set, the original
+// motherduck-scorecard-metrics.cjs path runs unchanged — this is
+// DELIBERATE: Bernatello's numbers were validated under the old path
+// (cross-checked against Andrew Young's real reported figures during
+// scoping) and migrating them to the new path hasn't been re-verified,
+// so Bernatello's front_inbox_name/metric_tile_names are both left NULL
+// rather than force an unvalidated switch onto an already-working
+// customer. New customers (starting with Grassland) should be configured
+// with metric_tile_names from the start.
+//
+// buildClaudePrompt() branches on metrics.mode ('omni_tiles' vs
+// 'motherduck_fixed') to format either shape into the prompt — the
+// omni_tiles branch is intentionally GENERIC (tile name + its rows,
+// whatever fields Omni returns), since the whole point is not needing to
+// hand-write a fixed schema per metric anymore.
 //
 // TRIGGER/DETECTION — REWRITTEN 2026-08-24/25. Full history, oldest to newest:
 //
@@ -67,77 +113,39 @@
 // derived To/Cc by "replying" to the conversation's inbound message — but
 // that inbound message is Omni's OWN scheduled-delivery notification, sent
 // FROM scheduled-delivery@omni.co TO our own internal inbox (e.g.
-// madison@csw-wi.com). Confirmed live on a real draft (Grassland,
-// cnv_1c84haz8, msg_2qc7g5ec): the draft's actual `to` was
-// [scheduled-delivery@omni.co, madison@csw-wi.com] — NEVER the real
-// customer. Had this been sent as-is, it would have gone to Omni's own
-// system and back to our own inbox, not to Grassland. getReplyAllRecipients
-// is no longer used to populate the draft's real recipients — REPLACED by
-// explicit customer_scorecard_config.to_recipients / cc_recipients
-// (comma-separated real customer email addresses, configured per customer
-// in the Scorecard Drafts UI tab). If left unset, the draft is created
-// with NO to/cc at all — a human must fill them in before sending. This is
-// a deliberate safe-failure choice: an empty recipient list is obviously
-// wrong and gets caught before sending; the old reply-all-derived
-// addresses looked plausible and could have been missed.
+// madison@csw-wi.com). Confirmed live on a real draft: NEVER the real
+// customer. REPLACED by explicit customer_scorecard_config.to_recipients /
+// cc_recipients (comma-separated real customer email addresses). If
+// unset, the draft is created with NO to/cc at all — a human must fill
+// them in before sending. Deliberate safe-failure choice.
 //
 // ADDED 2026-08-25, LATER SAME DAY — REVIEWER NOTIFICATION: after a draft
 // is created, addConversationFollowers() adds customer_scorecard_config.
 // reviewer_emails (comma-separated Front teammate emails) as FOLLOWERS of
 // the conversation via POST /conversations/{id}/followers, using Front's
-// alt:email: resource-alias pattern (no internal teammate ID lookup
-// needed). This is NOT an inline @mention — front-post-discussion.cjs's
-// own header already documents that Front's API rejects a guessed
-// `[](mention:tea_xxxxx)` markdown pattern as "unsafe markdown," and that
-// syntax isn't in Front's public docs. Adding teammates as followers is
-// the proven, working mechanism for pulling specific people's attention
-// to an existing conversation. Wrapped so a follower-add failure never
-// blocks the draft itself.
-//
-// ADDED 2026-08-25, EVEN LATER SAME DAY — DAY-BY-DAY BREAKDOWN IN PROMPT:
-// motherduck-scorecard-metrics.cjs now returns a dailyBreakdown array
-// (translated from the real Omni SQL for the "CSW Performance (Last Week
-// by Day)" tile — see that file's own header for the full story and two
-// flagged filter/windowing discrepancies vs. the weekly aggregates).
-// buildClaudePrompt includes it as a table when present, closing the
-// exact gap that started this line of work: Claude previously correctly
-// declined to speculate about daily distribution because it had no data
-// for it at all.
+// alt:email: resource-alias pattern. NOT an inline @mention —
+// front-post-discussion.cjs's own header documents that Front's API
+// rejects a guessed markdown mention pattern as "unsafe markdown."
 //
 // FIXED 2026-08-24: resolveChannelIdForConversation resolves the draft's
 // sending channel dynamically from whatever inbox the conversation
 // actually lives in, not a static warehouse→channel guess.
 //
-// FIXED 2026-08-06: createScorecardDraft requires channel_id explicitly.
-//
-// FIXED 2026-08-06: buildClaudePrompt includes Carrier % On-Time Arrival.
-//
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Bernatello's needs its real Omni delivery moved to a shared inbox
-//   before front_inbox_name can be set for it.
-// - Omni dashboard document-state read for OTHER metrics (Damage Rate,
-//   Total Shipped, etc.) not implemented — see the Dashboard Coverage
-//   Check panel in the UI for the current full list of gaps.
-// - Carrier % On-Time Arrival formula not fully validated against Omni's
-//   literal underlying definition.
-// - dailyBreakdown uses this app's generic project_name_contains filter,
-//   NOT Omni's tighter owner_name + exact-3-pattern filter for Grassland
-//   specifically — see motherduck-scorecard-metrics.cjs header for the
-//   full discrepancy writeup. Not yet resolved as a broader design
-//   decision (whether to add an optional owner_name filter for all
-//   metrics, not just this one).
+//   before front_inbox_name can be set for it. Also has no
+//   metric_tile_names set — remains on the old MotherDuck path.
 // - The tag and subject-search fallback paths remain in the code for
 //   customers without front_inbox_name set, but were never confirmed
 //   working — only the inbox-poll path has been live-verified.
 // - The 54,748-conversation "Madison" inbox top-50 fragility (see prior
 //   changelog entries) remains unaddressed.
 // - Image attachment: not yet live-verified end-to-end.
-// - to_recipients/cc_recipients/reviewer_emails: not yet live-verified —
-//   built and pushed same session as this comment, no real draft created
-//   with them populated yet. Also no email-format validation on save (a
-//   typo'd address would silently fail or misdeliver) — worth adding if
-//   this becomes a recurring issue.
-// - dailyBreakdown in the prompt: not yet live-verified end-to-end.
+// - to_recipients/cc_recipients/reviewer_emails: not yet live-verified
+//   end-to-end with real values populated.
+// - The omni_tiles metrics path (this rewrite): not yet live-verified —
+//   built and pushed this session, no real draft created with
+//   metric_tile_names populated yet.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -176,13 +184,34 @@ function warehouseKey(warehouse) {
   return (warehouse || '').toLowerCase().replace(/\s+/g, '-')
 }
 
-// Parses a comma-separated address list (to_recipients / cc_recipients /
-// reviewer_emails) into a trimmed, non-empty array. Shared by all three.
-function parseAddressList(raw) {
+// Parses a comma-separated list (to_recipients / cc_recipients /
+// reviewer_emails / metric_tile_names) into a trimmed, non-empty array.
+function parseCommaList(raw) {
   return (raw || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
+}
+
+// Previous complete Mon–Sun week, Central time — duplicated from
+// motherduck-scorecard-metrics.cjs purely for the omni_tiles prompt
+// header's "week of X to Y" label (the actual tile DATA comes from
+// Omni's own query, which encodes its own date logic internally — this
+// local computation is display-only, not used to filter anything).
+function previousWeekBounds() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const get = (t) => Number(parts.find((p) => p.type === t).value)
+  const todayCentral = new Date(Date.UTC(get('year'), get('month') - 1, get('day')))
+  const dow = todayCentral.getUTCDay()
+  const daysSinceMonday = dow === 0 ? 6 : dow - 1
+  const thisMonday = new Date(todayCentral)
+  thisMonday.setUTCDate(thisMonday.getUTCDate() - daysSinceMonday)
+  const lastMonday = new Date(thisMonday)
+  lastMonday.setUTCDate(lastMonday.getUTCDate() - 7)
+  const fmt = (d) => d.toISOString().slice(0, 10)
+  return [fmt(lastMonday), fmt(thisMonday)]
 }
 
 async function sbFetch(path) {
@@ -237,7 +266,10 @@ async function logDraftResult({ customerKey, conversationId, draftId, status, er
   } catch (_) { /* best-effort logging only, never block on this */ }
 }
 
-async function fetchMetrics(config) {
+// Old, fixed-field MotherDuck metrics path — kept unchanged as the
+// fallback for customers without metric_tile_names set. See METRICS
+// ARCHITECTURE note in file header for why this remains here.
+async function fetchMotherduckMetrics(config) {
   const res = await fetch(`${SITE_URL}/.netlify/functions/motherduck-scorecard-metrics`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -251,7 +283,33 @@ async function fetchMetrics(config) {
   let data
   try { data = JSON.parse(text) } catch { data = { raw: text } }
   if (!res.ok) throw new Error(`motherduck-scorecard-metrics failed: ${JSON.stringify(data)}`)
-  return data
+  return { mode: 'motherduck_fixed', ...data }
+}
+
+// New, live-Omni-tile metrics path — see METRICS ARCHITECTURE note in
+// file header. Used when config.metric_tile_names is set.
+async function fetchOmniTileMetrics(config) {
+  const tileNames = parseCommaList(config.metric_tile_names)
+  const res = await fetch(`${SITE_URL}/.netlify/functions/omni-scorecard-tiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dashboardId: config.omni_dashboard_id, tileNames }),
+  })
+  const text = await res.text()
+  let data
+  try { data = JSON.parse(text) } catch { data = { raw: text } }
+  if (!res.ok) throw new Error(`omni-scorecard-tiles failed: ${JSON.stringify(data)}`)
+  const [weekStart, weekEndExclusive] = previousWeekBounds()
+  return { mode: 'omni_tiles', weekStart, weekEndExclusive, tiles: data.tiles || [], notFound: data.notFound || [] }
+}
+
+// Chooses the metrics path per customer config — see METRICS ARCHITECTURE
+// note in file header for the full decision.
+async function fetchMetrics(config) {
+  if (config.metric_tile_names && config.omni_dashboard_id) {
+    return fetchOmniTileMetrics(config)
+  }
+  return fetchMotherduckMetrics(config)
 }
 
 async function frontGet(path) {
@@ -386,24 +444,45 @@ async function fetchRecentThreadContext(conversationId) {
   return { comments, flagged, error: null }
 }
 
-function buildClaudePrompt(config, metrics, threadContext) {
-  const metricLines = []
-  if (metrics.ott2?.pct != null) metricLines.push(`Under 2 Hours: ${metrics.ott2.pct}% (${metrics.ott2.numerator}/${metrics.ott2.denominator})`)
-  if (metrics.ott3?.pct != null) metricLines.push(`Under 3 Hours: ${metrics.ott3.pct}% (${metrics.ott3.numerator}/${metrics.ott3.denominator})`)
-  if (metrics.carrierOnTime?.pct != null) metricLines.push(`Carrier % On-Time Arrival: ${metrics.carrierOnTime.pct}% (${metrics.carrierOnTime.numerator}/${metrics.carrierOnTime.denominator})`)
-  if (metrics.casePickAccuracy?.pct != null) metricLines.push(`Case Pick Accuracy: ${metrics.casePickAccuracy.pct}%`)
-  metricLines.push(`Total completed outbound appointments: ${metrics.totalCompletedAppointments}`)
+// Formats one omni_tiles-mode tile into a compact, readable block. Row
+// values come straight from Omni's own field naming (e.g.
+// "gold__truck_appointments.percent_on_time_2hr_v2") — deliberately NOT
+// relabeled here, since the whole point of this path is not needing a
+// hand-maintained schema per metric. Claude is capable of interpreting
+// reasonably-named fields; the tile's own name provides the context.
+function formatTileBlock(tile) {
+  if (tile.error) return `${tile.name}: NOT AVAILABLE (${tile.error})`
+  if (!tile.rows.length) return `${tile.name}: (no rows returned)`
+  const lines = tile.rows.map((row) =>
+    Object.entries(row).map(([k, v]) => `${k}: ${v}`).join(', ')
+  )
+  return `${tile.name}:\n${lines.map((l) => `  - ${l}`).join('\n')}`
+}
 
-  // Day-by-day breakdown — added 2026-08-25, see motherduck-scorecard-metrics.cjs
-  // header for the exact Omni SQL this was translated from and the two
-  // flagged filter/windowing discrepancies vs. the weekly aggregates above
-  // (different date basis: scheduled_arrival here vs completed_on above,
-  // so this table's total may not exactly equal totalCompletedAppointments).
-  const dailyBlock = metrics.dailyBreakdown?.length
-    ? metrics.dailyBreakdown.map((d) =>
-        `- ${d.date}: ${d.total} appointment(s)${d.ott2Pct != null ? `, ${d.ott2Pct}% under 2hrs` : ''}${d.ott3Pct != null ? `, ${d.ott3Pct}% under 3hrs` : ''}`
-      ).join('\n')
-    : null
+function buildClaudePrompt(config, metrics, threadContext) {
+  let metricsBlock
+  if (metrics.mode === 'omni_tiles') {
+    const tileBlocks = metrics.tiles.map(formatTileBlock)
+    const missingBlock = metrics.notFound.length
+      ? `\nRequested but not found on the dashboard (check exact tile name): ${metrics.notFound.join(', ')}`
+      : ''
+    metricsBlock = `${tileBlocks.join('\n\n')}${missingBlock}`
+  } else {
+    // Legacy fixed-field MotherDuck path — unchanged formatting.
+    const metricLines = []
+    if (metrics.ott2?.pct != null) metricLines.push(`Under 2 Hours: ${metrics.ott2.pct}% (${metrics.ott2.numerator}/${metrics.ott2.denominator})`)
+    if (metrics.ott3?.pct != null) metricLines.push(`Under 3 Hours: ${metrics.ott3.pct}% (${metrics.ott3.numerator}/${metrics.ott3.denominator})`)
+    if (metrics.carrierOnTime?.pct != null) metricLines.push(`Carrier % On-Time Arrival: ${metrics.carrierOnTime.pct}% (${metrics.carrierOnTime.numerator}/${metrics.carrierOnTime.denominator})`)
+    if (metrics.casePickAccuracy?.pct != null) metricLines.push(`Case Pick Accuracy: ${metrics.casePickAccuracy.pct}%`)
+    metricLines.push(`Total completed outbound appointments: ${metrics.totalCompletedAppointments}`)
+    const dailyBlock = metrics.dailyBreakdown?.length
+      ? '\n\nDAY-BY-DAY BREAKDOWN (by scheduled date, not necessarily the same population as the weekly totals above):\n' +
+        metrics.dailyBreakdown.map((d) =>
+          `- ${d.date}: ${d.total} appointment(s)${d.ott2Pct != null ? `, ${d.ott2Pct}% under 2hrs` : ''}${d.ott3Pct != null ? `, ${d.ott3Pct}% under 3hrs` : ''}`
+        ).join('\n')
+      : ''
+    metricsBlock = `${metricLines.join('\n')}${dailyBlock}`
+  }
 
   const contextBlock = threadContext.comments.length
     ? threadContext.comments.map((c) => `- [${c.postedAt}] ${c.author}: ${c.body}`).join('\n')
@@ -419,8 +498,8 @@ STYLE GUIDANCE FOR THIS CUSTOMER:
 ${config.prompt_style}
 
 THIS WEEK'S METRICS (week of ${metrics.weekStart} to ${metrics.weekEndExclusive}):
-${metricLines.join('\n')}
-${dailyBlock ? `\nDAY-BY-DAY BREAKDOWN (by scheduled date, not necessarily the same population as the weekly totals above — a small mismatch in total count between this table and the weekly totals is expected and not an error):\n${dailyBlock}\n` : ''}
+${metricsBlock}
+
 RECENT INTERNAL THREAD CONTEXT (last ${THREAD_CONTEXT_DAYS} days — internal CSW discussion, NOT customer-facing; use only to inform tone/color, and NEVER quote or reference anything here that would be inappropriate for the customer to see):
 ${contextBlock}
 
@@ -553,12 +632,10 @@ async function addConversationFollowers(conversationId, reviewerEmails) {
 // send-message endpoint — see file header. channel_id is REQUIRED.
 //
 // Recipients come from config.to_recipients / config.cc_recipients
-// (explicit real customer addresses) — see the 2026-08-25 CRITICAL
-// RECIPIENT BUG note in the file header for why the old reply-all-derived
-// approach was actively wrong and has been removed. If neither is set,
-// the draft is created with no to/cc at all (safe: a human reviewing it
-// will immediately notice recipients are missing, rather than missing a
-// subtly-wrong address).
+// (explicit real customer addresses) — see CRITICAL RECIPIENT BUG note
+// in the file header. If neither is set, the draft is created with no
+// to/cc at all (safe: a human reviewing it will immediately notice
+// recipients are missing).
 //
 // Also attaches the original Omni scorecard PNG, if one can be found and
 // downloaded (never blocks the draft if that fails).
@@ -568,8 +645,8 @@ async function createScorecardDraft(conversationId, bodyText, warehouseName, con
     fetchInboundImageAttachment(conversationId),
   ])
 
-  const to = parseAddressList(config.to_recipients)
-  const cc = parseAddressList(config.cc_recipients)
+  const to = parseCommaList(config.to_recipients)
+  const cc = parseCommaList(config.cc_recipients)
 
   let imageBytes = null
   if (imageAttachment) {
@@ -602,7 +679,7 @@ async function createScorecardDraft(conversationId, bodyText, warehouseName, con
   if (!res.ok) throw new Error(`Front drafts API → ${res.status}: ${text}`)
 
   // Notify reviewers AFTER the draft succeeds — best-effort, never throws.
-  const reviewerEmails = parseAddressList(config.reviewer_emails)
+  const reviewerEmails = parseCommaList(config.reviewer_emails)
   await addConversationFollowers(conversationId, reviewerEmails)
 
   return data
