@@ -31,81 +31,76 @@
 //
 // (a) ORIGINAL DESIGN (2026-08-06): a shared Front tag ("QBR - Case Study",
 //     a company-level tag nested under Positive > Sentiment) was meant to
-//     scope detection cheaply across all customers. Never worked: this
-//     session's Front tools could not see the tag under any query variant
-//     (exact name, partial, parent tag), even after Dan confirmed via
-//     screenshot that it exists. The "Scorecard Template" rule that was
-//     meant to apply it also never got a tag action added, and separately
-//     doesn't even fire on newer delivery addresses (confirmed 2026-08-24:
-//     no rule_action on a real madison@csw-wi.com email). Fell back to a
-//     Front full-text subject search (see (b)).
+//     scope detection cheaply across all customers. Never worked in this
+//     workspace. Fell back to a Front full-text subject search (see (b)).
 // (b) SUBJECT SEARCH FALLBACK (2026-08-06 through 2026-08-24): worked for
 //     the pilot's early manual tests, but the SCHEDULED path never
 //     successfully found and drafted a single real production email on
-//     its own. Widened the candidate time window from 20 minutes to 7
-//     days on 2026-08-24 — did not fix it either.
+//     its own.
 // (c) DIRECT INBOX POLLING (2026-08-24, later found ALSO broken): replaced
 //     (a)/(b) with polling a customer's known Front inbox directly (GET
 //     /inboxes/{id}/conversations via customer_scorecard_config.
 //     front_inbox_name).
 // (d) ROOT CAUSE FOUND 2026-08-25: ALL THREE recency filters checked
 //     `c.last_message?.created_at`, a field that does not exist on Front's
-//     real Conversation object (confirmed against Front's own API docs).
-//     Every candidate was silently discarded, every time, since this
-//     feature's first version. Fixed to use the real top-level
-//     `created_at` field. LIVE-CONFIRMED 2026-08-25: Grassland's
-//     cnv_1c7vi1g4 auto-drafted with zero human intervention (email
-//     00:39:34 UTC → draft 00:45:42 UTC, is_manual_test: false in
-//     scorecard_draft_log) — first successful unattended run ever.
+//     real Conversation object. Every candidate was silently discarded,
+//     every time. Fixed to use the real top-level `created_at` field.
+//     LIVE-CONFIRMED 2026-08-25: Grassland's cnv_1c7vi1g4 auto-drafted
+//     with zero human intervention — first successful unattended run ever.
 //
 // IMPORTANT OPEN ITEM: (c)'s direct inbox polling only works for a
 // customer once their real Omni delivery is routed to a SHARED inbox this
-// app can read (confirmed working: Grassland → "Madison", access_mode:
-// everyone). Bernatello's real production email is NOT yet on this path —
-// it still lands in Dan's personal restricted inbox (inb_azvro), which
-// the app cannot read at all. Bernatello's front_inbox_name is
-// deliberately left NULL until Dan moves its Omni delivery to a shared
-// inbox the same way Grassland's was moved.
+// app can read (confirmed working: Grassland → "Madison"). Bernatello's
+// real production email is NOT yet on this path — it still lands in
+// Dan's personal restricted inbox, which the app cannot read at all.
+// Bernatello's front_inbox_name is deliberately left NULL until Dan moves
+// its Omni delivery to a shared inbox the same way Grassland's was moved.
 //
-// ALSO NOTE (2026-08-24): the "Madison" inbox that Grassland's
-// front_inbox_name points to is NOT a dedicated scorecard inbox — it's
-// the general Madison facility inbox, confirmed to contain 54,748+
-// conversations (mostly routine "Shipment X has been completed"
-// notifications). listRecentInboxConversations only fetches the newest 50
-// conversations from that inbox per call. Not fixed this pass — flagged
-// for whoever picks this up next if a customer's inbox choice turns out
-// to be high-traffic.
-//
-// ADDED 2026-08-25: createScorecardDraft now attaches the ORIGINAL PNG
+// ADDED 2026-08-25 (image): createScorecardDraft attaches the ORIGINAL PNG
 // scorecard image (the same graphic Omni emailed in) to the generated
-// draft, per Dan's ask. Confirmed live that Omni's inbound message always
-// carries exactly one image attachment (Grassland's cnv_1c7vi1g4:
-// "Grassland YTD OTT Scorecard.png", 276,840 bytes, content_type
-// image/png) — fetchInboundImageAttachment() finds it via the inbound
-// message's `attachments` array (real field names confirmed against
-// Front's own API/community docs: `id`, `url`, `filename`,
-// `content_type`, `size` — NOT the friendlier camelCase shape this
-// session's read-only MCP tool returns), downloads the bytes from its
-// `url` with the same Bearer token used everywhere else in this file, and
-// attaches it via multipart/form-data on the drafts POST (Front requires
-// multipart, not JSON, for any request carrying attachments — confirmed
-// via Front's own docs/community examples). Deliberately attached as a
-// real file attachment (same as the original), NOT inlined into the HTML
-// body via a cid: reference — inlining is more fragile for comparatively
-// little benefit. If the image can't be found or fails to download for
-// any reason, the draft still gets created with just the text — this
-// must never block the whole draft.
+// draft. fetchInboundImageAttachment() finds it via the inbound message's
+// `attachments` array, downloads the bytes, and attaches via
+// multipart/form-data (Front requires this for any attachment-carrying
+// drafts POST). Never blocks the draft if the image can't be found/downloaded.
+//
+// FIXED 2026-08-25, LATER SAME DAY — CRITICAL RECIPIENT BUG: getReplyAllRecipients
+// derived To/Cc by "replying" to the conversation's inbound message — but
+// that inbound message is Omni's OWN scheduled-delivery notification, sent
+// FROM scheduled-delivery@omni.co TO our own internal inbox (e.g.
+// madison@csw-wi.com). Confirmed live on a real draft (Grassland,
+// cnv_1c84haz8, msg_2qc7g5ec): the draft's actual `to` was
+// [scheduled-delivery@omni.co, madison@csw-wi.com] — NEVER the real
+// customer. Had this been sent as-is, it would have gone to Omni's own
+// system and back to our own inbox, not to Grassland. getReplyAllRecipients
+// is no longer used to populate the draft's real recipients — REPLACED by
+// explicit customer_scorecard_config.to_recipients / cc_recipients
+// (comma-separated real customer email addresses, configured per customer
+// in the Scorecard Drafts UI tab). If left unset, the draft is created
+// with NO to/cc at all — a human must fill them in before sending. This is
+// a deliberate safe-failure choice: an empty recipient list is obviously
+// wrong and gets caught before sending; the old reply-all-derived
+// addresses looked plausible and could have been missed.
+//
+// ADDED 2026-08-25, LATER SAME DAY — REVIEWER NOTIFICATION: after a draft
+// is created, addConversationFollowers() adds customer_scorecard_config.
+// reviewer_emails (comma-separated Front teammate emails) as FOLLOWERS of
+// the conversation via POST /conversations/{id}/followers, using Front's
+// alt:email: resource-alias pattern (no internal teammate ID lookup
+// needed). This is NOT an inline @mention — front-post-discussion.cjs's
+// own header already documents that Front's API rejects a guessed
+// `[](mention:tea_xxxxx)` markdown pattern as "unsafe markdown," and that
+// syntax isn't in Front's public docs. Adding teammates as followers is
+// the proven, working mechanism for pulling specific people's attention
+// to an existing conversation. Wrapped so a follower-add failure never
+// blocks the draft itself.
 //
 // FIXED 2026-08-24: resolveChannelIdForConversation resolves the draft's
 // sending channel dynamically from whatever inbox the conversation
-// actually lives in (GET /conversations/{id}/inboxes → GET
-// /inboxes/{inbox_id}/channels), not a static warehouse→channel guess.
+// actually lives in, not a static warehouse→channel guess.
 //
-// FIXED 2026-08-06: createScorecardDraft requires channel_id explicitly —
-// Front's drafts API 400s without it even for a reply.
+// FIXED 2026-08-06: createScorecardDraft requires channel_id explicitly.
 //
-// FIXED 2026-08-06: buildClaudePrompt now includes Carrier % On-Time
-// Arrival (see motherduck-scorecard-metrics.cjs).
+// FIXED 2026-08-06: buildClaudePrompt includes Carrier % On-Time Arrival.
 //
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Bernatello's needs its real Omni delivery moved to a shared inbox
@@ -116,10 +111,14 @@
 // - The tag and subject-search fallback paths remain in the code for
 //   customers without front_inbox_name set, but were never confirmed
 //   working — only the inbox-poll path has been live-verified.
-// - The 54,748-conversation "Madison" inbox top-50 fragility noted above.
-// - Image attachment: not yet live-verified end-to-end (built but not
-//   run against a real conversation as of this commit) — check the next
-//   real draft (scheduled or manual test) actually carries the PNG.
+// - The 54,748-conversation "Madison" inbox top-50 fragility (see prior
+//   changelog entries) remains unaddressed.
+// - Image attachment: not yet live-verified end-to-end.
+// - to_recipients/cc_recipients/reviewer_emails: not yet live-verified —
+//   built and pushed same session as this comment, no real draft created
+//   with them populated yet. Also no email-format validation on save (a
+//   typo'd address would silently fail or misdeliver) — worth adding if
+//   this becomes a recurring issue.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -156,6 +155,15 @@ const WAREHOUSE_MAP = {
 
 function warehouseKey(warehouse) {
   return (warehouse || '').toLowerCase().replace(/\s+/g, '-')
+}
+
+// Parses a comma-separated address list (to_recipients / cc_recipients /
+// reviewer_emails) into a trimmed, non-empty array. Shared by all three.
+function parseAddressList(raw) {
+  return (raw || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
 }
 
 async function sbFetch(path) {
@@ -420,29 +428,10 @@ function toHtml(text) {
   return escaped.split('\n').map((line) => `<div>${line === '' ? '<br />' : line}</div>`).join('')
 }
 
-// Resolves reply-all recipients from the most recent inbound message on the
-// conversation — same convention as front-draft-shared.cjs's
-// getReplyAllRecipients (includes original 'to' recipients, not just 'from').
-async function getReplyAllRecipients(conversationId) {
-  try {
-    const data = await frontGet(`/conversations/${conversationId}/messages?limit=50`)
-    const messages = data._results || []
-    const inbound = messages.slice().reverse().find((m) => m.is_inbound) || messages[messages.length - 1]
-    if (!inbound) return { to: [], cc: [] }
-    const recipients = inbound.recipients || []
-    const to = recipients.filter((r) => r.role === 'from' || r.role === 'to').map((r) => r.handle).filter(Boolean)
-    const cc = recipients.filter((r) => r.role === 'cc').map((r) => r.handle).filter(Boolean)
-    return { to, cc }
-  } catch {
-    return { to: [], cc: [] }
-  }
-}
-
 // Finds the original Omni scorecard PNG on the conversation's inbound
-// message, if any. ADDED 2026-08-25 — see file header. Returns
-// { url, filename, contentType } or null if no image attachment is found
-// (never throws — a missing/odd attachment shape should degrade to
-// "no image", not break the draft).
+// message, if any. Returns { url, filename, contentType } or null (never
+// throws — a missing/odd attachment shape should degrade to "no image",
+// not break the draft).
 async function fetchInboundImageAttachment(conversationId) {
   try {
     const data = await frontGet(`/conversations/${conversationId}/messages?limit=50`)
@@ -506,20 +495,51 @@ async function resolveChannelIdForConversation(conversationId, warehouseName) {
   return ch.id
 }
 
+// Adds Front teammates as FOLLOWERS of the conversation, using
+// alt:email:{email} resource aliases — no internal teammate ID lookup
+// needed. Called after a draft is successfully created, so the right
+// humans get notified to review it. See file header for why this
+// approach was chosen over an inline @mention (Front rejects the
+// markdown pattern this codebase already tried). Best-effort — a failure
+// here logs but never fails the overall draft creation.
+async function addConversationFollowers(conversationId, reviewerEmails) {
+  if (!reviewerEmails.length) return
+  try {
+    const teammateIds = reviewerEmails.map((email) => `alt:email:${email}`)
+    const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/followers`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ teammate_ids: teammateIds }),
+    })
+    if (!res.ok) {
+      console.error(`addConversationFollowers failed for ${conversationId}: ${res.status} ${await res.text()}`)
+    }
+  } catch (e) {
+    console.error(`addConversationFollowers threw for ${conversationId}: ${e.message}`)
+  }
+}
+
 // Creates a Front DRAFT reply on the conversation. NEVER calls Front's
 // send-message endpoint — see file header. channel_id is REQUIRED.
 //
-// ADDED 2026-08-25: attaches the original Omni scorecard PNG, if one can
-// be found and downloaded, using multipart/form-data (Front requires this
-// — not JSON — for any drafts request carrying attachments). The image
-// fetch/download is wrapped so a failure here NEVER blocks the draft
-// itself from being created with just the text.
-async function createScorecardDraft(conversationId, bodyText, warehouseName) {
-  const [channelId, { to, cc }, imageAttachment] = await Promise.all([
+// Recipients come from config.to_recipients / config.cc_recipients
+// (explicit real customer addresses) — see the 2026-08-25 CRITICAL
+// RECIPIENT BUG note in the file header for why the old reply-all-derived
+// approach was actively wrong and has been removed. If neither is set,
+// the draft is created with no to/cc at all (safe: a human reviewing it
+// will immediately notice recipients are missing, rather than missing a
+// subtly-wrong address).
+//
+// Also attaches the original Omni scorecard PNG, if one can be found and
+// downloaded (never blocks the draft if that fails).
+async function createScorecardDraft(conversationId, bodyText, warehouseName, config) {
+  const [channelId, imageAttachment] = await Promise.all([
     resolveChannelIdForConversation(conversationId, warehouseName),
-    getReplyAllRecipients(conversationId),
     fetchInboundImageAttachment(conversationId),
   ])
+
+  const to = parseAddressList(config.to_recipients)
+  const cc = parseAddressList(config.cc_recipients)
 
   let imageBytes = null
   if (imageAttachment) {
@@ -550,6 +570,11 @@ async function createScorecardDraft(conversationId, bodyText, warehouseName) {
   let data
   try { data = JSON.parse(text) } catch { data = { raw: text } }
   if (!res.ok) throw new Error(`Front drafts API → ${res.status}: ${text}`)
+
+  // Notify reviewers AFTER the draft succeeds — best-effort, never throws.
+  const reviewerEmails = parseAddressList(config.reviewer_emails)
+  await addConversationFollowers(conversationId, reviewerEmails)
+
   return data
 }
 
@@ -575,7 +600,7 @@ async function runForConversation({ customerKey, conversationId, isManualTest })
     threadContext = await fetchRecentThreadContext(conversationId)
     const prompt = buildClaudePrompt(config, metrics, threadContext)
     draftBody = await callClaude(prompt)
-    draftResult = await createScorecardDraft(conversationId, draftBody, config.warehouse_name)
+    draftResult = await createScorecardDraft(conversationId, draftBody, config.warehouse_name, config)
   } catch (e) {
     await logDraftResult({ customerKey, conversationId, status: 'error', errorDetail: e.message, isManualTest })
     return { ok: false, reason: e.message, customerKey, conversationId }
