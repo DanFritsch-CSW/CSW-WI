@@ -2,9 +2,9 @@
 
 // MotherDuck backend for the Scorecard Draft Creator feature — added
 // 2026-08-06. Computes ONE customer's weekly OTT (2hr v2 / 3hr all),
-// Carrier % On-Time Arrival, and, optionally, Case Pick Accuracy, scoped by
-// MotherDuck project_name instead of the Manager tab's quarter/facility-wide
-// scope.
+// Carrier % On-Time Arrival, Case Pick Accuracy (optional), and a
+// day-by-day breakdown, scoped by MotherDuck project_name instead of the
+// Manager tab's quarter/facility-wide scope.
 //
 // Deliberately a SEPARATE function from motherduck-ott.cjs and
 // motherduck-case-pick-accuracy.cjs rather than an extra mode bolted onto
@@ -23,61 +23,67 @@
 // week (small gap consistent with Omni's fuzzy "last week" window vs. an
 // exact Mon-Sun boundary — this function uses the exact boundary).
 //
-// CARRIER % ON-TIME ARRIVAL (added 2026-08-06, after the first live test's
-// output surfaced the gap — Dan's real Bernatello's Omni dashboard has this
-// metric and this function was missing it entirely, so Claude's narrative
-// correctly reported "not reported this period" for a metric it genuinely
-// had no data for). Confirmed live via Omni: a real measure named exactly
-// "Carrier % On-Time Arrival" exists in the same gold__truck_appointments
-// topic. This is a DIFFERENT concept than the OTT turn-time metrics above —
-// it measures whether the CARRIER arrived on/before its scheduled
-// appointment time, not how fast the warehouse processed the load once it
-// arrived. Computed here from the SAME arrival_status bucketing already
-// built for the OTT CTE (checked_in_on vs scheduled_arrival, within 15 min
-// = 'On Time'), since that's the same underlying data Omni's measure draws
-// from: on-time % = (On Time + Early) / (On Time + Early + Late), excluding
-// appointments with no check-in data recorded (arrival_status IS NULL) from
-// both sides of the ratio — a missing check-in isn't a carrier tardiness
-// signal either way.
-// NOT YET FULLY VALIDATED: cross-checked against Omni's own built-in
-// measure with the same filters (project_name/warehouse_name/outbound,
-// last week) and got ~86%, in the same ballpark as Dan's reported 90% for
-// "this period" — the gap is consistent with the same fuzzy-week-boundary
-// pattern already documented above for OTT (Omni's natural-language "last
-// week" vs. this function's exact Mon-Sun window), not evidence of a wrong
-// formula, but this hasn't been checked against Omni's literal underlying
-// SQL definition for the measure (not introspectable via the tools used to
-// build this). Treat as a reasonable first pass, not a guaranteed exact
-// match — validate against a known week before fully trusting it.
+// CARRIER % ON-TIME ARRIVAL (added 2026-08-06) — see prior header
+// revisions for the full story. Computed from the same arrival_status
+// bucketing as OTT: on-time % = (On Time + Early) / (On Time + Early +
+// Late), excluding rows with no check-in data from both sides.
 //
 // Case Pick Accuracy reuses the identical formula from
-// motherduck-case-pick-accuracy.cjs (SUM(expected_scans) −
-// SUM(ABS(discrepancy)), over SUM(expected_scans), from
-// audit_app.shipment_container_discrepancies) — that table has no
-// facility/customer column and is already ~100% Bernatello's-WR by real
-// data distribution (confirmed in that function's own header), so no
-// additional filter is applied here; this is the same query, just
-// re-windowed to a week instead of a quarter.
+// motherduck-case-pick-accuracy.cjs — no facility/customer filter needed,
+// that table is already ~100% Bernatello's-WR by real data distribution.
+//
+// DAY-BY-DAY BREAKDOWN (added 2026-08-25, "Option B" coverage-check
+// follow-through) — Dan supplied the ACTUAL Omni SQL for the "CSW
+// Performance (Last Week by Day)" tile on Grassland's real dashboard.
+// Translated directly from that query (OMNI_DATE → CAST AS DATE,
+// OMNI_DATETIME_LITERAL/INTERVAL_ADD → the same previousWeekBounds() this
+// file already computes, GROUP BY the scheduled date). Two things this
+// broke out, both flagged to Dan rather than silently resolved:
+//
+// 1. Omni's real query filters by `owner_name = 'GRASSLAND DAIRY
+//    PRODUCTS, INC'` PLUS three exact project_name patterns (Sam's -
+//    Cooler / WM - Cooler / WM - Frozen, all CSW-Madison) — tighter than
+//    this function's existing generic `project_name_contains` filter,
+//    which has no owner_name check at all. NOT changed here — hardcoding
+//    Grassland's exact strings into a function every customer shares
+//    would break the "any customer, generic filter" design this whole
+//    feature relies on. This means the day-by-day numbers below use the
+//    SAME filter as every other metric in this response, not Omni's
+//    tighter one — worth deciding separately whether to add an optional
+//    owner_name filter to customer_scorecard_config for all metrics, not
+//    just this one.
+// 2. Omni's real query windows by `scheduled_arrival`, not `completed_on`
+//    — the OTHER metrics in this function (OTT, Carrier %) window by
+//    completed_on. Kept scheduled_arrival for THIS query specifically
+//    (day-grouping is inherently about which day a load was scheduled;
+//    windowing it by a different date entirely would produce a breakdown
+//    that plausibly wouldn't match the dashboard at all), but this means
+//    dailyBreakdown's total across all days will NOT necessarily equal
+//    totalCompletedAppointments above, if any appointments' scheduled and
+//    completed weeks differ. Not fixed — surfaced so it isn't mistaken
+//    for a bug if the numbers don't add up to the same total.
+//
+// Also incorporates one filter detail from Omni's real SQL not previously
+// applied elsewhere in this file: `checked_in_on IS NOT NULL` as an
+// explicit top-level filter (Omni's dashboard tile excludes never-
+// checked-in appointments from the day-by-day view entirely, rather than
+// just letting them fall out of the percentage denominators).
 //
 // Week window: previous COMPLETE Monday–Sunday week, Central time —
 // matches the cadence Omni actually sends these on (Monday ~1am Central)
 // and every other weekly construct in this app (Weekly Labor Overview,
 // etc.).
 //
-// ROUNDING (fixed 2026-08-06, after first successful live test):
-// Dan's ask — match Omni's own dashboard display rounding, not raw
-// precision. OTT (2hr, 3hr) AND Carrier % On-Time Arrival all round to the
-// nearest WHOLE number (e.g. 97.53% → 98%, matching the dashboard). Case
-// Pick Accuracy rounds to the nearest 0.1% (e.g. 99.65% → 99.7%). This only
-// affects display — the underlying numerator/denominator counts are still
-// exact and unrounded, so nothing about the actual query logic changed.
+// ROUNDING (fixed 2026-08-06): OTT (2hr, 3hr) AND Carrier % On-Time
+// Arrival round to the nearest WHOLE number, matching Omni's own
+// dashboard display. Case Pick Accuracy rounds to the nearest 0.1%.
+// dailyBreakdown's per-day percentages use the same whole-number
+// rounding, for visual consistency with the weekly aggregates.
 //
-// LIVE-VERIFIED 2026-08-06: first real end-to-end test (via the Scorecard
-// Drafts UI tab, cnv_1c1dcmvo) succeeded — real Front draft created,
-// numbers pulled correctly (97.53%/100%/99.65% pre-rounding-fix), Claude
-// wrote a real narrative in the configured voice. That same test is what
-// surfaced the missing Carrier % metric (Claude correctly said "not
-// reported this period" rather than fabricating a number).
+// LIVE-VERIFIED 2026-08-06: first real end-to-end test succeeded — real
+// Front draft created, numbers pulled correctly, Claude wrote a real
+// narrative. That test surfaced the missing Carrier % metric.
+// dailyBreakdown itself is NOT yet live-verified as of this commit.
 
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
@@ -216,6 +222,81 @@ exports.handler = async (event) => {
     const carrierOntimeDenom = num(r.carrier_ontime_denom)
     const carrierOntimePct = carrierOntimeDenom > 0 ? (num(r.carrier_ontime_num) / carrierOntimeDenom) * 100 : null
 
+    // Day-by-day breakdown — see file header for the full translation
+    // story from Omni's real "CSW Performance (Last Week by Day)" SQL.
+    // Windowed and grouped by scheduled_arrival (not completed_on) since
+    // day-grouping is inherently about the scheduled date; includes the
+    // `checked_in_on IS NOT NULL` filter Omni's real query has at the top
+    // level, matching that tile's real behavior (never-checked-in
+    // appointments don't appear in the day-by-day view at all).
+    const dailySql = `
+      WITH base AS (
+        SELECT
+          scheduled_arrival, checked_in_on, completed_on, "Notes" AS notes,
+          CAST(scheduled_arrival AS DATE) AS scheduled_date,
+          CASE
+            WHEN checked_in_on < scheduled_arrival THEN scheduled_arrival
+            ELSE checked_in_on
+          END AS effective_start
+        FROM production_db.gold.truck_appointments
+        WHERE warehouse_name = '${esc(warehouseName)}'
+          AND project_name ILIKE '%${esc(projectNameContains)}%'
+          AND checked_in_on IS NOT NULL
+          AND dock_status_name = 'Completed'
+          AND dock_appointment_type_name IN (${typesSql})
+          AND scheduled_arrival >= TIMESTAMP '${weekStart}'
+          AND scheduled_arrival <  TIMESTAMP '${weekEndExclusive}'
+      ),
+      calc AS (
+        SELECT
+          *,
+          DATE_DIFF('second', effective_start, completed_on) / 3600.0 AS turn_hours,
+          CASE
+            WHEN DATE_DIFF('second', scheduled_arrival, checked_in_on) BETWEEN 0 AND 900 THEN 'On Time'
+            WHEN checked_in_on < scheduled_arrival THEN 'Early'
+            WHEN DATE_DIFF('second', scheduled_arrival, checked_in_on) > 900 THEN 'Late'
+            ELSE NULL
+          END AS arrival_status
+        FROM base
+      ),
+      final AS (
+        SELECT
+          *,
+          CASE
+            WHEN LOWER(arrival_status) = 'late' THEN 'Completed Within Target'
+            WHEN ROUND(turn_hours, 2) <= 2 THEN 'Completed Within Target'
+            ELSE 'Delayed'
+          END AS delivery_status_2hr,
+          CASE WHEN turn_hours <= 3 THEN 1 ELSE 0 END AS under_3_hours_
+        FROM calc
+      )
+      SELECT
+        scheduled_date,
+        COUNT(*) AS total,
+        COUNT(CASE WHEN arrival_status NOT IN ('Work-in','Late') AND delivery_status_2hr = 'Completed Within Target' THEN 1 END) AS ott2_num,
+        COUNT(CASE WHEN arrival_status NOT IN ('Work-in','Late') THEN 1 END)
+          - COUNT(CASE WHEN arrival_status NOT IN ('Work-in','Late') AND notes ILIKE '%driver not ready%' AND turn_hours >= 2 THEN 1 END) AS ott2_denom,
+        SUM(under_3_hours_) AS ott3_num,
+        COUNT(*) - COUNT(CASE WHEN notes ILIKE '%driver not ready%' AND turn_hours >= 3 THEN 1 END) AS ott3_denom
+      FROM final
+      GROUP BY scheduled_date
+      ORDER BY scheduled_date ASC
+    `
+
+    const dailyRows = await runQuery(dailySql)
+    const dailyBreakdown = dailyRows.map((row) => {
+      const d2 = num(row.ott2_denom)
+      const d3 = num(row.ott3_denom)
+      const p2 = d2 > 0 ? (num(row.ott2_num) / d2) * 100 : null
+      const p3 = d3 > 0 ? (num(row.ott3_num) / d3) * 100 : null
+      return {
+        date: row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : String(row.scheduled_date),
+        total: num(row.total),
+        ott2Pct: p2 == null ? null : Math.round(p2),
+        ott3Pct: p3 == null ? null : Math.round(p3),
+      }
+    })
+
     let casePickAccuracy = null
     if (includeCasePickAccuracy) {
       const cpaSql = `
@@ -262,6 +343,10 @@ exports.handler = async (event) => {
           denominator: carrierOntimeDenom,
         },
         casePickAccuracy,
+        // Day-by-day breakdown — see file header for the real Omni SQL
+        // this was translated from, and the two flagged filter/windowing
+        // discrepancies vs. the rest of this function's metrics.
+        dailyBreakdown,
         fetchedAt: new Date().toISOString(),
         elapsedMs: Date.now() - t0,
       }),
