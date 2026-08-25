@@ -8,48 +8,46 @@ import { supabase } from './supabase.js'
 // feature is its own lib file (see managerBonus.js, pviShelfLife.js).
 //
 // Backs customer_scorecard_config (per-customer scorecard config: prompt
-// style, Omni dashboard pointer, MotherDuck project/warehouse filters,
+// style, Omni dashboard pointer, recipients/reviewers, metric tile names,
 // active flag) and triggers scorecard-draft-test.cjs for the "test the
 // prompt" workflow — see that function's own header for what it actually
 // does (creates a REAL Front draft, not a dry run).
 //
 // insertScorecardConfig / updateScorecardConfigField (added 2026-08-06,
 // "Add Customer" ask) — extends this pilot from Bernatello's-only to any
-// customer whose scorecard only needs metrics this app ALREADY computes
-// (OTT + Case Pick Accuracy + Carrier % On-Time Arrival, all from
-// motherduck-scorecard-metrics.cjs). A customer needing a genuinely new
-// metric type still needs that MotherDuck query built once — this form
-// doesn't remove that ceiling, it just removes the need for a dev/Claude
-// session for every customer that fits the existing metric set.
+// customer, without needing a dev/Claude session for every new one.
 //
 // front_inbox_name (added 2026-08-24) — see scorecard-draft-shared.cjs's
 // TRIGGER/DETECTION header for the full story: this replaced an
 // unreliable Front tag + full-text search combo as the primary detection
-// mechanism, after the scheduled cron never once successfully found a
-// real production email on its own. Must be the exact Front inbox NAME a
-// customer's scorecard emails land in, and that inbox must be a SHARED
-// one the app connection can actually read (not personal/restricted).
+// mechanism. Must be the exact Front inbox NAME a customer's scorecard
+// emails land in, and that inbox must be a SHARED one the app connection
+// can actually read (not personal/restricted).
 //
 // to_recipients / cc_recipients / reviewer_emails (added 2026-08-25) —
 // see scorecard-draft-shared.cjs's CRITICAL RECIPIENT BUG note for why
 // to_recipients/cc_recipients exist at all: the draft's real recipients
 // used to be derived by "replying" to Omni's own internal delivery
 // notification, which resolved to Omni's own address + our own inbox,
-// NEVER the actual customer. These three fields are all plain
-// comma-separated email strings, parsed at draft-creation time — no
-// array/JSON handling needed here, matching the plain-TEXT convention
-// already used for every other field on this table.
+// NEVER the actual customer. All comma-separated plain-TEXT strings,
+// parsed at draft-creation time.
+//
+// metric_tile_names (added 2026-08-25, "rebuild" per Dan's pushback: "why
+// are we using MD with I provide you the OMNI - this seems like extra
+// work and not scalable") — comma-separated EXACT Omni dashboard tile
+// names, copied straight from the Dashboard Coverage Check panel. If set
+// (and omni_dashboard_id is also set), this REPLACES the old fixed-field
+// MotherDuck metrics path entirely for that customer — see
+// scorecard-draft-shared.cjs's METRICS ARCHITECTURE header for the full
+// story of why this exists and how it's wired in. Left NULL for
+// Bernatello's intentionally (its numbers were validated under the old
+// path and haven't been re-verified under this one).
 //
 // triggerDashboardCoverageCheck (added 2026-08-25, "Option B") — calls
 // omni-dashboard-coverage.cjs, which live-reads a customer's real Omni
-// dashboard (GET /v1/documents/{id}/queries) and flags which tiles this
-// app doesn't currently compute a metric for. Built after Claude
-// correctly declined to speculate about a day-by-day breakdown it wasn't
-// given data for, and Dan asked whether the app could surface that kind
-// of gap proactively instead of by accident. First real run (Grassland,
-// dashboard 9052024d) found 12 real tiles against ~4 metrics this app
-// computes — including one, "BJB Damage Corrections For Walmart," that
-// looks like a stray leftover from a different customer's dashboard.
+// dashboard and flags which tiles aren't yet in metric_tile_names. Now
+// accepts configuredTileNames so a tile already added shows as truly
+// covered, not just keyword-guessed — see that function's own header.
 
 export async function fetchAllScorecardConfigs() {
   if (!supabase) return []
@@ -88,7 +86,7 @@ export async function updateScorecardActive(customerKey, active) {
 export async function insertScorecardConfig({
   customerKey, customerLabel, omniDashboardId, projectNameContains,
   warehouseName, facility, includeCasePickAccuracy, frontSubjectContains, frontInboxName,
-  toRecipients, ccRecipients, reviewerEmails, promptStyle,
+  toRecipients, ccRecipients, reviewerEmails, metricTileNames, promptStyle,
 }) {
   if (!supabase) return
   const payload = {
@@ -104,6 +102,7 @@ export async function insertScorecardConfig({
     to_recipients: (toRecipients || '').trim() || null,
     cc_recipients: (ccRecipients || '').trim() || null,
     reviewer_emails: (reviewerEmails || '').trim() || null,
+    metric_tile_names: (metricTileNames || '').trim() || null,
     prompt_style: (promptStyle || '').trim(),
     active: false,
   }
@@ -122,14 +121,13 @@ export async function insertScorecardConfig({
 }
 
 // updateScorecardConfigField — generic single-field update for the
-// editable config fields. to_recipients/cc_recipients/reviewer_emails
-// added 2026-08-25 — see file header. Kept generic rather than one
-// function per field since these are all simple same-shape writes to the
-// same row.
+// editable config fields. metric_tile_names added 2026-08-25 — see file
+// header. Kept generic rather than one function per field since these
+// are all simple same-shape writes to the same row.
 const EDITABLE_CONFIG_FIELDS = new Set([
   'omni_dashboard_id', 'project_name_contains', 'warehouse_name',
   'facility', 'include_case_pick_accuracy', 'front_subject_contains', 'front_inbox_name',
-  'to_recipients', 'cc_recipients', 'reviewer_emails',
+  'to_recipients', 'cc_recipients', 'reviewer_emails', 'metric_tile_names',
 ])
 export async function updateScorecardConfigField(customerKey, field, value) {
   if (!supabase) return
@@ -167,12 +165,15 @@ export async function triggerScorecardDraftTest(customerKey, conversationId) {
 // triggerDashboardCoverageCheck — calls omni-dashboard-coverage.cjs
 // directly. Read-only (never modifies anything), but still surfaces a
 // clear error rather than swallowing one, since a stale/wrong
-// omniDashboardId would otherwise fail silently.
-export async function triggerDashboardCoverageCheck(dashboardId) {
+// omniDashboardId would otherwise fail silently. configuredTileNames
+// (added 2026-08-25) lets the check mark tiles already in metric_tile_names
+// as truly covered rather than keyword-guessed — see that function's own
+// header.
+export async function triggerDashboardCoverageCheck(dashboardId, configuredTileNames) {
   const res = await fetch('/.netlify/functions/omni-dashboard-coverage', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dashboardId }),
+    body: JSON.stringify({ dashboardId, configuredTileNames: configuredTileNames || [] }),
   })
   const json = await res.json().catch(() => null)
   if (!json) throw new Error(`HTTP ${res.status} — no JSON body returned`)
