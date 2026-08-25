@@ -47,87 +47,79 @@
 // (c) DIRECT INBOX POLLING (2026-08-24, later found ALSO broken): replaced
 //     (a)/(b) with polling a customer's known Front inbox directly (GET
 //     /inboxes/{id}/conversations via customer_scorecard_config.
-//     front_inbox_name). Seemed like the right fix, but the very next real
-//     test (Grassland, cnv_1c7vbmdw, 2026-08-24 ~19:07 CT) still produced
-//     no draft.
-// (d) ROOT CAUSE FOUND 2026-08-25: ALL THREE recency filters — in (b)'s
-//     searchRecentScorecardConversations, the tag fallback's
-//     listConversationsByTag, AND (c)'s brand-new listRecentInboxConversations
-//     — checked `c.last_message?.created_at`. Front's actual documented
-//     Conversation object (confirmed via https://dev.frontapp.com/reference/conversations,
-//     fetched directly) has NO such field: `last_message` only exists as a
-//     URL string under `_links.related.last_message`, not an embedded
-//     object with a timestamp. So `c.last_message?.created_at` was always
-//     `undefined`, `(undefined || 0) * 1000` was always `0`, and
-//     `0 >= cutoff` was always false — EVERY candidate was silently
-//     filtered out, on every single scheduled run, since this feature's
-//     first version. This is why nothing ever auto-drafted: not a
-//     search-scope issue, not a tag-visibility issue, not a deploy-timing
-//     issue — a wrong field name that discarded every real candidate
-//     before it could ever be processed. Fixed by using the Conversation
-//     object's real top-level `created_at` field (Unix seconds) instead.
-//     Each customer's scorecard email creates a brand-new conversation
-//     every week (confirmed early in this project), so a conversation's
-//     own creation time is exactly the right "how recent is this
-//     candidate" signal — this is not a workaround, it's the correct field.
+//     front_inbox_name).
+// (d) ROOT CAUSE FOUND 2026-08-25: ALL THREE recency filters checked
+//     `c.last_message?.created_at`, a field that does not exist on Front's
+//     real Conversation object (confirmed against Front's own API docs).
+//     Every candidate was silently discarded, every time, since this
+//     feature's first version. Fixed to use the real top-level
+//     `created_at` field. LIVE-CONFIRMED 2026-08-25: Grassland's
+//     cnv_1c7vi1g4 auto-drafted with zero human intervention (email
+//     00:39:34 UTC → draft 00:45:42 UTC, is_manual_test: false in
+//     scorecard_draft_log) — first successful unattended run ever.
 //
 // IMPORTANT OPEN ITEM: (c)'s direct inbox polling only works for a
 // customer once their real Omni delivery is routed to a SHARED inbox this
 // app can read (confirmed working: Grassland → "Madison", access_mode:
 // everyone). Bernatello's real production email is NOT yet on this path —
 // it still lands in Dan's personal restricted inbox (inb_azvro), which
-// the app cannot read at all (confirmed via a direct 403 earlier this
-// session). Bernatello's front_inbox_name is deliberately left NULL until
-// Dan moves its Omni delivery to a shared inbox the same way Grassland's
-// was moved.
+// the app cannot read at all. Bernatello's front_inbox_name is
+// deliberately left NULL until Dan moves its Omni delivery to a shared
+// inbox the same way Grassland's was moved.
 //
 // ALSO NOTE (2026-08-24): the "Madison" inbox that Grassland's
 // front_inbox_name points to is NOT a dedicated scorecard inbox — it's
 // the general Madison facility inbox, confirmed to contain 54,748+
 // conversations (mostly routine "Shipment X has been completed"
 // notifications). listRecentInboxConversations only fetches the newest 50
-// conversations from that inbox per call. This has NOT caused a failure
-// yet (the target conversation has always been within the first 1-2
-// results by recency), but is a real fragility: if enough other traffic
-// lands in the same inbox between scheduled ticks, a scorecard email
-// could fall out of that top-50 window before ever being seen. Not fixed
-// this pass — flagged for whoever picks this up next if a customer's
-// inbox choice turns out to be high-traffic.
+// conversations from that inbox per call. Not fixed this pass — flagged
+// for whoever picks this up next if a customer's inbox choice turns out
+// to be high-traffic.
+//
+// ADDED 2026-08-25: createScorecardDraft now attaches the ORIGINAL PNG
+// scorecard image (the same graphic Omni emailed in) to the generated
+// draft, per Dan's ask. Confirmed live that Omni's inbound message always
+// carries exactly one image attachment (Grassland's cnv_1c7vi1g4:
+// "Grassland YTD OTT Scorecard.png", 276,840 bytes, content_type
+// image/png) — fetchInboundImageAttachment() finds it via the inbound
+// message's `attachments` array (real field names confirmed against
+// Front's own API/community docs: `id`, `url`, `filename`,
+// `content_type`, `size` — NOT the friendlier camelCase shape this
+// session's read-only MCP tool returns), downloads the bytes from its
+// `url` with the same Bearer token used everywhere else in this file, and
+// attaches it via multipart/form-data on the drafts POST (Front requires
+// multipart, not JSON, for any request carrying attachments — confirmed
+// via Front's own docs/community examples). Deliberately attached as a
+// real file attachment (same as the original), NOT inlined into the HTML
+// body via a cid: reference — inlining is more fragile for comparatively
+// little benefit. If the image can't be found or fails to download for
+// any reason, the draft still gets created with just the text — this
+// must never block the whole draft.
 //
 // FIXED 2026-08-24: resolveChannelIdForConversation resolves the draft's
 // sending channel dynamically from whatever inbox the conversation
 // actually lives in (GET /conversations/{id}/inboxes → GET
 // /inboxes/{inbox_id}/channels), not a static warehouse→channel guess.
-// Real bug found: Grassland's Madison-inbox channel (cha_duvx0) differs
-// from the "MAD Appointments" channel the old static map pointed to for
-// that facility — using the wrong one would have 400'd. Live-verified
-// 2026-08-24 via a real successful test draft on cnv_1c7v4cgk.
 //
 // FIXED 2026-08-06: createScorecardDraft requires channel_id explicitly —
-// Front's drafts API 400s without it even for a reply
-// ("body.channel_id: missing"), confirmed via the first live test.
+// Front's drafts API 400s without it even for a reply.
 //
 // FIXED 2026-08-06: buildClaudePrompt now includes Carrier % On-Time
-// Arrival (see motherduck-scorecard-metrics.cjs) — the first live test's
-// output correctly said "not reported this period" for a metric this
-// function simply hadn't been built to compute yet; Bernatello's real
-// dashboard does report it.
+// Arrival (see motherduck-scorecard-metrics.cjs).
 //
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Bernatello's needs its real Omni delivery moved to a shared inbox
-//   (see IMPORTANT OPEN ITEM above) before front_inbox_name can be set
-//   for it and before its real weekly automation can work at all.
+//   before front_inbox_name can be set for it.
 // - Omni dashboard document-state read (drift-proofing) not implemented.
 // - Carrier % On-Time Arrival formula not fully validated against Omni's
 //   literal underlying definition.
-// - Grassland's MotherDuck numbers spot-checked once against Dan's own
-//   knowledge (42 outbound appointments, confirmed correct 2026-08-24) —
-//   a good first signal, not a full validation across several weeks.
 // - The tag and subject-search fallback paths remain in the code for
 //   customers without front_inbox_name set, but were never confirmed
-//   working even after the 2026-08-25 recency-filter fix — only the
-//   inbox-poll path has been live-verified.
+//   working — only the inbox-poll path has been live-verified.
 // - The 54,748-conversation "Madison" inbox top-50 fragility noted above.
+// - Image attachment: not yet live-verified end-to-end (built but not
+//   run against a real conversation as of this commit) — check the next
+//   real draft (scheduled or manual test) actually carries the PNG.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -266,15 +258,7 @@ async function resolveInboxIdByName(inboxName) {
 // Lists a specific inbox's conversations directly (GET
 // /inboxes/{inbox_id}/conversations), filtered by subject-contains and
 // recency. PRIMARY detection path when a customer has front_inbox_name
-// configured — a direct, scoped resource read, the same reliable class of
-// call as resolveChannelIdForConversation/createScorecardDraft elsewhere
-// in this file, not a fuzzy cross-workspace search.
-//
-// FIXED 2026-08-25: recency filter used `c.last_message?.created_at`,
-// which does not exist on Front's real Conversation object (confirmed
-// against Front's own API docs) — this silently discarded EVERY
-// candidate, every time. Now uses the real top-level `created_at` field.
-// See TRIGGER/DETECTION (d) in the file header for the full story.
+// configured.
 async function listRecentInboxConversations(inboxId, subjectContains, sinceMinutes) {
   const data = await frontGet(`/inboxes/${inboxId}/conversations?limit=50`)
   const cutoff = Date.now() - sinceMinutes * 60 * 1000
@@ -285,10 +269,8 @@ async function listRecentInboxConversations(inboxId, subjectContains, sinceMinut
 }
 
 // Resolves the "QBR - Case Study" tag's ID by name — LAST-RESORT FALLBACK
-// only (see TRIGGER/DETECTION (a) in file header; this has never
-// successfully resolved in this workspace as of 2026-08-24). Case-
-// insensitive exact match. Paginates through /tags. Returns null if not
-// found.
+// only. Case-insensitive exact match. Paginates through /tags. Returns
+// null if not found.
 async function resolveScorecardTagId() {
   let all = []
   let data = await frontGet('/tags?limit=100')
@@ -302,8 +284,7 @@ async function resolveScorecardTagId() {
 }
 
 // Lists conversations carrying the resolved tag, updated within the last
-// `sinceMinutes`. Fallback only — see above. FIXED 2026-08-25: same
-// created_at fix as listRecentInboxConversations above.
+// `sinceMinutes`. Fallback only.
 async function listConversationsByTag(tagId, sinceMinutes) {
   const data = await frontGet(`/tags/${tagId}/conversations?limit=50`)
   const cutoff = Date.now() - sinceMinutes * 60 * 1000
@@ -311,10 +292,7 @@ async function listConversationsByTag(tagId, sinceMinutes) {
 }
 
 // Searches Front for candidate conversations by subject string —
-// LAST-RESORT FALLBACK (see TRIGGER/DETECTION (b) in file header).
-// FIXED 2026-08-25: same created_at fix as listRecentInboxConversations
-// above — this was the actual root cause of this path never working,
-// not a search-scope limitation as originally suspected.
+// LAST-RESORT FALLBACK.
 async function searchRecentScorecardConversations(subjectContains, sinceMinutes) {
   const res = await fetch(
     `https://api2.frontapp.com/conversations/search/${encodeURIComponent(subjectContains)}`,
@@ -326,13 +304,10 @@ async function searchRecentScorecardConversations(subjectContains, sinceMinutes)
   return (data._results || []).filter((c) => (c.created_at || 0) * 1000 >= cutoff)
 }
 
-// Combined lookup used by scorecard-draft-run.cjs. Order of preference,
-// per TRIGGER/DETECTION in the file header:
+// Combined lookup used by scorecard-draft-run.cjs. Order of preference:
 //   1. Direct inbox poll (config.front_inbox_name) — PRIMARY, deterministic.
 //   2. Tag (SCORECARD_TAG_NAME) — fallback, unverified.
 //   3. Subject-string full-text search — last resort, unverified.
-// Returns { candidates, usedTag, usedInbox } so results can report which
-// path actually produced the candidates.
 async function fetchScorecardCandidates(config, sinceMinutes) {
   if (config.front_inbox_name) {
     try {
@@ -463,6 +438,34 @@ async function getReplyAllRecipients(conversationId) {
   }
 }
 
+// Finds the original Omni scorecard PNG on the conversation's inbound
+// message, if any. ADDED 2026-08-25 — see file header. Returns
+// { url, filename, contentType } or null if no image attachment is found
+// (never throws — a missing/odd attachment shape should degrade to
+// "no image", not break the draft).
+async function fetchInboundImageAttachment(conversationId) {
+  try {
+    const data = await frontGet(`/conversations/${conversationId}/messages?limit=50`)
+    const messages = data._results || []
+    const inbound = messages.find((m) => m.is_inbound)
+    if (!inbound) return null
+    const atts = inbound.attachments || []
+    const img = atts.find((a) => (a.content_type || '').startsWith('image/'))
+    if (!img?.url) return null
+    return { url: img.url, filename: img.filename || 'scorecard.png', contentType: img.content_type }
+  } catch (_) {
+    return null
+  }
+}
+
+// Downloads attachment bytes from Front's own attachment URL, using the
+// same Bearer token as every other call in this file.
+async function downloadAttachmentBytes(url) {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${FRONT_TOKEN}` } })
+  if (!res.ok) throw new Error(`Attachment download → ${res.status}: ${await res.text()}`)
+  return res.arrayBuffer()
+}
+
 // Lists the inbox IDs a conversation actually belongs to.
 async function resolveConversationInboxIds(conversationId) {
   const data = await frontGet(`/conversations/${conversationId}/inboxes`)
@@ -479,9 +482,9 @@ async function resolveChannelForInbox(inboxId) {
 
 // Resolves a Front channel_id to send from — REQUIRED by Front's drafts API
 // unconditionally. PRIMARY path is dynamic: look up the channel that
-// actually belongs to the conversation's own inbox(es) — see 2026-08-24
-// FIXED note in file header. Falls back to FRONT_CHANNEL_ID env override,
-// then the static WAREHOUSE_MAP, then any available channel.
+// actually belongs to the conversation's own inbox(es). Falls back to
+// FRONT_CHANNEL_ID env override, then the static WAREHOUSE_MAP, then any
+// available channel.
 async function resolveChannelIdForConversation(conversationId, warehouseName) {
   try {
     const inboxIds = await resolveConversationInboxIds(conversationId)
@@ -504,21 +507,44 @@ async function resolveChannelIdForConversation(conversationId, warehouseName) {
 }
 
 // Creates a Front DRAFT reply on the conversation. NEVER calls Front's
-// send-message endpoint — see file header. channel_id is REQUIRED (see
-// resolveChannelIdForConversation above).
+// send-message endpoint — see file header. channel_id is REQUIRED.
+//
+// ADDED 2026-08-25: attaches the original Omni scorecard PNG, if one can
+// be found and downloaded, using multipart/form-data (Front requires this
+// — not JSON — for any drafts request carrying attachments). The image
+// fetch/download is wrapped so a failure here NEVER blocks the draft
+// itself from being created with just the text.
 async function createScorecardDraft(conversationId, bodyText, warehouseName) {
-  const [channelId, { to, cc }] = await Promise.all([
+  const [channelId, { to, cc }, imageAttachment] = await Promise.all([
     resolveChannelIdForConversation(conversationId, warehouseName),
     getReplyAllRecipients(conversationId),
+    fetchInboundImageAttachment(conversationId),
   ])
-  const payload = { channel_id: channelId, body: toHtml(bodyText), mode: 'shared', type: 'replyAll' }
-  if (to.length) payload.to = to
-  if (cc.length) payload.cc = cc
+
+  let imageBytes = null
+  if (imageAttachment) {
+    try {
+      imageBytes = await downloadAttachmentBytes(imageAttachment.url)
+    } catch (_) { /* proceed without the image — never block the draft on this */ }
+  }
+
+  const form = new FormData()
+  form.append('channel_id', channelId)
+  form.append('body', toHtml(bodyText))
+  form.append('mode', 'shared')
+  form.append('type', 'replyAll')
+  to.forEach((handle, i) => form.append(`to[${i}]`, handle))
+  cc.forEach((handle, i) => form.append(`cc[${i}]`, handle))
+  if (imageBytes) {
+    form.append('attachments', new Blob([imageBytes], { type: imageAttachment.contentType || 'image/png' }), imageAttachment.filename)
+  }
 
   const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/drafts`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(payload),
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, Accept: 'application/json' },
+    // Deliberately no Content-Type header — fetch sets the correct
+    // multipart/form-data boundary automatically from the FormData body.
+    body: form,
   })
   const text = await res.text()
   let data
