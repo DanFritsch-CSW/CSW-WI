@@ -29,6 +29,16 @@ import { supabase } from './supabase.js'
 // real production email on its own. Must be the exact Front inbox NAME a
 // customer's scorecard emails land in, and that inbox must be a SHARED
 // one the app connection can actually read (not personal/restricted).
+//
+// to_recipients / cc_recipients / reviewer_emails (added 2026-08-25) —
+// see scorecard-draft-shared.cjs's CRITICAL RECIPIENT BUG note for why
+// to_recipients/cc_recipients exist at all: the draft's real recipients
+// used to be derived by "replying" to Omni's own internal delivery
+// notification, which resolved to Omni's own address + our own inbox,
+// NEVER the actual customer. These three fields are all plain
+// comma-separated email strings, parsed at draft-creation time — no
+// array/JSON handling needed here, matching the plain-TEXT convention
+// already used for every other field on this table.
 
 export async function fetchAllScorecardConfigs() {
   if (!supabase) return []
@@ -66,7 +76,8 @@ export async function updateScorecardActive(customerKey, active) {
 // surfaces naturally as a duplicate-key message if the person reuses one.
 export async function insertScorecardConfig({
   customerKey, customerLabel, omniDashboardId, projectNameContains,
-  warehouseName, facility, includeCasePickAccuracy, frontSubjectContains, frontInboxName, promptStyle,
+  warehouseName, facility, includeCasePickAccuracy, frontSubjectContains, frontInboxName,
+  toRecipients, ccRecipients, reviewerEmails, promptStyle,
 }) {
   if (!supabase) return
   const payload = {
@@ -79,6 +90,9 @@ export async function insertScorecardConfig({
     include_case_pick_accuracy: !!includeCasePickAccuracy,
     front_subject_contains: frontSubjectContains.trim(),
     front_inbox_name: (frontInboxName || '').trim() || null,
+    to_recipients: (toRecipients || '').trim() || null,
+    cc_recipients: (ccRecipients || '').trim() || null,
+    reviewer_emails: (reviewerEmails || '').trim() || null,
     prompt_style: (promptStyle || '').trim(),
     active: false,
   }
@@ -97,20 +111,14 @@ export async function insertScorecardConfig({
 }
 
 // updateScorecardConfigField — generic single-field update for the
-// editable config fields (dashboard ID, project filter, warehouse,
-// facility, case pick accuracy flag, subject match, Front inbox name).
-// front_inbox_name added 2026-08-24 — the PRIMARY detection mechanism as
-// of that date (see scorecard-draft-shared.cjs's TRIGGER/DETECTION header
-// for the full story of why the tag and full-text search paths were
-// replaced). Must be the EXACT Front inbox name a customer's scorecard
-// emails land in (e.g. "Madison") — that inbox must be a SHARED inbox the
-// app connection can read, not a personal/restricted one (confirmed via a
-// real 403 earlier: Bernatello's still isn't on this path for exactly
-// that reason). Kept generic rather than one function per field since
-// these are all simple same-shape writes to the same row.
+// editable config fields. to_recipients/cc_recipients/reviewer_emails
+// added 2026-08-25 — see file header. Kept generic rather than one
+// function per field since these are all simple same-shape writes to the
+// same row.
 const EDITABLE_CONFIG_FIELDS = new Set([
   'omni_dashboard_id', 'project_name_contains', 'warehouse_name',
   'facility', 'include_case_pick_accuracy', 'front_subject_contains', 'front_inbox_name',
+  'to_recipients', 'cc_recipients', 'reviewer_emails',
 ])
 export async function updateScorecardConfigField(customerKey, field, value) {
   if (!supabase) return
