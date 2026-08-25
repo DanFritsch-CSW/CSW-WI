@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   fetchAllScorecardConfigs, updateScorecardPromptStyle, updateScorecardActive,
   updateScorecardConfigField, insertScorecardConfig, triggerScorecardDraftTest,
+  triggerDashboardCoverageCheck,
 } from '../../lib/customerScorecard.js'
 
 // Scorecard Drafts tab — added 2026-08-06 per Dan's ask: "build the tab
@@ -37,6 +38,16 @@ import {
 // reviewer_emails adds Front teammates as conversation FOLLOWERS (not an
 // inline @mention — see scorecard-draft-shared.cjs for why) so the right
 // humans get notified to review before sending.
+//
+// Dashboard Coverage Check (added 2026-08-25, "Option B") — Dan asked
+// whether the app could show which of a customer's real Omni dashboard
+// metrics are actually available to the prompt, after Claude correctly
+// declined to speculate about a day-by-day breakdown it wasn't given.
+// Calls omni-dashboard-coverage.cjs, which live-reads the dashboard's
+// real tiles and flags which ones this app doesn't compute a metric for.
+// First real run (Grassland) found 12 real tiles against ~4 metrics this
+// app computes — including a tile that looks like a leftover from a
+// different customer's dashboard template.
 
 const WAREHOUSE_OPTIONS = [
   { warehouseName: 'CSW-Franksville',      facility: 'cal' },
@@ -270,6 +281,97 @@ function AddCustomerForm({ onAdded }) {
               {saving ? 'Creating…' : 'Create Customer (inactive)'}
             </button>
             {err && <span style={{ fontSize: 11, color: 'var(--red)' }}>{err}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// DashboardCoverageCheck — collapsible panel, live-reads the selected
+// customer's Omni dashboard and shows which real tiles this app doesn't
+// compute a metric for. Requires omni_dashboard_id to be set. See
+// omni-dashboard-coverage.cjs for the full design writeup and matching
+// heuristic (simple keyword matching, not a full semantic mapping).
+function DashboardCoverageCheck({ dashboardId }) {
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState(null)
+  const [err, setErr] = useState(null)
+
+  async function handleCheck() {
+    setRunning(true)
+    setResult(null)
+    setErr(null)
+    try {
+      const res = await triggerDashboardCoverageCheck(dashboardId)
+      setResult(res)
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  if (!dashboardId) {
+    return (
+      <div className="chart-card" style={{ marginBottom: 20 }}>
+        <div className="chart-header">
+          <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Dashboard Coverage</span>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '4px 0' }}>
+          Set an Omni Dashboard ID above to check which of this customer's real dashboard metrics this app currently computes.
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="chart-card" style={{ marginBottom: 20 }}>
+      <div className="chart-header">
+        <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Dashboard Coverage</span>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '4px 0 10px' }}>
+        Live-reads this customer's real Omni dashboard and flags tiles this app doesn't currently compute a metric for — so a gap
+        (like a day-by-day breakdown, or a metric Claude has no data for) shows up here instead of by accident in a real draft.
+        Matching is simple keyword-based (OTT, carrier, case pick/audit) — a tile flagged "not covered" may still be fine, this is a
+        starting point for review, not a definitive answer.
+      </div>
+      <button onClick={handleCheck} disabled={running} style={primaryBtnStyle(running)}>
+        {running ? 'Checking…' : 'Check Dashboard Coverage'}
+      </button>
+      {err && <div style={{ marginTop: 12, fontSize: 12, color: 'var(--red)' }}>Error: {err}</div>}
+      {result && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            {result.totalTiles} tile(s) on the dashboard — {result.coveredCount} likely covered, {result.notCoveredCount} not covered / needs review.
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {result.tiles.map((tile, i) => (
+              <div
+                key={tile.id || i}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                  borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)',
+                  background: tile.covered ? 'transparent' : 'rgba(220,50,50,0.06)',
+                }}
+              >
+                <span style={{
+                  fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, flexShrink: 0,
+                  background: tile.covered ? 'var(--green)' : 'var(--red)', color: '#fff',
+                }}>
+                  {tile.covered ? 'COVERED' : 'NOT COVERED'}
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--text-primary, #fff)' }}>{tile.name}</span>
+                {tile.matchedCategory && (
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>({tile.matchedCategory})</span>
+                )}
+                {tile.url && (
+                  <a href={tile.url} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: 'var(--brand, #a07818)', marginLeft: 'auto' }}>
+                    View in Omni
+                  </a>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -511,6 +613,9 @@ export default function ScorecardDraftsTab() {
                   </span>
                 </div>
               </div>
+
+              {/* Dashboard Coverage Check */}
+              <DashboardCoverageCheck dashboardId={selected.omni_dashboard_id} />
 
               {/* Prompt style editor */}
               <div className="chart-card" style={{ marginBottom: 20 }}>
