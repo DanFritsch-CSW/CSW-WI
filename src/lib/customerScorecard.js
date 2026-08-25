@@ -21,6 +21,14 @@ import { supabase } from './supabase.js'
 // metric type still needs that MotherDuck query built once — this form
 // doesn't remove that ceiling, it just removes the need for a dev/Claude
 // session for every customer that fits the existing metric set.
+//
+// front_inbox_name (added 2026-08-24) — see scorecard-draft-shared.cjs's
+// TRIGGER/DETECTION header for the full story: this replaced an
+// unreliable Front tag + full-text search combo as the primary detection
+// mechanism, after the scheduled cron never once successfully found a
+// real production email on its own. Must be the exact Front inbox NAME a
+// customer's scorecard emails land in, and that inbox must be a SHARED
+// one the app connection can actually read (not personal/restricted).
 
 export async function fetchAllScorecardConfigs() {
   if (!supabase) return []
@@ -58,7 +66,7 @@ export async function updateScorecardActive(customerKey, active) {
 // surfaces naturally as a duplicate-key message if the person reuses one.
 export async function insertScorecardConfig({
   customerKey, customerLabel, omniDashboardId, projectNameContains,
-  warehouseName, facility, includeCasePickAccuracy, frontSubjectContains, promptStyle,
+  warehouseName, facility, includeCasePickAccuracy, frontSubjectContains, frontInboxName, promptStyle,
 }) {
   if (!supabase) return
   const payload = {
@@ -70,6 +78,7 @@ export async function insertScorecardConfig({
     facility: facility || null,
     include_case_pick_accuracy: !!includeCasePickAccuracy,
     front_subject_contains: frontSubjectContains.trim(),
+    front_inbox_name: (frontInboxName || '').trim() || null,
     prompt_style: (promptStyle || '').trim(),
     active: false,
   }
@@ -88,13 +97,20 @@ export async function insertScorecardConfig({
 }
 
 // updateScorecardConfigField — generic single-field update for the
-// read-only-turned-editable config fields (dashboard ID, project filter,
-// warehouse, facility, case pick accuracy flag, subject match). Kept
-// generic rather than one function per field since these are all simple
-// same-shape writes to the same row.
+// editable config fields (dashboard ID, project filter, warehouse,
+// facility, case pick accuracy flag, subject match, Front inbox name).
+// front_inbox_name added 2026-08-24 — the PRIMARY detection mechanism as
+// of that date (see scorecard-draft-shared.cjs's TRIGGER/DETECTION header
+// for the full story of why the tag and full-text search paths were
+// replaced). Must be the EXACT Front inbox name a customer's scorecard
+// emails land in (e.g. "Madison") — that inbox must be a SHARED inbox the
+// app connection can read, not a personal/restricted one (confirmed via a
+// real 403 earlier: Bernatello's still isn't on this path for exactly
+// that reason). Kept generic rather than one function per field since
+// these are all simple same-shape writes to the same row.
 const EDITABLE_CONFIG_FIELDS = new Set([
   'omni_dashboard_id', 'project_name_contains', 'warehouse_name',
-  'facility', 'include_case_pick_accuracy', 'front_subject_contains',
+  'facility', 'include_case_pick_accuracy', 'front_subject_contains', 'front_inbox_name',
 ])
 export async function updateScorecardConfigField(customerKey, field, value) {
   if (!supabase) return
