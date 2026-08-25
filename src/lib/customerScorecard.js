@@ -39,6 +39,17 @@ import { supabase } from './supabase.js'
 // comma-separated email strings, parsed at draft-creation time — no
 // array/JSON handling needed here, matching the plain-TEXT convention
 // already used for every other field on this table.
+//
+// triggerDashboardCoverageCheck (added 2026-08-25, "Option B") — calls
+// omni-dashboard-coverage.cjs, which live-reads a customer's real Omni
+// dashboard (GET /v1/documents/{id}/queries) and flags which tiles this
+// app doesn't currently compute a metric for. Built after Claude
+// correctly declined to speculate about a day-by-day breakdown it wasn't
+// given data for, and Dan asked whether the app could surface that kind
+// of gap proactively instead of by accident. First real run (Grassland,
+// dashboard 9052024d) found 12 real tiles against ~4 metrics this app
+// computes — including one, "BJB Damage Corrections For Walmart," that
+// looks like a stray leftover from a different customer's dashboard.
 
 export async function fetchAllScorecardConfigs() {
   if (!supabase) return []
@@ -150,5 +161,21 @@ export async function triggerScorecardDraftTest(customerKey, conversationId) {
   // rather than a bare status code, most of these are actionable (missing
   // ANTHROPIC_API_KEY, bad conversationId, etc.).
   if (!res.ok && !json.reason) throw new Error(`HTTP ${res.status}`)
+  return json
+}
+
+// triggerDashboardCoverageCheck — calls omni-dashboard-coverage.cjs
+// directly. Read-only (never modifies anything), but still surfaces a
+// clear error rather than swallowing one, since a stale/wrong
+// omniDashboardId would otherwise fail silently.
+export async function triggerDashboardCoverageCheck(dashboardId) {
+  const res = await fetch('/.netlify/functions/omni-dashboard-coverage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dashboardId }),
+  })
+  const json = await res.json().catch(() => null)
+  if (!json) throw new Error(`HTTP ${res.status} — no JSON body returned`)
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
   return json
 }
