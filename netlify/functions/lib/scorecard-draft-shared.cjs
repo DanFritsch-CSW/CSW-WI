@@ -94,6 +94,16 @@
 // to an existing conversation. Wrapped so a follower-add failure never
 // blocks the draft itself.
 //
+// ADDED 2026-08-25, EVEN LATER SAME DAY — DAY-BY-DAY BREAKDOWN IN PROMPT:
+// motherduck-scorecard-metrics.cjs now returns a dailyBreakdown array
+// (translated from the real Omni SQL for the "CSW Performance (Last Week
+// by Day)" tile — see that file's own header for the full story and two
+// flagged filter/windowing discrepancies vs. the weekly aggregates).
+// buildClaudePrompt includes it as a table when present, closing the
+// exact gap that started this line of work: Claude previously correctly
+// declined to speculate about daily distribution because it had no data
+// for it at all.
+//
 // FIXED 2026-08-24: resolveChannelIdForConversation resolves the draft's
 // sending channel dynamically from whatever inbox the conversation
 // actually lives in, not a static warehouse→channel guess.
@@ -105,9 +115,17 @@
 // NOT YET DONE / KNOWN GAPS (see Notion Pending Issues):
 // - Bernatello's needs its real Omni delivery moved to a shared inbox
 //   before front_inbox_name can be set for it.
-// - Omni dashboard document-state read (drift-proofing) not implemented.
+// - Omni dashboard document-state read for OTHER metrics (Damage Rate,
+//   Total Shipped, etc.) not implemented — see the Dashboard Coverage
+//   Check panel in the UI for the current full list of gaps.
 // - Carrier % On-Time Arrival formula not fully validated against Omni's
 //   literal underlying definition.
+// - dailyBreakdown uses this app's generic project_name_contains filter,
+//   NOT Omni's tighter owner_name + exact-3-pattern filter for Grassland
+//   specifically — see motherduck-scorecard-metrics.cjs header for the
+//   full discrepancy writeup. Not yet resolved as a broader design
+//   decision (whether to add an optional owner_name filter for all
+//   metrics, not just this one).
 // - The tag and subject-search fallback paths remain in the code for
 //   customers without front_inbox_name set, but were never confirmed
 //   working — only the inbox-poll path has been live-verified.
@@ -119,6 +137,7 @@
 //   with them populated yet. Also no email-format validation on save (a
 //   typo'd address would silently fail or misdeliver) — worth adding if
 //   this becomes a recurring issue.
+// - dailyBreakdown in the prompt: not yet live-verified end-to-end.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -375,6 +394,17 @@ function buildClaudePrompt(config, metrics, threadContext) {
   if (metrics.casePickAccuracy?.pct != null) metricLines.push(`Case Pick Accuracy: ${metrics.casePickAccuracy.pct}%`)
   metricLines.push(`Total completed outbound appointments: ${metrics.totalCompletedAppointments}`)
 
+  // Day-by-day breakdown — added 2026-08-25, see motherduck-scorecard-metrics.cjs
+  // header for the exact Omni SQL this was translated from and the two
+  // flagged filter/windowing discrepancies vs. the weekly aggregates above
+  // (different date basis: scheduled_arrival here vs completed_on above,
+  // so this table's total may not exactly equal totalCompletedAppointments).
+  const dailyBlock = metrics.dailyBreakdown?.length
+    ? metrics.dailyBreakdown.map((d) =>
+        `- ${d.date}: ${d.total} appointment(s)${d.ott2Pct != null ? `, ${d.ott2Pct}% under 2hrs` : ''}${d.ott3Pct != null ? `, ${d.ott3Pct}% under 3hrs` : ''}`
+      ).join('\n')
+    : null
+
   const contextBlock = threadContext.comments.length
     ? threadContext.comments.map((c) => `- [${c.postedAt}] ${c.author}: ${c.body}`).join('\n')
     : '(no recent internal discussion on this thread)'
@@ -390,7 +420,7 @@ ${config.prompt_style}
 
 THIS WEEK'S METRICS (week of ${metrics.weekStart} to ${metrics.weekEndExclusive}):
 ${metricLines.join('\n')}
-
+${dailyBlock ? `\nDAY-BY-DAY BREAKDOWN (by scheduled date, not necessarily the same population as the weekly totals above — a small mismatch in total count between this table and the weekly totals is expected and not an error):\n${dailyBlock}\n` : ''}
 RECENT INTERNAL THREAD CONTEXT (last ${THREAD_CONTEXT_DAYS} days — internal CSW discussion, NOT customer-facing; use only to inform tone/color, and NEVER quote or reference anything here that would be inappropriate for the customer to see):
 ${contextBlock}
 
