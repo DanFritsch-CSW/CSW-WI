@@ -27,7 +27,7 @@
 // 5. Output is ALWAYS a Front DRAFT, never sent automatically. No code path
 //    in this file calls Front's send-message endpoint.
 //
-// TRIGGER/DETECTION — REWRITTEN 2026-08-24. Full history, oldest to newest:
+// TRIGGER/DETECTION — REWRITTEN 2026-08-24/25. Full history, oldest to newest:
 //
 // (a) ORIGINAL DESIGN (2026-08-06): a shared Front tag ("QBR - Case Study",
 //     a company-level tag nested under Positive > Sentiment) was meant to
@@ -42,43 +42,57 @@
 // (b) SUBJECT SEARCH FALLBACK (2026-08-06 through 2026-08-24): worked for
 //     the pilot's early manual tests, but the SCHEDULED path never
 //     successfully found and drafted a single real production email on
-//     its own — confirmed by an empty scorecard_draft_log across every
-//     scheduled tick since launch. Widened the candidate time window from
-//     20 minutes to 7 days on 2026-08-24 (see scorecard-draft-run.cjs) on
-//     the theory that ticks were narrowly missing new emails; that alone
-//     did not fix it. Root cause never fully confirmed (no access to
-//     Netlify's live function logs to see the actual API response), but
-//     Front's own docs note that an API token's search scope can be
-//     narrower than its direct resource-read access ("an API token with a
-//     scope limited to a specific team can only search for conversations
-//     in that team inbox") — a plausible, invisible explanation for why
-//     search silently returned nothing for inboxes that direct GETs (used
-//     everywhere else in this file) can read just fine.
-// (c) DIRECT INBOX POLLING — NEW PRIMARY PATH (2026-08-24): rather than
-//     keep debugging an opaque search/tag failure, replaced both with a
-//     deterministic approach: customer_scorecard_config.front_inbox_name
-//     stores the exact Front inbox NAME a customer's emails land in (e.g.
-//     "Madison" for Grassland). At runtime, resolve that name to an inbox
-//     ID (GET /inboxes) and list that inbox's conversations directly (GET
-//     /inboxes/{id}/conversations), filtered by subject + recency. This is
-//     the same class of call (a direct, scoped resource read) already
-//     proven reliable elsewhere in this file — resolveChannelIdForConversation
-//     and createScorecardDraft both work this way and have never failed
-//     due to search-scope ambiguity. Falls back to the tag, then subject
-//     search, only if front_inbox_name is unset or unresolvable — kept for
-//     backward compatibility, not because either is trusted going forward.
+//     its own. Widened the candidate time window from 20 minutes to 7
+//     days on 2026-08-24 — did not fix it either.
+// (c) DIRECT INBOX POLLING (2026-08-24, later found ALSO broken): replaced
+//     (a)/(b) with polling a customer's known Front inbox directly (GET
+//     /inboxes/{id}/conversations via customer_scorecard_config.
+//     front_inbox_name). Seemed like the right fix, but the very next real
+//     test (Grassland, cnv_1c7vbmdw, 2026-08-24 ~19:07 CT) still produced
+//     no draft.
+// (d) ROOT CAUSE FOUND 2026-08-25: ALL THREE recency filters — in (b)'s
+//     searchRecentScorecardConversations, the tag fallback's
+//     listConversationsByTag, AND (c)'s brand-new listRecentInboxConversations
+//     — checked `c.last_message?.created_at`. Front's actual documented
+//     Conversation object (confirmed via https://dev.frontapp.com/reference/conversations,
+//     fetched directly) has NO such field: `last_message` only exists as a
+//     URL string under `_links.related.last_message`, not an embedded
+//     object with a timestamp. So `c.last_message?.created_at` was always
+//     `undefined`, `(undefined || 0) * 1000` was always `0`, and
+//     `0 >= cutoff` was always false — EVERY candidate was silently
+//     filtered out, on every single scheduled run, since this feature's
+//     first version. This is why nothing ever auto-drafted: not a
+//     search-scope issue, not a tag-visibility issue, not a deploy-timing
+//     issue — a wrong field name that discarded every real candidate
+//     before it could ever be processed. Fixed by using the Conversation
+//     object's real top-level `created_at` field (Unix seconds) instead.
+//     Each customer's scorecard email creates a brand-new conversation
+//     every week (confirmed early in this project), so a conversation's
+//     own creation time is exactly the right "how recent is this
+//     candidate" signal — this is not a workaround, it's the correct field.
 //
-// IMPORTANT OPEN ITEM: this only works for a customer once their real
-// Omni delivery is routed to a SHARED inbox this app can read (confirmed
-// working: Grassland → "Madison", access_mode: everyone). Bernatello's
-// real production email is NOT yet on this path — it still lands in Dan's
-// personal restricted inbox (inb_azvro), which the app cannot read at all
-// (confirmed via a direct 403 earlier this session). Bernatello's
-// front_inbox_name is deliberately left NULL until Dan moves its Omni
-// delivery to a shared inbox the same way Grassland's was moved. Every
-// NEW customer being onboarded should get a shared-inbox destination
-// AND front_inbox_name set from the start — see the Scorecard Drafts UI
-// tab's Config panel.
+// IMPORTANT OPEN ITEM: (c)'s direct inbox polling only works for a
+// customer once their real Omni delivery is routed to a SHARED inbox this
+// app can read (confirmed working: Grassland → "Madison", access_mode:
+// everyone). Bernatello's real production email is NOT yet on this path —
+// it still lands in Dan's personal restricted inbox (inb_azvro), which
+// the app cannot read at all (confirmed via a direct 403 earlier this
+// session). Bernatello's front_inbox_name is deliberately left NULL until
+// Dan moves its Omni delivery to a shared inbox the same way Grassland's
+// was moved.
+//
+// ALSO NOTE (2026-08-24): the "Madison" inbox that Grassland's
+// front_inbox_name points to is NOT a dedicated scorecard inbox — it's
+// the general Madison facility inbox, confirmed to contain 54,748+
+// conversations (mostly routine "Shipment X has been completed"
+// notifications). listRecentInboxConversations only fetches the newest 50
+// conversations from that inbox per call. This has NOT caused a failure
+// yet (the target conversation has always been within the first 1-2
+// results by recency), but is a real fragility: if enough other traffic
+// lands in the same inbox between scheduled ticks, a scorecard email
+// could fall out of that top-50 window before ever being seen. Not fixed
+// this pass — flagged for whoever picks this up next if a customer's
+// inbox choice turns out to be high-traffic.
 //
 // FIXED 2026-08-24: resolveChannelIdForConversation resolves the draft's
 // sending channel dynamically from whatever inbox the conversation
@@ -109,9 +123,11 @@
 // - Grassland's MotherDuck numbers spot-checked once against Dan's own
 //   knowledge (42 outbound appointments, confirmed correct 2026-08-24) —
 //   a good first signal, not a full validation across several weeks.
-// - The tag and subject-search fallback paths are UNVERIFIED/likely
-//   broken in production (see (a)/(b) above) — kept only as a safety net
-//   for customers without front_inbox_name set, not something to rely on.
+// - The tag and subject-search fallback paths remain in the code for
+//   customers without front_inbox_name set, but were never confirmed
+//   working even after the 2026-08-25 recency-filter fix — only the
+//   inbox-poll path has been live-verified.
+// - The 54,748-conversation "Madison" inbox top-50 fragility noted above.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -253,12 +269,18 @@ async function resolveInboxIdByName(inboxName) {
 // configured — a direct, scoped resource read, the same reliable class of
 // call as resolveChannelIdForConversation/createScorecardDraft elsewhere
 // in this file, not a fuzzy cross-workspace search.
+//
+// FIXED 2026-08-25: recency filter used `c.last_message?.created_at`,
+// which does not exist on Front's real Conversation object (confirmed
+// against Front's own API docs) — this silently discarded EVERY
+// candidate, every time. Now uses the real top-level `created_at` field.
+// See TRIGGER/DETECTION (d) in the file header for the full story.
 async function listRecentInboxConversations(inboxId, subjectContains, sinceMinutes) {
   const data = await frontGet(`/inboxes/${inboxId}/conversations?limit=50`)
   const cutoff = Date.now() - sinceMinutes * 60 * 1000
   return (data._results || []).filter((c) =>
     (c.subject || '').includes(subjectContains) &&
-    (c.last_message?.created_at || 0) * 1000 >= cutoff
+    (c.created_at || 0) * 1000 >= cutoff
   )
 }
 
@@ -280,18 +302,19 @@ async function resolveScorecardTagId() {
 }
 
 // Lists conversations carrying the resolved tag, updated within the last
-// `sinceMinutes`. Fallback only — see above.
+// `sinceMinutes`. Fallback only — see above. FIXED 2026-08-25: same
+// created_at fix as listRecentInboxConversations above.
 async function listConversationsByTag(tagId, sinceMinutes) {
   const data = await frontGet(`/tags/${tagId}/conversations?limit=50`)
   const cutoff = Date.now() - sinceMinutes * 60 * 1000
-  return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
+  return (data._results || []).filter((c) => (c.created_at || 0) * 1000 >= cutoff)
 }
 
 // Searches Front for candidate conversations by subject string —
-// LAST-RESORT FALLBACK (see TRIGGER/DETECTION (b) in file header; this
-// path never successfully surfaced a real production email via the
-// scheduled run in this workspace as of 2026-08-24, root cause unconfirmed
-// but plausibly a search-scope limitation on the API token).
+// LAST-RESORT FALLBACK (see TRIGGER/DETECTION (b) in file header).
+// FIXED 2026-08-25: same created_at fix as listRecentInboxConversations
+// above — this was the actual root cause of this path never working,
+// not a search-scope limitation as originally suspected.
 async function searchRecentScorecardConversations(subjectContains, sinceMinutes) {
   const res = await fetch(
     `https://api2.frontapp.com/conversations/search/${encodeURIComponent(subjectContains)}`,
@@ -300,15 +323,14 @@ async function searchRecentScorecardConversations(subjectContains, sinceMinutes)
   if (!res.ok) throw new Error(`Front search API → ${res.status}: ${await res.text()}`)
   const data = await res.json()
   const cutoff = Date.now() - sinceMinutes * 60 * 1000
-  return (data._results || []).filter((c) => (c.last_message?.created_at || 0) * 1000 >= cutoff)
+  return (data._results || []).filter((c) => (c.created_at || 0) * 1000 >= cutoff)
 }
 
 // Combined lookup used by scorecard-draft-run.cjs. Order of preference,
 // per TRIGGER/DETECTION in the file header:
 //   1. Direct inbox poll (config.front_inbox_name) — PRIMARY, deterministic.
-//   2. Tag (SCORECARD_TAG_NAME) — fallback, unverified/likely broken.
-//   3. Subject-string full-text search — last resort, unverified/likely
-//      broken for the scheduled path.
+//   2. Tag (SCORECARD_TAG_NAME) — fallback, unverified.
+//   3. Subject-string full-text search — last resort, unverified.
 // Returns { candidates, usedTag, usedInbox } so results can report which
 // path actually produced the candidates.
 async function fetchScorecardCandidates(config, sinceMinutes) {
