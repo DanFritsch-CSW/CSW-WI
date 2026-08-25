@@ -538,6 +538,16 @@
 [functions."omni-dashboard-coverage"]
   timeout = 26
 
+# Scorecard Draft Creator -- Live Omni Tile Runner ("rebuild" per Dan's
+# explicit ask: "why are we using MD with I provide you the OMNI - this
+# seems like extra work and not scalable"). Plain read-only-to-Omni POST,
+# no duckdb/native-module dependency, reuses the existing OMNI_API_KEY.
+# See the function's own header for the full story: runs a dashboard
+# tile's REAL Omni query object directly via /api/v1/query/run, so any
+# new customer/tile needs zero hand-translated SQL going forward.
+[functions."omni-scorecard-tiles"]
+  timeout = 26
+
 # JDF Putaway Scorecard daily digest -- added 2026-08-11. Same
 # every-15-min tick + configurable notify_hour/notify_minute/notify_days
 # pattern as the other digests (facility='mad', dashboard_type=
