@@ -12,10 +12,7 @@ import {
 //
 // EXTENDED 2026-08-06 (later same day), "Add Customer" ask: config fields
 // are now editable inline (not just prompt style), and a new customer can
-// be added entirely from this tab — no dev/Claude session needed, AS LONG
-// AS the new customer's scorecard only needs metrics this app already
-// computes (OTT 2hr/3hr, Case Pick Accuracy, Carrier % On-Time Arrival —
-// all from motherduck-scorecard-metrics.cjs).
+// be added entirely from this tab — no dev/Claude session needed.
 //
 // Warehouse names are a fixed dropdown, not free text — confirmed live via
 // Omni (gold__truck_appointments) that exactly 5 values exist: CSW-Eau
@@ -33,21 +30,24 @@ import {
 // bearing fields: confirmed live on a real Grassland draft
 // (cnv_1c84haz8) that WITHOUT to_recipients set, the draft's actual
 // recipients defaulted to Omni's own delivery address + our own internal
-// inbox — never the real customer. If to_recipients is empty, this tab
-// shows a warning identical in severity to the missing-inbox one.
-// reviewer_emails adds Front teammates as conversation FOLLOWERS (not an
-// inline @mention — see scorecard-draft-shared.cjs for why) so the right
-// humans get notified to review before sending.
+// inbox — never the real customer. reviewer_emails adds Front teammates
+// as conversation FOLLOWERS (not an inline @mention — see
+// scorecard-draft-shared.cjs for why) so the right humans get notified.
 //
-// Dashboard Coverage Check (added 2026-08-25, "Option B") — Dan asked
-// whether the app could show which of a customer's real Omni dashboard
-// metrics are actually available to the prompt, after Claude correctly
-// declined to speculate about a day-by-day breakdown it wasn't given.
-// Calls omni-dashboard-coverage.cjs, which live-reads the dashboard's
-// real tiles and flags which ones this app doesn't compute a metric for.
-// First real run (Grassland) found 12 real tiles against ~4 metrics this
-// app computes — including a tile that looks like a leftover from a
-// different customer's dashboard template.
+// Dashboard Coverage Check (added 2026-08-25, "Option B") — live-reads a
+// customer's real Omni dashboard and flags which tiles this app doesn't
+// pull into the prompt yet.
+//
+// metric_tile_names + coverage "+ Add" button (added 2026-08-25, later
+// same day — the metrics architecture "rebuild" per Dan's pushback: "why
+// are we using MD with I provide you the OMNI - this seems like extra
+// work and not scalable"). Comma-separated EXACT Omni tile names — the
+// live-Omni-tile path (omni-scorecard-tiles.cjs) runs each one directly
+// via Omni's own query engine, no hand-translated SQL per metric. The
+// coverage panel's "+ Add" button on a NOT COVERED tile is the literal
+// answer to Dan's direct follow-up question, "how do we switch it to
+// covered": click it, the tile name gets appended to Metric Tile Names
+// and saved, and the next coverage check shows it as covered for real.
 
 const WAREHOUSE_OPTIONS = [
   { warehouseName: 'CSW-Franksville',      facility: 'cal' },
@@ -84,6 +84,10 @@ function Field({ label, children }) {
       {children}
     </div>
   )
+}
+
+function parseCommaList(raw) {
+  return (raw || '').split(',').map((s) => s.trim()).filter(Boolean)
 }
 
 // EditableConfigField — a single config value with inline edit-and-save.
@@ -163,6 +167,7 @@ function AddCustomerForm({ onAdded }) {
   const [toRecipients, setToRecipients] = useState('')
   const [ccRecipients, setCcRecipients] = useState('')
   const [reviewerEmails, setReviewerEmails] = useState('')
+  const [metricTileNames, setMetricTileNames] = useState('')
   const [promptStyle, setPromptStyle] = useState('')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
@@ -171,7 +176,7 @@ function AddCustomerForm({ onAdded }) {
     setCustomerKey(''); setCustomerLabel(''); setOmniDashboardId('')
     setProjectNameContains(''); setWarehouseName(''); setIncludeCasePickAccuracy(false)
     setFrontSubjectContains(''); setFrontInboxName('')
-    setToRecipients(''); setCcRecipients(''); setReviewerEmails('')
+    setToRecipients(''); setCcRecipients(''); setReviewerEmails(''); setMetricTileNames('')
     setPromptStyle(''); setErr(null)
   }
 
@@ -184,7 +189,7 @@ function AddCustomerForm({ onAdded }) {
         customerKey, customerLabel, omniDashboardId, projectNameContains,
         warehouseName, facility: match?.facility, includeCasePickAccuracy,
         frontSubjectContains, frontInboxName,
-        toRecipients, ccRecipients, reviewerEmails, promptStyle,
+        toRecipients, ccRecipients, reviewerEmails, metricTileNames, promptStyle,
       })
       reset()
       setOpen(false)
@@ -217,7 +222,9 @@ function AddCustomerForm({ onAdded }) {
             <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>New Customer</span>
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 12px' }}>
-            Only covers metrics this app already computes (OTT, Case Pick Accuracy, Carrier % On-Time Arrival). A customer needing a new metric type still needs that built once first.
+            Set an Omni Dashboard ID + Metric Tile Names below to pull live numbers directly from that customer's real dashboard —
+            no MotherDuck query needs to be hand-built per metric. Use the Dashboard Coverage panel after creating this customer to
+            see the dashboard's real tile names.
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
             <Field label="Customer Key (unique, e.g. mccain)">
@@ -229,7 +236,7 @@ function AddCustomerForm({ onAdded }) {
             <Field label="Omni Dashboard ID">
               <input type="text" value={omniDashboardId} onChange={(e) => setOmniDashboardId(e.target.value)} style={inputStyle} placeholder="aa9ac42a" />
             </Field>
-            <Field label="MotherDuck Project Filter">
+            <Field label="MotherDuck Project Filter (legacy fallback only — see below)">
               <input type="text" value={projectNameContains} onChange={(e) => setProjectNameContains(e.target.value)} style={inputStyle} placeholder="McCain" />
             </Field>
             <Field label="Warehouse">
@@ -240,7 +247,7 @@ function AddCustomerForm({ onAdded }) {
                 ))}
               </select>
             </Field>
-            <Field label="Case Pick Accuracy">
+            <Field label="Case Pick Accuracy (legacy path only)">
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
                 <input type="checkbox" checked={includeCasePickAccuracy} onChange={(e) => setIncludeCasePickAccuracy(e.target.checked)} />
                 Include this metric
@@ -261,10 +268,15 @@ function AddCustomerForm({ onAdded }) {
             <Field label="Reviewer Emails (Front teammates to notify, comma-separated)">
               <input type="text" value={reviewerEmails} onChange={(e) => setReviewerEmails(e.target.value)} style={inputStyle} placeholder="ayoung@csw-wi.com" />
             </Field>
+            <Field label="Metric Tile Names (live Omni, comma-separated exact tile names)">
+              <input type="text" value={metricTileNames} onChange={(e) => setMetricTileNames(e.target.value)} style={inputStyle} placeholder="Total OTT v2, Carrier Performance (Rolling Last 13 Weeks)" />
+            </Field>
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
             Route this customer's Omni scorecard email to a SHARED Front inbox before setting Front Inbox Name — a personal/restricted inbox will silently fail to draft.
             To Recipients must be the real customer's own email address(es) — without it the draft has no recipients at all (safe default, but won't send until filled in).
+            If Metric Tile Names is left blank, this customer falls back to the legacy MotherDuck-based OTT/Carrier %/Case Pick Accuracy path — recommended only if you
+            need parity with Bernatello's existing validated setup; otherwise use Metric Tile Names.
           </div>
           <div style={{ marginTop: 12 }}>
             <label style={labelStyle}>Prompt Style (tone/emphasis guidance — can refine later)</label>
@@ -289,26 +301,59 @@ function AddCustomerForm({ onAdded }) {
 }
 
 // DashboardCoverageCheck — collapsible panel, live-reads the selected
-// customer's Omni dashboard and shows which real tiles this app doesn't
-// compute a metric for. Requires omni_dashboard_id to be set. See
-// omni-dashboard-coverage.cjs for the full design writeup and matching
-// heuristic (simple keyword matching, not a full semantic mapping).
-function DashboardCoverageCheck({ dashboardId }) {
+// customer's Omni dashboard and shows which real tiles aren't yet in
+// Metric Tile Names. Requires omni_dashboard_id to be set. See
+// omni-dashboard-coverage.cjs for the full design writeup.
+//
+// "+ Add" on a NOT COVERED tile appends its exact name to Metric Tile
+// Names and saves immediately — the direct, working answer to "how do we
+// switch it to covered": add it here, then omni-scorecard-tiles.cjs will
+// actually run that tile live the next time a draft is generated.
+function DashboardCoverageCheck({ dashboardId, customerKey, metricTileNames, onTileAdded }) {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState(null)
   const [err, setErr] = useState(null)
+  const [addingTile, setAddingTile] = useState(null)
 
   async function handleCheck() {
     setRunning(true)
     setResult(null)
     setErr(null)
     try {
-      const res = await triggerDashboardCoverageCheck(dashboardId)
+      const configured = parseCommaList(metricTileNames)
+      const res = await triggerDashboardCoverageCheck(dashboardId, configured)
       setResult(res)
     } catch (e) {
       setErr(e.message)
     } finally {
       setRunning(false)
+    }
+  }
+
+  async function handleAddTile(tileName) {
+    setAddingTile(tileName)
+    try {
+      const current = parseCommaList(metricTileNames)
+      if (!current.some((n) => n.toLowerCase() === tileName.toLowerCase())) {
+        current.push(tileName)
+      }
+      const next = current.join(', ')
+      await updateScorecardConfigField(customerKey, 'metric_tile_names', next)
+      onTileAdded(next)
+      // Optimistically flip this one tile's covered state so the list
+      // updates immediately without a full re-check.
+      setResult((prev) => prev && {
+        ...prev,
+        coveredCount: prev.coveredCount + 1,
+        notCoveredCount: prev.notCoveredCount - 1,
+        tiles: prev.tiles.map((t) =>
+          t.name === tileName ? { ...t, covered: true, matchedCategory: 'In Metric Tile Names (live Omni)' } : t
+        ),
+      })
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setAddingTile(null)
     }
   }
 
@@ -319,7 +364,7 @@ function DashboardCoverageCheck({ dashboardId }) {
           <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Dashboard Coverage</span>
         </div>
         <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '4px 0' }}>
-          Set an Omni Dashboard ID above to check which of this customer's real dashboard metrics this app currently computes.
+          Set an Omni Dashboard ID above to check which of this customer's real dashboard metrics are pulled into the prompt.
         </div>
       </div>
     )
@@ -331,10 +376,9 @@ function DashboardCoverageCheck({ dashboardId }) {
         <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Dashboard Coverage</span>
       </div>
       <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '4px 0 10px' }}>
-        Live-reads this customer's real Omni dashboard and flags tiles this app doesn't currently compute a metric for — so a gap
-        (like a day-by-day breakdown, or a metric Claude has no data for) shows up here instead of by accident in a real draft.
-        Matching is simple keyword-based (OTT, carrier, case pick/audit) — a tile flagged "not covered" may still be fine, this is a
-        starting point for review, not a definitive answer.
+        Live-reads this customer's real Omni dashboard. A tile already in Metric Tile Names shows as truly COVERED (it's actually
+        run live via Omni's own query engine). Anything else shows NOT COVERED — click "+ Add" to add it to Metric Tile Names, or
+        it may just be a metric this scorecard doesn't need (worth checking in Omni before adding blindly).
       </div>
       <button onClick={handleCheck} disabled={running} style={primaryBtnStyle(running)}>
         {running ? 'Checking…' : 'Check Dashboard Coverage'}
@@ -343,7 +387,7 @@ function DashboardCoverageCheck({ dashboardId }) {
       {result && (
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-            {result.totalTiles} tile(s) on the dashboard — {result.coveredCount} likely covered, {result.notCoveredCount} not covered / needs review.
+            {result.totalTiles} tile(s) on the dashboard — {result.coveredCount} covered, {result.notCoveredCount} not covered.
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {result.tiles.map((tile, i) => (
@@ -365,11 +409,26 @@ function DashboardCoverageCheck({ dashboardId }) {
                 {tile.matchedCategory && (
                   <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>({tile.matchedCategory})</span>
                 )}
-                {tile.url && (
-                  <a href={tile.url} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: 'var(--brand, #a07818)', marginLeft: 'auto' }}>
-                    View in Omni
-                  </a>
-                )}
+                <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {!tile.covered && (
+                    <button
+                      onClick={() => handleAddTile(tile.name)}
+                      disabled={addingTile === tile.name}
+                      style={{
+                        padding: '2px 10px', borderRadius: 'var(--r-md)', border: '1px solid var(--border-subtle)',
+                        background: 'var(--brand, #a07818)', color: '#fff', fontSize: 11, fontWeight: 600,
+                        cursor: addingTile === tile.name ? 'default' : 'pointer',
+                      }}
+                    >
+                      {addingTile === tile.name ? 'Adding…' : '+ Add'}
+                    </button>
+                  )}
+                  {tile.url && (
+                    <a href={tile.url} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: 'var(--brand, #a07818)' }}>
+                      View in Omni
+                    </a>
+                  )}
+                </span>
               </div>
             ))}
           </div>
@@ -542,6 +601,13 @@ export default function ScorecardDraftsTab() {
                   Set To Recipients below before sending any draft for this customer.
                 </div>
               )}
+              {!selected.metric_tile_names && (
+                <div style={{ ...warningBoxStyle, borderColor: 'var(--brand, #a07818)', background: 'rgba(160,120,24,0.08)', color: 'var(--brand, #a07818)' }}>
+                  No Metric Tile Names set — this customer is using the legacy MotherDuck-based metrics path (fixed OTT/Carrier %/Case
+                  Pick Accuracy only). Use the Dashboard Coverage panel below to find this customer's real Omni tile names and add them,
+                  so metrics come live from Omni's own query engine instead.
+                </div>
+              )}
 
               {/* Editable config */}
               <div className="chart-card" style={{ marginBottom: 20 }}>
@@ -554,7 +620,12 @@ export default function ScorecardDraftsTab() {
                     customerKey={selected.customer_key} onSaved={handleFieldSaved}
                   />
                   <EditableConfigField
-                    label="MotherDuck Project Filter" field="project_name_contains" value={selected.project_name_contains}
+                    label="Metric Tile Names (live Omni)" field="metric_tile_names" value={selected.metric_tile_names}
+                    customerKey={selected.customer_key} onSaved={handleFieldSaved}
+                    placeholder="Total OTT v2, Carrier Performance (Rolling Last 13 Weeks)"
+                  />
+                  <EditableConfigField
+                    label="MotherDuck Project Filter (legacy fallback)" field="project_name_contains" value={selected.project_name_contains}
                     customerKey={selected.customer_key} onSaved={handleFieldSaved}
                   />
                   <EditableConfigField
@@ -562,7 +633,7 @@ export default function ScorecardDraftsTab() {
                     customerKey={selected.customer_key} onSaved={handleFieldSaved}
                   />
                   <EditableConfigField
-                    label="Case Pick Accuracy Included" field="include_case_pick_accuracy" value={selected.include_case_pick_accuracy} type="checkbox"
+                    label="Case Pick Accuracy (legacy path only)" field="include_case_pick_accuracy" value={selected.include_case_pick_accuracy} type="checkbox"
                     customerKey={selected.customer_key} onSaved={handleFieldSaved}
                   />
                   <EditableConfigField
@@ -615,14 +686,19 @@ export default function ScorecardDraftsTab() {
               </div>
 
               {/* Dashboard Coverage Check */}
-              <DashboardCoverageCheck dashboardId={selected.omni_dashboard_id} />
+              <DashboardCoverageCheck
+                dashboardId={selected.omni_dashboard_id}
+                customerKey={selected.customer_key}
+                metricTileNames={selected.metric_tile_names}
+                onTileAdded={(next) => handleFieldSaved({ metric_tile_names: next })}
+              />
 
               {/* Prompt style editor */}
               <div className="chart-card" style={{ marginBottom: 20 }}>
                 <div className="chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span className="chart-title" style={{ fontWeight: 800, color: 'var(--text-primary, #fff)' }}>Prompt Style</span>
                   <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                    Tone/emphasis guidance only — metrics come from MotherDuck/Omni, not this text
+                    Tone/emphasis guidance only — metrics come from Omni/MotherDuck, not this text
                   </span>
                 </div>
                 <textarea
