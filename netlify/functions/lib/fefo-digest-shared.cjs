@@ -40,11 +40,32 @@
 // header reading "Live snapshot: <today>" instead of "Next business day:
 // <date>". closedOrders (JDF) is completely unaffected — it still reviews
 // a specific closed/shipped calendar day via sameCalendarDayDateObj.
+//
+// ── "Biggest issues" AI summary (2026-08-26) ────────────────────────────────
+//
+// Per Dan (Front cnv_1c0ok3dg): Hill's own manual workaround for these
+// digests being a wall of violations was pasting the whole thing into a
+// fresh Claude chat and asking "what are the biggest issues" — Hill
+// confirmed that's more helpful than the raw list alone. Now automated:
+// buildDigestBody calls generateBiggestIssuesSummary (below) for any
+// project with violations, inserting a short synthesized summary between
+// the violation-count badge and the exhaustive list. Confirmed scope with
+// Dan: SAME-DAY only (no multi-day trend engine — this app has no
+// historical-violations table yet) and PER-PROJECT (no combined
+// cross-project Palermo's rollup). The exhaustive list is NOT shortened or
+// replaced — this is purely additive context on top of it. A Claude
+// failure never blocks the digest itself from posting.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
 const FRONT_TOKEN = process.env.FRONT_API_TOKEN
 const SITE_URL = process.env.URL || process.env.DEPLOY_URL
+// ANTHROPIC_API_KEY/CLAUDE_MODEL — added 2026-08-26 for the "biggest
+// issues" summary (see callClaude/generateBiggestIssuesSummary below).
+// Same env var and model already used by lib/scorecard-draft-shared.cjs —
+// reusing that exact pattern rather than inventing a second one.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
+const CLAUDE_MODEL = 'claude-sonnet-4-5'
 
 const FEFO_PROJECTS = [
   { id: 'faioa5', code: 'FAIOA5', name: 'Fair Oaks Farms', facility: 'ken', dateSemantic: 'pack' },
@@ -250,7 +271,80 @@ function verdictCopy(line, project) {
   return 'In rotation — the oldest stock on hand is shipping first.'
 }
 
-function buildDigestBody(orders, project, dateObj) {
+// callClaude/generateBiggestIssuesSummary — added 2026-08-26 per Dan's
+// request (Front cnv_1c0ok3dg, screenshot): Hill's own manual workaround
+// for these digests being a wall of violations — "I dumped this into
+// claude and asked what the biggest issues are, literally just copied all
+// of this into a new chat" — got a "yes that would be more helpful haha"
+// from Hill when Dan asked about automating it. Confirmed scope with Dan:
+// SAME-DAY only (matching exactly what Hill did — not a multi-day trend
+// engine, which would need a new historical-violations table this app
+// doesn't have yet) and PER-PROJECT (PALVI9/PALMA9/PALDSD9 each keep
+// their own separate summary, not one combined Palermo's-wide rollup).
+// Explicitly does NOT replace the exhaustive violation list below — Dan
+// was clear he wants to "keep all the lengthy wording" and ADD this as
+// context on top, not instead of it.
+//
+// callClaude reuses the exact same env var (ANTHROPIC_API_KEY) and model
+// (claude-sonnet-4-5) as lib/scorecard-draft-shared.cjs's own callClaude —
+// intentionally not inventing a second pattern for the same thing.
+async function callClaude(prompt) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 500,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  })
+  const text = await res.text()
+  let data
+  try { data = JSON.parse(text) } catch { data = { raw: text } }
+  if (!res.ok) throw new Error(`Claude API error: ${JSON.stringify(data)}`)
+  const textBlock = (data.content || []).find((b) => b.type === 'text')
+  if (!textBlock) throw new Error(`Claude API returned no text block: ${JSON.stringify(data)}`)
+  return textBlock.text
+}
+
+// Formats one violating order for the prompt — same per-line detail
+// (verdictCopy + severity) as the digest's own violation list, so the
+// summary is grounded in exactly what a human reading the digest sees,
+// not a separately-computed view that could disagree.
+function formatViolationForPrompt(o, project) {
+  const out = [`${o.id} — ${o.dest || 'dest unknown'}`]
+  for (const line of (o.lines || [])) {
+    if (lineVerdict(line) !== 'violation') continue
+    const sev = lineSeverity(line)
+    out.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
+  }
+  return out.join('\n')
+}
+
+async function generateBiggestIssuesSummary(violatingOrders, project) {
+  if (!ANTHROPIC_API_KEY || !violatingOrders.length) return null
+  const violationText = violatingOrders.map((o) => formatViolationForPrompt(o, project)).join('\n\n')
+  const prompt = `You are looking at today's FEFO (First-Expired-First-Out) rotation violation report for ${project.name} (${project.code}), a CSW-WI 3PL warehouse customer. Below is the full list of every order currently violating FEFO — newer stock shipping while older, unallocated, off-hold stock of the same material sits unused.
+
+${violationText}
+
+In 3-5 short sentences, summarize the BIGGEST issues in this list for a warehouse operations manager to act on today — which specific materials or locations show up repeatedly, which are the most severe (oldest stock, most cases), and anything that looks like a genuine data/process problem worth investigating (e.g. the same lot showing up dozens of times) versus a one-off. Be direct and concise — this is a working summary for someone about to go fix these, not a report. Do not just restate every violation; synthesize.`
+  // Never let a Claude failure (rate limit, timeout, bad response) block
+  // the digest itself from posting — the exhaustive list below is the
+  // part that must always go out; this summary is additive context only.
+  try {
+    return await callClaude(prompt)
+  } catch (e) {
+    console.warn(`generateBiggestIssuesSummary failed for ${project.code}: ${e.message}`)
+    return null
+  }
+}
+
+async function buildDigestBody(orders, project, dateObj) {
   const lines = []
   lines.push(`FEFO Rotation — ${project.name} (${project.code})`)
   lines.push(APP_URL)
@@ -293,6 +387,20 @@ function buildDigestBody(orders, project, dateObj) {
   }
   lines.push(divider)
   lines.push('')
+
+  // Biggest issues summary (2026-08-26) — see generateBiggestIssuesSummary
+  // above for the full story. Sits between the badge and the exhaustive
+  // list below on purpose: quick synthesis first for someone skimming,
+  // full detail still right there for anyone who wants to dig in — the
+  // exhaustive list is NOT replaced or shortened by this.
+  if (byVerdict.violation.length > 0) {
+    const summary = await generateBiggestIssuesSummary(byVerdict.violation, project)
+    if (summary) {
+      lines.push('**Biggest issues today:**')
+      lines.push(summary.trim())
+      lines.push('')
+    }
+  }
 
   if (byVerdict.violation.length) {
     lines.push(project.closedOrders ? 'Shipped out of FEFO order:' : 'Violations:')
@@ -375,7 +483,7 @@ async function runForProject({ settingsRow, project, dateObj, isManualTest }) {
   const allOrders = ordersJson.ordersByProject?.[project.id] || []
   const targetOrders = project.closedOrders ? allOrders.filter(o => o.day === closedDayBucket) : allOrders
 
-  const body = buildDigestBody(targetOrders, project, dateObj)
+  const body = await buildDigestBody(targetOrders, project, dateObj)
 
   const frontRes = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/comments`, {
     method: 'POST',
