@@ -39,6 +39,12 @@
 }
 
 @media print {
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+
   .dpi-pickline-no-print,
   .util-bar,
   .top-nav,
@@ -77,11 +83,64 @@
     margin-bottom: 4px !important;
     padding: 6px 8px !important;
     font-size: 10px !important;
+    border-width: 1px !important;
+    border-left-width: 4px !important;
   }
 
   .dpi-pickline-card * {
     font-size: 10px !important;
     line-height: 1.35 !important;
+  }
+
+  /* Bolder, darker, print-safe colors — the on-screen palette (pastel
+     reds/yellows tuned for a dark UI theme) reads as barely-there on
+     white paper, especially if the printer/PDF driver doesn't render
+     background fills at all. Deeper, higher-contrast colors + explicit
+     background fills + heavier weight here, independent of the on-screen
+     palette. Status label and card left-border both carry the severity
+     color so it reads at a glance without having to read the text. */
+  .dpi-pickline-card--other_customer {
+    border-left-color: #b30000 !important;
+  }
+  .dpi-pickline-card--wrong_dpi {
+    border-left-color: #8a5a00 !important;
+  }
+  .dpi-pickline-card--match {
+    border-left-color: #1e7a34 !important;
+  }
+  .dpi-pickline-card--empty {
+    border-left-color: #888 !important;
+  }
+
+  .dpi-pickline-status[data-level="other_customer"] {
+    color: #b30000 !important;
+    font-weight: 800 !important;
+  }
+  .dpi-pickline-status[data-level="wrong_dpi"] {
+    color: #8a5a00 !important;
+    font-weight: 800 !important;
+  }
+  .dpi-pickline-status[data-level="match"] {
+    color: #1e7a34 !important;
+    font-weight: 800 !important;
+  }
+  .dpi-pickline-status[data-level="empty"] {
+    color: #555 !important;
+    font-weight: 800 !important;
+  }
+
+  .dpi-pickline-occ-other {
+    color: #7a0000 !important;
+    background: #ffd9d9 !important;
+    border: 1px solid #b30000 !important;
+    font-weight: 700 !important;
+  }
+
+  .dpi-pickline-pull-tag {
+    color: #6b4800 !important;
+    background: #ffe9b8 !important;
+    border: 1px solid #8a5a00 !important;
+    font-weight: 700 !important;
   }
 }
 
