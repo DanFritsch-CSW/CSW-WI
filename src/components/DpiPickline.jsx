@@ -53,7 +53,7 @@ function PullSuggestions({ pullFrom }) {
       <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Pull from</div>
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
         {pullFrom.map((r, i) => (
-          <span key={i} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 4, background: 'rgba(212,167,44,0.12)', color: '#d4a72c', border: '1px solid rgba(212,167,44,0.35)', fontFamily: 'var(--font-mono)' }}>
+          <span key={i} className="dpi-pickline-pull-tag" style={{ fontSize: 11, padding: '2px 7px', borderRadius: 4, background: 'rgba(212,167,44,0.12)', color: '#d4a72c', border: '1px solid rgba(212,167,44,0.35)', fontFamily: 'var(--font-mono)' }}>
             {r.loc} <span style={{ opacity: 0.7 }}>{r.qty} cs</span>
           </span>
         ))}
@@ -68,10 +68,10 @@ function PositionCard({ pos }) {
   const cardStyle = { border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', background: 'var(--bg1)', marginBottom: 8 }
 
   return (
-    <div className="dpi-pickline-card" style={cardStyle}>
+    <div className={`dpi-pickline-card dpi-pickline-card--${pos.level}`} style={cardStyle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
         <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{pos.loc}</span>
-        <span style={{ fontSize: 12, color: urg, fontWeight: 600 }}>{meta.label}</span>
+        <span className="dpi-pickline-status" data-level={pos.level} style={{ fontSize: 12, color: urg, fontWeight: 600 }}>{meta.label}</span>
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
         Designated: <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{pos.sku}</span> — {pos.desc}
@@ -81,7 +81,7 @@ function PositionCard({ pos }) {
         <div style={{ marginBottom: 4 }}>
           {pos.actual.map((a, i) => (
             <div key={i} style={{ display: 'flex', gap: 4, alignItems: 'center', marginBottom: 2 }}>
-              <span style={{
+              <span className={a.isDpi ? undefined : 'dpi-pickline-occ-other'} style={{
                 fontSize: 10, padding: '1px 5px', borderRadius: 3,
                 background: a.isDpi ? 'var(--bg2)' : 'rgba(224,90,90,0.14)',
                 color: a.isDpi ? 'var(--text-secondary)' : '#e05a5a',
