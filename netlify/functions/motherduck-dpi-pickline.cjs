@@ -19,7 +19,12 @@
 // window, cross-referenced against real on-hand and observed cases/pallet
 // since Datex's configured tie/high was found unreliable for this
 // account) vs. whatever MotherDuck shows physically sitting there right
-// now, checked live on every load.
+// now, checked live on every load. Each position also carries a live
+// `pullFrom` list — the top 3 real reserve locations (by quantity, outside
+// the 34 primary positions and outside transient staging) currently
+// holding that SKU, so the reslot task list tells a crew where to go, not
+// just what's wrong. Added 2026-08-26 per Dan's request to mimic
+// WrSecondaryRepl.jsx's "Pull from" pattern.
 //
 // DESIGNATED_LOCATIONS is hardcoded rather than pulled from a settings
 // table because the underlying Datex material-to-location BINDING table
@@ -121,26 +126,54 @@ exports.handler = async (event) => {
     await exec(`ATTACH 'md:production_db'`)
 
     const locList = DESIGNATED_LOCATIONS.map(d => `'${d.loc}'`).join(',')
+    const skuList = DESIGNATED_LOCATIONS.map(d => `'${d.sku}'`).join(',')
 
-    const occupancyRows = await runQuery(`
-      SELECT
-        loc.location_container_name AS location,
-        m.lookup_code AS actual_sku,
-        m.Description AS actual_desc,
-        p.project_id,
-        p.project_name AS actual_project,
-        SUM(lpc.packaged_amount) AS qty
-      FROM production_db.silver.datex_slv_licenseplates lp
-      JOIN production_db.silver.datex_slv_locationcontainers loc ON loc.location_container_id = lp.location_id
-      JOIN production_db.silver.datex_slv_licenseplatecontents lpc ON lpc.license_plate_id = lp.license_plate_id
-      JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
-      JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
-      JOIN production_db.silver.datex_slv_projects p ON p.project_id = m.project_id
-      WHERE loc.location_container_name IN (${locList})
-        AND (lp.Archived IS NULL OR lp.Archived = false)
-      GROUP BY loc.location_container_name, m.lookup_code, m.Description, p.project_id, p.project_name
-      ORDER BY loc.location_container_name
-    `)
+    const [occupancyRows, pullRows] = await Promise.all([
+      runQuery(`
+        SELECT
+          loc.location_container_name AS location,
+          m.lookup_code AS actual_sku,
+          m.Description AS actual_desc,
+          p.project_id,
+          p.project_name AS actual_project,
+          SUM(lpc.packaged_amount) AS qty
+        FROM production_db.silver.datex_slv_licenseplates lp
+        JOIN production_db.silver.datex_slv_locationcontainers loc ON loc.location_container_id = lp.location_id
+        JOIN production_db.silver.datex_slv_licenseplatecontents lpc ON lpc.license_plate_id = lp.license_plate_id
+        JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
+        JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
+        JOIN production_db.silver.datex_slv_projects p ON p.project_id = m.project_id
+        WHERE loc.location_container_name IN (${locList})
+          AND (lp.Archived IS NULL OR lp.Archived = false)
+        GROUP BY loc.location_container_name, m.lookup_code, m.Description, p.project_id, p.project_name
+        ORDER BY loc.location_container_name
+      `),
+      // Pull-from: real reserve locations currently holding each designated SKU, outside the
+      // 34 primary positions themselves and outside transient staging ("Door %"). Top 3 per SKU
+      // by quantity — fewest physical moves to complete the reslot, not a travel-distance ranking
+      // (DPI's freezer aisle doesn't have WR's established furthest-aisle-first convention).
+      runQuery(`
+        SELECT sku, location, qty, rn FROM (
+          SELECT
+            m.lookup_code AS sku,
+            loc.location_container_name AS location,
+            SUM(lpc.packaged_amount) AS qty,
+            ROW_NUMBER() OVER (PARTITION BY m.lookup_code ORDER BY SUM(lpc.packaged_amount) DESC) AS rn
+          FROM production_db.silver.datex_slv_licenseplates lp
+          JOIN production_db.silver.datex_slv_locationcontainers loc ON loc.location_container_id = lp.location_id
+          JOIN production_db.silver.datex_slv_licenseplatecontents lpc ON lpc.license_plate_id = lp.license_plate_id
+          JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
+          JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
+          WHERE m.lookup_code IN (${skuList}) AND m.project_id = ${DPI_PROJECT_ID}
+            AND (lp.Archived IS NULL OR lp.Archived = false)
+            AND loc.location_container_name NOT IN (${locList})
+            AND loc.location_container_name NOT ILIKE 'Door%'
+          GROUP BY m.lookup_code, loc.location_container_name
+        ) ranked
+        WHERE rn <= 3
+        ORDER BY sku, rn
+      `),
+    ])
 
     try { conn.close(); db.close() } catch (_) {}
 
@@ -157,6 +190,12 @@ exports.handler = async (event) => {
       })
     }
 
+    const pullBySku = {}
+    for (const r of pullRows) {
+      if (!pullBySku[r.sku]) pullBySku[r.sku] = []
+      pullBySku[r.sku].push({ loc: r.location, qty: num(r.qty) })
+    }
+
     const positions = DESIGNATED_LOCATIONS.map(d => {
       const actual = actualByLoc[d.loc] || []
       const skus = actual.map(a => a.sku)
@@ -165,7 +204,7 @@ exports.handler = async (event) => {
       else if (actual.some(a => !a.isDpi)) level = 'other_customer'
       else if (actual.length === 0) level = 'empty'
       else level = 'wrong_dpi'
-      return { ...d, actual, level }
+      return { ...d, actual, level, pullFrom: pullBySku[d.sku] || [] }
     })
 
     return {
