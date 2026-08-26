@@ -1,11 +1,29 @@
-/* Print/layout stylesheet for the DPI Pickline tab (added 2026-08-26).
-   Mirrors wr-secondary-repl.css's pattern -- controls hidden on print, a
-   dedicated print title shown instead -- but the F8E/F8F grid is
-   two-column on screen too (not just print), per Dan's explicit ask for
-   side-by-side columns rather than WR's single-column-with-aisle-toggle. */
+/* Print/layout stylesheet for the DPI Pickline tab (added 2026-08-26,
+   revised same day per Dan's follow-up: the browser Print button was
+   printing the entire app shell — top nav, utility bar, Labor Planning
+   date selector, Daily/Weekly toggle, facility tabs, and the MAD sub-tab
+   row — none of which this component can suppress on its own since
+   they're rendered by TopNav.jsx/LaborPlanning.jsx/FacilityPanel.jsx, not
+   by DpiPickline.jsx. Their real classNames (util-bar, top-nav,
+   page-header, view-tab-row, facility-tabs, cal2-tab-row) are hidden here
+   in the print media query. This is a page-wide fix by nature of CSS not
+   being component-scoped — nothing else in the app has ever wanted this
+   chrome in a print, so this should only improve every other tab's print
+   output too, not just DPI Pickline's.
+
+   Also revised to read closer to the actual Front-digest PDF Dan
+   referenced (wr-secondary-repl-pdf.cjs's canvas-rendered output) rather
+   than the plain browser print WrSecondaryRepl.jsx itself produces —
+   tighter card padding/font sizes and a compact stat-count header line in
+   print, since that PDF's density was the actual target, not WR's own
+   print CSS. */
 
 .dpi-pickline-no-print {
   display: initial;
+}
+
+.dpi-pickline-print-stats {
+  display: none;
 }
 
 .dpi-pickline-grid {
@@ -21,27 +39,49 @@
 }
 
 @media print {
-  .dpi-pickline-no-print {
+  .dpi-pickline-no-print,
+  .util-bar,
+  .top-nav,
+  .page-header,
+  .view-tab-row,
+  .facility-tabs,
+  .cal2-tab-row {
     display: none !important;
   }
 
   .dpi-pickline-print-title {
     display: block !important;
     font-weight: 700;
-    font-size: 14px;
-    margin-bottom: 12px;
+    font-size: 15px;
+    margin-bottom: 4px;
     color: #000;
+  }
+
+  .dpi-pickline-print-stats {
+    display: flex !important;
+    gap: 16px;
+    margin-bottom: 10px;
+    font-size: 10px;
+    color: #333;
+    font-family: var(--font-mono);
   }
 
   .dpi-pickline-grid {
     grid-template-columns: 1fr 1fr;
-    gap: 6px;
+    gap: 5px;
     padding: 0 !important;
   }
 
   .dpi-pickline-card {
     break-inside: avoid;
-    margin-bottom: 0 !important;
+    margin-bottom: 4px !important;
+    padding: 6px 8px !important;
+    font-size: 10px !important;
+  }
+
+  .dpi-pickline-card * {
+    font-size: 10px !important;
+    line-height: 1.35 !important;
   }
 }
 
