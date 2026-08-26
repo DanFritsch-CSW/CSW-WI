@@ -18,6 +18,13 @@ import '../styles/dpi-pickline.css'
 //     no equivalent aisle-priority convention for this freezer bay)
 //   - Filter buttons + sort toggle, print button with dedicated print CSS
 //   - Refresh button + last-fetched timestamp
+// Print revised same day, second pass: the browser Print button was
+// printing the whole app shell (nav, date selector, tab rows) since those
+// live outside this component — real fix lives in dpi-pickline.css, not
+// here. A compact print-only stat line was also added so the printed
+// output reads closer to the density of the real Front-digest PDF
+// (wr-secondary-repl-pdf.cjs's canvas-rendered output) that prompted the
+// comparison, rather than WR's own plain-browser-print output.
 // NOT ported: WR's split-face/buffer-slot logic (no DPI equivalent — one
 // SKU per position here, no shared multi-material bays) and its Notify
 // digest panel (flagged to Dan as a natural next step, not built this
@@ -172,6 +179,14 @@ export default function DpiPickline() {
     <div style={{ padding: '16px 4px', fontSize: 13 }}>
       <div className="dpi-pickline-print-title">
         DPI Pickline — F8E / F8F Primary Pick Reslot — {FILTER_LABELS[filter]}
+      </div>
+      <div className="dpi-pickline-print-stats">
+        <span>{positions.length} positions</span>
+        <span>{counts.other_customer} other customer</span>
+        <span>{counts.wrong_dpi} wrong DPI SKU</span>
+        <span>{counts.empty} empty</span>
+        <span>{counts.match} correct</span>
+        <span>as of {lastRefresh ? refreshLabel : '—'}</span>
       </div>
 
       <div className="dpi-pickline-no-print" style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
