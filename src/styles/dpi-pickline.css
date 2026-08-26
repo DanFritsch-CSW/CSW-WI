@@ -1,0 +1,50 @@
+/* Print/layout stylesheet for the DPI Pickline tab (added 2026-08-26).
+   Mirrors wr-secondary-repl.css's pattern -- controls hidden on print, a
+   dedicated print title shown instead -- but the F8E/F8F grid is
+   two-column on screen too (not just print), per Dan's explicit ask for
+   side-by-side columns rather than WR's single-column-with-aisle-toggle. */
+
+.dpi-pickline-no-print {
+  display: initial;
+}
+
+.dpi-pickline-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .dpi-pickline-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media print {
+  .dpi-pickline-no-print {
+    display: none !important;
+  }
+
+  .dpi-pickline-print-title {
+    display: block !important;
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 12px;
+    color: #000;
+  }
+
+  .dpi-pickline-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 0 !important;
+  }
+
+  .dpi-pickline-card {
+    break-inside: avoid;
+    margin-bottom: 0 !important;
+  }
+}
+
+.dpi-pickline-print-title {
+  display: none;
+}
