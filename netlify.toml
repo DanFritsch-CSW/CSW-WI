@@ -166,6 +166,17 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# DPI Pickline backend -- added 2026-08-26, replaces the DPI Putaways tab
+# (motherduck-dpi-putaways.cjs above is left registered/unregistered from
+# the frontend but its function file and this block are untouched -- no
+# file-delete tool, same pattern as dockcounts-digest-run.cjs). Live
+# reslot check for the 34 F8E/F8F primary pick positions -- see the
+# function's own header for the full story (Datex's IsPrimaryPick flag
+# went live before any product was physically moved to match).
+[functions."motherduck-dpi-pickline"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."motherduck-wr-pick-check"]
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
