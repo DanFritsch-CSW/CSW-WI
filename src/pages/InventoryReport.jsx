@@ -297,14 +297,36 @@ export default function InventoryReport() {
     window.print()
   }, [])
 
+  // 2026-08-27 (Cory/Dan, cycle count on aisle "AQ" at CAL showing only 1
+  // location): Room F1 at Caledonia was partially renamed at some point
+  // from a legacy "A<letter>###" location-code format (e.g. "AQ116B") to
+  // "F1-<letter>-###-#" (e.g. "F1-Q-116-B"). For most aisles that rename
+  // is incomplete in Datex -- some locations still carry the old name,
+  // most carry the new one -- so a plain "starts with" search on one
+  // prefix only ever finds part of the aisle. Confirmed live in
+  // MotherDuck: aisle Q has exactly 1 legacy-named location left plus 751
+  // under the new prefix; aisles D/E/F/G/H/I/K have a similar split
+  // (varying amounts still legacy-named); this 4-segment naming is unique
+  // to Room F1 at Caledonia, no other room or facility uses it, so this
+  // expansion can't accidentally broaden a search elsewhere.
+  // Rather than have people remember which prefix a given aisle uses,
+  // recognize a bare aisle-letter query (one letter, optionally preceded
+  // by the legacy "A", e.g. "Q", "AQ", "AD", "K") and search BOTH the
+  // literal typed prefix AND the equivalent "F1-<letter>-" prefix, so the
+  // full aisle comes back regardless of which locations in it have been
+  // renamed yet.
+  const aisleLetterMatch = /^A?([A-Za-z])$/.exec(search.trim())
+  const aisleExpandedPrefix = aisleLetterMatch ? `f1-${aisleLetterMatch[1].toLowerCase()}-` : null
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return data.filter(loc => {
       const mm = mode === 'All' || (mode === 'Occupied' && loc.palletCount > 0) || (mode === 'Empty' && loc.palletCount === 0)
-      const sm = !q || loc.id.toLowerCase().startsWith(q)
+      const idLower = loc.id.toLowerCase()
+      const sm = !q || idLower.startsWith(q) || (aisleExpandedPrefix && idLower.startsWith(aisleExpandedPrefix))
       return mm && sm
     })
-  }, [data, mode, search])
+  }, [data, mode, search, aisleExpandedPrefix])
 
   // Print worksheet data — a dedicated compact 2-column cycle-count sheet,
   // not a printed copy of the interactive table (see src/styles/inventory-report.css).
