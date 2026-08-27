@@ -147,7 +147,19 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# FIXED 2026-08-27: this block was missing `timeout = 26` -- every other
+# duckdb-needing motherduck-*.cjs function in this file has it, this one
+# didn't. That meant motherduck-inventory ran on Netlify's short default
+# timeout instead of the max 26s. Combined with CAL/Franksville carrying
+# ~5x Wisconsin Rapids' and ~4.5x Eau Claire's inventory volume (36,302 vs
+# 6,796/8,056 active LPs, confirmed live in MotherDuck), CAL's Inventory
+# tab runs were the ones most likely to exceed that shorter default and
+# come back as a 502 -- reported by Dan as "pretty consistent" on CAL,
+# working fine on WR/EC. See the function's own file header for the
+# companion query-side fix (warehouse now filtered before the join,
+# not after).
 [functions."motherduck-inventory"]
+  timeout = 26
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
