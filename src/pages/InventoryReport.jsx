@@ -342,7 +342,17 @@ export default function InventoryReport() {
   // literal typed prefix AND the equivalent "F1-<letter>-" prefix, so the
   // full aisle comes back regardless of which locations in it have been
   // renamed yet.
-  const aisleLetterMatch = /^A?([A-Za-z])$/.exec(search.trim())
+  //
+  // FIXED 2026-08-27, same day: the regex below was missing the /i flag,
+  // so it only matched a LITERAL uppercase "A" as the legacy prefix --
+  // typing "aq" (lowercase, exactly what most people naturally type)
+  // failed to match at all, silently falling back to a plain startsWith
+  // that only caught the single literal AQ116B row and none of the
+  // F1-Q-* locations. Caught live: Dan searched "aq" and only got 1
+  // result again. Verified the /i fix against all four case variants
+  // (AQ/aq/Aq/aQ) plus the untouched-by-design cases (C8B, F7X, AQ116B
+  // itself, empty string) before shipping.
+  const aisleLetterMatch = /^A?([A-Za-z])$/i.exec(search.trim())
   const aisleExpandedPrefix = aisleLetterMatch ? `f1-${aisleLetterMatch[1].toLowerCase()}-` : null
 
   const filtered = useMemo(() => {
