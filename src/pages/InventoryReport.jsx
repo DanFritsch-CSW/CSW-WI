@@ -27,6 +27,27 @@ const DISC_TYPES = [
   { value: 'other',           label: 'Other — see notes' },
 ]
 
+// 2026-08-27 (Dan, after the aisle-search fix above): the team physically
+// refers to Room F1 locations at Caledonia in the older no-dash
+// "A<letter><bay><level>" style (e.g. "AQ001A") -- confirmed by the one
+// still-legacy-named location, AQ116B, which is literally F1-Q-116-B in
+// that same shorthand. Datex's actual location_container_name for
+// everything else in Room F1 uses the newer "F1-<letter>-<bay>-<level>"
+// format, which Dan flagged as confusing on-screen since nobody on the
+// floor calls it that. This is a DISPLAY-ONLY transform -- loc.id stays
+// the real Datex name for every actual system interaction (the aisle
+// search above, discrepancy-flag keys in Supabase, print-sheet grouping);
+// only what's rendered for a human gets reformatted. Locations outside
+// Room F1 (BA, BB, C9, Do, etc.) already use their native on-floor code
+// as the raw name, so they pass through this function unchanged.
+function friendlyLocationName(id) {
+  const parts = id.split('-')
+  if (parts.length === 4 && parts[0] === 'F1') {
+    return `A${parts[1]}${parts[2]}${parts[3]}`
+  }
+  return id
+}
+
 function Modal({ onClose, children, maxWidth = 520 }) {
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, padding: 16 }}>
@@ -51,7 +72,7 @@ function FlagFormModal({ loc, existing, onSave, onRemove, onClose }) {
       <div style={{ marginBottom: 16 }}>
         <h3 style={{ margin: '0 0 2px', fontSize: 15, fontWeight: 600, color: 'var(--red)' }}>⚑ Flag discrepancy</h3>
         <p style={{ margin: 0, fontSize: 12, color: 'var(--text-secondary)' }}>
-          Location: <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{loc.id}</strong>
+          Location: <strong style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{loc.displayId}</strong>
           <span style={{ marginLeft: 12, opacity: 0.5 }}>·</span>
           <span style={{ marginLeft: 12 }}>{loc.palletCount} pallet{loc.palletCount !== 1 ? 's' : ''} in system</span>
         </p>
@@ -123,7 +144,7 @@ function DiscrepancyLogModal({ discrepancies, allData, onClose }) {
       return `
         <div style="border:1px solid #e5e5e5;border-radius:6px;padding:12px 14px;margin-bottom:10px;page-break-inside:avoid">
           <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap">
-            <span style="font-family:monospace;font-weight:700;font-size:13px">${loc.id}</span>
+            <span style="font-family:monospace;font-weight:700;font-size:13px">${loc.displayId}</span>
             <span style="font-size:10px;font-weight:600;padding:1px 7px;border-radius:8px;background:#fee2e2;color:#dc2626">${typeLabel(note.discType)}</span>
             ${note.initials ? `<span style="font-size:10px;color:#999;margin-left:auto">${note.initials} · ${new Date(note.flaggedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>` : ''}
           </div>
@@ -170,7 +191,7 @@ function DiscrepancyLogModal({ discrepancies, allData, onClose }) {
       ) : items.map(({ loc, note }) => (
         <div key={loc.id} style={{ padding: '12px 14px', marginBottom: 10, background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 'var(--r-md)' }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>{loc.id}</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>{loc.displayId}</span>
             <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 8, background: 'rgba(239,68,68,0.15)', color: 'var(--red)' }}>{typeLabel(note.discType)}</span>
             {note.initials && <span style={{ fontSize: 10, color: 'var(--text-secondary)', marginLeft: 'auto' }}>{note.initials} · {new Date(note.flaggedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>}
           </div>
@@ -242,6 +263,12 @@ export default function InventoryReport() {
     setDiscrepancies(map)
   }, [])
 
+  // Attaches the human-friendly display name (see friendlyLocationName above)
+  // once, at load time, so every consumer of `data`/`filtered` has it --
+  // including DiscrepancyLogModal, which renders from `allData={data}`
+  // directly rather than the `filtered` derived list.
+  const withDisplayId = (rows) => rows.map(loc => ({ ...loc, displayId: friendlyLocationName(loc.id) }))
+
   const doFetch = useCallback(async (facId, clearSearch = false) => {
     setLoading(true)
     setError(null)
@@ -251,12 +278,12 @@ export default function InventoryReport() {
     purgeExpiredInventoryDiscrepancies()
     try {
       const occupied = await fetchInventoryLocations(facId)
-      setData(occupied)
+      setData(withDisplayId(occupied))
       setLastRefresh(new Date())
       setLoading(false)
       setLoadingEmpty(true)
       const merged = await mergeEmptyLocations(facId, occupied)
-      setData(merged)
+      setData(withDisplayId(merged))
     } catch (e) {
       setError(e.message || 'Unknown error fetching inventory')
     } finally {
@@ -383,11 +410,11 @@ export default function InventoryReport() {
     return filtered.flatMap(loc => {
       const flagged = discrepancies.has(loc.id)
       if (loc.pallets.length === 0) {
-        return [{ key: loc.id, locId: loc.id, itemCode: '', description: '', cases: loc.onHand, flagged }]
+        return [{ key: loc.id, locId: loc.displayId, itemCode: '', description: '', cases: loc.onHand, flagged }]
       }
       return loc.pallets.map((p, pi) => ({
         key: `${loc.id}-${pi}`,
-        locId: loc.id,
+        locId: loc.displayId,
         itemCode: p.materialCode,
         description: p.materialDescription,
         cases: p.qty,
@@ -537,7 +564,7 @@ export default function InventoryReport() {
                         <tr key={loc.id} onClick={() => hasInventory && toggleExpand(loc.id)} style={{ borderBottom: '1px solid var(--border)', background: isFlagged ? 'rgba(239,68,68,0.06)' : 'transparent', cursor: hasInventory ? 'pointer' : 'default' }}>
                           <td style={{ padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
                             {hasInventory && <span style={{ color: 'var(--text-secondary)', marginRight: 4, fontSize: 10 }}>{isExpanded ? '▾' : '▸'}</span>}
-                            {loc.id}
+                            {loc.displayId}
                           </td>
                           <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-primary)', fontWeight: 600 }}>{loc.palletCount || '—'}</td>
                           <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-secondary)' }}>{loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}</td>
@@ -644,7 +671,7 @@ export default function InventoryReport() {
                       </tr>
                     )) : col.map(loc => (
                       <tr key={loc.id}>
-                        <td className="loc">{loc.id}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</td>
+                        <td className="loc">{loc.displayId}{discrepancies.has(loc.id) && <span className="flag"> ⚑</span>}</td>
                         <td>{loc.palletCount || '—'}</td>
                         <td>{loc.onHand > 0 ? loc.onHand.toLocaleString() : '—'}</td>
                         <td></td>
