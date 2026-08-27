@@ -4,6 +4,8 @@
 // Token is passed via motherduck_token env var — NOT in the ATTACH connection string.
 // The MotherDuck extension reads the env var automatically after LOAD.
 
+const zlib = require('zlib')
+
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
   'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -46,34 +48,19 @@ exports.handler = async (event) => {
 
   const safe = whName.replace(/'/g, "''")
 
-  // FIXED 2026-08-27: was previously a FULL JOIN between the entire
-  // company-wide licenseplates table and the entire company-wide
-  // locationcontainers table (59,590 rows across all 5 warehouses),
-  // filtered down to one warehouse only in the outer WHERE clause. That
-  // meant every call — regardless of which facility was requested — had
-  // to materialize the full cross-warehouse join before narrowing to one
-  // facility. Caledonia/Franksville has ~5x Wisconsin Rapids' and ~4.5x
-  // Eau Claire's inventory volume (confirmed live: 36,302 active LPs vs.
-  // 6,796 / 8,056), which combined with this function's missing `timeout
-  // = 26` in netlify.toml (every sibling motherduck-*.cjs function has
-  // this, this one didn't) meant CAL's runs were the ones most likely to
-  // exceed Netlify's short default timeout and come back as a 502.
-  // Root-caused via a direct row-count/location-count comparison across
-  // all 5 warehouses in MotherDuck before touching anything.
-  //
-  // Fix: resolve the target warehouse's locations FIRST (the `locs` CTE
-  // below), then join license plates only against that already-filtered
-  // location set. This pushes the warehouse filter to the start of the
-  // plan instead of the end, so the join surface is bounded by the one
-  // facility's location count (e.g. ~20K for CAL) instead of the
-  // company-wide 59,590. Also switched FULL JOIN -> JOIN: the frontend
-  // (src/lib/omniInventory.js's buildLocationMap) already discards every
-  // row that lacks both an lp and a locationName, so the FULL JOIN's
-  // location-with-no-LP rows were pure wasted computation — empty
-  // locations are already handled separately via emptyLocSql below.
-  // Verified functionally identical before shipping: ran both the old
-  // and new query shapes live against MotherDuck for CSW-Franksville —
-  // both returned exactly 36,638 rows.
+  // 2026-08-27, first pass (query restructure): was previously a FULL JOIN
+  // between the entire company-wide licenseplates table and the entire
+  // company-wide locationcontainers table (59,590 rows across all 5
+  // warehouses), filtered down to one warehouse only in the outer WHERE
+  // clause. Rewritten to resolve the target warehouse's locations FIRST
+  // (the `locs` CTE below), then join license plates only against that
+  // already-filtered location set — bounds the join to one facility's
+  // location count instead of the company-wide total. Also switched FULL
+  // JOIN -> JOIN since the frontend (src/lib/omniInventory.js's
+  // buildLocationMap) already discards every row lacking both an lp and a
+  // locationName. Verified functionally identical to the old query shape:
+  // both returned exactly 36,638 rows for CSW-Franksville.
+  // THIS FIRST PASS DID NOT FIX THE REAL BUG — see below.
   const inventorySql = `
     WITH wh AS (
       SELECT warehouse_id
@@ -155,21 +142,47 @@ exports.handler = async (event) => {
     conn.close()
     db.close()
 
+    const responseBody = JSON.stringify({
+      inventoryRows: inventoryRows.map(r => ({
+        lp:                  String(r.lp_code              || ''),
+        locationName:        String(r.location_name        || ''),
+        qty:                 Number(r.qty)                  || 0,
+        materialCode:        String(r.material_code        || ''),
+        materialDescription: String(r.material_description || ''),
+        vendorLot:           String(r.vendor_lot           || ''),
+        sysLot:              String(r.sys_lot              || ''),
+      })),
+      emptyLocations: emptyRows.map(r => String(r.location_name || '')).filter(Boolean),
+    })
+
+    // FIXED 2026-08-27, SECOND PASS -- the actual bug: the query-restructure
+    // fix above was a real improvement but never the fix for the reported
+    // 502s. The real error (only visible in the function's own response
+    // body, confirmed live by Dan pulling it from DevTools' Network tab):
+    //   Function.ResponseSizeTooLarge -- "Response payload size exceeded
+    //   maximum allowed payload size (6291556 bytes)"
+    // CAL's ~36,638-row inventory response, as raw JSON, lands right at
+    // Netlify Functions' ~6MB synchronous-response ceiling (inherited from
+    // AWS Lambda). WR (~6,796 rows) and EC (~8,056 rows) stay comfortably
+    // under it -- same root cause (CAL's much larger inventory volume)
+    // as the timeout investigation, but a completely different failure
+    // mode than a slow query: the query was already fast, the RESPONSE
+    // was just too big to send back.
+    // Fix: gzip the JSON body before returning it, base64-encoded with
+    // isBase64Encoded:true and a Content-Encoding:gzip header -- standard
+    // Netlify/Lambda pattern for compressed sync responses. Browsers'
+    // fetch() decompresses gzip transparently based on that header, so
+    // src/lib/omniInventory.js needed zero changes. JSON like this
+    // (highly repetitive keys/values) typically compresses 80-90%+,
+    // which puts CAL's response well under the limit with real margin
+    // to spare -- not just barely under it.
+    const gzipped = zlib.gzipSync(Buffer.from(responseBody, 'utf8'))
+
     return {
       statusCode: 200,
-      headers: NO_CACHE_HEADERS,
-      body: JSON.stringify({
-        inventoryRows: inventoryRows.map(r => ({
-          lp:                  String(r.lp_code              || ''),
-          locationName:        String(r.location_name        || ''),
-          qty:                 Number(r.qty)                  || 0,
-          materialCode:        String(r.material_code        || ''),
-          materialDescription: String(r.material_description || ''),
-          vendorLot:           String(r.vendor_lot           || ''),
-          sysLot:              String(r.sys_lot              || ''),
-        })),
-        emptyLocations: emptyRows.map(r => String(r.location_name || '')).filter(Boolean),
-      }),
+      headers: { ...NO_CACHE_HEADERS, 'Content-Encoding': 'gzip' },
+      body: gzipped.toString('base64'),
+      isBase64Encoded: true,
     }
   } catch (e) {
     try { if (conn) conn.close() } catch {}
