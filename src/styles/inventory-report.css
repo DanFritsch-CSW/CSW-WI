@@ -113,20 +113,34 @@
      item code/description -- the on-screen "tap to expand" view already
      shows "LP178459" etc per pallet, and that's what the printout needed to
      match. Added a 7th column (.d-lp-col, monospace + single-line ellipsis
-     like .loc/.code) and rebalanced every column's width so the 7-column
-     row still fits the existing tuned 2-column-per-page layout at the same
-     font-size/row-height -- did NOT touch ROWS_FIRST_PAGE_COL/
-     ROWS_OTHER_PAGE_COL in the JSX, since row height (single line, same
-     font-size) is unchanged, only column widths shifted. LP codes like
-     "LP178459" (8 chars) get ~13% of column width (~60px in a ~466px print
-     column at the current landscape/0.5in-margin/2-column layout), sized to
-     fit without truncating in the common case; Description dropped from 29%
-     to 20% to make room, which will truncate more eagerly than before --
-     acceptable given this sheet already documents "use the on-screen tap-
-     to-expand view for the full text if it's cut off" as the fallback.
-     Like the two prior fixes in this comment block, THIS HAS NOT YET BEEN
-     VERIFIED ON A REAL PRINT -- check a facility like WR before relying on
-     the widths not to wrap/overflow on an actual printer. */
+     like .loc/.code).
+
+     FIXED AGAIN, same day, before the ink was dry: the 13% LP width above
+     was sized off the single 8-char example Dan happened to screenshot
+     ("LP178459"). Checked the real distribution live in MotherDuck across
+     every facility before touching this again -- LP codes run up to 20
+     characters, and facilities vary wildly in how often that happens:
+     Eau Claire is 81.9% long (17-20 char) codes, Madison 52.7%, WR 25.6%,
+     Kenosha 24.8%, even Caledonia (the best case) is 15.1%. The 13% column
+     (~53px content width) only fit ~8 monospace characters -- nowhere close
+     to 20, so most facilities were still getting silently truncated LPs
+     after the first "fix."
+     Real fix: took width from Notes (.d-blank-lg) instead of guessing at
+     Description/Item Code again -- Notes shrinks from 27% to 12%, LP grows
+     from 13% to 28%. At 28% of the ~466px print column (minus ~8px cell
+     padding), that's ~122px of content width. LP codes are all-numeric, and
+     digits render narrower than the 6.3px/char average used for the first
+     estimate (which assumed wider letters); at a more realistic 5.5-6.0px
+     per digit, 122px fits ~20-22 digits -- enough for the full 20-digit
+     max in the common case. Notes drops to a genuinely tight ~46px of
+     content width (room for a checkmark/initials/a few characters, not a
+     sentence) -- a real, accepted trade-off, not an oversight.
+     Still NOT VERIFIED ON A REAL PRINT, same caveat as every revision to
+     this sheet -- the digit-width assumption is a reasonable estimate, not
+     a guarantee, across different browsers/print engines/printer drivers.
+     Check a facility with a lot of long LP codes (Eau Claire or Madison,
+     per the numbers above -- NOT Wisconsin Rapids, which is a below-average
+     case for this specific problem) before fully trusting it. */
   .inv-print-table-detailed .code,
   .inv-print-table-detailed .desc,
   .inv-print-table-detailed .lp {
@@ -140,10 +154,10 @@
   }
 
   .inv-print-table .d-loc-col  { width: 13%; }
-  .inv-print-table .d-lp-col   { width: 13%; }
+  .inv-print-table .d-lp-col   { width: 28%; }
   .inv-print-table .d-code-col { width: 8%;  }
   .inv-print-table .d-desc-col { width: 20%; }
   .inv-print-table .d-num-col  { width: 8%;  }
   .inv-print-table .d-blank-sm { width: 11%; }
-  .inv-print-table .d-blank-lg { width: 27%; }
+  .inv-print-table .d-blank-lg { width: 12%; }
 }
