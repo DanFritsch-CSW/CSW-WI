@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { fetchInventoryLocations, mergeEmptyLocations } from '../lib/omniInventory.js'
 import {
   fetchInventoryDiscrepancies,
@@ -269,8 +269,28 @@ export default function InventoryReport() {
   const [flagModal,     setFlagModal]     = useState(null)
   const [showLog,       setShowLog]       = useState(false)
 
-  const loadDiscrepancies = useCallback(async (facId) => {
+  // 2026-08-28 (caught live: a WR print showed locations like "AD003D" --
+  // real raw name "F1-D-003-D", which only exists at Caledonia/Franksville,
+  // confirmed live in MotherDuck. Root cause: doFetch/loadDiscrepancies had
+  // no guard against overlapping requests. Switching facilities (e.g. CAL
+  // -> WR) fires a new doFetch while the previous facility's async
+  // fetchInventoryLocations/mergeEmptyLocations/fetchInventoryDiscrepancies
+  // calls may still be in flight; whichever one's setData/setDiscrepancies
+  // call happened to resolve LAST won, even if it was for a facility the
+  // user had already switched away from -- so the on-screen header
+  // (currentFacility, derived purely from the facilityId state) could show
+  // one facility while `data` silently still held another's rows. This
+  // fetchSeqRef is a simple request-sequence guard: every doFetch call gets
+  // a strictly increasing sequence number, and every state-setting callback
+  // (including loadDiscrepancies, which runs concurrently and un-awaited)
+  // checks its own sequence number is still the latest before writing state
+  // -- any response for a since-superseded request is silently discarded
+  // instead of overwriting newer data.
+  const fetchSeqRef = useRef(0)
+
+  const loadDiscrepancies = useCallback(async (facId, seq) => {
     const map = await fetchInventoryDiscrepancies(facId)
+    if (fetchSeqRef.current !== seq) return // superseded by a newer facility switch/refresh
     setDiscrepancies(map)
   }, [])
 
@@ -281,25 +301,31 @@ export default function InventoryReport() {
   const withDisplayId = (rows) => rows.map(loc => ({ ...loc, displayId: friendlyLocationName(loc.id) }))
 
   const doFetch = useCallback(async (facId, clearSearch = false) => {
+    const seq = ++fetchSeqRef.current
     setLoading(true)
     setError(null)
     setExpanded(new Set())
     if (clearSearch) setSearch('')
-    loadDiscrepancies(facId)
+    loadDiscrepancies(facId, seq)
     purgeExpiredInventoryDiscrepancies()
     try {
       const occupied = await fetchInventoryLocations(facId)
+      if (fetchSeqRef.current !== seq) return // a newer facility switch/refresh already started
       setData(withDisplayId(occupied))
       setLastRefresh(new Date())
       setLoading(false)
       setLoadingEmpty(true)
       const merged = await mergeEmptyLocations(facId, occupied)
+      if (fetchSeqRef.current !== seq) return
       setData(withDisplayId(merged))
     } catch (e) {
+      if (fetchSeqRef.current !== seq) return
       setError(e.message || 'Unknown error fetching inventory')
     } finally {
-      setLoading(false)
-      setLoadingEmpty(false)
+      if (fetchSeqRef.current === seq) {
+        setLoading(false)
+        setLoadingEmpty(false)
+      }
     }
   }, [loadDiscrepancies])
 
