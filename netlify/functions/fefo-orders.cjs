@@ -335,6 +335,47 @@ async function loadActiveDismissals(projectIds) {
   }
 }
 
+// loadDateOverrides — added 2026-08-28, one-time data fix for Echo Lakes
+// (see fefo_lot_date_overrides migration for the full root-cause writeup:
+// 8 lots had a genuinely NULL receive_date in Datex from an internal
+// re-lot/transfer event on 2026-07-29; real dates recovered from each
+// lot's originating vendor lot and stored here). General-purpose by
+// design, not Echo-Lakes-specific — checked for every project so the same
+// mechanism covers future one-off date gaps without a code change.
+async function loadDateOverrides(projectIds) {
+  const SUPABASE_URL =
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  const SUPABASE_KEY =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    ''
+  if (!SUPABASE_URL || !SUPABASE_KEY || !projectIds?.length) return new Map()
+  try {
+    const inList = projectIds.map(p => `"${p}"`).join(',')
+    const params = new URLSearchParams()
+    params.set('select', 'project_id,lot_lookup_code,override_date')
+    params.set('project_id', `in.(${inList})`)
+    const url = `${SUPABASE_URL}/rest/v1/fefo_lot_date_overrides?${params.toString()}`
+    const res = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+    })
+    if (!res.ok) return new Map()
+    const rows = await res.json()
+    const map = new Map()
+    for (const r of rows) map.set(`${r.project_id}|${r.lot_lookup_code}`, r.override_date)
+    return map
+  } catch (e) {
+    console.warn('loadDateOverrides failed:', e.message)
+    return new Map()
+  }
+}
+
 // ─── Date parsers ──────────────────────────────────────────────────────────
 
 function parseFairOaksDate(lookupCode) {
@@ -426,6 +467,19 @@ function parseLotDateKey(lookupCode, dateFormat, extras) {
   return parsed
 }
 
+// parseLotDateKeyWithOverride — added 2026-08-28 alongside
+// loadDateOverrides/fefo_lot_date_overrides above. Checks the manual
+// override table FIRST, regardless of the project's own dateFormat, and
+// short-circuits straight to parseReceiveDate (already fully generic —
+// any timestamp in, {k, kDay, display} out) when a match exists. Falls
+// through to the normal parseLotDateKey untouched when there's no
+// override, so every project keeps its existing behavior by default.
+function parseLotDateKeyWithOverride(lookupCode, dateFormat, extras, overrideMap, projectId) {
+  const override = overrideMap?.get(`${projectId}|${lookupCode}`)
+  if (override) return parseReceiveDate(override)
+  return parseLotDateKey(lookupCode, dateFormat, extras)
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function arrivalToDate(scheduledArrival) {
@@ -463,7 +517,7 @@ function fmtPack(palletTie, palletHigh, shortName) {
 // "'today' anchored to Central time" for why the old UTC-based version was
 // a real bug (day boundary silently rolled over ~5-6 hours before the
 // Central-time business day actually ended). Same pattern
-// fefo-digest-run.cjs's centralTodayDateObj already used correctly; this
+// fefo-digest-run.cjs's centralTodayDateObj already uses correctly; this
 // just brings the live-query path in line with it. All Date arithmetic
 // downstream (dateFrom/dateTo window, closedOrders
 // daysAgo) is unaffected in shape — it still operates on a UTC-midnight
@@ -494,7 +548,7 @@ function fmtDest(name, city, state) {
 
 // ─── Per-project query block ───────────────────────────────────────────────
 
-async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount, dismissedSet }) {
+async function loadOrdersForProject(runQuery, { projectId, project, warehouseId, today, dateFrom, dateTo, dayCount, dismissedSet, overrideMap }) {
   const safeProjectName = project.datexName.replace(/'/g, "''")
 
   // closedOrders projects (e.g. JDF) look BACKWARD — last dayCount days,
@@ -838,7 +892,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
     const allocLots = allocLotsByLine.get(key)
     allocLots.add(Number(r.lot_id))
 
-    const parsed = parseLotDateKey(r.lot_code, project.dateFormat, { receiveDate: r.lot_receive_date, expirationDate: r.lot_expiration_date })
+    const parsed = parseLotDateKeyWithOverride(r.lot_code, project.dateFormat, { receiveDate: r.lot_receive_date, expirationDate: r.lot_expiration_date }, overrideMap, projectId)
     const cases = Number(r.actual_cases) > 0 ? Number(r.actual_cases) : Number(r.expected_cases) || 0
     const lps = Number(r.lp_count_actual) > 0
       ? Number(r.lp_count_actual)
@@ -894,7 +948,7 @@ async function loadOrdersForProject(runQuery, { projectId, project, warehouseId,
       .filter(c => !allocLots.has(c.lotId))
       .filter(c => !dismissedSet || !dismissedSet.has(`${projectId}|${c.lotCode}`))
       .map(c => {
-        const parsed = parseLotDateKey(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate, expirationDate: c.expirationDate })
+        const parsed = parseLotDateKeyWithOverride(c.lotCode, project.dateFormat, { receiveDate: c.receiveDate, expirationDate: c.expirationDate }, overrideMap, projectId)
         return { ...c, k: parsed.k, kDay: parsed.kDay, display: parsed.display, dateUnknown: !!parsed.error }
       })
       // 2026-07-30 — was `c.cases > 0`. A lot whose LPs are ALL on hold now
@@ -1069,6 +1123,7 @@ exports.handler = async (event) => {
   const dateTo   = fmtDateISO(new Date(today.getTime() + (dayCount - 1) * 86400000))
 
   const dismissedSetPromise = loadActiveDismissals(projectIds)
+  const overrideMapPromise = loadDateOverrides(projectIds)
 
   let conn, db
   const ordersByProject = {}
@@ -1094,6 +1149,7 @@ exports.handler = async (event) => {
     await exec(`ATTACH 'md:production_db'`)
 
     const dismissedSet = await dismissedSetPromise
+    const overrideMap = await overrideMapPromise
 
     for (const pid of projectIds) {
       try {
@@ -1101,7 +1157,7 @@ exports.handler = async (event) => {
           projectId: pid,
           project: PROJECTS[pid],
           warehouseId, today, dateFrom, dateTo, dayCount,
-          dismissedSet,
+          dismissedSet, overrideMap,
         })
         ordersByProject[pid] = result.orders
         rowCountsByProject[pid] = result.rowCounts
