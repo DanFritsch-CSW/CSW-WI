@@ -252,7 +252,18 @@ export default function InventoryReport() {
   const [mode,       setMode]       = useState('All')
   const [search,     setSearch]     = useState('')
   const [expanded,   setExpanded]   = useState(new Set())
-  const [printDetailed, setPrintDetailed] = useState(false)
+  // 2026-08-28 (Cory/inventory team via Front, relayed by Dan): no tablets
+  // on the floor yet, so the printed cycle-count sheet -- not the on-screen
+  // "tap to expand" view -- is what they actually use. Legacy always
+  // printed every location already expanded to pallet level; this sheet
+  // only does that when this checkbox is checked, and it was defaulting to
+  // off, so every print came out collapsed unless someone remembered to
+  // check it first. Defaulting to true so printed sheets open already
+  // expanded, matching legacy's always-open behavior, with zero change to
+  // the underlying detailed-row/print-table logic (rev 4 pagination, see
+  // the comment block below) -- still fully toggleable if a facility ever
+  // wants the compact collapsed sheet instead.
+  const [printDetailed, setPrintDetailed] = useState(true)
 
   const [discrepancies, setDiscrepancies] = useState(new Map())
   const [flagModal,     setFlagModal]     = useState(null)
