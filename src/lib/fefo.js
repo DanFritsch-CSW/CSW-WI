@@ -111,6 +111,50 @@ export const FEFO_PROJECTS = [
     datexProjectName: "Palermo's Caledonia DSD",
   },
   {
+    // Added 2026-08-28 per Hill's request (Front cnv_1c7cx6ac) — Echo
+    // Lakes flagged real out-of-rotation storage credits and asked for
+    // proactive tracking. IMPORTANT: Echo Lakes wants LOT-LEVEL FIFO (ship
+    // the oldest lot first, fully clearing it across all its inbounds
+    // before moving to the next), NOT expiration-based FEFO like every
+    // other project here — confirmed in-thread (Dean: "Isn't the BLUF not
+    // true though? They want us to ship in FIFO? Not FEFO?"). Uses the
+    // exact same dateFormat/dateSemantic as Birchwood ('receiveDate'/
+    // 'received') since Echo Lakes lot codes don't encode a date either —
+    // receive_date is the age proxy.
+    //
+    // The retrospective dollar-credit calculation the team was building in
+    // that thread (rank-matching pallets to shipments, partial-pallet
+    // exclusion, active/inactive lot handling, etc.) is explicitly OUT of
+    // scope here per Dan — this is just the live/forward tracking
+    // mechanism, matching every other project's architecture. The existing
+    // per-line violation check ("is older on-hand stock unallocated while
+    // THIS order ships newer stock of the same material") already
+    // structurally matches the guard the team converged on for the credit
+    // calc (a violation only counts if a newer lot is actually, not
+    // theoretically, shipping) — no new verdict logic needed, just this
+    // date basis.
+    //
+    // KNOWN CAVEAT, not solved here: the team's investigation found that
+    // internal material transfers can reset a lot's receive_date, making
+    // transferred (but actually old) material look newer than it is (Dean:
+    // "those material transfers then had a new 'created' date... so we
+    // didn't ship them and they sat in inventory needlessly"). This app
+    // uses receive_date as-is, same as ops sees in Datex — if that field
+    // gets reset by a transfer, this tracker reflects the same
+    // (mis)information ops already has, not a corrected version. Revisit
+    // if this causes real false negatives.
+    //
+    // Confirmed via MotherDuck: project_id=128, project_name "Echo Lakes
+    // Foods Inc- KENOSHA", facility KEN (warehouse_id=5) — matches the
+    // Front conversation's Kenosha inbox. 222 completed outbound orders
+    // historically; only 1 currently Processing at add-time (thin live
+    // snapshot, not a scope problem).
+    id: 'echlk5', code: 'ECHLK5', name: 'Echo Lakes Foods',
+    proj: 128, dateFormat: 'receiveDate', dateSemantic: 'received',
+    color: '#c9862f', facility: 'ken',
+    datexProjectName: 'Echo Lakes Foods Inc- KENOSHA',
+  },
+  {
     // Added 2026-07-18 per Dan's request. Fundamentally different from every
     // other FEFO project: instead of watching OPEN orders forward-looking
     // for upcoming violations, JDF is a retrospective/audit view — "did we
