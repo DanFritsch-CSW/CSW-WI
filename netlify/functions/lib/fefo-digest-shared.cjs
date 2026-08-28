@@ -77,6 +77,7 @@ const FEFO_PROJECTS = [
   { id: 'palma9', code: 'PALMA9', name: "Palermo's Caledonia Materials", facility: 'cal', dateSemantic: 'expiration' },
   { id: 'paldsd9', code: 'PALDSD9', name: "Palermo's Caledonia DSD", facility: 'cal', dateSemantic: 'expiration' },
   { id: 'jdf1', code: 'JDF1', name: 'Jones Dairy Farm', facility: 'mad', closedOrders: true, dateSemantic: 'man' },
+  { id: 'echlk5', code: 'ECHLK5', name: 'Echo Lakes Foods', facility: 'ken', dateSemantic: 'received' },
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_${p.id}`, p]))
 const APP_URL = 'https://csw-wi.netlify.app/customers?tab=fefo'
