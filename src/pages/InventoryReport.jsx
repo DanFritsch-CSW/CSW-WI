@@ -426,16 +426,27 @@ export default function InventoryReport() {
   // one line via CSS ellipsis (see inventory-report.css), NOT wrapped, so
   // row height — and therefore the page-chunking math below — stays the
   // same as the standard sheet.
+  //
+  // FIXED 2026-08-28 (Cory/inventory team, same Front feedback as the
+  // printDetailed-default-true fix above): the ask was specifically for
+  // the LP number itself to print, not just item code/description --
+  // pointed to the on-screen "tap to expand" view (which already shows
+  // "LP178459" etc per pallet) as what the printout should match. Added
+  // `lp` to each detailed print row and a new LP column to the print
+  // table (see inventory-report.css for the column-width rebalance this
+  // required to fit a 7th column into the existing tuned 2-column-per-page
+  // layout without changing row height).
   const printDetailRows = useMemo(() => {
     if (!printDetailed) return []
     return filtered.flatMap(loc => {
       const flagged = discrepancies.has(loc.id)
       if (loc.pallets.length === 0) {
-        return [{ key: loc.id, locId: loc.displayId, itemCode: '', description: '', cases: loc.onHand, flagged }]
+        return [{ key: loc.id, locId: loc.displayId, lp: '', itemCode: '', description: '', cases: loc.onHand, flagged }]
       }
       return loc.pallets.map((p, pi) => ({
         key: `${loc.id}-${pi}`,
         locId: loc.displayId,
+        lp: p.lp,
         itemCode: p.materialCode,
         description: p.materialDescription,
         cases: p.qty,
@@ -508,9 +519,9 @@ export default function InventoryReport() {
           </div>
           <div style={S.btnRow}>
             {discrepancies.size > 0 && <button style={S.btnDanger} onClick={() => setShowLog(true)}>⚑ {discrepancies.size} Discrepanc{discrepancies.size > 1 ? 'ies' : 'y'}</button>}
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer' }} title="Shows Item Code + Description on screen and on the printed sheet, one line per pallet/LP — for verifying counts against the description when the case/pallet isn't labeled with the item code.">
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer' }} title="Shows LP #, Item Code + Description on screen and on the printed sheet, one line per pallet/LP — for verifying counts against the description when the case/pallet isn't labeled with the item code, and matching each pallet to its LP.">
               <input type="checkbox" checked={printDetailed} onChange={e => setPrintDetailed(e.target.checked)} />
-              Include item code/description
+              Include LP, item code & description
             </label>
             <button style={S.btn} onClick={handlePrintSheet} title="Prints the currently filtered location list as a compact 2-column cycle-count sheet with Pallets/Cases columns plus blank Actual Ct / Notes for hand-written counts. Filter to Occupied or search a location prefix first to keep it short.">🖨 Print count sheet</button>
             <button style={S.btn} onClick={handleRefresh} disabled={loading}>{loading ? 'Loading…' : '↻ Refresh'}</button>
@@ -650,7 +661,7 @@ export default function InventoryReport() {
           <div className="meta">{currentFacility?.label} ({currentFacility?.whName}) · {printFilterLabel}{printSearchLabel ? `, ${printSearchLabel}` : ''}</div>
           <div className="meta">Printed {printDateStr} · {filtered.length} location{filtered.length !== 1 ? 's' : ''} · {printOccCount} occupied · {printEmpCount} empty{discrepancies.size > 0 ? ` · ${discrepancies.size} already flagged (⚑)` : ''}</div>
           {printDetailed ? (
-            <div className="meta small">One row per pallet/LP · Cases = packaged qty on that pallet · Description truncated to one line — use the on-screen "tap to expand" view for the full text if it's cut off</div>
+            <div className="meta small">One row per pallet/LP, with LP # · Cases = packaged qty on that pallet · Description truncated to one line — use the on-screen "tap to expand" view for the full text if it's cut off</div>
           ) : (
             <div className="meta small">Pallets = LP count in system · Cases = total packaged qty (same figure shown on-screen as "Total Qty" — flag if this isn't the case-level number you need)</div>
           )}
@@ -664,6 +675,7 @@ export default function InventoryReport() {
                     {printDetailed ? (
                       <tr>
                         <th className="d-loc-col">Location</th>
+                        <th className="d-lp-col">LP</th>
                         <th className="d-code-col">Item Code</th>
                         <th className="d-desc-col">Description</th>
                         <th className="d-num-col">Cases</th>
@@ -684,6 +696,7 @@ export default function InventoryReport() {
                     {printDetailed ? col.map(row => (
                       <tr key={row.key}>
                         <td className="loc">{row.locId}{row.flagged && <span className="flag"> ⚑</span>}</td>
+                        <td className="lp">{row.lp || '—'}</td>
                         <td className="code">{row.itemCode || '—'}</td>
                         <td className="desc">{row.description || '—'}</td>
                         <td>{row.cases > 0 ? row.cases.toLocaleString() : '—'}</td>
