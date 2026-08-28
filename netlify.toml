@@ -421,6 +421,19 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# PVI Shortage Report -- added 2026-08-28. Replaces the old Omni-based
+# Palermo's PVI shortage sheet (Front cnv_1c79gvh0). Plain read-only POST,
+# no schedule yet -- this first pass is view-only inside the Customers
+# tab; a scheduled digest/automated Excel-to-Front send is the planned
+# next step once the open items in the tab itself are confirmed with
+# Hill/Katie. Same duckdb single-query pattern as the other
+# motherduck-*.cjs functions above. See the function's own header for the
+# full design writeup, including why this moved out of Omni entirely.
+[functions."motherduck-pvi-shortage"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
