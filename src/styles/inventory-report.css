@@ -29,7 +29,7 @@
 
   .inv-print-only { display: block !important; }
 
-  @page { size: landscape; margin: 0.5in; }
+  @page { size: landscape; margin: 0.3in; }
 
   /* Hide the shared TopNav/utility-bar chrome for this print action only.
      Guarded behind body.inv-printing (toggled in InventoryReport.jsx right
@@ -63,7 +63,7 @@
   .inv-print-columns {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 28px;
+    gap: 20px;
   }
 
   .inv-print-table {
@@ -135,12 +135,27 @@
      max in the common case. Notes drops to a genuinely tight ~46px of
      content width (room for a checkmark/initials/a few characters, not a
      sentence) -- a real, accepted trade-off, not an oversight.
+     FIXED AGAIN, same day, a third time: Dan pointed out generous unused
+     page margins/gap and that Item Code itself was now cut off (taking
+     width from it for the LP fix above pushed it too far -- checked live in
+     MotherDuck: 92% of item codes actually in use at Caledonia are <=8
+     chars, so the prior 8% column, only ~29px of content, was truncating
+     the large majority, not just a rare tail). Reclaimed real page space
+     first instead of only shuffling existing column percentages again:
+     @page margin 0.5in -> 0.3in and column gap 28px -> 20px together add
+     ~23px of usable width PER COLUMN (from ~466px to ~489px), still well
+     within safe non-printable-margin territory for standard printers.
+     Item Code (.d-code-col) 8% -> 13% of that larger column (~56px content,
+     ~8.8 chars -- covers the 92% figure above with room to spare), taking
+     the needed percentage from Description (.d-desc-col) 20% -> 15% --
+     Dan confirmed further Description truncation is acceptable (unlike
+     Item Code, which needs to be readable). LP (.d-lp-col, still 28%)
+     actually gains a few pixels too as a side effect of the larger overall
+     column, no regression there.
      Still NOT VERIFIED ON A REAL PRINT, same caveat as every revision to
-     this sheet -- the digit-width assumption is a reasonable estimate, not
-     a guarantee, across different browsers/print engines/printer drivers.
-     Check a facility with a lot of long LP codes (Eau Claire or Madison,
-     per the numbers above -- NOT Wisconsin Rapids, which is a below-average
-     case for this specific problem) before fully trusting it. */
+     this sheet -- check a facility with a lot of long LP codes (Eau Claire
+     or Madison, not Wisconsin Rapids) before fully trusting either the LP
+     or Item Code widths. */
   .inv-print-table-detailed .code,
   .inv-print-table-detailed .desc,
   .inv-print-table-detailed .lp {
@@ -155,8 +170,8 @@
 
   .inv-print-table .d-loc-col  { width: 13%; }
   .inv-print-table .d-lp-col   { width: 28%; }
-  .inv-print-table .d-code-col { width: 8%;  }
-  .inv-print-table .d-desc-col { width: 20%; }
+  .inv-print-table .d-code-col { width: 13%; }
+  .inv-print-table .d-desc-col { width: 15%; }
   .inv-print-table .d-num-col  { width: 8%;  }
   .inv-print-table .d-blank-sm { width: 11%; }
   .inv-print-table .d-blank-lg { width: 12%; }
