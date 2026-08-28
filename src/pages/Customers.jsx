@@ -5,6 +5,7 @@ import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import ExpCheckTab from '../components/customers/ExpCheckTab.jsx'
 import ScorecardDraftsTab from '../components/customers/ScorecardDraftsTab.jsx'
+import PviShortageTab from '../components/customers/PviShortageTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
 import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 
@@ -15,7 +16,7 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // Tab order:
 //   LoadProof / DVRS → FEFO Rotation → EXP Check (Pretzilla) →
 //   Scorecard Drafts → PVI At Risk Inventory → Space Planning →
-//   Customer Onboarding
+//   PVI Shortage Report → Customer Onboarding
 //
 // LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
 // for Caledonia and Kenosha. Seeded with last-30-day open incidents from
@@ -42,6 +43,19 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // a real (not dry-run) test draft against a known Front conversation. See
 // components/customers/ScorecardDraftsTab.jsx and
 // netlify/functions/lib/scorecard-draft-shared.cjs for the full design.
+//
+// PVI Shortage Report tab added 2026-08-28, per Dan's ask — replaces the
+// old Omni-based Palermo's PVI shortage sheet (Front cnv_1c79gvh0, Katie
+// Sobieski's original request) entirely. Moved out of Omni because the
+// new join/exclusion logic needed for that request hit a hard wall in
+// Omni's model layer (a hand-pasted Advanced SQL version failed with
+// "could not run this query in this context" — root cause was a modeled
+// field reference, ${silver_datex_slv_tasks.effective_material_id}, that
+// only resolves inside Omni's own topic context). This is currently
+// VIEW ONLY — no Excel export or Front send yet; that's the next step
+// once the open items in the tab's own banner are confirmed with
+// Hill/Katie. See netlify/functions/motherduck-pvi-shortage.cjs for the
+// full design writeup.
 const SUB_TABS = [
   {
     id: 'dvr',
@@ -72,6 +86,11 @@ const SUB_TABS = [
     id: 'space',
     label: 'Space Planning',
     subtitle: 'Space planning, allocations & utilization across the network',
+  },
+  {
+    id: 'pvishortage',
+    label: 'PVI Shortage Report',
+    subtitle: "Palermo's CALEDONIA finished · rebuilt off Omni, direct from MotherDuck",
   },
   {
     id: 'onboarding',
@@ -156,13 +175,14 @@ export default function Customers() {
 
       {/* Sub-tab content */}
       <div style={{ padding: '24px' }}>
-        {subTab === 'dvr'        && <DvrTab />}
-        {subTab === 'fefo'       && <FefoRotationTab />}
-        {subTab === 'expcheck'   && <ExpCheckTab />}
-        {subTab === 'scorecard'  && <ScorecardDraftsTab />}
-        {subTab === 'pvi'        && <PviShelfLife />}
-        {subTab === 'space'      && <SpacePlanningTab />}
-        {subTab === 'onboarding' && <OnboardingTab />}
+        {subTab === 'dvr'         && <DvrTab />}
+        {subTab === 'fefo'        && <FefoRotationTab />}
+        {subTab === 'expcheck'    && <ExpCheckTab />}
+        {subTab === 'scorecard'   && <ScorecardDraftsTab />}
+        {subTab === 'pvi'         && <PviShelfLife />}
+        {subTab === 'space'       && <SpacePlanningTab />}
+        {subTab === 'pvishortage' && <PviShortageTab />}
+        {subTab === 'onboarding'  && <OnboardingTab />}
       </div>
     </div>
   )
