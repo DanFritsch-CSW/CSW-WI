@@ -106,19 +106,44 @@
      the ROWS_FIRST_PAGE_COL/ROWS_OTHER_PAGE_COL budget in InventoryReport.jsx
      stays valid. Not yet verified on a real multi-page print — check a
      facility like WR before relying on it, same as every prior revision to
-     this sheet. */
+     this sheet.
+
+     FIXED/EXTENDED 2026-08-28 (Cory/inventory team, Front feedback): the
+     original ask was for the LP number itself to print per pallet, not just
+     item code/description -- the on-screen "tap to expand" view already
+     shows "LP178459" etc per pallet, and that's what the printout needed to
+     match. Added a 7th column (.d-lp-col, monospace + single-line ellipsis
+     like .loc/.code) and rebalanced every column's width so the 7-column
+     row still fits the existing tuned 2-column-per-page layout at the same
+     font-size/row-height -- did NOT touch ROWS_FIRST_PAGE_COL/
+     ROWS_OTHER_PAGE_COL in the JSX, since row height (single line, same
+     font-size) is unchanged, only column widths shifted. LP codes like
+     "LP178459" (8 chars) get ~13% of column width (~60px in a ~466px print
+     column at the current landscape/0.5in-margin/2-column layout), sized to
+     fit without truncating in the common case; Description dropped from 29%
+     to 20% to make room, which will truncate more eagerly than before --
+     acceptable given this sheet already documents "use the on-screen tap-
+     to-expand view for the full text if it's cut off" as the fallback.
+     Like the two prior fixes in this comment block, THIS HAS NOT YET BEEN
+     VERIFIED ON A REAL PRINT -- check a facility like WR before relying on
+     the widths not to wrap/overflow on an actual printer. */
   .inv-print-table-detailed .code,
-  .inv-print-table-detailed .desc {
+  .inv-print-table-detailed .desc,
+  .inv-print-table-detailed .lp {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .inv-print-table-detailed .code { font-family: monospace; }
+  .inv-print-table-detailed .code,
+  .inv-print-table-detailed .lp {
+    font-family: monospace;
+  }
 
-  .inv-print-table .d-loc-col  { width: 14%; }
-  .inv-print-table .d-code-col { width: 11%; }
-  .inv-print-table .d-desc-col { width: 29%; }
-  .inv-print-table .d-num-col  { width: 9%;  }
-  .inv-print-table .d-blank-sm { width: 12%; }
-  .inv-print-table .d-blank-lg { width: 25%; }
+  .inv-print-table .d-loc-col  { width: 13%; }
+  .inv-print-table .d-lp-col   { width: 13%; }
+  .inv-print-table .d-code-col { width: 8%;  }
+  .inv-print-table .d-desc-col { width: 20%; }
+  .inv-print-table .d-num-col  { width: 8%;  }
+  .inv-print-table .d-blank-sm { width: 11%; }
+  .inv-print-table .d-blank-lg { width: 27%; }
 }
