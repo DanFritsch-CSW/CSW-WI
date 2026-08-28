@@ -60,6 +60,15 @@ import '../styles/prepick-status.css'
  * Madison data — when some cases on an order lack tie/high data, that's
  * surfaced in the expandable detail row rather than silently baked into
  * the number, so the estimate never looks more complete than it is.
+ *
+ * Partial-pick progress (added 2026-08-28): actualCases is now populated
+ * for orders still being picked (not just 'ready' ones) when the backend's
+ * self-check confirms the number is trustworthy (appt.progressReliable —
+ * see motherduck-prepick-status.cjs header "Partial-pick progress +
+ * self-check"). When reliable, the row shows "952/1121 — 85%" instead of
+ * just the case totals. When not reliable (self-check failed, or no task
+ * data exists yet to attempt it), the display falls back to exactly the
+ * pre-2026-08-28 look — no percentage, no partial count.
  */
 export default function PrePickStatus({ facilityId, planDate }) {
   const [appointments, setAppointments] = useState([])
@@ -157,6 +166,9 @@ export default function PrePickStatus({ facilityId, planDate }) {
           : difficulty === 'Easy grab' ? 'good'
           : 'neutral'
         const hasProgress = appt.expectedCases != null
+        // Real partial-pick number only when the backend's self-check
+        // passed (progressReliable) and there's actually a number to show.
+        const showPartialProgress = appt.status !== 'ready' && appt.progressReliable && appt.actualCases != null
         const hasPalletGap = appt.casesWithoutPalletData != null && appt.casesWithoutPalletData > 0
         const hasDetail = Boolean(appt.warehouseMismatch) ||
           (appt.pickLocations != null && appt.status !== 'ready') ||
@@ -191,7 +203,9 @@ export default function PrePickStatus({ facilityId, planDate }) {
 
               {hasProgress && (
                 <span className="pps-progress">
-                  {Math.round(appt.actualCases)}/{Math.round(appt.expectedCases)}
+                  {showPartialProgress
+                    ? `${Math.round(appt.actualCases)}/${Math.round(appt.expectedCases)} — ${Math.round((appt.actualCases / appt.expectedCases) * 100)}%`
+                    : `${Math.round(appt.actualCases)}/${Math.round(appt.expectedCases)}`}
                 </span>
               )}
 

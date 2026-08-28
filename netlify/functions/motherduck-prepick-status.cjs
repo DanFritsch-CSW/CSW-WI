@@ -23,7 +23,14 @@
 //       orderIds, orderLookupCodes,   // arrays — an appointment can cover multiple orders
 //       status: 'ready' | 'not-started' | 'unresolved' | 'placeholder',
 //       expectedCases,                 // reliable — sum of orderlines.Amount
-//       actualCases,                   // ONLY set when status='ready' (= expectedCases); null otherwise — see notes
+//       actualCases,                   // set when status='ready' (= expectedCases), OR when a
+//                                       // not-yet-ready order's partial pick count passes the
+//                                       // self-check below (progressReliable=true); null otherwise
+//       progressReliable,               // true if actualCases reflects a real partial-pick count
+//                                       // that passed the self-check (see "Partial-pick progress"
+//                                       // below); true for 'ready' (trivially, actual=expected);
+//                                       // false when partial data exists but failed the self-check;
+//                                       // null when there's no task data to attempt this at all
 //       estimatedPallets,              // sum of CEIL(cases / (pallet_tie * pallet_high)) per line; null if no line had tie/high data
 //       casesWithoutPalletData,        // cases from lines missing tie/high — NOT included in estimatedPallets; 0 when full coverage
 //       pickLocations, rehandleRisk,   // summed across all orders; null when no hard allocation yet
@@ -98,13 +105,9 @@
 //   - orderlines.license_plate_id: null on every order regardless of pick
 //     status — populated at a later shipping stage, not useful here.
 // No reliable source for "cases picked so far" on a PARTIALLY-picked order
-// was found this session. Rather than keep guessing, actualCases is only
-// populated when status='ready' (where, by the ready definition itself,
-// all cases are done — actualCases = expectedCases). For 'not-started'
-// orders, actualCases is null and the frontend shows no progress number
-// rather than a potentially-wrong one. If a real "picked so far" source
-// surfaces later (Dan may know of a Datex report/field this session didn't
-// check), this is the place to wire it in.
+// was found in that session. actualCases was only populated when
+// status='ready' — see "Partial-pick progress" below for how this was
+// finally solved.
 //
 // ── Estimated pallets — added 2026-07-13 ────────────────────────────────
 // silver.datex_slv_materialspackagingslookup carries pallet_tie/pallet_high
@@ -120,6 +123,48 @@
 // is visible rather than silently wrong — e.g. Novonesis materials in this
 // session's test data had NO tie/high configured at all, so
 // estimatedPallets is null for those orders specifically, not zero.
+//
+// ── Partial-pick progress + self-check — added 2026-08-28 ───────────────
+// Revisited the "no reliable source for cases picked so far" gap above.
+// silver.datex_slv_tasks is an audit-trail table: re-plans/corrections
+// create NEW task rows for the same physical pick instead of updating the
+// original, so a naive SUM(actual_inventory_amount) across all of an
+// order's tasks overcounts (confirmed 2x overcount on real order 730255
+// when summed naively).
+//
+// Fix: reconstruct the "real" task list per order as the TERMINAL tasks —
+// tasks whose task_id does not appear as another task's chain_head (i.e.
+// not superseded by a later re-plan in the same chain) — excluding
+// Cancelled tasks (status_id=3, whose replacement work is a separate,
+// unlinked task chain) and tasks with expected_inventory_amount=0 (a
+// different, non-pick task type). Among terminal tasks: pickedSoFar =
+// SUM(actual_inventory_amount), reconstructedTotal =
+// SUM(expected_inventory_amount).
+//
+// This reconstruction is NOT universally reliable, so every order runs a
+// self-check before its number is trusted: reconstructedTotal is compared
+// against the real order total (SUM(orderlines.Amount), already computed
+// above as expectedCases) with a 1% tolerance. Two confirmed failure modes
+// that the self-check catches and safely falls back on:
+//   - Bulk/lane-style batch-pick orders (e.g. real order 757506) use a
+//     fixed-increment task pattern that doesn't cleanly resolve via
+//     chain_head — reconstructedTotal comes out roughly 2x the real total.
+//   - Orders where a "Picking" task (operation_code 8, still Released) and
+//     a separate "Manual Pick Allocation" task (operation_code 23, already
+//     Completed) both exist per line for the same physical pick — neither
+//     supersedes the other via chain_head, so both get counted, again
+//     roughly doubling reconstructedTotal. Confirmed live on several
+//     current Madison orders (e.g. 733713, 735422, 785794, 786250, 786251)
+//     during this change's validation — this pattern is actually MORE
+//     common on live data than the bulk/lane case above.
+// When the self-check fails, this order contributes no partial-progress
+// number — the appointment falls back to exactly the pre-2026-08-28
+// behavior (actualCases null until status='ready'). An appointment's
+// actualCases/progressReliable is only marked reliable when EVERY order on
+// it (there can be several, for load-container appointments) passed its
+// own self-check — a wrong number is worse than no number, so one
+// unreliable order poisons the whole appointment's partial figure rather
+// than being silently dropped from the sum.
 const NO_CACHE_HEADERS = {
   'Content-Type': 'application/json',
   'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -384,6 +429,57 @@ exports.handler = async (event) => {
       }
     }
 
+    // ── Step 7.5: partial-pick reconstruction + self-check ────────────────
+    // "Terminal" tasks per order — not superseded by a later re-plan
+    // (task_id doesn't appear as another task's chain_head), not Cancelled
+    // (status_id=3, whose replacement work is an unlinked separate chain),
+    // and not a non-pick task type (expected_inventory_amount=0). See file
+    // header "Partial-pick progress + self-check" for why this needs a
+    // self-check rather than being trusted outright.
+    const terminalByOrder = new Map() // order_id -> { pickedSoFar, reconstructedTotal }
+    if (resolvedOrderIds.length > 0) {
+      const idList = resolvedOrderIds.join(',')
+      const terminalSql = `
+        WITH terminal AS (
+          SELECT t.order_id, t.actual_inventory_amount, t.expected_inventory_amount
+          FROM production_db.silver.datex_slv_tasks t
+          WHERE t.order_id IN (${idList})
+            AND t.status_id <> 3
+            AND t.expected_inventory_amount <> 0
+            AND t.task_id NOT IN (
+              SELECT chain_head
+              FROM production_db.silver.datex_slv_tasks
+              WHERE chain_head IS NOT NULL AND order_id IN (${idList})
+            )
+        )
+        SELECT order_id,
+               SUM(actual_inventory_amount) AS picked_so_far,
+               SUM(expected_inventory_amount) AS reconstructed_total
+        FROM terminal
+        GROUP BY order_id
+      `
+      const terminalRows = await runQuery(terminalSql)
+      for (const r of terminalRows) {
+        terminalByOrder.set(Number(r.order_id), {
+          pickedSoFar: Number(r.picked_so_far) || 0,
+          reconstructedTotal: Number(r.reconstructed_total) || 0,
+        })
+      }
+    }
+
+    // Self-check: does the reconstructed total match the known-reliable
+    // order total (expectedByOrder, from orderlines) within 1%? If not,
+    // this order's terminal-task reconstruction can't be trusted — treat it
+    // as having no partial-pick data at all rather than showing a wrong
+    // number (see file header for confirmed failure patterns).
+    function orderProgressReliable(oid) {
+      const terminal = terminalByOrder.get(oid)
+      const expected = expectedByOrder.get(oid)
+      if (!terminal || expected == null) return false
+      const tolerance = expected > 0 ? expected * 0.01 : 1
+      return Math.abs(terminal.reconstructedTotal - expected) <= tolerance
+    }
+
     // ── Step 8: pick difficulty (hard allocations + lot mix) ──────────────
     const complexityByOrder = new Map()
     if (resolvedOrderIds.length > 0) {
@@ -445,6 +541,7 @@ exports.handler = async (event) => {
           status: 'unresolved',
           expectedCases: null,
           actualCases: null,
+          progressReliable: null,
           estimatedPallets: null,
           casesWithoutPalletData: null,
           pickLocations: null,
@@ -469,6 +566,14 @@ exports.handler = async (event) => {
       let hasAnyComplexityData = false
       const mismatchedWarehouses = new Set()
       const orderLookupCodes = []
+
+      // Partial-pick progress: summed across orders on this appointment,
+      // but only trusted if EVERY order with terminal-task data passed its
+      // own self-check — one unreliable order poisons the whole
+      // appointment's number rather than being silently dropped.
+      let partialPickedTotal = 0
+      let hasAnyPartialData = false
+      let allPartialDataReliable = true
 
       for (const oid of orderIds) {
         const order = orderById.get(oid)
@@ -501,6 +606,14 @@ exports.handler = async (event) => {
           pickLocations += complexity.pickLocations
           rehandleRisk += complexity.rehandleRisk
         }
+        if (terminalByOrder.has(oid)) {
+          hasAnyPartialData = true
+          if (orderProgressReliable(oid)) {
+            partialPickedTotal += terminalByOrder.get(oid).pickedSoFar
+          } else {
+            allPartialDataReliable = false
+          }
+        }
       }
 
       let status = 'not-started'
@@ -514,17 +627,25 @@ exports.handler = async (event) => {
         ? { orderWarehouseId: [...mismatchedWarehouses][0], expectedWarehouseId }
         : null
 
+      // actualCases/progressReliable: 'ready' orders are trivially reliable
+      // (actual = expected, by the ready definition itself). For orders
+      // still being picked, only show a partial number when every order on
+      // this appointment passed its self-check — otherwise fall back to
+      // exactly the pre-2026-08-28 behavior (null).
+      const partialReliable = hasAnyPartialData && allPartialDataReliable
+      const progressReliable = status === 'ready' ? true : (hasAnyPartialData ? partialReliable : null)
+      const actualCases = status === 'ready'
+        ? (hasAnyExpectedData ? expectedTotal : null)
+        : (partialReliable ? partialPickedTotal : null)
+
       appointments.push({
         ...base,
         orderIds,
         orderLookupCodes,
         status,
         expectedCases: hasAnyExpectedData ? expectedTotal : null,
-        // No reliable "picked so far" source for partial orders — only
-        // populate actualCases when 'ready' (= expectedCases by
-        // definition). See file header for why this isn't shown for
-        // not-started orders.
-        actualCases: (status === 'ready' && hasAnyExpectedData) ? expectedTotal : null,
+        actualCases,
+        progressReliable,
         estimatedPallets: hasAnyPalletData ? palletsTotal : null,
         casesWithoutPalletData,
         pickLocations: hasAnyComplexityData ? pickLocations : null,
@@ -545,6 +666,7 @@ exports.handler = async (event) => {
         status: 'placeholder',
         expectedCases: null,
         actualCases: null,
+        progressReliable: null,
         estimatedPallets: null,
         casesWithoutPalletData: null,
         pickLocations: null,
