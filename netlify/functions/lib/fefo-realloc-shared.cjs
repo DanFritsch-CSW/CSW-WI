@@ -30,6 +30,12 @@ const FEFO_PROJECTS = [
   { id: 'palvi9', code: 'PALVI9', name: "Palermo's Caledonia", facility: 'cal' },
   { id: 'palma9', code: 'PALMA9', name: "Palermo's Caledonia Materials", facility: 'cal' },
   { id: 'paldsd9', code: 'PALDSD9', name: "Palermo's Caledonia DSD", facility: 'cal' },
+  // Added 2026-08-28 alongside the live-tab Echo Lakes addition (see
+  // fefo-orders.cjs/fefo.js for the full writeup) -- included here so the
+  // FEFO Lot Reallocation Alert settings panel (which maps over the
+  // client's FEFO_PROJECTS list) doesn't offer a project this file can't
+  // actually alert for.
+  { id: 'echlk5', code: 'ECHLK5', name: 'Echo Lakes Foods', facility: 'ken' },
 ]
 const PROJECT_BY_DASHBOARD_TYPE = new Map(FEFO_PROJECTS.map(p => [`fefo_realloc_${p.id}`, p]))
 const APP_URL = 'https://csw-wi.netlify.app/customers?tab=fefo'
