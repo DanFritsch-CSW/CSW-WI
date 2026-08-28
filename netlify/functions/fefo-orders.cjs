@@ -6,7 +6,7 @@
 //   - facility:   'cal' | 'mad' | 'ken' | 'wr' | 'ec'
 //   - projectIds: string[] of project IDs (one or more of 'faioa5', 'fofwe5',
 //                 'riche5', 'golst5', 'birch5', 'palvi9', 'palma9', 'paldsd9',
-//                 'jdf1'). Not all facilities in one call — 'facility' is a
+//                 'jdf1', 'echlk5'). Not all facilities in one call — 'facility' is a
 //                 single warehouse per request (see src/lib/fefo.js's
 //                 fetchLiveFefoOrdersBatch for how the client splits a
 //                 mixed-facility batch into per-facility calls to this
@@ -235,6 +235,14 @@ const PROJECTS = {
   // rationale). Lot codes encode the manufacture date ('F' + YYMMDD + 4-digit
   // sequence), parsed by parseJDFManDate below.
   jdf1: { datexName: 'Jones Dairy Farm - CSW-Madison', dateFormat: 'manDateF', dateSemantic: 'man', closedOrders: true },
+  // Added 2026-08-28 per Hill's request (Front cnv_1c7cx6ac) -- Echo Lakes
+  // wants lot-level FIFO by receive date, not expiration-based FEFO
+  // (confirmed in-thread). Same receiveDate/received architecture as
+  // Birchwood. Confirmed via MotherDuck: project_id=128, facility KEN
+  // (warehouse_id=5). See src/lib/fefo.js's echlk5 entry for the full
+  // scoping writeup (retrospective dollar-credit calc explicitly out of
+  // scope; known receive_date-reset-via-transfer caveat not solved here).
+  echlk5: { datexName: 'Echo Lakes Foods Inc- KENOSHA', dateFormat: 'receiveDate', dateSemantic: 'received' },
 }
 
 const FACILITY_WAREHOUSE_ID = {
