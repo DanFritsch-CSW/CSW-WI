@@ -27,15 +27,21 @@ const FACILITY_LIST = [
 // LP" is its own precise SHOW option -- Empty stays strictly 0 pallets,
 // Occupied stays >0 (still includes 1-pallet locations too, since they do
 // have something in them -- these tabs are independent lenses, not a
-// mutually-exclusive partition), and "1 LP" is exactly 1 pallet. Deliberately
-// scoped to just this piece for now -- Dean's related but more complex ask
-// (flagging locations short of a full DOUBLE-STACKED count, e.g. 3-of-4 for
-// Stackable-group products) needs a material-group-to-capacity mapping
-// Datex doesn't store anywhere (confirmed live: max_license_plate_quantity
-// is null for all 20,299 locations at Caledonia) and real input from Nate
-// on the exact capacity per material group before it can be built
-// correctly -- not done here.
-const MODES = ['All', 'Occupied', 'Empty', '1 LP']
+// mutually-exclusive partition), and "1 LP" is exactly 1 pallet.
+//
+// EXTENDED same day: added "3 LPs" (exactly 3 pallets) alongside "1 LP" --
+// same independent-lens pattern, no new logic needed beyond one more
+// literal count. This directly serves Dean's question in the same thread
+// ("Are we flagging locations that have products with 3 lps when the
+// product is double stacked so there should be 4?") in its simplest form:
+// a raw exactly-3 count, with no material-group-aware "is this actually
+// short of full" judgment attached. Still deliberately NOT building the
+// full capacity-aware version -- that needs a material-group-to-capacity
+// mapping Datex doesn't store anywhere (confirmed live:
+// max_license_plate_quantity is null for all 20,299 locations at
+// Caledonia) and real input from Nate on the exact capacity per material
+// group before it can be built correctly.
+const MODES = ['All', 'Occupied', 'Empty', '1 LP', '3 LPs']
 
 const DISC_TYPES = [
   { value: 'pallet_missing',  label: 'Pallet missing — in system, not physically there' },
@@ -245,16 +251,18 @@ function FilterPills({ items, active, onSelect }) {
 }
 
 function StatBar({ rows, discCount, loadingEmpty }) {
-  const occ    = rows.filter(l => l.palletCount > 0).length
-  const emp    = rows.filter(l => l.palletCount === 0).length
-  const oneLp  = rows.filter(l => l.palletCount === 1).length
-  const total  = rows.reduce((s, l) => s + l.palletCount, 0)
+  const occ     = rows.filter(l => l.palletCount > 0).length
+  const emp     = rows.filter(l => l.palletCount === 0).length
+  const oneLp   = rows.filter(l => l.palletCount === 1).length
+  const threeLp = rows.filter(l => l.palletCount === 3).length
+  const total   = rows.reduce((s, l) => s + l.palletCount, 0)
   return (
     <div style={{ display: 'flex', gap: '1.5rem', padding: '7px 14px', background: 'var(--bg2)', borderRadius: 'var(--r-md)', fontSize: 11, color: 'var(--text-secondary)', flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
       <span><strong style={{ color: 'var(--text-primary)' }}>{rows.length}</strong> locations</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{occ}</strong> occupied</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{loadingEmpty ? '…' : emp}</strong> empty</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{oneLp}</strong> with 1 LP</span>
+      <span><strong style={{ color: 'var(--text-primary)' }}>{threeLp}</strong> with 3 LPs</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{total}</strong> total pallets</span>
       {discCount > 0 && <span><strong style={{ color: 'var(--red)' }}>{discCount}</strong> flagged</span>}
       {loadingEmpty && <span style={{ fontSize: 10, opacity: 0.5, fontStyle: 'italic' }}>loading empty locations…</span>}
@@ -416,7 +424,7 @@ export default function InventoryReport() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return data.filter(loc => {
-      const mm = mode === 'All' || (mode === 'Occupied' && loc.palletCount > 0) || (mode === 'Empty' && loc.palletCount === 0) || (mode === '1 LP' && loc.palletCount === 1)
+      const mm = mode === 'All' || (mode === 'Occupied' && loc.palletCount > 0) || (mode === 'Empty' && loc.palletCount === 0) || (mode === '1 LP' && loc.palletCount === 1) || (mode === '3 LPs' && loc.palletCount === 3)
       const idLower = loc.id.toLowerCase()
       const sm = !q || idLower.startsWith(q) || (aisleExpandedPrefix && idLower.startsWith(aisleExpandedPrefix))
       return mm && sm
