@@ -16,7 +16,26 @@ const FACILITY_LIST = [
   { id: 'ec',  label: 'Eau Claire',       whName: 'CSW-Eau Claire' },
 ]
 
-const MODES = ['All', 'Occupied', 'Empty']
+// 2026-08-29 (Nate/Josh, cnv_1az0gqac): the app's binary Occupied/Empty
+// split doesn't match the legacy "available locations" report the team is
+// used to. A location with exactly 1 LP in it still has open, usable
+// space -- it isn't "occupied" in the sense that matters for putaway/
+// replenishment planning, per Nate's ask: "could we add a flag for
+// locations with only 1 license plate in it?" Rather than merge that into
+// a broader "Available" bucket (an earlier pass at this did that, then
+// Dan asked for it split back out into its own explicit tab instead), "1
+// LP" is its own precise SHOW option -- Empty stays strictly 0 pallets,
+// Occupied stays >0 (still includes 1-pallet locations too, since they do
+// have something in them -- these tabs are independent lenses, not a
+// mutually-exclusive partition), and "1 LP" is exactly 1 pallet. Deliberately
+// scoped to just this piece for now -- Dean's related but more complex ask
+// (flagging locations short of a full DOUBLE-STACKED count, e.g. 3-of-4 for
+// Stackable-group products) needs a material-group-to-capacity mapping
+// Datex doesn't store anywhere (confirmed live: max_license_plate_quantity
+// is null for all 20,299 locations at Caledonia) and real input from Nate
+// on the exact capacity per material group before it can be built
+// correctly -- not done here.
+const MODES = ['All', 'Occupied', 'Empty', '1 LP']
 
 const DISC_TYPES = [
   { value: 'pallet_missing',  label: 'Pallet missing — in system, not physically there' },
@@ -226,14 +245,16 @@ function FilterPills({ items, active, onSelect }) {
 }
 
 function StatBar({ rows, discCount, loadingEmpty }) {
-  const occ   = rows.filter(l => l.palletCount > 0).length
-  const emp   = rows.filter(l => l.palletCount === 0).length
-  const total = rows.reduce((s, l) => s + l.palletCount, 0)
+  const occ    = rows.filter(l => l.palletCount > 0).length
+  const emp    = rows.filter(l => l.palletCount === 0).length
+  const oneLp  = rows.filter(l => l.palletCount === 1).length
+  const total  = rows.reduce((s, l) => s + l.palletCount, 0)
   return (
     <div style={{ display: 'flex', gap: '1.5rem', padding: '7px 14px', background: 'var(--bg2)', borderRadius: 'var(--r-md)', fontSize: 11, color: 'var(--text-secondary)', flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
       <span><strong style={{ color: 'var(--text-primary)' }}>{rows.length}</strong> locations</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{occ}</strong> occupied</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{loadingEmpty ? '…' : emp}</strong> empty</span>
+      <span><strong style={{ color: 'var(--text-primary)' }}>{oneLp}</strong> with 1 LP</span>
       <span><strong style={{ color: 'var(--text-primary)' }}>{total}</strong> total pallets</span>
       {discCount > 0 && <span><strong style={{ color: 'var(--red)' }}>{discCount}</strong> flagged</span>}
       {loadingEmpty && <span style={{ fontSize: 10, opacity: 0.5, fontStyle: 'italic' }}>loading empty locations…</span>}
@@ -395,7 +416,7 @@ export default function InventoryReport() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return data.filter(loc => {
-      const mm = mode === 'All' || (mode === 'Occupied' && loc.palletCount > 0) || (mode === 'Empty' && loc.palletCount === 0)
+      const mm = mode === 'All' || (mode === 'Occupied' && loc.palletCount > 0) || (mode === 'Empty' && loc.palletCount === 0) || (mode === '1 LP' && loc.palletCount === 1)
       const idLower = loc.id.toLowerCase()
       const sm = !q || idLower.startsWith(q) || (aisleExpandedPrefix && idLower.startsWith(aisleExpandedPrefix))
       return mm && sm
