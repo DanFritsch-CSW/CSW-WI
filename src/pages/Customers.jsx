@@ -16,7 +16,7 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 //
 // Tab order:
 //   LoadProof / DVRS → FEFO Rotation → EXP Check (Pretzilla) →
-//   Pretzilla Shortage Report → Scorecard Drafts → PVI At Risk Inventory →
+//   Customer Shortage Report → Scorecard Drafts → PVI At Risk Inventory →
 //   Space Planning → PVI Shortage Report → Customer Onboarding
 //
 // LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
@@ -47,7 +47,10 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // Excel export or Front send yet, visible so Dan can compare it against
 // the manual sheet daily before handing off to the CSR team. See
 // netlify/functions/motherduck-pretzilla-shortage.cjs for the full design
-// writeup (demand join, inventory pull, Short formula).
+// writeup (demand join, inventory pull, Short formula). Nav label renamed
+// to "Customer Shortage Report" the same day, per Dan's request — the
+// underlying tool/route id ('pretzillashortage') and its Kenosha/Pretzilla
+// scope are unchanged, only the tab text.
 //
 // Scorecard Drafts tab added 2026-08-06, per Dan's ask: "build the tab
 // within the UI so that I can see and test the prompt." Bernatello's-only
@@ -86,7 +89,7 @@ const SUB_TABS = [
   },
   {
     id: 'pretzillashortage',
-    label: 'Pretzilla Shortage Report',
+    label: 'Customer Shortage Report',
     subtitle: 'Kenosha · validation mode · live from MotherDuck vs. team\'s manual sheet',
   },
   {
