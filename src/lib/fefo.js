@@ -505,6 +505,17 @@ function locSuffix(rem) {
   return ` at ${rem.location}`
 }
 
+// lotSuffix — added 2026-08-31 per Hill Hamrick's Front feedback (PALVI9
+// digest): the violation text named the MATERIAL but never the actual LOT
+// NUMBER of the stuck LPs — Hill had to ask "ie whats the lot?" since
+// there was nothing to look up in Datex from the message alone. Same fix
+// applied to lib/fefo-digest-shared.cjs's verdictCopy so the live tab's
+// inline verdict text and the digest never disagree.
+function lotSuffix(rem) {
+  if (!rem?.lot) return ''
+  return ` (lot ${rem.lot})`
+}
+
 export function verdictCopy(line, projId) {
   const verb = dateVerb(projId)
   const v = lineVerdict(line)
@@ -513,16 +524,17 @@ export function verdictCopy(line, projId) {
     const oldShip = datedShip.reduce((a, b) => a.k < b.k ? a : b)
     const stockUnit = line.rem.lps > 0 ? `${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}` : 'stock'
     const loc = locSuffix(line.rem)
+    const lot = lotSuffix(line.rem)
     const days = lineDaysOlder(line)
     const drift = days > 0 ? ` (${days} day${days === 1 ? '' : 's'} older)` : ''
-    return `Out of rotation${drift} — ${stockUnit} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
+    return `Out of rotation${drift} — ${stockUnit}${lot} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
   }
   if (v === 'hold') {
-    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
   }
   if (v === 'blocked') {
     const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
-    return `Older stock exists (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
   }
   if (!line.rem || line.rem.lps === 0) {
     return 'In rotation — the oldest stock on hand is shipping first… fully cleared.'
