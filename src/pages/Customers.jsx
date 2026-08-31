@@ -4,6 +4,7 @@ import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import ExpCheckTab from '../components/customers/ExpCheckTab.jsx'
+import PretzillaShortageTab from '../components/customers/PretzillaShortageTab.jsx'
 import ScorecardDraftsTab from '../components/customers/ScorecardDraftsTab.jsx'
 import PviShortageTab from '../components/customers/PviShortageTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
@@ -15,8 +16,8 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 //
 // Tab order:
 //   LoadProof / DVRS → FEFO Rotation → EXP Check (Pretzilla) →
-//   Scorecard Drafts → PVI At Risk Inventory → Space Planning →
-//   PVI Shortage Report → Customer Onboarding
+//   Pretzilla Shortage Report → Scorecard Drafts → PVI At Risk Inventory →
+//   Space Planning → PVI Shortage Report → Customer Onboarding
 //
 // LoadProof / DVRS tab (2026-07-10): multi-facility DVR incident tracker
 // for Caledonia and Kenosha. Seeded with last-30-day open incidents from
@@ -36,6 +37,17 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // math-reconciliation view only (EXP vs MFG + shelf life); it does not
 // catch an internally-consistent misread manufacture date — see
 // netlify/functions/motherduck-exp-check.cjs for exactly what it covers.
+//
+// Pretzilla Shortage Report tab added 2026-08-31, per Dan's ask (Fathom
+// "Pretzilla Daily" call) — automates the team's daily hand-built shortage
+// Excel (Pretzilla_Template.xlsx). Kenosha only (project_ids 230, 342) for
+// now; validated live against the team's actual 09/01 Excel before this
+// tab was built (6/7 materials matched exactly, one real false-shortage in
+// the manual sheet caught and explained). Currently VALIDATION MODE — no
+// Excel export or Front send yet, visible so Dan can compare it against
+// the manual sheet daily before handing off to the CSR team. See
+// netlify/functions/motherduck-pretzilla-shortage.cjs for the full design
+// writeup (demand join, inventory pull, Short formula).
 //
 // Scorecard Drafts tab added 2026-08-06, per Dan's ask: "build the tab
 // within the UI so that I can see and test the prompt." Bernatello's-only
@@ -71,6 +83,11 @@ const SUB_TABS = [
     id: 'expcheck',
     label: 'EXP Check',
     subtitle: 'Pretzilla · EXP date vs. manufacture date + shelf life reconciliation',
+  },
+  {
+    id: 'pretzillashortage',
+    label: 'Pretzilla Shortage Report',
+    subtitle: 'Kenosha · validation mode · live from MotherDuck vs. team\'s manual sheet',
   },
   {
     id: 'scorecard',
@@ -175,14 +192,15 @@ export default function Customers() {
 
       {/* Sub-tab content */}
       <div style={{ padding: '24px' }}>
-        {subTab === 'dvr'         && <DvrTab />}
-        {subTab === 'fefo'        && <FefoRotationTab />}
-        {subTab === 'expcheck'    && <ExpCheckTab />}
-        {subTab === 'scorecard'   && <ScorecardDraftsTab />}
-        {subTab === 'pvi'         && <PviShelfLife />}
-        {subTab === 'space'       && <SpacePlanningTab />}
-        {subTab === 'pvishortage' && <PviShortageTab />}
-        {subTab === 'onboarding'  && <OnboardingTab />}
+        {subTab === 'dvr'               && <DvrTab />}
+        {subTab === 'fefo'              && <FefoRotationTab />}
+        {subTab === 'expcheck'          && <ExpCheckTab />}
+        {subTab === 'pretzillashortage' && <PretzillaShortageTab />}
+        {subTab === 'scorecard'         && <ScorecardDraftsTab />}
+        {subTab === 'pvi'               && <PviShelfLife />}
+        {subTab === 'space'             && <SpacePlanningTab />}
+        {subTab === 'pvishortage'       && <PviShortageTab />}
+        {subTab === 'onboarding'        && <OnboardingTab />}
       </div>
     </div>
   )
