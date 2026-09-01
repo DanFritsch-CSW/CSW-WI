@@ -459,27 +459,32 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
-# Daily Discussion EMAIL draft creation -- added 2026-09-01, per Dan's ask
-# ("I would love for this to create an email draft from the APP"). NOT
-# connected to front-daily-discussion-run.cjs above (Dan explicitly: "not
-# sure where the 'replace' internal front discussion aspect comes from...
-# This would be a fresh email") -- a completely separate, additional
-# capability. Facility-selectable in the UI (unlike CMM Outbound's
-# hardcoded 'cal') and pulls a general, all-customer/both-direction
-# appointment list rather than CMM Outbound's single-carrier/single-
-# customer/outbound-only filter. See lib/daily-discussion-email-shared.cjs
-# for the full design writeup.
-[functions."daily-discussion-email-run"]
+# Customer Shortage Report EMAIL draft creation -- added 2026-09-01,
+# MOVED same day from an earlier "Daily Discussion Email" version per
+# Dan's follow-up: "I would've thought they would live within the
+# Customer Shortage Report tab" + "this needs to live within the Customer
+# Shortage Report [tab] for when we get more customers other than
+# Pretzilla built within it." Content is now the shortage table itself
+# (Material/Needed/Active/Inactive/Allocated/Short), not a general
+# appointment list. Keyed by reportKey (today: just 'pretzilla_ken'), not
+# facility, so adding a second customer to the tab later is a new
+# reportKey + REPORT_CONFIGS entry, not a restructuring. The earlier
+# daily-discussion-email-run.cjs/-test.cjs/lib/daily-discussion-email-
+# shared.cjs files are now orphaned/unregistered (left in place, no
+# file-delete tool, same pattern as dockcounts-digest-run.cjs). See
+# lib/shortage-report-email-shared.cjs for the full design writeup.
+[functions."shortage-report-email-run"]
   schedule = "*/15 * * * *"
   timeout = 26
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
-# Daily Discussion email draft creation MANUAL TEST -- same reason and
-# pattern as cmm-outbound-draft-create-test above (fixes 403 on "Create
-# Draft Now (test)"). Requires {facility} in the POST body -- no default,
-# since this feature is meant to work across any of the 5 facilities.
-[functions."daily-discussion-email-test"]
+# Customer Shortage Report email draft creation MANUAL TEST -- same
+# reason and pattern as cmm-outbound-draft-create-test above (fixes 403
+# on "Create Draft Now (test)"). Requires {reportKey} in the POST body --
+# no default, since this is meant to work across multiple customer
+# reports as they get added.
+[functions."shortage-report-email-test"]
   timeout = 26
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
