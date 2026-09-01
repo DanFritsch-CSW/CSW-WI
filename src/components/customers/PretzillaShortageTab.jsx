@@ -37,6 +37,14 @@
 // the time this report is generated. Short is now simply Active - Needed,
 // computed server-side; see the backend function's header for detail.
 //
+// Order status shown per order (2026-09-01, later same day, per Dan's
+// ask): each order in the appointments panel now shows its Datex status
+// (Created/Processing/etc.) next to its number. Created and Processing
+// get distinct colors since Created orders are the likely explanation for
+// why an appointment shows Not Linked / No Order Within Datex — see the
+// backend function's header for the live example that prompted this
+// (three "Not Linked" orders for 9/3, all sitting in Created).
+//
 // Currently VALIDATION MODE: visible in the app for Dan to compare against
 // the team's manual sheet each day this week before this replaces the
 // manual process for the CSR team. No Excel export or Front send yet —
@@ -83,6 +91,29 @@ function LinkStatusBadge({ status }) {
       borderRadius: 999, background: cfg.bg, color: cfg.color, whiteSpace: 'nowrap',
     }}>
       {cfg.text}
+    </span>
+  );
+}
+
+// Order status (Datex silver.datex_slv_orderstatuses — Created/Processing/
+// Completed/Cancelled/etc.). Created and Processing get their own colors
+// since those are the two Dan specifically flagged as worth calling out
+// (Created being the likely explanation for Not Linked/No Order
+// appointments — see the backend function's header). Everything else
+// (Completed, Cancelled, Hold, etc.) falls back to a neutral color.
+const ORDER_STATUS_COLOR = {
+  Created: '#8b8fa3',
+  Processing: '#38a169',
+};
+
+function OrderTag({ orderNo, orderStatus }) {
+  const color = ORDER_STATUS_COLOR[orderStatus] || 'var(--text-secondary, #9aa1ac)';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4 }}>
+      <span style={{ color: 'var(--text-secondary, #9aa1ac)' }}>{orderNo}</span>
+      {orderStatus && (
+        <span style={{ fontSize: 10, fontWeight: 600, color }}>({orderStatus})</span>
+      )}
     </span>
   );
 }
@@ -228,9 +259,15 @@ export default function PretzillaShortageTab() {
                       <span style={{ color: 'var(--text-primary, #fff)' }}>{a.apptCode}</span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                      <span style={{ color: 'var(--text-secondary, #9aa1ac)' }}>
-                        {a.orders.length > 0 ? a.orders.join(', ') : '—'}
-                      </span>
+                      {a.orders.length > 0 ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          {a.orders.map((o) => (
+                            <OrderTag key={o.orderNo} orderNo={o.orderNo} orderStatus={o.orderStatus} />
+                          ))}
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--text-secondary, #9aa1ac)' }}>—</span>
+                      )}
                       <LinkStatusBadge status={a.linkStatus} />
                     </div>
                   </div>
