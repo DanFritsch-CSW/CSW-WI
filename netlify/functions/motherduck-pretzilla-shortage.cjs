@@ -43,25 +43,25 @@
 // (this app, ~15 min later) with Active/Inactive unchanged — confirmed
 // live this was real pick activity, not a bug: allocated_packaged_amount
 // (hard-allocated) had risen to 120 in that window, and 120 + 60 = 180,
-// exactly matching the original Datex reading. Soft-allocated converting
-// to hard-allocated as pick tasks complete is expected, but showing only
-// Soft-Allocated made it look like inventory was disappearing. Per Dan's
-// ask, the report now shows a single combined "Allocated" figure
-// (soft_allocated_packaged_amount + allocated_packaged_amount) so the
-// total stays stable across that conversion and only decreases when
-// inventory actually ships. The "Inbound (auto)" column is REMOVED from
-// the UI per the same request — incoming_packaged_amount has read 0 in
-// every case tested so far and added a column's worth of visual noise for
-// no signal. It is NOT removed from the Short calculation below — Short
-// still follows the source spreadsheet's actual formula exactly, Inbound
-// included; it's just no longer surfaced as its own column.
+// exactly matching the original Datex reading. Report now shows a single
+// combined "Allocated" figure (soft_allocated_packaged_amount +
+// allocated_packaged_amount) so the total stays stable across that
+// conversion and only decreases when inventory actually ships.
+//
+// === INBOUND REMOVED FROM THE SHORT CALCULATION, 2026-09-01 (later same
+// day) === Per Dan's explicit ask: "remove Inbound from the equation at
+// this time — most customers do not have InASN orders in at this time of
+// report generation." incoming_packaged_amount is no longer queried or
+// used anywhere. SHORT is now simply Active - Needed. If Inbound/InASN
+// data becomes reliably meaningful for a given customer down the road,
+// this is the place to reintroduce it — deliberately not deleted from
+// history, just not part of the math right now.
 //
 // DEMAND (Needed) — appointments-only, sourced STRICTLY from
 // dockappointmentitems -> Order links (see appointment coverage note).
 //
-// SHORT = Active + Inbound - Needed, only returned when negative. Matches
-// the source spreadsheet's actual row-26 formula. Inactive and Allocated
-// (soft + hard) are informational only, not netted in.
+// SHORT = Active - Needed, only returned when negative. Inactive and
+// Allocated (soft + hard) are informational only, not netted in.
 //
 // targetDate is REQUIRED, pre-computed by the frontend in America/Chicago
 // (tomorrowCentral() in src/lib/pretzillaShortage.js) — this function
@@ -238,14 +238,14 @@ exports.handler = async (event) => {
 
     // Inventory — material-level aggregate. allocated_packaged_amount
     // (hard-allocated) pulled alongside soft_allocated_packaged_amount so
-    // they can be combined into a single stable "Allocated" figure — see
-    // the ALLOCATED COLUMN note above for why they're combined.
+    // they can be combined into a single stable "Allocated" figure.
+    // incoming_packaged_amount is intentionally NOT queried — see the
+    // INBOUND REMOVED note above.
     const invSql = `
       SELECT
         material_id,
         active_packaged_amount         AS active,
         inactive_packaged_amount       AS inactive,
-        incoming_packaged_amount       AS inbound_auto,
         soft_allocated_packaged_amount AS soft_alloc,
         allocated_packaged_amount      AS hard_alloc
       FROM production_db.gold.available_inventory_by_material
@@ -260,17 +260,15 @@ exports.handler = async (event) => {
       const needed = Number(r.needed) || 0;
       const active = Number(inv.active) || 0;
       const inactive = Number(inv.inactive) || 0;
-      const inboundAuto = Number(inv.inbound_auto) || 0;
       const softAlloc = Number(inv.soft_alloc) || 0;
       const hardAlloc = Number(inv.hard_alloc) || 0;
-      const rawShort = active + inboundAuto - needed;
+      const rawShort = active - needed;
       return {
         materialCode: r.material_code,
         description: r.description,
         needed,
         active,
         inactive,
-        inboundAuto, // kept for Short calc; not surfaced as its own column
         allocated: softAlloc + hardAlloc, // soft + hard combined, see header
         short: rawShort < 0 ? rawShort : 0,
       };
