@@ -19,6 +19,7 @@ import {
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import { fetchCronHealth } from '../lib/cronHealth.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
+import DailyDiscussionEmailEditor from '../components/settings/DailyDiscussionEmailEditor.jsx'
 
 // ── Tab nav ────────────────────────────────────────────────
 
@@ -546,6 +547,12 @@ function EstDropProjectsEditor() {
 // Manages front_daily_discussion_configs (per-facility active toggle) and
 // notification_recipients (list_name = daily_discussion_<facility>). See
 // front-daily-discussion-run.cjs for the scheduled side.
+//
+// Also renders DailyDiscussionEmailEditor below (added 2026-09-01, see
+// that component's own header for the full story) — a completely
+// separate, additional email-draft capability sharing this component's
+// `facility` and `teammates` state so facility selection stays a single
+// dropdown rather than two.
 
 function DailyDiscussionsEditor() {
   const [configs, setConfigs]     = useState([])
@@ -709,6 +716,8 @@ function DailyDiscussionsEditor() {
           Turn on the checkbox above to enable both the nightly auto-create and the test button for this facility.
         </p>
       )}
+
+      <DailyDiscussionEmailEditor facility={facility} teammates={teammates} />
     </div>
   )
 }
