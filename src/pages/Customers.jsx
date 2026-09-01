@@ -47,10 +47,15 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // Excel export or Front send yet, visible so Dan can compare it against
 // the manual sheet daily before handing off to the CSR team. See
 // netlify/functions/motherduck-pretzilla-shortage.cjs for the full design
-// writeup (demand join, inventory pull, Short formula). Nav label renamed
-// to "Customer Shortage Report" the same day, per Dan's request — the
-// underlying tool/route id ('pretzillashortage') and its Kenosha/Pretzilla
-// scope are unchanged, only the tab text.
+// writeup (demand join, inventory pull, Short formula). Nav label + in-tab
+// header/subtitle genericized to "Customer Shortage Report" / "Shortage
+// Report" the same day, per Dan's request — the underlying tool/route id
+// ('pretzillashortage') and its Kenosha/Pretzilla scope are unchanged,
+// only the visible text, ahead of eventually tying in other customers the
+// same way FEFO Rotation already covers multiple customers/projects.
+// Demand logic also simplified the same day to appointments-only (dropped
+// the requested_delivery_date cross-check/"needs review" concept) per
+// Dan's explicit ask — see the backend function's header for detail.
 //
 // Scorecard Drafts tab added 2026-08-06, per Dan's ask: "build the tab
 // within the UI so that I can see and test the prompt." Bernatello's-only
@@ -90,7 +95,7 @@ const SUB_TABS = [
   {
     id: 'pretzillashortage',
     label: 'Customer Shortage Report',
-    subtitle: 'Kenosha · validation mode · live from MotherDuck vs. team\'s manual sheet',
+    subtitle: 'Appointment-scheduled orders vs. available inventory · live from MotherDuck',
   },
   {
     id: 'scorecard',
