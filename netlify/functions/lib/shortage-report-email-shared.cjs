@@ -40,6 +40,13 @@
 // no-file-delete convention) or cmm_outbound_email_recipients. Internal
 // discussion followers reuse notification_recipients with
 // list_name=`shortage_report_email_<reportKey>`.
+//
+// REPORT_CONFIGS moved 2026-09-01 (later same day) to lib/shortage-report-
+// configs.cjs — the SAME config file motherduck-shortage-report.cjs (the
+// data-fetch backend for the report itself) now imports, so the two can
+// never scope-drift apart. Added per Dan's direction when Sargento
+// (Caledonia) joined Pretzilla (Kenosha): "mimic Sargento just as
+// Pretzilla -- any future additions will probably be for all customers."
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -48,18 +55,7 @@ const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN
 const DEFAULT_FRONT_CHANNEL_ID = 'cha_erzf8'
 const DASHBOARD_TYPE = 'shortage_report_email'
 
-// One entry per customer report. Add a new key here (plus its own
-// PROJECT_IDS/WAREHOUSE_ID/APPT_TAG/display name) when a second customer
-// gets built into the Customer Shortage Report tab — nothing else in this
-// file needs to change to support that.
-const REPORT_CONFIGS = {
-  pretzilla_ken: {
-    display: 'Pretzilla — Kenosha',
-    warehouseId: 5,
-    projectIds: [230, 342],
-    apptTag: '(PZ)',
-  },
-}
+const { REPORT_CONFIGS } = require('./shortage-report-configs.cjs')
 
 async function sbFetch(path) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
