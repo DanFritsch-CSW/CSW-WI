@@ -3,83 +3,83 @@
 // Customer Shortage Report backend. Automates the team's daily hand-built
 // shortage Excel (Pretzilla_Template.xlsx / 09_01pretzilla_shortage.xlsx).
 // Built 2026-08-31 per Dan's ask (Fathom "Pretzilla Daily" call) +
-// validated live against the team's actual 09/01 Excel for Kenosha
-// (SO620075, SO620188, SO620189, SO620231, SO620285, SO620319): 6 of 7
-// materials matched exactly. The 7th (109282) differed only because the
-// order qty changed and inventory got picked between the Excel build and
-// the live pull — expected drift, not a bug, confirmed by checking the
-// raw orderline (modified_sys_date_time same day, 10:50am).
-//
-// Also caught a real false-shortage in the manual sheet: material 208494
-// showed SHORT = -66 because Active/Inactive/Inbound were left BLANK (not
-// zero) in the Excel — the row was never finished. Excel's SUM/IF formula
-// treats blank as 0, producing a false shortage. Live pull shows 3,031
-// active on hand, i.e. not actually short. The automated version would not
-// have produced this false positive.
+// validated live against the team's actual 09/01 Excel for Kenosha: 6 of 7
+// materials matched exactly; the 7th was real order/inventory drift
+// between Excel-build time and pull time (confirmed via
+// modified_sys_date_time on the raw orderline).
 //
 // SCOPE (confirmed with Dan 2026-08-31): Kenosha only, project_ids 230
-// (PRETZ5) and 342 (PRTZL5, COOLER). NOT the other 4 Pretzilla project_ids
-// (CAL/MAD) yet, and NOT the other ~16 CSW customers Dan mentioned on the
-// call as eventual candidates for this same report shape. Extend to a
-// CUSTOMERS-style config object (see motherduck-exp-check.cjs for the
-// pattern) once Kenosha is validated — tab wording generalized 2026-08-31
-// (later same day) ahead of that, matching the multi-customer FEFO Rotation
-// tab's convention, since this report shape is meant to serve more than
-// one customer eventually.
+// (PRETZ5) and 342 (PRTZL5, COOLER). Appointment coverage is scoped via
+// the lookup_code containing "(PZ)" (Datex's own convention for Pretzilla
+// Kenosha appointments — confirmed against the live Dock Appointments Hub
+// filtered to Owner=PRETZ9/Project=PRETZ5/Warehouse=CSW-Kenosha, every row
+// carries a "(PZ)" tag somewhere in its name, not necessarily at the
+// start — some are prefixed with "$" or "*" first, e.g.
+// "$ *(PZ) -KENOSHA SO620189" — hence LIKE '%(PZ)%', not '(PZ)%'). NOT the
+// other 4 Pretzilla project_ids (CAL/MAD) yet. Extend to a CUSTOMERS-style
+// config object (see motherduck-exp-check.cjs) once Kenosha is validated.
 //
-// DEMAND — appointments ONLY (changed 2026-08-31, later same day, per
-// Dan's explicit ask): datex_slv_dockappointmentitems ->
-// datex_slv_dockappointments, filtered to appointments scheduled for
-// targetDate. This is what the team actually does ("look at all the
-// appointments for tomorrow") and is the only reliable way to catch
-// multi-order consolidated trucks. Validated live for 2026-09-01: a
-// single appointment ("AMC WM Belvedere 61915633") covering 12 separate
-// orders resolved correctly, all 12 attributed to the right appointment
-// via the item_entity_type='Order' join — same relational-join pattern
-// already proven for KEN drop-rule projects elsewhere in this app.
+// === APPOINTMENT COVERAGE BUG, FOUND AND FIXED 2026-09-01 ===
+// An earlier version of this function only surfaced appointments that had
+// an actual dockappointmentitems -> Order relational link. Checked live
+// against every "(PZ)" appointment scheduled 9/2: only 2 of 6 had that
+// link. The other 4 had real order numbers TYPED INTO THE APPOINTMENT
+// NAME as free text (e.g. "(PZ) - SO620392, SO620346, SO620347") with NO
+// relational link in Datex at all — meaning 3 of those order numbers
+// (SO620392/346/347) are real, current orders due 9/2 that the old query
+// silently missed entirely. A 4th referenced order number (SO620402,
+// "FRONT ROYAL") doesn't exist in datex_slv_orders at all yet — an
+// appointment placeholder ahead of the order being created.
 //
-// An earlier version of this function also cross-checked against
-// requested_delivery_date and surfaced unmatched orders as a
-// "needsReview" list. Removed per Dan's ask 2026-08-31 (later same day) —
-// he wants this report scoped strictly to what's on the appointments
-// table, not a broader due-date view. If a real order exists but has no
-// appointment scheduled yet, it simply won't appear here; that's expected,
-// not a gap to flag.
+// Per Dan's explicit decision: do NOT parse those text-only order numbers
+// into the demand/Needed calculation (too uncertain to trust
+// automatically) — but DO surface every appointment, classified by link
+// status, so a human can see what's missing:
+//   - "linked":            dockappointmentitems row exists, order pulled
+//                           into Needed as before.
+//   - "not_linked":        no relational link, but the appointment name
+//                           contains an order number (regex /SO\d{6}/)
+//                           that DOES exist in datex_slv_orders. Shown,
+//                           NOT counted in Needed.
+//   - "no_order_in_datex": no relational link, and either no order-number
+//                           pattern in the name, or the referenced number
+//                           doesn't exist in datex_slv_orders at all
+//                           (includes pure holds like "MRS HELD" and
+//                           not-yet-created orders like the FRONT ROYAL
+//                           case above).
 //
-// INVENTORY — gold.available_inventory_by_lp, warehouse_id=5 (Kenosha),
-// summed per material_id. This gold table already carries exactly the
-// fields the manual process hand-copies:
-//   active_packaged_amount         -> Active
-//   inactive_packaged_amount       -> Inactive        (display only)
-//   incoming_packaged_amount       -> Inbound (auto)   (overridable, see
-//                                                        pretzilla_shortage_overrides)
-//   soft_allocated_packaged_amount -> Soft-Allocated   (display only)
-// Validated live: Active/Inactive matched the Excel exactly for 6 of 7
-// materials (the 7th drifted for the same real-world reason as Needed,
-// above). Soft-Allocated read back as 0 across the board at pull time even
-// though the Excel showed real values — expected, per Dan's own framing on
-// the call: soft-allocated converts to hard-allocated (picked) as the day
-// progresses, so a later-in-the-day pull naturally reads lower than a
-// morning one. The field itself is real and populated elsewhere in the
-// system (spot-checked: 301 rows nonzero org-wide at validation time).
+// === SOFT-ALLOCATED BUG, FOUND AND FIXED 2026-09-01 ===
+// gold.available_inventory_by_lp.soft_allocated_packaged_amount reads 0
+// for EVERY license plate on every material tested — confirmed live
+// against material 108281, where Footprint Cloud's own Inventory Hub
+// shows Soft Allocated = 120. Root cause: soft allocation is an
+// order/pick-task-level fact, not a per-LP fact, so it never gets
+// stamped onto individual by_lp rows. gold.available_inventory_by_material
+// (the material-level aggregate, one row per material+warehouse) has the
+// correct value — confirmed exact match (120) against Footprint. Active
+// and Inactive matched between both tables in every case tested, so this
+// was isolated to Soft-Allocated (and, by the same reasoning, Inbound).
+// Inventory now sources from available_inventory_by_material instead of
+// available_inventory_by_lp.
 //
-// SHORT = Active + Inbound - Needed, only returned when negative. This
-// matches the source spreadsheet's ACTUAL formula (row 26) exactly —
-// Inactive and Soft-Allocated are informational only in the original Excel
-// too (confirmed by reading the formula itself, not by the verbal
-// description of it from the Fathom call, which don't match).
+// DEMAND (Needed) — appointments-only (per Dan's 2026-08-31 ask), sourced
+// STRICTLY from dockappointmentitems -> Order links. Text-parsed order
+// numbers from unlinked appointments are surfaced for visibility (see
+// above) but never included in Needed — see the classification writeup.
 //
-// targetDate is REQUIRED and must be pre-computed by the caller (frontend
-// computes "tomorrow" in America/Chicago — see tomorrowCentral() in
-// src/lib/pretzillaShortage.js). This function deliberately never computes
-// "today"/"tomorrow" itself, to avoid the naive-timestamp/UTC
-// function-runtime trap documented elsewhere in this codebase (see
-// completed_date_time handling in other MotherDuck functions).
+// SHORT = Active + Inbound - Needed, only returned when negative. Matches
+// the source spreadsheet's actual row-26 formula — Inactive and
+// Soft-Allocated are informational only, not netted in.
+//
+// targetDate is REQUIRED, pre-computed by the frontend in America/Chicago
+// (tomorrowCentral() in src/lib/pretzillaShortage.js) — this function
+// never computes "today"/"tomorrow" itself.
 
 const duckdb = require('duckdb');
 
 const PROJECT_IDS = [230, 342]; // Pretzilla Kenosha (PRETZ5) + COOLER (PRTZL5)
 const WAREHOUSE_ID = 5; // Kenosha
+const APPT_TAG = '(PZ)'; // Datex's own naming convention for these appointments
 
 function getDb() {
   process.env.HOME = '/tmp';
@@ -88,6 +88,13 @@ function getDb() {
 
 function isValidDate(s) {
   return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+// Pulls candidate order numbers (e.g. "SO620394") out of an appointment
+// name via regex. Datex order lookup_codes observed live are all "SO" +
+// 6 digits.
+function extractOrderNumbers(text) {
+  return [...new Set((text.match(/SO\d{6}/g) || []))];
 }
 
 exports.handler = async (event) => {
@@ -120,27 +127,96 @@ exports.handler = async (event) => {
   try {
     await runQuery(`ATTACH 'md:production_db' (READ_ONLY)`);
 
-    // Appointments scheduled for targetDate whose dockappointmentitems
-    // resolve to a Pretzilla KEN order (item_entity_type='Order'). This is
-    // the SOLE source of demand for this report — see header.
-    const appointmentsSql = `
-      SELECT DISTINCT
-        da.dock_appointment_id AS appt_id,
-        da.lookup_code         AS appt_code,
-        da.scheduled_arrival   AS scheduled_arrival,
-        o.order_id             AS order_id,
-        o.lookup_code          AS order_no
+    // ALL Pretzilla-Kenosha appointments for targetDate, regardless of
+    // whether they have an order link yet. status_id NOT IN (4,5) excludes
+    // completed/historical (4) and cancelled/hold placeholders (5) —
+    // confirmed live this matches the Dock Appointments Hub's own "Open,
+    // In-Yard, Door Assigned" filter (all 6 real appointments carry
+    // status_id=0; the excluded HOLD rows carry status_id=5).
+    const allApptsSql = `
+      SELECT dock_appointment_id AS appt_id, lookup_code AS appt_code, scheduled_arrival
+      FROM production_db.silver.datex_slv_dockappointments
+      WHERE warehouse_id = ${WAREHOUSE_ID}
+        AND lookup_code LIKE '%${APPT_TAG}%'
+        AND status_id NOT IN (4, 5)
+        AND CAST(scheduled_arrival AS DATE) = DATE '${targetDate}'
+      ORDER BY scheduled_arrival
+    `;
+    const allApptRows = await runQuery(allApptsSql);
+
+    // Relational links only, for the same appointment set.
+    const linkedSql = `
+      SELECT
+        dai.dock_appointment_id AS appt_id,
+        o.order_id              AS order_id,
+        o.lookup_code            AS order_no
       FROM production_db.silver.datex_slv_dockappointmentitems dai
-      JOIN production_db.silver.datex_slv_dockappointments da
-        ON da.dock_appointment_id = dai.dock_appointment_id
       JOIN production_db.silver.datex_slv_orders o
         ON o.order_id = dai.item_entity_id AND dai.item_entity_type = 'Order'
       WHERE o.project_id IN (${PROJECT_IDS.join(',')})
-        AND CAST(da.scheduled_arrival AS DATE) = DATE '${targetDate}'
-      ORDER BY da.scheduled_arrival, o.lookup_code
+        AND dai.dock_appointment_id IN (${allApptRows.map((r) => r.appt_id).join(',') || '-1'})
     `;
-    const appointmentRows = await runQuery(appointmentsSql);
-    const orderIds = [...new Set(appointmentRows.map((r) => r.order_id))];
+    const linkedRows = allApptRows.length ? await runQuery(linkedSql) : [];
+
+    const linkedByAppt = new Map();
+    for (const r of linkedRows) {
+      if (!linkedByAppt.has(r.appt_id)) linkedByAppt.set(r.appt_id, []);
+      linkedByAppt.get(r.appt_id).push({ orderId: r.order_id, orderNo: r.order_no });
+    }
+
+    // For appointments with zero relational links, pull candidate order
+    // numbers out of the name and check whether they exist in Datex at all.
+    const unlinkedAppts = allApptRows.filter((r) => !linkedByAppt.has(r.appt_id));
+    const candidateNumbers = [...new Set(
+      unlinkedAppts.flatMap((r) => extractOrderNumbers(r.appt_code))
+    )];
+    let existingOrdersByCode = new Map();
+    if (candidateNumbers.length) {
+      const quoted = candidateNumbers.map((c) => `'${c}'`).join(',');
+      const existSql = `
+        SELECT lookup_code, order_id
+        FROM production_db.silver.datex_slv_orders
+        WHERE lookup_code IN (${quoted})
+      `;
+      const existRows = await runQuery(existSql);
+      existingOrdersByCode = new Map(existRows.map((r) => [r.lookup_code, r.order_id]));
+    }
+
+    // Build final appointment list with link-status classification.
+    const appointments = allApptRows.map((r) => {
+      const linked = linkedByAppt.get(r.appt_id);
+      if (linked && linked.length) {
+        return {
+          apptId: r.appt_id,
+          apptCode: r.appt_code,
+          scheduledArrival: r.scheduled_arrival,
+          linkStatus: 'linked',
+          orders: linked.map((l) => l.orderNo),
+        };
+      }
+      const candidates = extractOrderNumbers(r.appt_code);
+      const foundExisting = candidates.filter((c) => existingOrdersByCode.has(c));
+      if (foundExisting.length) {
+        return {
+          apptId: r.appt_id,
+          apptCode: r.appt_code,
+          scheduledArrival: r.scheduled_arrival,
+          linkStatus: 'not_linked',
+          orders: foundExisting,
+        };
+      }
+      return {
+        apptId: r.appt_id,
+        apptCode: r.appt_code,
+        scheduledArrival: r.scheduled_arrival,
+        linkStatus: 'no_order_in_datex',
+        orders: candidates, // referenced but nonexistent, or empty (pure hold)
+      };
+    });
+
+    // Needed/materials are computed STRICTLY from linked orders — see
+    // header for why unlinked/no-order appointments are excluded here.
+    const orderIds = [...new Set(linkedRows.map((r) => r.order_id))];
 
     if (orderIds.length === 0) {
       return {
@@ -149,15 +225,13 @@ exports.handler = async (event) => {
         body: JSON.stringify({
           targetDate,
           materials: [],
-          appointments: [],
+          appointments,
           orderCount: 0,
           fetchedAt: new Date().toISOString(),
         }),
       };
     }
 
-    // Needed per material, summed across every order resolved via an
-    // appointment above.
     const neededSql = `
       SELECT
         m.material_id            AS material_id,
@@ -173,17 +247,19 @@ exports.handler = async (event) => {
     const neededRows = await runQuery(neededSql);
     const materialIds = neededRows.map((r) => r.material_id);
 
+    // Inventory — material-level aggregate (available_inventory_by_material),
+    // NOT the by_lp table. See header for why: soft allocation is not a
+    // per-LP fact and reads 0 on every LP row even when real.
     const invSql = `
       SELECT
         material_id,
-        SUM(active_packaged_amount)         AS active,
-        SUM(inactive_packaged_amount)       AS inactive,
-        SUM(incoming_packaged_amount)       AS inbound_auto,
-        SUM(soft_allocated_packaged_amount) AS soft_alloc
-      FROM production_db.gold.available_inventory_by_lp
+        active_packaged_amount         AS active,
+        inactive_packaged_amount       AS inactive,
+        incoming_packaged_amount       AS inbound_auto,
+        soft_allocated_packaged_amount AS soft_alloc
+      FROM production_db.gold.available_inventory_by_material
       WHERE warehouse_id = ${WAREHOUSE_ID}
         AND material_id IN (${materialIds.join(',') || '-1'})
-      GROUP BY material_id
     `;
     const invRows = materialIds.length ? await runQuery(invSql) : [];
     const invByMaterial = new Map(invRows.map((r) => [r.material_id, r]));
@@ -207,26 +283,6 @@ exports.handler = async (event) => {
         short: rawShort < 0 ? rawShort : 0,
       };
     });
-
-    // Group appointment rows into one entry per appointment, with the list
-    // of orders it covers (this is the "12 orders, 1 truck" view).
-    const appointments = [];
-    const apptIndex = new Map();
-    for (const r of appointmentRows) {
-      let entry = apptIndex.get(r.appt_id);
-      if (!entry) {
-        entry = {
-          apptId: r.appt_id,
-          apptCode: r.appt_code,
-          scheduledArrival: r.scheduled_arrival,
-          orders: [],
-        };
-        apptIndex.set(r.appt_id, entry);
-        appointments.push(entry);
-      }
-      entry.orders.push(r.order_no);
-    }
-    appointments.sort((a, b) => new Date(a.scheduledArrival) - new Date(b.scheduledArrival));
 
     return {
       statusCode: 200,
