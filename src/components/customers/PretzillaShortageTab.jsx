@@ -1,22 +1,29 @@
 // src/components/customers/PretzillaShortageTab.jsx
 //
-// Pretzilla Kenosha Shortage Report. Built 2026-08-31 per Dan's ask
-// (Fathom "Pretzilla Daily" call) — automates the team's daily hand-built
+// Customer Shortage Report. Built 2026-08-31 per Dan's ask (Fathom
+// "Pretzilla Daily" call) — automates the team's daily hand-built shortage
 // Excel (Pretzilla_Template.xlsx). Backend: netlify/functions/motherduck-
 // pretzilla-shortage.cjs — see that file's header for the full validation
 // writeup against the team's actual 09/01 Excel (6 of 7 materials matched
 // exactly; the 7th was real order/inventory drift between build time and
 // pull time; one manual-sheet false-shortage caught and explained).
 //
+// Header/subtitle wording deliberately genericized 2026-08-31 (later same
+// day, per Dan's ask) — this component is currently wired to Kenosha only
+// (see the backend function's PROJECT_IDS), but the report shape is meant
+// to serve other customers too, the same way FEFO Rotation already covers
+// multiple customers/projects behind one tab. No customer name is
+// hardcoded into the visible UI text so that generalization doesn't
+// require another wording pass later.
+//
+// Demand is sourced ENTIRELY from the appointments table (also changed
+// 2026-08-31, later same day) — no due-date cross-check, no "needs review"
+// concept. An order with no scheduled appointment simply doesn't appear.
+//
 // Currently VALIDATION MODE: visible in the app for Dan to compare against
 // the team's manual sheet each day this week before this replaces the
 // manual process for the CSR team. No Excel export or Front send yet —
 // same staged rollout pattern as PVI Shortage Report.
-//
-// SCOPE: Kenosha only (project_ids 230, 342). See the backend function's
-// header for why, and what's needed to extend this to the other 5
-// Pretzilla facility instances or the ~16 other CSW customers Dan
-// mentioned as eventual candidates for this same report shape.
 
 import React, { useEffect, useState, useCallback } from 'react';
 import {
@@ -121,11 +128,7 @@ export default function PretzillaShortageTab() {
     <div style={{ padding: '4px 0' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
         <div>
-          <h3 style={{ margin: 0, color: 'var(--text-primary, #fff)' }}>Pretzilla Kenosha — Shortage Report</h3>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)', marginTop: 4, maxWidth: 680 }}>
-            Live from MotherDuck (appointment-based demand + gold inventory). Validation mode —
-            compare against the team's manual sheet each day. No Excel export or Front send yet.
-          </div>
+          <h3 style={{ margin: 0, color: 'var(--text-primary, #fff)' }}>Shortage Report</h3>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <label style={labelStyle}>
@@ -160,26 +163,15 @@ export default function PretzillaShortageTab() {
               ['Appointments', data.appointments.length],
               ['Materials', data.materials.length],
               ['Short', shortCount],
-              ['Needs review', data.needsReview.length],
             ].map(([label, value]) => (
               <div key={label} style={{ background: 'var(--bg2, #1a1d24)', border: '1px solid var(--border, #2a2e38)', borderRadius: 6, padding: '8px 14px', minWidth: 90 }}>
                 <div style={{ fontSize: 11, color: 'var(--text-secondary, #9aa1ac)' }}>{label}</div>
-                <div style={{ fontSize: 20, fontWeight: 600, color: label === 'Short' && value > 0 ? '#e5484d' : label === 'Needs review' && value > 0 ? '#f5a623' : 'var(--text-primary, #fff)' }}>
+                <div style={{ fontSize: 20, fontWeight: 600, color: label === 'Short' && value > 0 ? '#e5484d' : 'var(--text-primary, #fff)' }}>
                   {value}
                 </div>
               </div>
             ))}
           </div>
-
-          {/* Needs-review banner */}
-          {data.needsReview.length > 0 && (
-            <div style={{ background: 'var(--bg2, #1a1d24)', border: '1px solid #f5a623', borderRadius: 6, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: 'var(--text-secondary, #9aa1ac)' }}>
-              <strong style={{ color: '#f5a623' }}>{data.needsReview.length} order{data.needsReview.length === 1 ? '' : 's'} due {targetDate} without a matched appointment yet:</strong>
-              <div style={{ marginTop: 4 }}>
-                {data.needsReview.map((r) => r.orderNo).join(', ')}
-              </div>
-            </div>
-          )}
 
           {/* Appointments panel */}
           <div style={{ background: 'var(--bg2, #1a1d24)', border: '1px solid var(--border, #2a2e38)', borderRadius: 6, marginBottom: 16, overflow: 'hidden' }}>
