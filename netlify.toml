@@ -434,6 +434,18 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Customer Shortage Report data -- GENERALIZED 2026-09-01 from
+# motherduck-pretzilla-shortage.cjs (now orphaned/unregistered) to accept
+# {targetDate, reportKey} instead of being hardcoded to Pretzilla/Kenosha.
+# Sargento (Caledonia) added alongside Pretzilla per Dan's explicit
+# direction: "mimic Sargento just as Pretzilla -- any future additions
+# will probably be for all customers." Scope comes from
+# lib/shortage-report-configs.cjs, shared with the email draft backend.
+[functions."motherduck-shortage-report"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."wr-secondary-repl-digest-run"]
   schedule = "*/15 * * * *"
   timeout = 26
