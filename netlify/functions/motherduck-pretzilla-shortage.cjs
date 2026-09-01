@@ -1,8 +1,8 @@
 // netlify/functions/motherduck-pretzilla-shortage.cjs
 //
-// Pretzilla Kenosha Shortage Report — automates the team's daily hand-built
-// Excel (Pretzilla_Template.xlsx / 09_01pretzilla_shortage.xlsx). Built
-// 2026-08-31 per Dan's ask (Fathom "Pretzilla Daily" call, 2026-08-31) +
+// Customer Shortage Report backend. Automates the team's daily hand-built
+// shortage Excel (Pretzilla_Template.xlsx / 09_01pretzilla_shortage.xlsx).
+// Built 2026-08-31 per Dan's ask (Fathom "Pretzilla Daily" call) +
 // validated live against the team's actual 09/01 Excel for Kenosha
 // (SO620075, SO620188, SO620189, SO620231, SO620285, SO620319): 6 of 7
 // materials matched exactly. The 7th (109282) differed only because the
@@ -22,33 +22,29 @@
 // (CAL/MAD) yet, and NOT the other ~16 CSW customers Dan mentioned on the
 // call as eventual candidates for this same report shape. Extend to a
 // CUSTOMERS-style config object (see motherduck-exp-check.cjs for the
-// pattern) once Kenosha is validated across a full week.
+// pattern) once Kenosha is validated — tab wording generalized 2026-08-31
+// (later same day) ahead of that, matching the multi-customer FEFO Rotation
+// tab's convention, since this report shape is meant to serve more than
+// one customer eventually.
 //
-// DEMAND — two independent sources, cross-checked against each other:
+// DEMAND — appointments ONLY (changed 2026-08-31, later same day, per
+// Dan's explicit ask): datex_slv_dockappointmentitems ->
+// datex_slv_dockappointments, filtered to appointments scheduled for
+// targetDate. This is what the team actually does ("look at all the
+// appointments for tomorrow") and is the only reliable way to catch
+// multi-order consolidated trucks. Validated live for 2026-09-01: a
+// single appointment ("AMC WM Belvedere 61915633") covering 12 separate
+// orders resolved correctly, all 12 attributed to the right appointment
+// via the item_entity_type='Order' join — same relational-join pattern
+// already proven for KEN drop-rule projects elsewhere in this app.
 //
-//   1. PRIMARY (appointment-based): datex_slv_dockappointmentitems ->
-//      datex_slv_dockappointments, filtered to appointments scheduled for
-//      targetDate. This is what the team actually does on the call
-//      ("look at all the appointments for tomorrow") and is the only
-//      reliable way to catch multi-order consolidated trucks. Validated
-//      live for 2026-09-01: a single appointment ("AMC WM Belvedere
-//      61915633") covering 12 separate orders resolved correctly, all 12
-//      attributed to the right appointment via the item_entity_type='Order'
-//      join — same relational-join pattern already proven for KEN drop-rule
-//      projects elsewhere in this app. Also correctly picked up SO620189,
-//      whose requested_delivery_date (8/27) is BEFORE targetDate but whose
-//      appointment IS scheduled for targetDate (an overdue/still-open
-//      order) — something the requested_delivery_date-only approach below
-//      would miss on its own.
-//
-//   2. CROSS-CHECK (requested_delivery_date): datex_slv_orders WHERE
-//      requested_delivery_date = targetDate AND fulfillment_date IS NULL.
-//      Any order in this set NOT found via the appointment join is
-//      surfaced in `needsReview` — real demand that exists in Datex but
-//      hasn't been tied to a scheduled truck yet. On 2026-08-31, this
-//      cross-check surfaced 12 real orders (the Belvedere truck) that
-//      weren't in the team's in-progress Excel yet — i.e. this is a real
-//      completeness check, not just a theoretical safety net.
+// An earlier version of this function also cross-checked against
+// requested_delivery_date and surfaced unmatched orders as a
+// "needsReview" list. Removed per Dan's ask 2026-08-31 (later same day) —
+// he wants this report scoped strictly to what's on the appointments
+// table, not a broader due-date view. If a real order exists but has no
+// appointment scheduled yet, it simply won't appear here; that's expected,
+// not a gap to flag.
 //
 // INVENTORY — gold.available_inventory_by_lp, warehouse_id=5 (Kenosha),
 // summed per material_id. This gold table already carries exactly the
@@ -125,7 +121,8 @@ exports.handler = async (event) => {
     await runQuery(`ATTACH 'md:production_db' (READ_ONLY)`);
 
     // Appointments scheduled for targetDate whose dockappointmentitems
-    // resolve to a Pretzilla KEN order (item_entity_type='Order').
+    // resolve to a Pretzilla KEN order (item_entity_type='Order'). This is
+    // the SOLE source of demand for this report — see header.
     const appointmentsSql = `
       SELECT DISTINCT
         da.dock_appointment_id AS appt_id,
@@ -143,29 +140,7 @@ exports.handler = async (event) => {
       ORDER BY da.scheduled_arrival, o.lookup_code
     `;
     const appointmentRows = await runQuery(appointmentsSql);
-
-    // Cross-check set: orders whose requested_delivery_date = targetDate
-    // and not yet fulfilled, regardless of whether an appointment has been
-    // scheduled for them yet. Anything here not covered by the appointment
-    // join above is real orphaned demand -> needsReview.
-    const crossCheckSql = `
-      SELECT order_id, lookup_code AS order_no, requested_delivery_date
-      FROM production_db.silver.datex_slv_orders
-      WHERE project_id IN (${PROJECT_IDS.join(',')})
-        AND CAST(requested_delivery_date AS DATE) = DATE '${targetDate}'
-        AND fulfillment_date IS NULL
-    `;
-    const crossCheckRows = await runQuery(crossCheckSql);
-
-    const matchedOrderIds = new Set(appointmentRows.map((r) => r.order_id));
-    const needsReview = crossCheckRows
-      .filter((r) => !matchedOrderIds.has(r.order_id))
-      .map((r) => ({ orderNo: r.order_no, requestedDeliveryDate: r.requested_delivery_date }));
-
-    const orderIds = [...new Set([
-      ...appointmentRows.map((r) => r.order_id),
-      ...crossCheckRows.map((r) => r.order_id),
-    ])];
+    const orderIds = [...new Set(appointmentRows.map((r) => r.order_id))];
 
     if (orderIds.length === 0) {
       return {
@@ -175,16 +150,14 @@ exports.handler = async (event) => {
           targetDate,
           materials: [],
           appointments: [],
-          needsReview,
           orderCount: 0,
           fetchedAt: new Date().toISOString(),
         }),
       };
     }
 
-    // Needed per material, summed across every resolved order (both the
-    // appointment-matched set and the cross-check orphans — an orphan
-    // order's demand is still real demand even if it's not on a truck yet).
+    // Needed per material, summed across every order resolved via an
+    // appointment above.
     const neededSql = `
       SELECT
         m.material_id            AS material_id,
@@ -262,7 +235,6 @@ exports.handler = async (event) => {
         targetDate,
         materials,
         appointments,
-        needsReview,
         orderCount: orderIds.length,
         fetchedAt: new Date().toISOString(),
       }),
