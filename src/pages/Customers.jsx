@@ -4,7 +4,7 @@ import OnboardingTab from '../components/customers/OnboardingTab.jsx'
 import DvrTab from '../components/customers/DvrTab.jsx'
 import FefoRotationTab from '../components/customers/FefoRotationTab.jsx'
 import ExpCheckTab from '../components/customers/ExpCheckTab.jsx'
-import PretzillaShortageTab from '../components/customers/PretzillaShortageTab.jsx'
+import CustomerShortageReportTab from '../components/customers/CustomerShortageReportTab.jsx'
 import ScorecardDraftsTab from '../components/customers/ScorecardDraftsTab.jsx'
 import PviShortageTab from '../components/customers/PviShortageTab.jsx'
 import PviShelfLife from './PviShelfLife.jsx'
@@ -56,6 +56,20 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // Demand logic also simplified the same day to appointments-only (dropped
 // the requested_delivery_date cross-check/"needs review" concept) per
 // Dan's explicit ask — see the backend function's header for detail.
+//
+// GENERALIZED 2026-09-01 (later same day) into a dropdown-driven,
+// multi-customer container per Dan's ask: "mimic Sargento just as
+// Pretzilla -- any future additions will probably be for all customers"
+// + "My imagination thinks it would have a dropdown project indicator
+// (similar to the FEFO tab)... it would render blank at first." This tab
+// now renders CustomerShortageReportTab.jsx (a small dropdown wrapper,
+// blank by default, mirrors FEFO's ProjectSelect pattern) instead of
+// PretzillaShortageTab directly. PretzillaShortageTab.jsx itself is
+// unchanged in name (kept for continuity) but now accepts {reportKey,
+// reportLabel} props and renders whichever customer the dropdown
+// selects — Sargento (Caledonia) joined Pretzilla (Kenosha) the same
+// shape, same backend logic, scoped via
+// netlify/functions/lib/shortage-report-configs.cjs.
 //
 // Scorecard Drafts tab added 2026-08-06, per Dan's ask: "build the tab
 // within the UI so that I can see and test the prompt." Bernatello's-only
@@ -203,7 +217,7 @@ export default function Customers() {
         {subTab === 'dvr'               && <DvrTab />}
         {subTab === 'fefo'              && <FefoRotationTab />}
         {subTab === 'expcheck'          && <ExpCheckTab />}
-        {subTab === 'pretzillashortage' && <PretzillaShortageTab />}
+        {subTab === 'pretzillashortage' && <CustomerShortageReportTab />}
         {subTab === 'scorecard'         && <ScorecardDraftsTab />}
         {subTab === 'pvi'               && <PviShelfLife />}
         {subTab === 'space'             && <SpacePlanningTab />}
