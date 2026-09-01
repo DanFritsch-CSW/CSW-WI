@@ -32,6 +32,11 @@
 // gone, so there's no client-side override for it anymore (Inactive
 // remains editable).
 //
+// Inbound removed from the Short calculation entirely (2026-09-01, later
+// same day, per Dan's ask) — most customers don't have InASN orders in at
+// the time this report is generated. Short is now simply Active - Needed,
+// computed server-side; see the backend function's header for detail.
+//
 // Currently VALIDATION MODE: visible in the app for Dan to compare against
 // the team's manual sheet each day this week before this replaces the
 // manual process for the CSR team. No Excel export or Front send yet —
@@ -287,7 +292,7 @@ export default function PretzillaShortageTab() {
           </div>
 
           <div style={{ fontSize: 11, color: 'var(--text-secondary, #9aa1ac)', marginTop: 12 }}>
-            As of {new Date(data.fetchedAt).toLocaleString()} · Short = Active + Inbound − Needed (only shown when negative; Inbound isn't shown as its own column but is still included in this calculation) ·
+            As of {new Date(data.fetchedAt).toLocaleString()} · Short = Active − Needed (only shown when negative; Inbound is not part of this calculation right now) ·
             {' '}Inactive and Allocated (soft + hard) are informational only, not netted into Short ·
             {' '}Inactive is editable — click a value to correct it ·
             {' '}Only Linked appointments count toward Needed — Not Linked / No Order Within Datex are shown for review only.
