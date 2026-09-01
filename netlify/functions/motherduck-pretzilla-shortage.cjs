@@ -24,52 +24,44 @@
 // an actual dockappointmentitems -> Order relational link. Checked live
 // against every "(PZ)" appointment scheduled 9/2: only 2 of 6 had that
 // link. The other 4 had real order numbers TYPED INTO THE APPOINTMENT
-// NAME as free text (e.g. "(PZ) - SO620392, SO620346, SO620347") with NO
-// relational link in Datex at all — meaning 3 of those order numbers
-// (SO620392/346/347) are real, current orders due 9/2 that the old query
-// silently missed entirely. A 4th referenced order number (SO620402,
-// "FRONT ROYAL") doesn't exist in datex_slv_orders at all yet — an
-// appointment placeholder ahead of the order being created.
-//
-// Per Dan's explicit decision: do NOT parse those text-only order numbers
-// into the demand/Needed calculation (too uncertain to trust
-// automatically) — but DO surface every appointment, classified by link
-// status, so a human can see what's missing:
-//   - "linked":            dockappointmentitems row exists, order pulled
-//                           into Needed as before.
-//   - "not_linked":        no relational link, but the appointment name
-//                           contains an order number (regex /SO\d{6}/)
-//                           that DOES exist in datex_slv_orders. Shown,
-//                           NOT counted in Needed.
-//   - "no_order_in_datex": no relational link, and either no order-number
-//                           pattern in the name, or the referenced number
-//                           doesn't exist in datex_slv_orders at all
-//                           (includes pure holds like "MRS HELD" and
-//                           not-yet-created orders like the FRONT ROYAL
-//                           case above).
+// NAME as free text with NO relational link in Datex at all. Fixed by
+// scoping coverage to lookup_code LIKE '%(PZ)%' and classifying every
+// appointment into linked / not_linked / no_order_in_datex — see
+// extractOrderNumbers() and the classification block below. Only "linked"
+// orders count toward Needed (Dan's explicit decision).
 //
 // === SOFT-ALLOCATED BUG, FOUND AND FIXED 2026-09-01 ===
 // gold.available_inventory_by_lp.soft_allocated_packaged_amount reads 0
-// for EVERY license plate on every material tested — confirmed live
-// against material 108281, where Footprint Cloud's own Inventory Hub
-// shows Soft Allocated = 120. Root cause: soft allocation is an
-// order/pick-task-level fact, not a per-LP fact, so it never gets
-// stamped onto individual by_lp rows. gold.available_inventory_by_material
-// (the material-level aggregate, one row per material+warehouse) has the
-// correct value — confirmed exact match (120) against Footprint. Active
-// and Inactive matched between both tables in every case tested, so this
-// was isolated to Soft-Allocated (and, by the same reasoning, Inbound).
-// Inventory now sources from available_inventory_by_material instead of
-// available_inventory_by_lp.
+// for EVERY license plate on every material tested, because soft
+// allocation is an order/pick-task-level fact, not a per-LP fact.
+// gold.available_inventory_by_material (material-level aggregate) has the
+// correct value. Inventory now sources from available_inventory_by_material.
 //
-// DEMAND (Needed) — appointments-only (per Dan's 2026-08-31 ask), sourced
-// STRICTLY from dockappointmentitems -> Order links. Text-parsed order
-// numbers from unlinked appointments are surfaced for visibility (see
-// above) but never included in Needed — see the classification writeup.
+// === ALLOCATED COLUMN, ADDED 2026-09-01 (later same day) ===
+// Per Dan's direct comparison against Datex's own Inventory Hub: watched
+// material 109280 go from Soft-Allocated=180 (Datex) to Soft-Allocated=60
+// (this app, ~15 min later) with Active/Inactive unchanged — confirmed
+// live this was real pick activity, not a bug: allocated_packaged_amount
+// (hard-allocated) had risen to 120 in that window, and 120 + 60 = 180,
+// exactly matching the original Datex reading. Soft-allocated converting
+// to hard-allocated as pick tasks complete is expected, but showing only
+// Soft-Allocated made it look like inventory was disappearing. Per Dan's
+// ask, the report now shows a single combined "Allocated" figure
+// (soft_allocated_packaged_amount + allocated_packaged_amount) so the
+// total stays stable across that conversion and only decreases when
+// inventory actually ships. The "Inbound (auto)" column is REMOVED from
+// the UI per the same request — incoming_packaged_amount has read 0 in
+// every case tested so far and added a column's worth of visual noise for
+// no signal. It is NOT removed from the Short calculation below — Short
+// still follows the source spreadsheet's actual formula exactly, Inbound
+// included; it's just no longer surfaced as its own column.
+//
+// DEMAND (Needed) — appointments-only, sourced STRICTLY from
+// dockappointmentitems -> Order links (see appointment coverage note).
 //
 // SHORT = Active + Inbound - Needed, only returned when negative. Matches
-// the source spreadsheet's actual row-26 formula — Inactive and
-// Soft-Allocated are informational only, not netted in.
+// the source spreadsheet's actual row-26 formula. Inactive and Allocated
+// (soft + hard) are informational only, not netted in.
 //
 // targetDate is REQUIRED, pre-computed by the frontend in America/Chicago
 // (tomorrowCentral() in src/lib/pretzillaShortage.js) — this function
@@ -129,10 +121,7 @@ exports.handler = async (event) => {
 
     // ALL Pretzilla-Kenosha appointments for targetDate, regardless of
     // whether they have an order link yet. status_id NOT IN (4,5) excludes
-    // completed/historical (4) and cancelled/hold placeholders (5) —
-    // confirmed live this matches the Dock Appointments Hub's own "Open,
-    // In-Yard, Door Assigned" filter (all 6 real appointments carry
-    // status_id=0; the excluded HOLD rows carry status_id=5).
+    // completed/historical (4) and cancelled/hold placeholders (5).
     const allApptsSql = `
       SELECT dock_appointment_id AS appt_id, lookup_code AS appt_code, scheduled_arrival
       FROM production_db.silver.datex_slv_dockappointments
@@ -247,16 +236,18 @@ exports.handler = async (event) => {
     const neededRows = await runQuery(neededSql);
     const materialIds = neededRows.map((r) => r.material_id);
 
-    // Inventory — material-level aggregate (available_inventory_by_material),
-    // NOT the by_lp table. See header for why: soft allocation is not a
-    // per-LP fact and reads 0 on every LP row even when real.
+    // Inventory — material-level aggregate. allocated_packaged_amount
+    // (hard-allocated) pulled alongside soft_allocated_packaged_amount so
+    // they can be combined into a single stable "Allocated" figure — see
+    // the ALLOCATED COLUMN note above for why they're combined.
     const invSql = `
       SELECT
         material_id,
         active_packaged_amount         AS active,
         inactive_packaged_amount       AS inactive,
         incoming_packaged_amount       AS inbound_auto,
-        soft_allocated_packaged_amount AS soft_alloc
+        soft_allocated_packaged_amount AS soft_alloc,
+        allocated_packaged_amount      AS hard_alloc
       FROM production_db.gold.available_inventory_by_material
       WHERE warehouse_id = ${WAREHOUSE_ID}
         AND material_id IN (${materialIds.join(',') || '-1'})
@@ -271,6 +262,7 @@ exports.handler = async (event) => {
       const inactive = Number(inv.inactive) || 0;
       const inboundAuto = Number(inv.inbound_auto) || 0;
       const softAlloc = Number(inv.soft_alloc) || 0;
+      const hardAlloc = Number(inv.hard_alloc) || 0;
       const rawShort = active + inboundAuto - needed;
       return {
         materialCode: r.material_code,
@@ -278,8 +270,8 @@ exports.handler = async (event) => {
         needed,
         active,
         inactive,
-        inboundAuto,
-        softAlloc,
+        inboundAuto, // kept for Short calc; not surfaced as its own column
+        allocated: softAlloc + hardAlloc, // soft + hard combined, see header
         short: rawShort < 0 ? rawShort : 0,
       };
     });
