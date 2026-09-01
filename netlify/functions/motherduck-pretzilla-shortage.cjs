@@ -57,6 +57,21 @@
 // this is the place to reintroduce it — deliberately not deleted from
 // history, just not part of the math right now.
 //
+// === ORDER STATUS ADDED TO APPOINTMENTS, 2026-09-01 (later same day) ===
+// Per Dan's ask, after noticing "Not Linked"/"No Order Within Datex"
+// appointments cluster around early-lifecycle orders: joined
+// silver.datex_slv_orderstatuses onto every resolved order (Linked AND
+// Not Linked — anywhere a real order_id is known) so each order shown in
+// the appointments panel carries its Datex status (Created / Processing /
+// Completed / Cancelled / etc., per the full 13-value lookup table).
+// Confirmed live for 9/3: three "Not Linked" orders (SO620174, SO619896,
+// SO620403) were all sitting in "Created" — the earliest lifecycle
+// stage — which is a plausible explanation for why nobody had linked them
+// to their appointment yet. This is visibility only, same as the link
+// classification itself — status does NOT affect whether an order's
+// demand counts toward Needed (that's still gated on linkStatus==='linked'
+// alone).
+//
 // DEMAND (Needed) — appointments-only, sourced STRICTLY from
 // dockappointmentitems -> Order links (see appointment coverage note).
 //
@@ -133,15 +148,19 @@ exports.handler = async (event) => {
     `;
     const allApptRows = await runQuery(allApptsSql);
 
-    // Relational links only, for the same appointment set.
+    // Relational links only, for the same appointment set. Joins the
+    // order-status lookup so each linked order carries its Datex status.
     const linkedSql = `
       SELECT
         dai.dock_appointment_id AS appt_id,
         o.order_id              AS order_id,
-        o.lookup_code            AS order_no
+        o.lookup_code            AS order_no,
+        s.status_name            AS order_status
       FROM production_db.silver.datex_slv_dockappointmentitems dai
       JOIN production_db.silver.datex_slv_orders o
         ON o.order_id = dai.item_entity_id AND dai.item_entity_type = 'Order'
+      LEFT JOIN production_db.silver.datex_slv_orderstatuses s
+        ON s.order_status_id = o.order_status_id
       WHERE o.project_id IN (${PROJECT_IDS.join(',')})
         AND dai.dock_appointment_id IN (${allApptRows.map((r) => r.appt_id).join(',') || '-1'})
     `;
@@ -150,11 +169,12 @@ exports.handler = async (event) => {
     const linkedByAppt = new Map();
     for (const r of linkedRows) {
       if (!linkedByAppt.has(r.appt_id)) linkedByAppt.set(r.appt_id, []);
-      linkedByAppt.get(r.appt_id).push({ orderId: r.order_id, orderNo: r.order_no });
+      linkedByAppt.get(r.appt_id).push({ orderId: r.order_id, orderNo: r.order_no, orderStatus: r.order_status });
     }
 
     // For appointments with zero relational links, pull candidate order
-    // numbers out of the name and check whether they exist in Datex at all.
+    // numbers out of the name and check whether they exist in Datex at
+    // all — pulling status alongside so Not Linked orders show it too.
     const unlinkedAppts = allApptRows.filter((r) => !linkedByAppt.has(r.appt_id));
     const candidateNumbers = [...new Set(
       unlinkedAppts.flatMap((r) => extractOrderNumbers(r.appt_code))
@@ -163,15 +183,19 @@ exports.handler = async (event) => {
     if (candidateNumbers.length) {
       const quoted = candidateNumbers.map((c) => `'${c}'`).join(',');
       const existSql = `
-        SELECT lookup_code, order_id
-        FROM production_db.silver.datex_slv_orders
-        WHERE lookup_code IN (${quoted})
+        SELECT o.lookup_code, o.order_id, s.status_name AS order_status
+        FROM production_db.silver.datex_slv_orders o
+        LEFT JOIN production_db.silver.datex_slv_orderstatuses s
+          ON s.order_status_id = o.order_status_id
+        WHERE o.lookup_code IN (${quoted})
       `;
       const existRows = await runQuery(existSql);
-      existingOrdersByCode = new Map(existRows.map((r) => [r.lookup_code, r.order_id]));
+      existingOrdersByCode = new Map(existRows.map((r) => [r.lookup_code, { orderId: r.order_id, orderStatus: r.order_status }]));
     }
 
     // Build final appointment list with link-status classification.
+    // "orders" is now a list of { orderNo, orderStatus } objects (was
+    // plain strings) so the frontend can show status per order.
     const appointments = allApptRows.map((r) => {
       const linked = linkedByAppt.get(r.appt_id);
       if (linked && linked.length) {
@@ -180,7 +204,7 @@ exports.handler = async (event) => {
           apptCode: r.appt_code,
           scheduledArrival: r.scheduled_arrival,
           linkStatus: 'linked',
-          orders: linked.map((l) => l.orderNo),
+          orders: linked.map((l) => ({ orderNo: l.orderNo, orderStatus: l.orderStatus })),
         };
       }
       const candidates = extractOrderNumbers(r.appt_code);
@@ -191,7 +215,10 @@ exports.handler = async (event) => {
           apptCode: r.appt_code,
           scheduledArrival: r.scheduled_arrival,
           linkStatus: 'not_linked',
-          orders: foundExisting,
+          orders: foundExisting.map((c) => ({
+            orderNo: c,
+            orderStatus: existingOrdersByCode.get(c).orderStatus,
+          })),
         };
       }
       return {
@@ -199,7 +226,7 @@ exports.handler = async (event) => {
         apptCode: r.appt_code,
         scheduledArrival: r.scheduled_arrival,
         linkStatus: 'no_order_in_datex',
-        orders: candidates, // referenced but nonexistent, or empty (pure hold)
+        orders: candidates.map((c) => ({ orderNo: c, orderStatus: null })), // referenced but nonexistent, or empty (pure hold)
       };
     });
 
