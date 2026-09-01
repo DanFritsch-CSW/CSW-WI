@@ -57,10 +57,21 @@
 // ('pretzilla_ken' today) rather than facility, so a second customer
 // added to this tab later gets its own reportKey/editor instance without
 // restructuring this component.
+//
+// GENERALIZED 2026-09-01 (later same day) to accept {reportKey,
+// reportLabel} as props instead of being hardcoded to Pretzilla/Kenosha —
+// per Dan's explicit direction when Sargento (Caledonia) joined: "mimic
+// Sargento just as Pretzilla -- any future additions will probably be
+// for all customers." This component (filename kept for continuity — see
+// house convention of not renaming actively-used files) now renders
+// whichever customer's report CustomerShortageReportTab.jsx (the new
+// dropdown container, see that file) selects. Backend calls
+// motherduck-shortage-report.cjs with the selected reportKey; overrides
+// are scoped by report_key as well as (report_date, material_code).
 
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  fetchPretzillaShortage,
+  fetchShortageReport,
   fetchShortageOverrides,
   upsertShortageOverride,
   tomorrowCentral,
@@ -127,7 +138,7 @@ function OrderTag({ orderNo, orderStatus }) {
   );
 }
 
-export default function PretzillaShortageTab() {
+export default function PretzillaShortageTab({ reportKey, reportLabel }) {
   const [targetDate, setTargetDate] = useState(tomorrowCentral());
   const [data, setData] = useState(null);
   const [overrides, setOverrides] = useState(new Map());
@@ -141,8 +152,8 @@ export default function PretzillaShortageTab() {
     setError(null);
     try {
       const [result, overrideMap] = await Promise.all([
-        fetchPretzillaShortage(date),
-        fetchShortageOverrides(date),
+        fetchShortageReport(date, reportKey),
+        fetchShortageOverrides(date, reportKey),
       ]);
       setData(result);
       setOverrides(overrideMap);
@@ -151,12 +162,12 @@ export default function PretzillaShortageTab() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [reportKey]);
 
   useEffect(() => {
     load(targetDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [reportKey]);
 
   const handleDateChange = (v) => {
     setTargetDate(v);
@@ -169,7 +180,7 @@ export default function PretzillaShortageTab() {
     const existing = overrides.get(materialCode) || {};
     const numeric = rawValue === '' ? null : Number(rawValue);
     try {
-      await upsertShortageOverride(targetDate, materialCode, {
+      await upsertShortageOverride(targetDate, reportKey, materialCode, {
         inactiveOverride: numeric,
         inboundOverride: existing.inbound_override,
       });
@@ -201,6 +212,7 @@ export default function PretzillaShortageTab() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <h3 style={{ margin: 0, color: 'var(--text-primary, #fff)' }}>Shortage Report</h3>
+          {reportLabel && <div style={{ fontSize: 12, color: 'var(--text-secondary, #9aa1ac)', marginTop: 2 }}>{reportLabel}</div>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <label style={labelStyle}>
@@ -344,7 +356,7 @@ export default function PretzillaShortageTab() {
             {' '}Only Linked appointments count toward Needed — Not Linked / No Order Within Datex are shown for review only.
           </div>
 
-          <ShortageReportEmailEditor reportKey="pretzilla_ken" reportLabel="Pretzilla — Kenosha" />
+          <ShortageReportEmailEditor reportKey={reportKey} reportLabel={reportLabel} />
         </>
       )}
 
