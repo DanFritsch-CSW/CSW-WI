@@ -4,10 +4,9 @@
 // "Pretzilla Daily" call) — automates the team's daily hand-built shortage
 // Excel (Pretzilla_Template.xlsx). Backend: netlify/functions/motherduck-
 // pretzilla-shortage.cjs — see that file's header for the full validation
-// writeup, including two live-data bugs found and fixed 2026-09-01:
-// appointment coverage (was only 2 of 6 real appointments, since most
-// don't carry a Datex relational order link — see below) and Soft-
-// Allocated inventory (was reading the wrong gold table, always 0).
+// writeup, including bugs found and fixed 2026-09-01: appointment coverage
+// (was only 2 of 6 real appointments) and Soft-Allocated inventory (was
+// reading the wrong gold table, always 0).
 //
 // Header/subtitle wording deliberately genericized 2026-08-31 (later same
 // day, per Dan's ask) — this component is currently wired to Kenosha only
@@ -16,20 +15,22 @@
 // multiple customers/projects behind one tab.
 //
 // Appointment link-status badges (added 2026-09-01, per Dan's explicit
-// ask): every appointment now shows regardless of whether Datex has a
-// relational order link, tagged with one of three states:
-//   - "Linked"                — has a real dockappointmentitems→Order
-//                                link; its order(s) count toward Needed.
-//   - "Not Linked"             — no relational link, but the appointment
-//                                name references an order number that DOES
-//                                exist in Datex. NOT counted in Needed —
-//                                flagged for a human to link in Datex.
-//   - "No Order Within Datex"  — no relational link, and either no order
-//                                number in the name (pure holds) or the
-//                                referenced number doesn't exist as a real
-//                                order yet.
-// Per Dan's decision, none of these get auto-parsed into demand — this is
-// visibility only, not an automatic fallback.
+// ask): every appointment shows regardless of whether Datex has a
+// relational order link, tagged Linked / Not Linked / No Order Within
+// Datex. Only Linked orders count toward Needed — see the backend
+// function's header for the full classification writeup.
+//
+// Allocated column (added 2026-09-01, later same day, per Dan's ask):
+// replaces the separate Soft-Allocated column with a combined
+// soft-allocated + hard-allocated figure, after confirming live that
+// watching Soft-Allocated alone made real pick progress look like
+// inventory disappearing (120 units moved from soft- to hard-allocated in
+// ~15 minutes; the combined total was unchanged). The Inbound (auto)
+// column is REMOVED from this table per the same request —
+// incoming_packaged_amount has read 0 in every case tested. It is still
+// part of the Short calculation server-side; only the display column is
+// gone, so there's no client-side override for it anymore (Inactive
+// remains editable).
 //
 // Currently VALIDATION MODE: visible in the app for Dan to compare against
 // the team's manual sheet each day this week before this replaces the
@@ -117,22 +118,21 @@ export default function PretzillaShortageTab() {
     load(v);
   };
 
-  const handleOverrideSave = async (materialCode, field, rawValue) => {
-    const key = `${materialCode}-${field}`;
+  const handleInactiveSave = async (materialCode, rawValue) => {
+    const key = `${materialCode}-inactive`;
     setSavingKey(key);
     const existing = overrides.get(materialCode) || {};
     const numeric = rawValue === '' ? null : Number(rawValue);
-    const next = {
-      inactiveOverride: field === 'inactive' ? numeric : existing.inactive_override,
-      inboundOverride: field === 'inbound' ? numeric : existing.inbound_override,
-    };
     try {
-      await upsertShortageOverride(targetDate, materialCode, next);
+      await upsertShortageOverride(targetDate, materialCode, {
+        inactiveOverride: numeric,
+        inboundOverride: existing.inbound_override,
+      });
       const newMap = new Map(overrides);
       newMap.set(materialCode, {
         material_code: materialCode,
-        inactive_override: next.inactiveOverride,
-        inbound_override: next.inboundOverride,
+        inactive_override: numeric,
+        inbound_override: existing.inbound_override,
       });
       setOverrides(newMap);
     } catch (e) {
@@ -145,13 +145,10 @@ export default function PretzillaShortageTab() {
   const rows = (data?.materials || []).map((m) => {
     const ov = overrides.get(m.materialCode);
     const inactive = ov?.inactive_override ?? m.inactive;
-    const inbound = ov?.inbound_override ?? m.inboundAuto;
-    const rawShort = m.active + inbound - m.needed;
-    const short = rawShort < 0 ? rawShort : 0;
-    return { ...m, inactiveEffective: inactive, inboundEffective: inbound, shortEffective: short };
-  }).sort((a, b) => a.shortEffective - b.shortEffective);
+    return { ...m, inactiveEffective: inactive };
+  }).sort((a, b) => a.short - b.short);
 
-  const shortCount = rows.filter((r) => r.shortEffective < 0).length;
+  const shortCount = rows.filter((r) => r.short < 0).length;
   const linkedCount = (data?.appointments || []).filter((a) => a.linkStatus === 'linked').length;
 
   return (
@@ -249,14 +246,13 @@ export default function PretzillaShortageTab() {
                   <th style={{ ...cellStyle, textAlign: 'right' }}>Needed</th>
                   <th style={{ ...cellStyle, textAlign: 'right' }}>Active</th>
                   <th style={{ ...cellStyle, textAlign: 'right' }}>Inactive</th>
-                  <th style={{ ...cellStyle, textAlign: 'right' }}>Inbound (auto)</th>
-                  <th style={{ ...cellStyle, textAlign: 'right' }}>Soft-alloc.</th>
+                  <th style={{ ...cellStyle, textAlign: 'right' }}>Allocated</th>
                   <th style={{ ...cellStyle, textAlign: 'right' }}>Short</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((m) => {
-                  const isShort = m.shortEffective < 0;
+                  const isShort = m.short < 0;
                   return (
                     <tr key={m.materialCode} style={{ borderBottom: '1px solid var(--border, #2a2e38)', background: isShort ? 'rgba(229,72,77,0.08)' : 'transparent' }}>
                       <td style={cellStyle}>
@@ -269,26 +265,19 @@ export default function PretzillaShortageTab() {
                         <EditableCell
                           value={m.inactiveEffective}
                           saving={savingKey === `${m.materialCode}-inactive`}
-                          onCommit={(v) => handleOverrideSave(m.materialCode, 'inactive', v)}
+                          onCommit={(v) => handleInactiveSave(m.materialCode, v)}
                         />
                       </td>
-                      <td style={{ ...cellStyle, textAlign: 'right' }}>
-                        <EditableCell
-                          value={m.inboundEffective}
-                          saving={savingKey === `${m.materialCode}-inbound`}
-                          onCommit={(v) => handleOverrideSave(m.materialCode, 'inbound', v)}
-                        />
-                      </td>
-                      <td style={{ ...cellStyle, textAlign: 'right', color: 'var(--text-secondary, #9aa1ac)' }}>{fmtNumber(m.softAlloc)}</td>
+                      <td style={{ ...cellStyle, textAlign: 'right', color: 'var(--text-secondary, #9aa1ac)' }}>{fmtNumber(m.allocated)}</td>
                       <td style={{ ...cellStyle, textAlign: 'right', fontWeight: 600, color: isShort ? '#e5484d' : 'var(--text-secondary, #9aa1ac)' }}>
-                        {isShort ? fmtNumber(m.shortEffective) : '—'}
+                        {isShort ? fmtNumber(m.short) : '—'}
                       </td>
                     </tr>
                   );
                 })}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={7} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
+                    <td colSpan={6} style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--text-secondary, #9aa1ac)' }}>
                       No orders found for {targetDate}.
                     </td>
                   </tr>
@@ -298,9 +287,9 @@ export default function PretzillaShortageTab() {
           </div>
 
           <div style={{ fontSize: 11, color: 'var(--text-secondary, #9aa1ac)', marginTop: 12 }}>
-            As of {new Date(data.fetchedAt).toLocaleString()} · Short = Active + Inbound − Needed (only shown when negative) ·
-            {' '}Inactive and Soft-Allocated are informational only, matching the source spreadsheet's actual formula ·
-            {' '}Inactive/Inbound are editable — click a value to correct it ·
+            As of {new Date(data.fetchedAt).toLocaleString()} · Short = Active + Inbound − Needed (only shown when negative; Inbound isn't shown as its own column but is still included in this calculation) ·
+            {' '}Inactive and Allocated (soft + hard) are informational only, not netted into Short ·
+            {' '}Inactive is editable — click a value to correct it ·
             {' '}Only Linked appointments count toward Needed — Not Linked / No Order Within Datex are shown for review only.
           </div>
         </>
