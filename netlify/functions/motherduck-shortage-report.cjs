@@ -24,6 +24,20 @@
 // warehouse/projects/appointment tag. Unlinked/no-order appointments are
 // surfaced for visibility (linkStatus) but excluded from Needed.
 //
+// OUTBOUND ONLY, FIXED 2026-09-01 (later same day): appointment query now
+// joins silver.datex_slv_dockappointmenttypes and filters to
+// dock_appointment_type_name LIKE 'Outbound%'. Found live on Sargento
+// (Caledonia): several appointments tagged (SARG) were actually type_id=1
+// ("Inbound") carrying PO-style numbers (e.g. "4500620025") that don't
+// exist as sales orders in Datex at all — they showed up as "No Order
+// Within Datex" noise and, worse, would have been silently excluded from
+// Needed anyway since they're not real outbound demand, but cluttered the
+// appointments panel. Pretzilla's (PZ)-tagged appointments happened to
+// already be 100% Outbound, which is why this was invisible there — this
+// filter is a no-op for Pretzilla, a real fix for Sargento, and applies
+// uniformly to any future customer per Dan's ask ("make this consistent
+// across all customers").
+//
 // SHORT = Active - Needed, only returned when negative. Inactive and
 // Allocated (soft + hard) are informational only, not netted in.
 //
@@ -90,13 +104,16 @@ exports.handler = async (event) => {
     await runQuery(`ATTACH 'md:production_db' (READ_ONLY)`);
 
     const allApptsSql = `
-      SELECT dock_appointment_id AS appt_id, lookup_code AS appt_code, scheduled_arrival
-      FROM production_db.silver.datex_slv_dockappointments
-      WHERE warehouse_id = ${WAREHOUSE_ID}
-        AND lookup_code LIKE '%${APPT_TAG}%'
-        AND status_id NOT IN (4, 5)
-        AND CAST(scheduled_arrival AS DATE) = DATE '${targetDate}'
-      ORDER BY scheduled_arrival
+      SELECT da.dock_appointment_id AS appt_id, da.lookup_code AS appt_code, da.scheduled_arrival
+      FROM production_db.silver.datex_slv_dockappointments da
+      JOIN production_db.silver.datex_slv_dockappointmenttypes t
+        ON t.dock_appointment_type_id = da.type_id
+      WHERE da.warehouse_id = ${WAREHOUSE_ID}
+        AND da.lookup_code LIKE '%${APPT_TAG}%'
+        AND da.status_id NOT IN (4, 5)
+        AND t.dock_appointment_type_name LIKE 'Outbound%'
+        AND CAST(da.scheduled_arrival AS DATE) = DATE '${targetDate}'
+      ORDER BY da.scheduled_arrival
     `;
     const allApptRows = await runQuery(allApptsSql);
 
