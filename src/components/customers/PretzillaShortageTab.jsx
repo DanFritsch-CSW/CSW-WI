@@ -4,21 +4,32 @@
 // "Pretzilla Daily" call) — automates the team's daily hand-built shortage
 // Excel (Pretzilla_Template.xlsx). Backend: netlify/functions/motherduck-
 // pretzilla-shortage.cjs — see that file's header for the full validation
-// writeup against the team's actual 09/01 Excel (6 of 7 materials matched
-// exactly; the 7th was real order/inventory drift between build time and
-// pull time; one manual-sheet false-shortage caught and explained).
+// writeup, including two live-data bugs found and fixed 2026-09-01:
+// appointment coverage (was only 2 of 6 real appointments, since most
+// don't carry a Datex relational order link — see below) and Soft-
+// Allocated inventory (was reading the wrong gold table, always 0).
 //
 // Header/subtitle wording deliberately genericized 2026-08-31 (later same
 // day, per Dan's ask) — this component is currently wired to Kenosha only
 // (see the backend function's PROJECT_IDS), but the report shape is meant
 // to serve other customers too, the same way FEFO Rotation already covers
-// multiple customers/projects behind one tab. No customer name is
-// hardcoded into the visible UI text so that generalization doesn't
-// require another wording pass later.
+// multiple customers/projects behind one tab.
 //
-// Demand is sourced ENTIRELY from the appointments table (also changed
-// 2026-08-31, later same day) — no due-date cross-check, no "needs review"
-// concept. An order with no scheduled appointment simply doesn't appear.
+// Appointment link-status badges (added 2026-09-01, per Dan's explicit
+// ask): every appointment now shows regardless of whether Datex has a
+// relational order link, tagged with one of three states:
+//   - "Linked"                — has a real dockappointmentitems→Order
+//                                link; its order(s) count toward Needed.
+//   - "Not Linked"             — no relational link, but the appointment
+//                                name references an order number that DOES
+//                                exist in Datex. NOT counted in Needed —
+//                                flagged for a human to link in Datex.
+//   - "No Order Within Datex"  — no relational link, and either no order
+//                                number in the name (pure holds) or the
+//                                referenced number doesn't exist as a real
+//                                order yet.
+// Per Dan's decision, none of these get auto-parsed into demand — this is
+// visibility only, not an automatic fallback.
 //
 // Currently VALIDATION MODE: visible in the app for Dan to compare against
 // the team's manual sheet each day this week before this replaces the
@@ -51,6 +62,24 @@ function fmtDateTime(d) {
 
 const cellStyle = { padding: '6px 8px' };
 const labelStyle = { fontSize: 12, color: 'var(--text-secondary, #9aa1ac)' };
+
+const LINK_STATUS = {
+  linked: { text: 'Linked', bg: 'rgba(56,161,105,0.15)', color: '#38a169' },
+  not_linked: { text: 'Not Linked', bg: 'rgba(245,166,35,0.15)', color: '#f5a623' },
+  no_order_in_datex: { text: 'No Order Within Datex', bg: 'rgba(229,72,77,0.15)', color: '#e5484d' },
+};
+
+function LinkStatusBadge({ status }) {
+  const cfg = LINK_STATUS[status] || LINK_STATUS.no_order_in_datex;
+  return (
+    <span style={{
+      display: 'inline-block', fontSize: 11, fontWeight: 600, padding: '2px 8px',
+      borderRadius: 999, background: cfg.bg, color: cfg.color, whiteSpace: 'nowrap',
+    }}>
+      {cfg.text}
+    </span>
+  );
+}
 
 export default function PretzillaShortageTab() {
   const [targetDate, setTargetDate] = useState(tomorrowCentral());
@@ -123,6 +152,7 @@ export default function PretzillaShortageTab() {
   }).sort((a, b) => a.shortEffective - b.shortEffective);
 
   const shortCount = rows.filter((r) => r.shortEffective < 0).length;
+  const linkedCount = (data?.appointments || []).filter((a) => a.linkStatus === 'linked').length;
 
   return (
     <div style={{ padding: '4px 0' }}>
@@ -181,23 +211,30 @@ export default function PretzillaShortageTab() {
             >
               <span>
                 Appointment → order matching{' '}
-                <span style={labelStyle}>({data.appointments.length} appointment{data.appointments.length === 1 ? '' : 's'}, {data.orderCount} orders)</span>
+                <span style={labelStyle}>
+                  ({data.appointments.length} appointment{data.appointments.length === 1 ? '' : 's'}, {linkedCount} linked)
+                </span>
               </span>
               <span style={labelStyle}>{showAppointments ? 'Hide' : 'Show'}</span>
             </button>
             {showAppointments && (
               <div style={{ borderTop: '1px solid var(--border, #2a2e38)' }}>
                 {data.appointments.map((a) => (
-                  <div key={a.apptId} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 14px', fontSize: 13, borderBottom: '1px solid var(--border, #2a2e38)' }}>
-                    <div>
+                  <div key={a.apptId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 14px', fontSize: 13, borderBottom: '1px solid var(--border, #2a2e38)', gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
                       <span style={{ color: 'var(--text-secondary, #9aa1ac)', marginRight: 10 }}>{fmtDateTime(a.scheduledArrival)}</span>
                       <span style={{ color: 'var(--text-primary, #fff)' }}>{a.apptCode}</span>
                     </div>
-                    <div style={{ color: 'var(--text-secondary, #9aa1ac)' }}>{a.orders.length} order{a.orders.length === 1 ? '' : 's'}: {a.orders.join(', ')}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                      <span style={{ color: 'var(--text-secondary, #9aa1ac)' }}>
+                        {a.orders.length > 0 ? a.orders.join(', ') : '—'}
+                      </span>
+                      <LinkStatusBadge status={a.linkStatus} />
+                    </div>
                   </div>
                 ))}
                 {data.appointments.length === 0 && (
-                  <div style={{ padding: '12px 14px', color: 'var(--text-secondary, #9aa1ac)', fontSize: 13 }}>No matched appointments for this date.</div>
+                  <div style={{ padding: '12px 14px', color: 'var(--text-secondary, #9aa1ac)', fontSize: 13 }}>No appointments for this date.</div>
                 )}
               </div>
             )}
@@ -263,7 +300,8 @@ export default function PretzillaShortageTab() {
           <div style={{ fontSize: 11, color: 'var(--text-secondary, #9aa1ac)', marginTop: 12 }}>
             As of {new Date(data.fetchedAt).toLocaleString()} · Short = Active + Inbound − Needed (only shown when negative) ·
             {' '}Inactive and Soft-Allocated are informational only, matching the source spreadsheet's actual formula ·
-            {' '}Inactive/Inbound are editable — click a value to correct it.
+            {' '}Inactive/Inbound are editable — click a value to correct it ·
+            {' '}Only Linked appointments count toward Needed — Not Linked / No Order Within Datex are shown for review only.
           </div>
         </>
       )}
