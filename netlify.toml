@@ -459,6 +459,31 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Daily Discussion EMAIL draft creation -- added 2026-09-01, per Dan's ask
+# ("I would love for this to create an email draft from the APP"). NOT
+# connected to front-daily-discussion-run.cjs above (Dan explicitly: "not
+# sure where the 'replace' internal front discussion aspect comes from...
+# This would be a fresh email") -- a completely separate, additional
+# capability. Facility-selectable in the UI (unlike CMM Outbound's
+# hardcoded 'cal') and pulls a general, all-customer/both-direction
+# appointment list rather than CMM Outbound's single-carrier/single-
+# customer/outbound-only filter. See lib/daily-discussion-email-shared.cjs
+# for the full design writeup.
+[functions."daily-discussion-email-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# Daily Discussion email draft creation MANUAL TEST -- same reason and
+# pattern as cmm-outbound-draft-create-test above (fixes 403 on "Create
+# Draft Now (test)"). Requires {facility} in the POST body -- no default,
+# since this feature is meant to work across any of the 5 facilities.
+[functions."daily-discussion-email-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 # LoadProof / DVRS open-incidents daily digest -- added 2026-07-19, same
 # every-15-min tick + configurable notify_hour/notify_minute/notify_days
 # pattern as the other digests (facility='all', dashboard_type=
