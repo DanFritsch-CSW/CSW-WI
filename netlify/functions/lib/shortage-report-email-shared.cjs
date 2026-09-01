@@ -47,6 +47,13 @@
 // never scope-drift apart. Added per Dan's direction when Sargento
 // (Caledonia) joined Pretzilla (Kenosha): "mimic Sargento just as
 // Pretzilla -- any future additions will probably be for all customers."
+//
+// OUTBOUND ONLY, FIXED 2026-09-01 (later same day): queryShortageMaterials
+// now joins datex_slv_dockappointmenttypes and filters to
+// dock_appointment_type_name LIKE 'Outbound%', matching the exact fix
+// applied to motherduck-shortage-report.cjs the same session — see that
+// file's header for the full Sargento Inbound-PO story. Kept in sync here
+// so the email draft's numbers can never diverge from what the tab shows.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -177,6 +184,8 @@ async function queryShortageMaterials(config, date) {
   const linkedApptsSql = `
     SELECT dai.dock_appointment_id AS appt_id, o.order_id AS order_id
     FROM production_db.silver.datex_slv_dockappointments da
+    JOIN production_db.silver.datex_slv_dockappointmenttypes t
+      ON t.dock_appointment_type_id = da.type_id
     JOIN production_db.silver.datex_slv_dockappointmentitems dai
       ON dai.dock_appointment_id = da.dock_appointment_id
     JOIN production_db.silver.datex_slv_orders o
@@ -184,6 +193,7 @@ async function queryShortageMaterials(config, date) {
     WHERE da.warehouse_id = ${warehouseId}
       AND da.lookup_code LIKE '%${apptTag}%'
       AND da.status_id NOT IN (4, 5)
+      AND t.dock_appointment_type_name LIKE 'Outbound%'
       AND CAST(da.scheduled_arrival AS DATE) = DATE '${date}'
       AND o.project_id IN (${projectIds.join(',')})
   `
