@@ -49,6 +49,14 @@
 // the team's manual sheet each day this week before this replaces the
 // manual process for the CSR team. No Excel export or Front send yet —
 // same staged rollout pattern as PVI Shortage Report.
+//
+// Email Draft editor (added 2026-09-01, see ShortageReportEmailEditor.jsx
+// for the full story): renders below the material table, collapsed by
+// default. Creates a Front email draft of this shortage table — TO/CC,
+// From channel, Draft Author all editable in the UI. Keyed by reportKey
+// ('pretzilla_ken' today) rather than facility, so a second customer
+// added to this tab later gets its own reportKey/editor instance without
+// restructuring this component.
 
 import React, { useEffect, useState, useCallback } from 'react';
 import {
@@ -57,6 +65,7 @@ import {
   upsertShortageOverride,
   tomorrowCentral,
 } from '../../lib/pretzillaShortage';
+import ShortageReportEmailEditor from './ShortageReportEmailEditor.jsx';
 
 function fmtNumber(n) {
   if (n === null || n === undefined) return '—';
@@ -334,6 +343,8 @@ export default function PretzillaShortageTab() {
             {' '}Inactive is editable — click a value to correct it ·
             {' '}Only Linked appointments count toward Needed — Not Linked / No Order Within Datex are shown for review only.
           </div>
+
+          <ShortageReportEmailEditor reportKey="pretzilla_ken" reportLabel="Pretzilla — Kenosha" />
         </>
       )}
 
