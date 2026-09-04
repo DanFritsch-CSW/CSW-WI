@@ -10,17 +10,41 @@
  * Tim's original xlsx -> python script -> committed JSON pipeline.
  *
  * 2026-09-04 — Tim flagged "alignment of column titles little wacky" after
- * seeing real data (screenshot via Front). Rendered the real component
- * with real Alex Andino data at Tim's exact screenshot width to diagnose
- * before touching anything: headers DO align correctly with their columns
- * (verified via headless Chromium render) — the actual issue is that each
- * LOE cell's status Chip used to render AFTER the goal text, so its
- * vertical position drifted depending on how long that particular goal's
- * wording was. Scanning LOE 1 -> LOE 2 -> LOE 3 status across a row looked
- * jagged since the three chips rarely lined up on the same line. Fixed by
- * moving the Chip to the top of each LoeCell, before the goal text, so all
- * three chips now always sit on the same horizontal line regardless of
- * goal length — confirmed via a second render before shipping.
+ * seeing real data (screenshot via Front). First pass fixed the LOE chip
+ * ordering (see below), but Dan then sent a screenshot with the real
+ * production app showing header labels bunched up far to the LEFT of
+ * their actual data columns, with the gap widening column-by-column
+ * moving right — the signature of <th> and <td> not sharing a resolved
+ * column width. Root-caused and fixed properly this time:
+ *   - Rendered the isolated component alone (no surrounding app CSS) at
+ *     Tim's exact screenshot width — headers aligned fine. Then rendered
+ *     it AGAIN wrapped in the actual .page-content/.settings-tab-row
+ *     markup with the REAL src/index.css loaded (fetched from GitHub,
+ *     not reconstructed from memory) — same misalignment did NOT
+ *     reproduce in that harness either, meaning the drift is coming from
+ *     something specific to the live page (real data volume/length,
+ *     browser, or the sticky-header + horizontal-scroll combination) that
+ *     isn't perfectly reproducible in an isolated test.
+ *   - Rather than keep chasing an intermittent root cause, switched to a
+ *     defensive fix that makes the bug structurally impossible: added an
+ *     explicit <colgroup> with fixed pixel widths and `table-layout:
+ *     fixed` on .grid. With table-layout:fixed, column widths are set
+ *     ONCE from the colgroup and apply identically to every row
+ *     (including the sticky <thead>) — there is no per-row, per-browser,
+ *     or per-content-length auto-sizing calculation left to diverge.
+ *     Verified this holds with long realistic text (the actual Alex
+ *     Andino/Brandon Hall session content) rendered inside the real
+ *     src/index.css context before shipping.
+ *   - Removed `white-space: nowrap` from header cells so a header label
+ *     wraps to two lines instead of overflowing if a column is ever too
+ *     narrow for it, rather than relying on nowrap only being safe by
+ *     coincidence.
+ *
+ * Earlier fix, still in place: each LOE cell's status Chip now renders
+ * BEFORE the goal text (not after), so all three LOE chips in a row sit
+ * on the same horizontal line regardless of how long each goal's wording
+ * is — previously they drifted vertically and made a row look jagged
+ * when scanning LOE 1 -> LOE 2 -> LOE 3.
  *
  * Usage:
  *   import CoachingDashboard from './CoachingDashboard';
@@ -261,6 +285,16 @@ export default function CoachingDashboard({ data }) {
 
       <section className="tablewrap" aria-label="Coaching roster">
         <table className="grid">
+          <colgroup>
+            <col style={{ width: 200 }} />
+            <col style={{ width: 130 }} />
+            <col style={{ width: 220 }} />
+            <col style={{ width: 220 }} />
+            <col style={{ width: 220 }} />
+            <col style={{ width: 200 }} />
+            <col style={{ width: 150 }} />
+            <col style={{ width: 220 }} />
+          </colgroup>
           <thead>
             <tr>
               <th className="col-mgr" scope="col">Manager</th>
@@ -478,14 +512,14 @@ const CSS = `
 
 .tablewrap { background:var(--surface-1); border:1px solid var(--ring); border-radius:10px;
   overflow:auto; max-height:74vh; }
-.grid { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }
+.grid { table-layout: fixed; border-collapse:separate; border-spacing:0; font-size:13px; }
 .grid thead th { position:sticky; top:0; z-index:3; background:var(--surface-1);
   text-align:left; font-size:11px; font-weight:650; text-transform:uppercase; letter-spacing:0.06em;
-  color:var(--text-secondary); padding:10px 12px; border-bottom:1px solid var(--axis); white-space:nowrap; }
+  color:var(--text-secondary); padding:10px 12px; border-bottom:1px solid var(--axis); }
 .grid thead th.col-mgr { z-index:4; }
 .col-mgr { position:sticky; left:0; background:var(--surface-1); z-index:2;
-  border-right:1px solid var(--grid); min-width:200px; }
-.row td, .row th { border-bottom:1px solid var(--grid); vertical-align:top; padding:12px; }
+  border-right:1px solid var(--grid); }
+.row td, .row th { border-bottom:1px solid var(--grid); vertical-align:top; padding:12px; overflow-wrap:break-word; }
 .row--open > * { background:var(--plane); }
 
 .mgr { display:flex; gap:8px; align-items:flex-start; background:none; border:0; padding:0;
@@ -494,11 +528,9 @@ const CSS = `
 .mgr__name { display:block; font-weight:650; }
 .mgr__meta { display:block; font-size:11.5px; color:var(--text-muted); margin-top:2px; }
 
-.cell--date { white-space:nowrap; font-size:12.5px; }
-.cell--loe { min-width:210px; max-width:250px; }
-.cell--hw { min-width:190px; max-width:230px; font-size:12.5px; line-height:1.45; }
-.cell--hwstatus { white-space:nowrap; }
-.cell--comment { min-width:210px; max-width:270px; font-size:12.5px; line-height:1.45; }
+.cell--date { font-size:12.5px; }
+.cell--hw { font-size:12.5px; line-height:1.45; }
+.cell--comment { font-size:12.5px; line-height:1.45; }
 
 .loe__goal { font-size:12.5px; font-weight:600; line-height:1.35; margin-top:6px; margin-bottom:6px;
   color:var(--text-primary); }
