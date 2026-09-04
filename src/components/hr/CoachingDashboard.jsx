@@ -9,6 +9,19 @@
  * CoachingTab.jsx -> netlify/functions/sharepoint-coaching.cjs instead of
  * Tim's original xlsx -> python script -> committed JSON pipeline.
  *
+ * 2026-09-04 — Tim flagged "alignment of column titles little wacky" after
+ * seeing real data (screenshot via Front). Rendered the real component
+ * with real Alex Andino data at Tim's exact screenshot width to diagnose
+ * before touching anything: headers DO align correctly with their columns
+ * (verified via headless Chromium render) — the actual issue is that each
+ * LOE cell's status Chip used to render AFTER the goal text, so its
+ * vertical position drifted depending on how long that particular goal's
+ * wording was. Scanning LOE 1 -> LOE 2 -> LOE 3 status across a row looked
+ * jagged since the three chips rarely lined up on the same line. Fixed by
+ * moving the Chip to the top of each LoeCell, before the goal text, so all
+ * three chips now always sit on the same horizontal line regardless of
+ * goal length — confirmed via a second render before shipping.
+ *
  * Usage:
  *   import CoachingDashboard from './CoachingDashboard';
  *   <CoachingDashboard data={data} />   // data always passed in now
@@ -94,8 +107,8 @@ function LoeCell({ loe }) {
   if (!loe) return <td className="cell cell--loe"><span className="muted">—</span></td>;
   return (
     <td className="cell cell--loe">
-      <div className="loe__goal">{loe.goal || <span className="muted">No goal set</span>}</div>
       <Chip status={loe.status} />
+      <div className="loe__goal">{loe.goal || <span className="muted">No goal set</span>}</div>
       {loe.notes
         ? <p className="loe__notes">{loe.notes}</p>
         : <p className="loe__notes loe__notes--empty">Notes not written yet</p>}
@@ -487,7 +500,7 @@ const CSS = `
 .cell--hwstatus { white-space:nowrap; }
 .cell--comment { min-width:210px; max-width:270px; font-size:12.5px; line-height:1.45; }
 
-.loe__goal { font-size:12.5px; font-weight:600; line-height:1.35; margin-bottom:6px;
+.loe__goal { font-size:12.5px; font-weight:600; line-height:1.35; margin-top:6px; margin-bottom:6px;
   color:var(--text-primary); }
 .loe__notes { margin:8px 0 0; font-size:12px; line-height:1.45; color:var(--text-secondary);
   border-left:2px solid var(--grid); padding-left:8px; }
