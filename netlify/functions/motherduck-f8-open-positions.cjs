@@ -18,6 +18,21 @@
 // no need for the gzip-response handling motherduck-inventory.cjs needs
 // for its much larger payload.
 //
+// FIXED 2026-09-04 (later): Dan flagged old/inactive legacy locations in
+// F8E that should be completely ignored -- confirmed live before
+// excluding anything, per standing project rule. Every F8E aisle position
+// (F8E01 through F8E58+) has a real numbered pick slot (F8E##-1A through
+// F8E##-7A) PLUS a legacy F8E##-00 location sitting alongside it. Queried
+// live: 40 of these F8E##-00 locations exist, effectively all sitting at
+// 0 license plates (one exception, F8E10-00, had 5 -- flagged to Dan
+// separately, not treated as a reason to keep the pattern). Checked the
+// other three aisles too before scoping the fix: F8B has exactly 1 stray
+// '-00' location (not what Dan flagged), F8C/F8D have none at all -- so
+// this exclusion is scoped to F8E specifically, matching Dan's explicit
+// ask, not applied blanket across all four aisles. Excluded via a NOT
+// clause in the `locs` CTE below rather than filtering client-side, so
+// these locations never enter the classification/count logic at all.
+//
 // POST body: {} (no params).
 
 const NO_CACHE_HEADERS = {
@@ -42,10 +57,15 @@ const OPEN_POSITIONS_SQL = `
       substr(loc.location_container_name, 1, 3) AS aisle
     FROM production_db.silver.datex_slv_locationcontainers loc
     JOIN wh ON loc.warehouse_id = wh.warehouse_id
-    WHERE loc.location_container_name LIKE 'F8B%'
-       OR loc.location_container_name LIKE 'F8C%'
-       OR loc.location_container_name LIKE 'F8D%'
-       OR loc.location_container_name LIKE 'F8E%'
+    WHERE (
+      loc.location_container_name LIKE 'F8B%'
+      OR loc.location_container_name LIKE 'F8C%'
+      OR loc.location_container_name LIKE 'F8D%'
+      OR loc.location_container_name LIKE 'F8E%'
+    )
+    -- Legacy/inactive F8E##-00 locations -- confirmed live 2026-09-04
+    -- (see file header), completely ignored per Dan's explicit request.
+    AND NOT (loc.location_container_name LIKE 'F8E%' AND loc.location_container_name LIKE '%-00')
   ),
   lp_counts AS (
     SELECT
