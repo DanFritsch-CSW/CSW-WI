@@ -26,6 +26,12 @@
 // classification logic (Empty=2 open, 1 LP=1 open, else 0) is copied
 // verbatim from that function so the digest number can't drift from the
 // on-screen number even though the query is duplicated here.
+//
+// FIXED 2026-09-04 (later): same exclusion as motherduck-f8-open-
+// positions.cjs -- see that file's header for the full live-confirmed
+// story (40 legacy F8E##-00 locations, effectively always empty, scoped
+// to F8E only since B/C/D don't have this pattern). Copied verbatim here
+// so the digest and the tab can never disagree on which locations count.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -51,10 +57,16 @@ const OPEN_POSITIONS_SQL = `
       substr(loc.location_container_name, 1, 3) AS aisle
     FROM production_db.silver.datex_slv_locationcontainers loc
     JOIN wh ON loc.warehouse_id = wh.warehouse_id
-    WHERE loc.location_container_name LIKE 'F8B%'
-       OR loc.location_container_name LIKE 'F8C%'
-       OR loc.location_container_name LIKE 'F8D%'
-       OR loc.location_container_name LIKE 'F8E%'
+    WHERE (
+      loc.location_container_name LIKE 'F8B%'
+      OR loc.location_container_name LIKE 'F8C%'
+      OR loc.location_container_name LIKE 'F8D%'
+      OR loc.location_container_name LIKE 'F8E%'
+    )
+    -- Legacy/inactive F8E##-00 locations -- confirmed live 2026-09-04,
+    -- completely ignored per Dan's explicit request. See
+    -- motherduck-f8-open-positions.cjs's file header for the full story.
+    AND NOT (loc.location_container_name LIKE 'F8E%' AND loc.location_container_name LIKE '%-00')
   ),
   lp_counts AS (
     SELECT
