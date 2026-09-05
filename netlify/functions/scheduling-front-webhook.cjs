@@ -4,10 +4,10 @@
  * Netlify Function: scheduling-front-webhook
  * Ported from front_netlify_datex/functions/front-webhook.js (2026-08-03).
  *
- * Three-tag flow (the Playbook pipeline this is slated to be replaced by —
- * see the parallel Claude-extraction shadow project — but ported as-is for
- * now so the standalone app's live intake keeps working while that's built
- * and validated):
+ * Three-tag flow (the Playbook pipeline this is now a FALLBACK for — see
+ * lib/ai-appt-intake-shared.cjs / ai-appt-intake-webhook.cjs, added
+ * 2026-09-05, which runs first on the conversation's inbound message and
+ * writes to the same `submissions` row when confident):
  *   0. Rule "CAL - Notify/Comment for Certain People" tags "Front Notes" →
  *      webhook creates a stub with notes + front_conversation_id, or updates
  *      notes on an existing stub.
@@ -17,10 +17,24 @@
  *      by conversation ID and updates it with full fields (date, type, PO
  *      number). If no stub exists, inserts a fresh record instead.
  *
- * NOT yet wired to a live Front webhook subscription in Front's settings —
- * that's a manual step (Settings → Developers → Webhooks) still to be done
- * before this actually receives traffic. Until then this function exists but
- * is inert.
+ * CONFLICT RULE — ADDED 2026-09-05: the "Front Playbook" tag handler used
+ * to blindly PATCH every field parsePlaybook() found onto an existing stub,
+ * which would silently overwrite anything the new AI intake pipeline had
+ * already populated (that pipeline typically runs first — it fires on the
+ * conversation's very first inbound message, before a human/Autopilot even
+ * finishes the multi-step tag sequence that leads here). Fixed: updateStub
+ * calls in this file now only include fields that are NOT already set on
+ * the existing row (see filterUnsetFields below) — "never clobber existing
+ * data" is the same convention already used elsewhere in this app (e.g.
+ * the Notes-field auto-fill in PluginView.jsx). A brand-new stub (no
+ * existing row yet) is unaffected — it still gets every field Playbook
+ * found, same as before.
+ *
+ * NOW LIVE as of 2026-09-05 — this webhook's own subscription URL had been
+ * silently pointed at the old standalone app's domain
+ * (csw-scheduling-datex.netlify.app) instead of this one; Dan corrected it
+ * in Front's app settings this same session. Previously this function
+ * existed but received zero real traffic.
  *
  * Env vars required: SUPABASE_URL/VITE_SUPABASE_URL, SUPABASE_ANON_KEY or
  * SUPABASE_SERVICE_ROLE_KEY, FRONT_API_TOKEN (or legacy FRONT_API_KEY),
@@ -46,13 +60,29 @@ function supabaseHeaders(extra) {
   return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) }
 }
 
+// Selects the fields this file's conflict rule needs to check, alongside
+// the id/status/warehouse the original version already selected.
 async function findStub(conversationId) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/submissions?select=id,status,warehouse&front_conversation_id=eq.${encodeURIComponent(conversationId)}`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/submissions?select=id,status,warehouse,type,scheduled_arrival,reference_number,notes&front_conversation_id=eq.${encodeURIComponent(conversationId)}`, {
     headers: supabaseHeaders(),
   })
   if (!res.ok) return null
   const rows = await res.json()
   return rows?.[0] || null
+}
+
+// CONFLICT RULE: drops any key from `fields` whose value is already
+// truthy on `existing` — so a later Playbook tag can never overwrite a
+// field the AI intake pipeline (or a prior Playbook step, or a human edit)
+// already populated. Only fills in genuinely-blank fields.
+function filterUnsetFields(existing, fields) {
+  const out = {}
+  for (const [key, value] of Object.entries(fields)) {
+    if (existing[key] === undefined || existing[key] === null || existing[key] === '') {
+      out[key] = value
+    }
+  }
+  return out
 }
 
 async function updateStub(id, fields) {
@@ -236,8 +266,12 @@ exports.handler = async (event) => {
       if (existing.status === 'approved') {
         return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, skipped: true, reason: 'Already approved' }) }
       }
+      const toApply = filterUnsetFields(existing, { notes })
+      if (Object.keys(toApply).length === 0) {
+        return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, skipped: true, reason: 'Notes already set (not overwriting)' }) }
+      }
       try {
-        await updateStub(existing.id, { notes })
+        await updateStub(existing.id, toApply)
       } catch (err) {
         return { statusCode: 500, body: `Database error: ${err.message}` }
       }
@@ -308,12 +342,19 @@ exports.handler = async (event) => {
     if (existing.status === 'approved') {
       return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, skipped: true, reason: 'Already approved' }) }
     }
+    // CONFLICT RULE (see file header): only apply fields Playbook found
+    // that aren't already set — protects whatever the AI intake pipeline
+    // (or a prior step, or a human) already populated on this stub.
+    const toApply = filterUnsetFields(existing, fields)
+    if (Object.keys(toApply).length === 0) {
+      return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, skipped: true, reason: 'All fields already set (not overwriting)' }) }
+    }
     try {
-      await updateStub(existing.id, fields)
+      await updateStub(existing.id, toApply)
     } catch (err) {
       return { statusCode: 500, body: `Database error: ${err.message}` }
     }
-    return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, updated: existing.id }) }
+    return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, updated: existing.id, appliedFields: Object.keys(toApply) }) }
   }
 
   let created
