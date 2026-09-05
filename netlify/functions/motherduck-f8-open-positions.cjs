@@ -32,6 +32,21 @@
 // ask, not applied blanket across all four aisles. Excluded via a NOT
 // clause in the `locs` CTE below rather than filtering client-side, so
 // these locations never enter the classification/count logic at all.
+// This structural exclusion is separate from the user-managed ignore
+// list below -- it can never be un-ignored from the UI.
+//
+// ADDED 2026-09-04 (later still): per-location results now returned
+// (`locations`), not just the aisle aggregate, so the frontend can offer
+// a manual "ignore this location" capability (f8_open_positions_ignored
+// table, managed via src/lib/f8OpenPositionsIgnored.js) and recompute
+// aisle totals with ignored locations excluded -- same client-side-
+// recompute convention as WrPickCheck.jsx's dismissal handling
+// (visibleMaterials / filteredCounts). This function itself stays
+// unaware of the ignore list -- `aisles`/`totalOpenPositions` below are
+// the UNFILTERED baseline; the frontend is the one place that combines
+// this with the live ignore list to produce what's actually displayed.
+// The digest (f8-open-positions-digest-shared.cjs), which has no client
+// to lean on, fetches the ignore list itself server-side instead.
 //
 // POST body: {} (no params).
 
@@ -153,12 +168,25 @@ exports.handler = async (event) => {
 
     const { aisles, totalOpenPositions } = buildAisleSummary(rows)
 
+    // Per-location detail -- powers the frontend's ignore-list management
+    // UI and its client-side recomputed (ignore-filtered) aisle totals.
+    const locations = rows.map(r => {
+      const lpCount = num(r.lp_count)
+      return {
+        location: r.location,
+        aisle: r.aisle,
+        lpCount,
+        openPositions: openPositionsForCount(lpCount),
+      }
+    })
+
     return {
       statusCode: 200,
       headers: NO_CACHE_HEADERS,
       body: JSON.stringify({
         aisles,
         totalOpenPositions,
+        locations,
         fetchedAt: new Date().toISOString(),
         elapsedMs: Date.now() - t0,
       }),
