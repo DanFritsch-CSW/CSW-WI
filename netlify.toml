@@ -189,6 +189,36 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# F8 Open Positions backend -- added 2026-09-04, sibling to
+# motherduck-dpi-pickline.cjs above (sits next to it in FacilityPanel.jsx's
+# MAD_TABS row). Plain read-only POST against F8B-F8E location/license-
+# plate counts, scoped to CSW-Madison. See the function's own header for
+# the query + Empty=2/1 LP=1/else=0 open-position classification.
+[functions."motherduck-f8-open-positions"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# F8 Open Positions morning digest -- added 2026-09-04, same every-15-min
+# tick + configurable notify_hour/notify_minute/notify_days pattern as the
+# other Madison digests (facility='mad', dashboard_type=
+# 'f8_open_positions' in prepick_notify_settings). Content date is TODAY
+# (live snapshot, no forecast lead-time). Runs its own direct MotherDuck
+# query (self-contained port convention, same as jdf-scorecard-digest-
+# shared.cjs) so it needs duckdb like the other motherduck-*.cjs functions.
+[functions."f8-open-positions-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# F8 Open Positions digest MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as every other *-digest-test.cjs in
+# this app -- see lib/f8-open-positions-digest-shared.cjs).
+[functions."f8-open-positions-digest-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."motherduck-wr-pick-check"]
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
