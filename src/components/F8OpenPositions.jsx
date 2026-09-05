@@ -6,13 +6,17 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 // ─── F8 Open Positions ───────────────────────────────────────────────────
 // Added 2026-09-04, sits next to "DPI Pickline" in FacilityPanel.jsx's
 // MAD_TABS row. Per Dan's request, kept deliberately simple: just how
-// many open pallet positions exist per aisle in F8B-F8E, no drill-down
+// many open pallet positions exist per aisle in F8B-F8F, no drill-down
 // table, no filters.
 //
 // Definition (Dan's explicit rule):
-//   - a location with ZERO license plates ("Empty")     = 2 open positions
-//   - a location with EXACTLY ONE license plate ("1 LP") = 1 open position
-//   - anything else (2+ LPs)                             = 0 open positions
+//   - B/C/D/E hold 2 pallet positions per location:
+//       - a location with ZERO license plates ("Empty")     = 2 open
+//       - a location with EXACTLY ONE license plate ("1 LP") = 1 open
+//       - anything else (2+ LPs)                             = 0 open
+//   - F holds only 1 pallet position per location (added 2026-09-04,
+//     later still) -- only EMPTY F8F locations count as open (1 each);
+//     a location already holding 1 LP is FULL there, not partially open.
 // Computed server-side in motherduck-f8-open-positions.cjs -- see that
 // file's header for the query and classification logic.
 //
@@ -30,10 +34,10 @@ import NotifySettingsPanel from './NotifySettingsPanel.jsx'
 //
 // Ignore specific locations (added 2026-09-04, later still): per Dan's
 // follow-up ask, a general "ignore this location" capability across all
-// four aisles (not just F8E's structural -00 exclusion, which stays
-// baked into the backend query and isn't user-manageable). Deliberately
-// lives in its own collapsed section on THIS tab, separate from the
-// Notify settings dropdown -- Dan was explicit these are two different
+// aisles (not just F8E's structural -00 exclusion, which stays baked
+// into the backend query and isn't user-manageable). Deliberately lives
+// in its own collapsed section on THIS tab, separate from the Notify
+// settings dropdown -- Dan was explicit these are two different
 // controls. Aisle cards recompute client-side from the raw per-location
 // list (now returned by motherduck-f8-open-positions.cjs) minus whatever
 // is actively ignored -- same "visibleX / filteredCounts" convention as
@@ -48,7 +52,12 @@ const IGNORE_DURATION_OPTIONS = [
   { label: '1 year', days: 365 },
 ]
 
-const AISLE_ORDER = ['F8B', 'F8C', 'F8D', 'F8E']
+const AISLE_ORDER = ['F8B', 'F8C', 'F8D', 'F8E', 'F8F']
+
+// F8F holds only 1 pallet position per location, vs. 2 for B/C/D/E --
+// affects both the classification (done server-side, reflected in
+// loc.openPositions) and how the card's sub-label reads here.
+const SINGLE_POSITION_AISLES = new Set(['F8F'])
 
 function fmtDate(iso) {
   if (!iso) return '—'
@@ -146,6 +155,8 @@ export default function F8OpenPositions() {
   // whatever's actively ignored — same "visible/filtered" convention as
   // WrPickCheck.jsx's dismissal handling, so ignoring a location actually
   // removes it from the aisle totals, not just hides it somewhere.
+  // loc.openPositions is already aisle-aware (server-computed), so this
+  // aggregation doesn't need to know the B-E-vs-F rule itself.
   const visibleAisles = useMemo(() => {
     const byAisle = {}
     for (const a of AISLE_ORDER) byAisle[a] = { aisle: a, empty: 0, oneLp: 0, openPositions: 0 }
@@ -194,8 +205,8 @@ export default function F8OpenPositions() {
       ' ' + lastRefresh.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
     : 'loading…'
 
-  // Datalist of currently-open (Empty/1 LP) locations, for autocomplete
-  // convenience — the input still accepts any typed location code.
+  // Datalist of currently-open locations, for autocomplete convenience —
+  // the input still accepts any typed location code.
   const openLocationCodes = useMemo(
     () => rawLocations.filter(l => l.openPositions > 0 && !activeIgnoredNames.has(l.location)).map(l => l.location),
     [rawLocations, activeIgnoredNames]
@@ -206,7 +217,7 @@ export default function F8OpenPositions() {
       <div style={{ marginBottom: 4 }}>
         <div className="section-label" style={{ marginBottom: 4 }}>F8 Open Positions</div>
         <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
-          CSW-Madison · F8 aisles B–E · Empty = 2 open · 1 LP = 1 open
+          CSW-Madison · F8 aisles B–F · B–E: Empty = 2 open, 1 LP = 1 open · F: Empty = 1 open (1 LP = full)
         </div>
       </div>
 
@@ -250,7 +261,9 @@ export default function F8OpenPositions() {
                 {a.openPositions}
               </div>
               <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
-                {a.empty} empty · {a.oneLp} 1&nbsp;LP
+                {SINGLE_POSITION_AISLES.has(a.aisle)
+                  ? <>{a.empty} empty</>
+                  : <>{a.empty} empty · {a.oneLp} 1&nbsp;LP</>}
               </div>
             </div>
           ))}
@@ -275,7 +288,7 @@ export default function F8OpenPositions() {
         functionName="f8-open-positions-digest-test"
         contentDateLabel="today"
         showSkipToNextValidDay={false}
-        digestDescription="Posts today's F8 Open Positions count per aisle (F8B–F8E) plus the total as a Front comment. Ignored locations (see below) are excluded here too."
+        digestDescription="Posts today's F8 Open Positions count per aisle (F8B–F8F) plus the total as a Front comment. Ignored locations (see below) are excluded here too."
       />
 
       {/* Manage Ignored Locations — deliberately a SEPARATE section from
