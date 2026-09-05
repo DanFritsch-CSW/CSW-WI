@@ -32,6 +32,16 @@
 // story (40 legacy F8E##-00 locations, effectively always empty, scoped
 // to F8E only since B/C/D don't have this pattern). Copied verbatim here
 // so the digest and the tab can never disagree on which locations count.
+//
+// ADDED 2026-09-04 (later still): user-managed ignore list
+// (f8_open_positions_ignored, keyed on location_name) is now also
+// excluded here, same as the tab -- fetchIgnoredLocationNames() is
+// best-effort (falls back to an empty set on any Supabase error) so a
+// transient Supabase hiccup degrades to "count everything" rather than
+// blocking the whole digest, same convention as EXP Check's
+// fetchActiveDismissalKeys(). Query SELECT now includes the raw location
+// name (previously only aisle + lp_count) so it can be matched against
+// the ignore list before aggregating.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -80,6 +90,7 @@ const OPEN_POSITIONS_SQL = `
   )
   SELECT
     locs.aisle AS aisle,
+    locs.location_container_name AS location,
     COALESCE(lp_counts.lp_count, 0) AS lp_count
   FROM locs
   LEFT JOIN lp_counts ON lp_counts.location_container_id = locs.location_container_id
@@ -114,6 +125,21 @@ async function sbPatch(path, body) {
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(await res.text())
+}
+
+// Best-effort -- a Supabase hiccup here degrades to "count everything"
+// (empty ignore set) rather than blocking the whole digest, same
+// convention as exp-check-digest-shared.cjs's fetchActiveDismissalKeys().
+async function fetchIgnoredLocationNames() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return new Set()
+  try {
+    const rows = await sbFetch('f8_open_positions_ignored?select=location_name,ignored_until')
+    const now = Date.now()
+    const active = rows.filter(r => !r.ignored_until || new Date(r.ignored_until).getTime() > now)
+    return new Set(active.map(r => r.location_name))
+  } catch {
+    return new Set()
+  }
 }
 
 function centralNowParts() {
@@ -163,10 +189,11 @@ async function runQuery() {
   }
 }
 
-function summarize(rows) {
+function summarize(rows, ignoredNames) {
   const byAisle = {}
   for (const a of AISLES) byAisle[a] = { aisle: a, empty: 0, oneLp: 0, openPositions: 0 }
   for (const r of rows) {
+    if (ignoredNames.has(r.location)) continue
     const aisle = r.aisle
     if (!byAisle[aisle]) continue
     const lpCount = num(r.lp_count)
@@ -214,8 +241,8 @@ async function runDigest({ settingsRow, isManualTest }) {
     return { ok: false, reason: 'No front_conversation_id configured for f8_open_positions' }
   }
   const today = centralTodayDateStr()
-  const rows = await runQuery()
-  const { aisles, totalOpenPositions } = summarize(rows)
+  const [rows, ignoredNames] = await Promise.all([runQuery(), fetchIgnoredLocationNames()])
+  const { aisles, totalOpenPositions } = summarize(rows, ignoredNames)
   const body = buildDigestBody(aisles, totalOpenPositions, today)
 
   const posted = await frontPostComment(conversationId, body)
