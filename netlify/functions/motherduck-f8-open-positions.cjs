@@ -1,22 +1,31 @@
 'use strict'
 
-// F8 Open Positions backend -- Madison, F8 aisles B-E. Added 2026-09-04
+// F8 Open Positions backend -- Madison, F8 aisles B-F. Added 2026-09-04
 // per Dan's request: a simple per-aisle count of open pallet positions,
 // sitting next to DPI Pickline in FacilityPanel.jsx's MAD_TABS row.
 //
 // Definition (Dan's explicit rule):
-//   - a location with ZERO license plates ("Empty")  = 2 open positions
-//   - a location with EXACTLY ONE license plate ("1 LP") = 1 open position
-//   - anything else (2+ LPs)                         = 0 open positions
+//   - B/C/D/E aisles hold 2 pallet positions per location:
+//       - ZERO license plates ("Empty")     = 2 open positions
+//       - EXACTLY ONE license plate ("1 LP") = 1 open position
+//       - anything else (2+ LPs)             = 0 open positions
+//   - F aisle holds only 1 pallet position per location (added
+//     2026-09-04, later still) -- confirmed live before building: F8F
+//     has no legacy '-00' locations (0 of 200, unlike F8E) and its real
+//     slots mostly sit at 1 LP with some at 2 (double-stacked), never 0
+//     unless truly empty. Per Dan's explicit framing, only EMPTY F8F
+//     locations count as open (1 open position each) -- a location
+//     already holding 1 LP is considered FULL there, not partially
+//     open, so 1-LP F8F locations contribute 0.
 //
 // Query shape mirrors motherduck-inventory.cjs's warehouse-scoping pattern
 // (resolve CSW-Madison's warehouse_id first, then filter locations to
 // that warehouse before joining license plates -- keeps the join bounded
 // to Madison's own location count, not company-wide). Scoped further to
-// just the F8B/F8C/F8D/F8E aisles via a location-name prefix match, so
-// this is a much smaller/faster query than the full Inventory tab dump --
-// no need for the gzip-response handling motherduck-inventory.cjs needs
-// for its much larger payload.
+// just the F8B/F8C/F8D/F8E/F8F aisles via a location-name prefix match,
+// so this is a much smaller/faster query than the full Inventory tab
+// dump -- no need for the gzip-response handling motherduck-inventory.cjs
+// needs for its much larger payload.
 //
 // FIXED 2026-09-04 (later): Dan flagged old/inactive legacy locations in
 // F8E that should be completely ignored -- confirmed live before
@@ -57,7 +66,11 @@ const NO_CACHE_HEADERS = {
 }
 
 const MADISON_WAREHOUSE_NAME = 'CSW-Madison'
-const AISLES = ['F8B', 'F8C', 'F8D', 'F8E']
+const AISLES = ['F8B', 'F8C', 'F8D', 'F8E', 'F8F']
+
+// F8F holds only 1 pallet position per location, vs. 2 for B/C/D/E --
+// see file header for the live-confirmed reasoning.
+const SINGLE_POSITION_AISLES = new Set(['F8F'])
 
 const OPEN_POSITIONS_SQL = `
   WITH wh AS (
@@ -77,9 +90,12 @@ const OPEN_POSITIONS_SQL = `
       OR loc.location_container_name LIKE 'F8C%'
       OR loc.location_container_name LIKE 'F8D%'
       OR loc.location_container_name LIKE 'F8E%'
+      OR loc.location_container_name LIKE 'F8F%'
     )
     -- Legacy/inactive F8E##-00 locations -- confirmed live 2026-09-04
     -- (see file header), completely ignored per Dan's explicit request.
+    -- F8F has no equivalent legacy pattern (confirmed live: 0 of 200),
+    -- so no exclusion is needed there.
     AND NOT (loc.location_container_name LIKE 'F8E%' AND loc.location_container_name LIKE '%-00')
   ),
   lp_counts AS (
@@ -108,7 +124,10 @@ const OPEN_POSITIONS_SQL = `
 // silently drift from what this tab shows).
 function num(v) { return Number(v ?? 0) || 0 }
 
-function openPositionsForCount(lpCount) {
+function openPositionsForCount(aisle, lpCount) {
+  if (SINGLE_POSITION_AISLES.has(aisle)) {
+    return lpCount === 0 ? 1 : 0  // F8F: only Empty counts, 1 position each
+  }
   if (lpCount === 0) return 2  // Empty
   if (lpCount === 1) return 1  // 1 LP
   return 0                     // 2+ LPs -- not counted
@@ -120,9 +139,9 @@ function buildAisleSummary(rows) {
 
   for (const r of rows) {
     const aisle = r.aisle
-    if (!byAisle[aisle]) continue // ignore anything outside B-E, shouldn't happen given the WHERE clause
+    if (!byAisle[aisle]) continue // ignore anything outside B-F, shouldn't happen given the WHERE clause
     const lpCount = num(r.lp_count)
-    const open = openPositionsForCount(lpCount)
+    const open = openPositionsForCount(aisle, lpCount)
     byAisle[aisle].totalLocations += 1
     if (lpCount === 0) byAisle[aisle].empty += 1
     if (lpCount === 1) byAisle[aisle].oneLp += 1
@@ -176,7 +195,7 @@ exports.handler = async (event) => {
         location: r.location,
         aisle: r.aisle,
         lpCount,
-        openPositions: openPositionsForCount(lpCount),
+        openPositions: openPositionsForCount(r.aisle, lpCount),
       }
     })
 
@@ -202,6 +221,7 @@ exports.handler = async (event) => {
 }
 
 module.exports.AISLES = AISLES
+module.exports.SINGLE_POSITION_AISLES = SINGLE_POSITION_AISLES
 module.exports.openPositionsForCount = openPositionsForCount
 module.exports.buildAisleSummary = buildAisleSummary
 module.exports.OPEN_POSITIONS_SQL = OPEN_POSITIONS_SQL
