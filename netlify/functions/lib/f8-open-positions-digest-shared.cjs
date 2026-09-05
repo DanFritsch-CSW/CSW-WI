@@ -23,9 +23,9 @@
 // motherduck-f8-open-positions.cjs over HTTP, following this app's
 // established "self-contained port" convention for server-side digests
 // (see weekly-labor-digest-shared.cjs's header for the precedent). The
-// classification logic (Empty=2 open, 1 LP=1 open, else 0) is copied
-// verbatim from that function so the digest number can't drift from the
-// on-screen number even though the query is duplicated here.
+// classification logic is copied verbatim from that function so the
+// digest number can't drift from the on-screen number even though the
+// query is duplicated here.
 //
 // FIXED 2026-09-04 (later): same exclusion as motherduck-f8-open-
 // positions.cjs -- see that file's header for the full live-confirmed
@@ -42,6 +42,15 @@
 // fetchActiveDismissalKeys(). Query SELECT now includes the raw location
 // name (previously only aisle + lp_count) so it can be matched against
 // the ignore list before aggregating.
+//
+// ADDED 2026-09-04 (later still, F8F): F8F holds only 1 pallet position
+// per location, not 2 like B/C/D/E -- confirmed live before building (no
+// legacy '-00' locations there, real slots hold 1 or occasionally 2 LPs,
+// never structurally empty unless truly empty). Per Dan's explicit
+// framing, only EMPTY F8F locations count as open (1 position each); a
+// location already holding 1 LP is FULL there, not partially open.
+// openPositionsForCount() is now aisle-aware, copied verbatim from
+// motherduck-f8-open-positions.cjs.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -51,7 +60,8 @@ const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN
 const FACILITY = 'mad'
 const DASHBOARD_TYPE = 'f8_open_positions'
 const MADISON_WAREHOUSE_NAME = 'CSW-Madison'
-const AISLES = ['F8B', 'F8C', 'F8D', 'F8E']
+const AISLES = ['F8B', 'F8C', 'F8D', 'F8E', 'F8F']
+const SINGLE_POSITION_AISLES = new Set(['F8F'])
 const APP_URL = 'https://csw-wi.netlify.app'
 
 const OPEN_POSITIONS_SQL = `
@@ -72,10 +82,12 @@ const OPEN_POSITIONS_SQL = `
       OR loc.location_container_name LIKE 'F8C%'
       OR loc.location_container_name LIKE 'F8D%'
       OR loc.location_container_name LIKE 'F8E%'
+      OR loc.location_container_name LIKE 'F8F%'
     )
     -- Legacy/inactive F8E##-00 locations -- confirmed live 2026-09-04,
     -- completely ignored per Dan's explicit request. See
     -- motherduck-f8-open-positions.cjs's file header for the full story.
+    -- F8F has no equivalent legacy pattern (confirmed live).
     AND NOT (loc.location_container_name LIKE 'F8E%' AND loc.location_container_name LIKE '%-00')
   ),
   lp_counts AS (
@@ -98,7 +110,10 @@ const OPEN_POSITIONS_SQL = `
 
 function num(v) { return Number(v ?? 0) || 0 }
 
-function openPositionsForCount(lpCount) {
+function openPositionsForCount(aisle, lpCount) {
+  if (SINGLE_POSITION_AISLES.has(aisle)) {
+    return lpCount === 0 ? 1 : 0
+  }
   if (lpCount === 0) return 2
   if (lpCount === 1) return 1
   return 0
@@ -197,7 +212,7 @@ function summarize(rows, ignoredNames) {
     const aisle = r.aisle
     if (!byAisle[aisle]) continue
     const lpCount = num(r.lp_count)
-    const open = openPositionsForCount(lpCount)
+    const open = openPositionsForCount(aisle, lpCount)
     if (lpCount === 0) byAisle[aisle].empty += 1
     if (lpCount === 1) byAisle[aisle].oneLp += 1
     byAisle[aisle].openPositions += open
@@ -215,7 +230,11 @@ function buildDigestBody(aisles, totalOpenPositions, today) {
   lines.push(`As of: ${formatHeaderDate(today)}`)
   lines.push('')
   for (const a of aisles) {
-    lines.push(`${a.aisle}: ${a.openPositions} open (${a.empty} empty · ${a.oneLp} 1 LP)`)
+    if (SINGLE_POSITION_AISLES.has(a.aisle)) {
+      lines.push(`${a.aisle}: ${a.openPositions} open (${a.empty} empty)`)
+    } else {
+      lines.push(`${a.aisle}: ${a.openPositions} open (${a.empty} empty · ${a.oneLp} 1 LP)`)
+    }
   }
   lines.push('')
   lines.push(`Total F8 Open: ${totalOpenPositions}`)
