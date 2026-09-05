@@ -1,13 +1,12 @@
 'use strict'
 
 // Shared logic for the Automated Appointment Creation pilot (Palermo's /
-// Sam Rohde) — added 2026-08-22. Used by auto-appt-parse-run.cjs and
-// auto-appt-parse-test.cjs.
+// Sam Rohde + Daren Peet) — added 2026-08-22, MAJOR REDESIGN 2026-09-05.
 //
 // Scope, per Dan's explicit "tread lightly" framing:
-//   - ONE inbox (CAL Appointments, channel cha_ema1g). Anything that
-//     doesn't match both a known sender AND that sender's exact expected
-//     body pattern is left alone — no partial guesses, no fuzzy matching.
+//   - CAL Appointments inbox (inb_aut78) only. Anything that doesn't
+//     match both a known sender AND that sender's exact expected body
+//     pattern is left alone — no partial guesses, no fuzzy matching.
 //   - NEVER pushes to Datex. Creates a 'pending' submissions row only —
 //     the existing human-approval flow in PluginView.jsx (Single APPT
 //     tab) picks it up exactly like a manually-entered draft. The CSR
@@ -17,50 +16,68 @@
 //     auto-appt-review-digest-run.cjs) — this is the audit trail Dan
 //     wants before ever considering full automation.
 //
-// UPDATED 2026-08-23 after Dan clarified the parsing logic: the time in
-// Sam Rohde's emails ("needed 3pm") is when the material needs to be
-// READY BY, not the truck appointment time itself — the actual
-// appointment should be scheduled 3 hours BEFORE that time. parseBody now
-// returns both neededBy (the time as literally stated in the email) and
-// scheduledArrival (neededBy minus 3 hours, via proper Date millisecond
-// arithmetic so day/month/year rollover is handled correctly.
+// ROOT-CAUSE FOUND 2026-09-05, after this function ran on schedule for
+// roughly two weeks and never once wrote its own watermark or logged a
+// single attempt, despite confirmed real emails sitting in the inbox the
+// whole time. Diagnostic logging added earlier that day showed the exact
+// failure on the very first network call, every single run:
+//   GET /channels/cha_ema1g/messages -> 404 "No such route."
+// That endpoint never existed in Front's API. This function was built on
+// a call that was invalid from the day it was written — not a timing
+// issue, not a permissions issue, not a deploy issue (all three were
+// separately ruled out first: RLS confirmed off on `settings`, anon role
+// confirmed to have full INSERT/UPDATE grants, a direct SQL upsert into
+// settings succeeded instantly, and the Front API token was confirmed to
+// have explicit "Read and Write Channels" scope). The lesson: an
+// integration call this central to the whole feature should have been
+// verified against a live response before anything was built on top of
+// it, the same way SQL against MotherDuck is verified elsewhere in this
+// app — that didn't happen here, and it cost real time to find.
 //
-// FIXED 2026-08-24 — replaced a fixed "top 50 snapshot" scan with a
-// persistent watermark + pagination, after confirming Sam Rohde's real
-// email was pushed out of the old fixed window by unrelated channel
-// volume. See prior versions of this file's header for the full story.
+// SECOND DISCOVERY the same day, while confirming the real fix: pulling
+// an actual Daren Peet conversation (cnv_1cbj9u8k) directly showed his
+// messages arrive via a `custom_channel` origin, NOT the office365
+// channel (cha_ema1g) Sam Rohde's mail comes through. Even a working fix
+// to the old channel-scoped design would NEVER have caught Daren's
+// messages — they don't arrive on that channel at all. This is why the
+// whole fetch layer is now scoped to the INBOX (inb_aut78, "CAL
+// Appointments") rather than any single channel — an inbox can receive
+// messages through multiple channel types, which is exactly what's
+// happening here.
 //
-// EXTENDED 2026-08-24 (later) — added Daren Peet as a second eligible
-// sender with his own distinct format and the same 3-hour lead-time rule.
+// THIRD DISCOVERY, reading that same conversation's full history: the
+// original request ("3am urgent, same day") was renegotiated hours later
+// through ordinary back-and-forth replies into a completely different
+// time ("ready at 0500 Tuesday") — with no second parseable email, just
+// human conversation. Flagged to Dan directly; his answer: only ever act
+// on a conversation's FIRST message, and accept that a conversation which
+// gets renegotiated afterward may produce a stale pending draft. This is
+// an acceptable tradeoff specifically BECAUSE human review is already
+// mandatory before anything reaches Datex — a stale draft is a starting
+// point for the CSR to correct or discard, not a live appointment.
 //
-// DIAGNOSTIC LOGGING added 2026-09-05 — despite the watermark fix and
-// Daren Peet addition both being deployed and confirmed intact (verified
-// via direct GitHub read — netlify.toml registration and this file's
-// content are both exactly as last pushed), the scheduled function has
-// never once written a watermark row, even though: RLS is confirmed OFF
-// on `settings`, the anon role has full INSERT/UPDATE grants (confirmed
-// via information_schema.role_table_grants), the settings.key/value
-// schema matches what this code expects (confirmed via
-// information_schema.columns), a direct SQL upsert into settings
-// succeeded instantly, and the Front API token has explicit "Read and
-// Write Channels" scope (confirmed via Front's own token detail page) —
-// ruling out every database- and permissions-side explanation that could
-// be checked without seeing the function's own execution. Netlify's
-// function log shows clean, fast (300-900ms) executions with no visible
-// errors, which is consistent with the code failing very early and the
-// top-level handler's try/catch converting that into a clean 502 rather
-// than a visible crash.
+// REDESIGNED FETCH LAYER: scans conversations in the CAL Appointments
+// inbox (not any single channel), watermarked and paginated by
+// conversation created_at (Unix seconds, matching Front's convention) —
+// so a NEW conversation's arrival is what advances the watermark, not
+// message-level chatter within existing conversations. For each new
+// conversation, fetches its messages and identifies the EARLIEST one by
+// created_at (sort-order-agnostic, since a brand-new conversation won't
+// have more than a handful of messages) and evaluates ONLY that message
+// against the sender/pattern rules — never anything later in the thread.
 //
-// Added explicit console.log/console.error at every meaningful step
-// (watermark read, each Front API page fetch, pagination decisions,
-// watermark write, and eligibility results) specifically so the NEXT
-// invocation's Netlify log shows exactly where execution stops, instead
-// of continuing to infer from execution duration and the absence of
-// side effects. getWatermarkSeconds/setWatermarkSeconds also now check
-// res.ok explicitly and log the response body on failure — previously
-// setWatermarkSeconds only caught network-level exceptions and silently
-// ignored a non-2xx HTTP response, which could have been masking a
-// Supabase-side rejection this whole time.
+// OPEN RISK, not yet resolved: Daren Peet's messages arrive via
+// custom_channel, and the exact shape of the "from" sender identifier on
+// that channel type hasn't been independently confirmed (the visible
+// content looks like a forwarded/relayed structure with embedded "From:"
+// lines inside the body text, which raises a real question of whether
+// Front's own recipients/handle field for these messages will cleanly
+// read as da.peet@palermospizza.com, or something else — a phone number,
+// a relay identity, etc.). Sam Rohde's pattern is unaffected (confirmed
+// office365/email channel, clean sender handles). Left in place as-is
+// rather than guessing further; if Daren's messages don't match, the
+// diagnostic logging below will show exactly what handle was actually
+// seen, which is the fastest way to confirm or correct this.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -68,22 +85,23 @@ const SUPABASE_KEY =
 const FRONT_API_KEY = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
 const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN || ''
 
-const CAL_CHANNEL_ID = 'cha_ema1g' // CAL Appointments — confirmed with Dan 2026-08-22, re-confirmed against live channel address 2026-08-24
+const CAL_INBOX_ID = 'inb_aut78' // CAL Appointments inbox -- confirmed 2026-09-05 (cha_ema1g's own inbox_id, and where both Sam Rohde's and Daren Peet's conversations live per direct Front search)
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuck query before writing this, not guessed
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
 const APPT_TYPE = 'Outbound' // every observed order from either sender is an Outbound Sales Order in Datex
-const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by"/stated time — confirmed with Dan 2026-08-23, and confirmed to apply identically to Daren Peet's format 2026-08-24
+const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by"/stated time -- confirmed with Dan for BOTH senders' formats
 
 const WATERMARK_SETTINGS_KEY = 'auto_appt_scan_watermark'
-const WATERMARK_LOOKBACK_HOURS = 24 // first-ever run default — see header note
-const MAX_PAGES = 10 // safety cap: 10 * 50 = 500 messages per run, comfortably above the ~136/day observed for this channel
+const WATERMARK_LOOKBACK_HOURS = 24 // first-ever run default -- see header note
+const MAX_PAGES = 10 // safety cap on the conversation-list pagination: 10 * 50 = 500 new conversations per run
 
-// Sam Rohde: "TO446013 - 8/20 (needed 3pm)". Deliberately strict — no
-// fuzzy variations attempted.
+// Sam Rohde: "TO446013 - 8/20 (needed 3pm)". Deliberately strict -- no
+// fuzzy variations attempted. Confirmed office365 channel, clean handle.
 const SAM_ROHDE_PATTERN = /\bTO(\d{5,7})\s*-\s*(\d{1,2})\/(\d{1,2})\s*\(\s*needed\s*(\d{1,2})\s*(am|pm)\s*\)/i
 
 // Daren Peet: "TO_447991 Print Transfer Status 8/24 1700". Requires the
-// literal "Print Transfer Status" phrase to stay strict.
+// literal "Print Transfer Status" phrase to stay strict. Arrives via
+// custom_channel -- see header note on the unresolved sender-handle risk.
 const DAREN_PEET_PATTERN = /\bTO_(\d{5,7})\s+Print\s+Transfer\s+Status\s+(\d{1,2})\/(\d{1,2})\s+(\d{3,4})\b/i
 
 const ELIGIBLE_SENDER_PATTERNS = [
@@ -160,10 +178,6 @@ async function logAttempt(fields) {
   }
 }
 
-// Watermark persistence. NOW checks res.ok explicitly and logs the
-// response body on failure — previously this only caught network-level
-// exceptions and silently ignored a non-2xx HTTP response, which could
-// have been masking a Supabase-side rejection this whole time.
 async function getWatermarkSeconds() {
   log('getWatermarkSeconds: SUPABASE_URL set?', Boolean(SUPABASE_URL), 'SUPABASE_KEY set?', Boolean(SUPABASE_KEY))
   const url = `${SUPABASE_URL}/rest/v1/settings?select=value&key=eq.${WATERMARK_SETTINGS_KEY}`
@@ -198,24 +212,33 @@ async function setWatermarkSeconds(seconds) {
   }
 }
 
+// Scans the CAL Appointments INBOX (not a single channel -- see header
+// note) for conversations CREATED since the watermark, paginating
+// forward as needed. For each new conversation, fetches its messages and
+// evaluates ONLY the earliest one -- per Dan's explicit direction, this
+// pilot acts purely on a conversation's first message, regardless of any
+// negotiation that happens afterward.
 async function fetchRecentEligibleMessages() {
-  log('fetchRecentEligibleMessages: starting')
+  log('fetchRecentEligibleMessages: starting (inbox-scoped)')
   const watermarkSeconds = await getWatermarkSeconds()
   const sinceSeconds = watermarkSeconds ?? Math.floor(Date.now() / 1000) - WATERMARK_LOOKBACK_HOURS * 3600
   log('fetchRecentEligibleMessages: sinceSeconds =', sinceSeconds, '(watermark was', watermarkSeconds, ')')
 
-  let allMessages = []
-  let path = `/channels/${CAL_CHANNEL_ID}/messages?limit=50`
+  let allConversations = []
+  let path = `/inboxes/${CAL_INBOX_ID}/conversations?limit=50`
   let pagesFetched = 0
 
   while (path && pagesFetched < MAX_PAGES) {
     const data = await frontFetch(path)
-    const pageMessages = data._results || []
-    log(`page ${pagesFetched + 1}: fetched ${pageMessages.length} messages`)
-    allMessages.push(...pageMessages)
+    const pageConvos = data._results || []
+    log(`page ${pagesFetched + 1}: fetched ${pageConvos.length} conversations`)
+    allConversations.push(...pageConvos)
     pagesFetched++
 
-    const oldestOnPage = pageMessages[pageMessages.length - 1]
+    // Conversations are newest-first (same convention as every other
+    // Front list endpoint in this app). Stop once this page's oldest
+    // conversation is at or before the watermark.
+    const oldestOnPage = pageConvos[pageConvos.length - 1]
     if (!oldestOnPage || (oldestOnPage.created_at ?? 0) <= sinceSeconds) {
       log('stopping pagination: reached watermark or empty page')
       break
@@ -226,27 +249,49 @@ async function fetchRecentEligibleMessages() {
     if (!path) log('stopping pagination: no next page URL')
   }
 
-  log('fetchRecentEligibleMessages: total messages collected =', allMessages.length)
+  log('fetchRecentEligibleMessages: total conversations collected =', allConversations.length)
 
-  if (allMessages.length > 0) {
-    const newestSeconds = allMessages.reduce((max, m) => Math.max(max, m.created_at ?? 0), sinceSeconds)
+  if (allConversations.length > 0) {
+    const newestSeconds = allConversations.reduce((max, c) => Math.max(max, c.created_at ?? 0), sinceSeconds)
     await setWatermarkSeconds(newestSeconds)
   } else {
-    log('fetchRecentEligibleMessages: allMessages is empty, skipping watermark write')
+    log('fetchRecentEligibleMessages: allConversations is empty, skipping watermark write')
   }
 
-  const newMessages = allMessages.filter((m) => (m.created_at ?? 0) > sinceSeconds)
-  log('fetchRecentEligibleMessages: newMessages (after watermark filter) =', newMessages.length)
+  const newConvos = allConversations.filter((c) => (c.created_at ?? 0) > sinceSeconds)
+  log('fetchRecentEligibleMessages: newConvos (after watermark filter) =', newConvos.length)
 
   const eligible = []
-  for (const m of newMessages) {
-    if (!m.is_inbound) continue
-    const fromHandle = (m.recipients || []).find((r) => r.role === 'from')?.handle?.toLowerCase()
+  for (const convo of newConvos) {
+    let messagesData
+    try {
+      messagesData = await frontFetch(`/conversations/${convo.id}/messages?limit=50`)
+    } catch (err) {
+      console.error('[auto-appt-parse] failed to fetch messages for conversation', convo.id, err.message)
+      continue
+    }
+    const msgList = messagesData._results || []
+    if (msgList.length === 0) {
+      log('conversation', convo.id, 'has no messages, skipping')
+      continue
+    }
+    // Sort-order-agnostic: take the message with the smallest created_at
+    // rather than assuming a particular order, since a brand-new
+    // conversation won't have enough messages for this to be expensive.
+    const firstMessage = msgList.reduce((earliest, m) =>
+      (m.created_at ?? Infinity) < (earliest.created_at ?? Infinity) ? m : earliest
+    )
+    if (!firstMessage.is_inbound) {
+      log('conversation', convo.id, 'first message is not inbound, skipping')
+      continue
+    }
+    const fromHandle = (firstMessage.recipients || []).find((r) => r.role === 'from')?.handle?.toLowerCase()
+    log('conversation', convo.id, 'first message from handle:', fromHandle)
     if (!fromHandle) continue
     const match = ELIGIBLE_SENDER_PATTERNS.find((p) => p.sender === fromHandle)
-    if (match) eligible.push({ message: m, senderConfig: match })
+    if (match) eligible.push({ message: firstMessage, senderConfig: match, conversationId: convo.id })
   }
-  log('fetchRecentEligibleMessages: eligible (matched sender) =', eligible.length)
+  log('fetchRecentEligibleMessages: eligible (matched sender on first message) =', eligible.length)
   return eligible
 }
 
@@ -254,14 +299,6 @@ function getMessageText(message) {
   if (message.text) return message.text
   if (message.body) return stripHtml(message.body)
   return ''
-}
-
-async function getConversationId(message) {
-  const url = message._links?.related?.conversation
-  if (!url) return null
-  const path = url.replace('https://api2.frontapp.com', '')
-  const conv = await frontFetch(path)
-  return conv.id || null
 }
 
 function fmtLocal(d) {
@@ -415,7 +452,7 @@ function formatDisplayDatetime(iso) {
 
 async function createPendingSubmission({ conversationId, project, dockDoor, reference, neededBy, scheduledArrival, senderLabel }) {
   const appointmentCode = `(${PALERMO_ABBR}) - ${reference}`
-  const notes = `Auto-parsed from ${senderLabel} email — needed by ${formatDisplayDatetime(neededBy)}, appointment scheduled ${LEAD_TIME_HOURS} hours prior. Please verify all fields before pushing to Datex.`
+  const notes = `Auto-parsed from ${senderLabel} email (first message only) — needed by ${formatDisplayDatetime(neededBy)}, appointment scheduled ${LEAD_TIME_HOURS} hours prior. Please verify all fields before pushing to Datex, and check the conversation for any later replies that may have changed the plan.`
   const fields = {
     warehouse: CAL_WAREHOUSE,
     type: APPT_TYPE,
@@ -442,11 +479,11 @@ async function createPendingSubmission({ conversationId, project, dockDoor, refe
   return rows?.[0] || null
 }
 
-async function processMessage(message, senderConfig) {
+async function processMessage(message, senderConfig, conversationId) {
   const messageId = message.id
   const subject = message.subject || ''
   const senderHandle = senderConfig.sender
-  log('processMessage: start', messageId, senderHandle)
+  log('processMessage: start', messageId, senderHandle, 'conversation', conversationId)
 
   if (await alreadyProcessed(messageId)) {
     log('processMessage: already processed, skipping', messageId)
@@ -458,13 +495,12 @@ async function processMessage(message, senderConfig) {
 
   if (!parsed) {
     log('processMessage: parse_failed', messageId)
-    await logAttempt({ front_message_id: messageId, sender: senderHandle, subject, outcome: 'parse_failed' })
+    await logAttempt({ front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject, outcome: 'parse_failed' })
     return { messageId, outcome: 'parse_failed' }
   }
 
   const { reference, neededBy, scheduledArrival } = parsed
   log('processMessage: parsed', reference, neededBy, '->', scheduledArrival)
-  const conversationId = await getConversationId(message).catch(() => null)
 
   let order
   try {
@@ -534,8 +570,8 @@ async function runScan() {
   try {
     const eligible = await fetchRecentEligibleMessages()
     const results = []
-    for (const { message, senderConfig } of eligible) {
-      results.push(await processMessage(message, senderConfig))
+    for (const { message, senderConfig, conversationId } of eligible) {
+      results.push(await processMessage(message, senderConfig, conversationId))
     }
     log('runScan: complete, results =', JSON.stringify(results))
     return results
@@ -546,7 +582,7 @@ async function runScan() {
 }
 
 module.exports = {
-  CAL_CHANNEL_ID,
+  CAL_INBOX_ID,
   ELIGIBLE_SENDER_PATTERNS,
   PALERMO_OWNER_NAME,
   CAL_WAREHOUSE,
@@ -555,7 +591,6 @@ module.exports = {
   alreadyProcessed,
   logAttempt,
   getMessageText,
-  getConversationId,
   parseBody,
   lookupOrder,
   findDockDoorRule,
