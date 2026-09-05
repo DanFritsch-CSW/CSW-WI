@@ -219,6 +219,18 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Current Open Positions backend -- CAL/KEN/WR/EC -- added 2026-09-04,
+# new sub-tab on the Inventory page (Cycle Count Report | Current Open
+# Positions), per Dan/Hill's Front conversation about an instant dock-
+# computer pull-up (not a digest). Madison reuses
+# motherduck-f8-open-positions.cjs above instead of this function. See
+# the function's own header for the per-facility zone-grouping reasoning
+# (confirmed live, not guessed) and the conservative Empty-only
+# classification pending real capacity-per-location confirmation.
+[functions."motherduck-open-positions"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."motherduck-wr-pick-check"]
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
