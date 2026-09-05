@@ -78,6 +78,24 @@
 // rather than guessing further; if Daren's messages don't match, the
 // diagnostic logging below will show exactly what handle was actually
 // seen, which is the fastest way to confirm or correct this.
+//
+// FIXED 2026-09-05 (later same day) — the first real tick after the
+// inbox-scoped redesign confirmed page 1 worked (200, 50 conversations —
+// real backlog exists), then threw a generic "fetch failed" TypeError on
+// page 2. Root cause: Front's pagination `next` link is an
+// ALREADY-ABSOLUTE URL on a company-specific subdomain
+// (central-storage-and-warehouse-co.api.frontapp.com), not the generic
+// api2.frontapp.com host used for the initial request. The old code
+// tried to strip a hardcoded api2.frontapp.com prefix off that URL
+// (never matched) and re-prepend it in frontFetch, producing a garbage
+// double-URL. frontFetch now detects an already-absolute URL and uses it
+// as-is. Also restructured fetchRecentEligibleMessages to check
+// eligibility PER PAGE and advance the watermark only after a page's
+// conversations are FULLY evaluated (not just listed) — with a real
+// backlog this large, the per-conversation message-fetch calls needed
+// for eligibility checking could plausibly exceed Netlify's 26s timeout,
+// and advancing the watermark too early (right after listing, before
+// checking) would risk silently losing a real message if that happened.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -131,17 +149,29 @@ function stripHtml(html) {
     .trim()
 }
 
-async function frontFetch(path, options) {
-  log('frontFetch ->', path)
-  const res = await fetch(`https://api2.frontapp.com${path}`, {
+async function frontFetch(pathOrUrl, options) {
+  // Front's pagination `next` links come back as ALREADY-ABSOLUTE URLs on
+  // a company-specific subdomain (e.g.
+  // central-storage-and-warehouse-co.api.frontapp.com), NOT the generic
+  // api2.frontapp.com host used for the initial request. FIXED 2026-09-05
+  // after this caused a "fetch failed" TypeError on every page 2+: the
+  // old code tried to strip a hardcoded "https://api2.frontapp.com"
+  // prefix off the next URL (which never matched) and then re-prepended
+  // it in the fetch() call below, producing a garbage double-URL like
+  // "https://api2.frontapp.comhttps://central-storage-and-warehouse-co...".
+  // Now: if what's passed in is already an absolute URL, use it as-is;
+  // only prepend the generic host for a relative path.
+  const url = pathOrUrl.startsWith('http') ? pathOrUrl : `https://api2.frontapp.com${pathOrUrl}`
+  log('frontFetch ->', url)
+  const res = await fetch(url, {
     ...options,
     headers: { Authorization: `Bearer ${FRONT_API_KEY}`, Accept: 'application/json', ...(options?.headers || {}) },
   })
-  log('frontFetch <-', path, 'status', res.status)
+  log('frontFetch <-', url, 'status', res.status)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    console.error('[auto-appt-parse] frontFetch FAILED', path, res.status, text.slice(0, 500))
-    throw new Error(`Front API ${path} -> ${res.status}: ${text.slice(0, 300)}`)
+    console.error('[auto-appt-parse] frontFetch FAILED', url, res.status, text.slice(0, 500))
+    throw new Error(`Front API ${url} -> ${res.status}: ${text.slice(0, 300)}`)
   }
   return res.json()
 }
@@ -218,13 +248,29 @@ async function setWatermarkSeconds(seconds) {
 // evaluates ONLY the earliest one -- per Dan's explicit direction, this
 // pilot acts purely on a conversation's first message, regardless of any
 // negotiation that happens afterward.
+//
+// RESTRUCTURED 2026-09-05 to process eligibility PER PAGE rather than
+// collecting all pages first and checking eligibility in one big batch
+// afterward. With a real backlog (first page alone returned a full 50
+// conversations, with more to go), the per-conversation message-fetch
+// calls needed for eligibility checking add up fast, and Netlify's
+// function timeout (26s) is a real constraint. Advancing the watermark
+// only after a page's conversations have been FULLY evaluated (not just
+// fetched) means: if a later page or a later eligibility check times out
+// mid-run, nothing already processed gets silently skipped (the
+// watermark only ever reflects fully-checked ground) AND nothing gets
+// needlessly re-fetched next run (already-checked pages don't get
+// re-listed). The alternative -- advancing the watermark right after
+// LISTING a page, before checking its conversations for eligibility --
+// would risk silently losing a real Sam/Daren message if eligibility
+// checking timed out before reaching it.
 async function fetchRecentEligibleMessages() {
   log('fetchRecentEligibleMessages: starting (inbox-scoped)')
   const watermarkSeconds = await getWatermarkSeconds()
-  const sinceSeconds = watermarkSeconds ?? Math.floor(Date.now() / 1000) - WATERMARK_LOOKBACK_HOURS * 3600
+  let sinceSeconds = watermarkSeconds ?? Math.floor(Date.now() / 1000) - WATERMARK_LOOKBACK_HOURS * 3600
   log('fetchRecentEligibleMessages: sinceSeconds =', sinceSeconds, '(watermark was', watermarkSeconds, ')')
 
-  let allConversations = []
+  const eligible = []
   let path = `/inboxes/${CAL_INBOX_ID}/conversations?limit=50`
   let pagesFetched = 0
 
@@ -232,65 +278,69 @@ async function fetchRecentEligibleMessages() {
     const data = await frontFetch(path)
     const pageConvos = data._results || []
     log(`page ${pagesFetched + 1}: fetched ${pageConvos.length} conversations`)
-    allConversations.push(...pageConvos)
     pagesFetched++
+
+    const newOnPage = pageConvos.filter((c) => (c.created_at ?? 0) > sinceSeconds)
+    log(`page ${pagesFetched}: ${newOnPage.length} new (post-watermark) conversations`)
+
+    for (const convo of newOnPage) {
+      let messagesData
+      try {
+        messagesData = await frontFetch(`/conversations/${convo.id}/messages?limit=50`)
+      } catch (err) {
+        console.error('[auto-appt-parse] failed to fetch messages for conversation', convo.id, err.message)
+        continue
+      }
+      const msgList = messagesData._results || []
+      if (msgList.length === 0) {
+        log('conversation', convo.id, 'has no messages, skipping')
+        continue
+      }
+      // Sort-order-agnostic: take the message with the smallest
+      // created_at rather than assuming a particular order, since a
+      // brand-new conversation won't have enough messages for this to
+      // be expensive.
+      const firstMessage = msgList.reduce((earliest, m) =>
+        (m.created_at ?? Infinity) < (earliest.created_at ?? Infinity) ? m : earliest
+      )
+      if (!firstMessage.is_inbound) {
+        log('conversation', convo.id, 'first message is not inbound, skipping')
+        continue
+      }
+      const fromHandle = (firstMessage.recipients || []).find((r) => r.role === 'from')?.handle?.toLowerCase()
+      log('conversation', convo.id, 'first message from handle:', fromHandle)
+      if (fromHandle) {
+        const match = ELIGIBLE_SENDER_PATTERNS.find((p) => p.sender === fromHandle)
+        if (match) eligible.push({ message: firstMessage, senderConfig: match, conversationId: convo.id })
+      }
+    }
+
+    // This page's conversations are now FULLY evaluated (fetched +
+    // eligibility-checked) -- safe to advance the watermark to this
+    // page's newest created_at. If this run times out or errors on a
+    // LATER page, this progress is preserved for the next run rather
+    // than being silently lost or repeated.
+    if (pageConvos.length > 0) {
+      const pageNewest = pageConvos.reduce((max, c) => Math.max(max, c.created_at ?? 0), sinceSeconds)
+      if (pageNewest > sinceSeconds) {
+        await setWatermarkSeconds(pageNewest)
+        sinceSeconds = pageNewest
+      }
+    }
 
     // Conversations are newest-first (same convention as every other
     // Front list endpoint in this app). Stop once this page's oldest
-    // conversation is at or before the watermark.
+    // conversation is at or before the (possibly just-advanced) watermark.
     const oldestOnPage = pageConvos[pageConvos.length - 1]
     if (!oldestOnPage || (oldestOnPage.created_at ?? 0) <= sinceSeconds) {
       log('stopping pagination: reached watermark or empty page')
       break
     }
 
-    const nextUrl = data._pagination?.next
-    path = nextUrl ? nextUrl.replace('https://api2.frontapp.com', '') : null
+    path = data._pagination?.next || null
     if (!path) log('stopping pagination: no next page URL')
   }
 
-  log('fetchRecentEligibleMessages: total conversations collected =', allConversations.length)
-
-  if (allConversations.length > 0) {
-    const newestSeconds = allConversations.reduce((max, c) => Math.max(max, c.created_at ?? 0), sinceSeconds)
-    await setWatermarkSeconds(newestSeconds)
-  } else {
-    log('fetchRecentEligibleMessages: allConversations is empty, skipping watermark write')
-  }
-
-  const newConvos = allConversations.filter((c) => (c.created_at ?? 0) > sinceSeconds)
-  log('fetchRecentEligibleMessages: newConvos (after watermark filter) =', newConvos.length)
-
-  const eligible = []
-  for (const convo of newConvos) {
-    let messagesData
-    try {
-      messagesData = await frontFetch(`/conversations/${convo.id}/messages?limit=50`)
-    } catch (err) {
-      console.error('[auto-appt-parse] failed to fetch messages for conversation', convo.id, err.message)
-      continue
-    }
-    const msgList = messagesData._results || []
-    if (msgList.length === 0) {
-      log('conversation', convo.id, 'has no messages, skipping')
-      continue
-    }
-    // Sort-order-agnostic: take the message with the smallest created_at
-    // rather than assuming a particular order, since a brand-new
-    // conversation won't have enough messages for this to be expensive.
-    const firstMessage = msgList.reduce((earliest, m) =>
-      (m.created_at ?? Infinity) < (earliest.created_at ?? Infinity) ? m : earliest
-    )
-    if (!firstMessage.is_inbound) {
-      log('conversation', convo.id, 'first message is not inbound, skipping')
-      continue
-    }
-    const fromHandle = (firstMessage.recipients || []).find((r) => r.role === 'from')?.handle?.toLowerCase()
-    log('conversation', convo.id, 'first message from handle:', fromHandle)
-    if (!fromHandle) continue
-    const match = ELIGIBLE_SENDER_PATTERNS.find((p) => p.sender === fromHandle)
-    if (match) eligible.push({ message: firstMessage, senderConfig: match, conversationId: convo.id })
-  }
   log('fetchRecentEligibleMessages: eligible (matched sender on first message) =', eligible.length)
   return eligible
 }
