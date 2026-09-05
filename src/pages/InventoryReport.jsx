@@ -6,6 +6,7 @@ import {
   deleteInventoryDiscrepancy,
   purgeExpiredInventoryDiscrepancies,
 } from '../lib/supabase.js'
+import CurrentOpenPositions from '../components/CurrentOpenPositions.jsx'
 import '../styles/inventory-report.css'
 
 const FACILITY_LIST = [
@@ -14,6 +15,18 @@ const FACILITY_LIST = [
   { id: 'ken', label: 'Kenosha',          whName: 'CSW-Kenosha' },
   { id: 'wr',  label: 'Wisconsin Rapids', whName: 'CSW-Wisconsin Rapids' },
   { id: 'ec',  label: 'Eau Claire',       whName: 'CSW-Eau Claire' },
+]
+
+// Top-level Inventory page sub-tabs -- added 2026-09-04 per Dan/Hill's
+// Front conversation. "Cycle Count Report" is everything that already
+// lived on this page (facility pills, SHOW filters, location table,
+// discrepancy flagging, print sheet) -- unchanged, just relocated under
+// this label. "Current Open Positions" is new -- see
+// src/components/CurrentOpenPositions.jsx for the full design writeup
+// (instant dock-computer pull-up per Hill's actual ask, not a digest).
+const TOP_TABS = [
+  { id: 'cycle', label: 'Cycle Count Report' },
+  { id: 'open', label: 'Current Open Positions' },
 ]
 
 // 2026-08-29 (Nate/Josh, cnv_1az0gqac): the app's binary Occupied/Empty
@@ -271,6 +284,7 @@ function StatBar({ rows, discCount, loadingEmpty }) {
 }
 
 export default function InventoryReport() {
+  const [topTab, setTopTab] = useState('cycle')
   const [data,         setData]         = useState([])
   const [loading,      setLoading]      = useState(false)
   const [loadingEmpty, setLoadingEmpty] = useState(false)
@@ -563,6 +577,16 @@ export default function InventoryReport() {
     <div className="page-content">
       <div style={S.page} className="inv-no-print">
 
+        <div className="cal2-tab-row" style={{ marginBottom: '1.1rem' }}>
+          {TOP_TABS.map(t => (
+            <button key={t.id} className={`cal2-tab${topTab === t.id ? ' active' : ''}`} onClick={() => setTopTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {topTab === 'cycle' && (
+        <>
         <div style={S.pageHeader}>
           <div>
             <h1 style={S.h1}>INVENTORY <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}>Location Contents</span></h1>
@@ -699,17 +723,17 @@ export default function InventoryReport() {
             )}
           </div>
         )}
+        </>
+        )}
+
+        {topTab === 'open' && <CurrentOpenPositions />}
 
         {flagModal && <FlagFormModal loc={flagModal} existing={discrepancies.get(flagModal.id) ?? null} onSave={note => saveFlag(flagModal.id, note)} onRemove={() => removeFlag(flagModal.id)} onClose={() => setFlagModal(null)} />}
         {showLog   && <DiscrepancyLogModal discrepancies={discrepancies} allData={data} onClose={() => setShowLog(false)} />}
 
       </div>
 
-      {/* Print-only cycle-count worksheet — hidden on screen, rendered only via
-          @media print in inventory-report.css. Plain HTML tables (2 per
-          page-chunk), pre-chunked into printPages above with a forced
-          page-break between chunks — see the pagination-history comment
-          above for why this reverted away from CSS multicol. */}
+      {topTab === 'cycle' && (
       <div className="inv-print-only">
         <div className="inv-print-header">
           <div className="title">Central Storage &amp; Warehouse — Cycle Count Sheet</div>
@@ -774,6 +798,7 @@ export default function InventoryReport() {
           </div>
         ))}
       </div>
+      )}
     </div>
   )
 }
