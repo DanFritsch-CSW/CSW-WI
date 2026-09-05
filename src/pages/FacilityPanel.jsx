@@ -10,6 +10,7 @@ import WeeklyLaborOverview from '../components/WeeklyLaborOverview.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
 import JdfPutaways from '../components/JdfPutaways.jsx'
 import DpiPickline from '../components/DpiPickline.jsx'
+import F8OpenPositions from '../components/F8OpenPositions.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
 import WrPickCheck from '../components/WrPickCheck.jsx'
 import WrSecondaryRepl from '../components/WrSecondaryRepl.jsx'
@@ -62,7 +63,7 @@ const WR_TABS = [
 // logic in the isMad branch below.
 const MAD_TABS = [
   { id: 'ops', label: 'Daily Ops' }, { id: 'prepick', label: 'Pre-Pick Status' }, { id: 'putaways', label: 'JDF Putaways' },
-  { id: 'dpi_pickline', label: 'DPI Pickline' },
+  { id: 'dpi_pickline', label: 'DPI Pickline' }, { id: 'f8_open', label: 'F8 Open Positions' },
 ]
 // Weekly tab sub-tab row (added 2026-08-03) — sits below the global
 // Daily/Weekly toggle when in Weekly view, same pattern as the other
@@ -242,7 +243,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   // WR's non-warehouse tabs and MAD's Pre-Pick Status tab). Gating on this
   // keeps a stale rosterBusy reading from permanently blocking date
   // navigation on those sub-views.
-  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && (madTab === 'prepick' || madTab === 'putaways' || madTab === 'dpi_pickline'))
+  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && (madTab === 'prepick' || madTab === 'putaways' || madTab === 'dpi_pickline' || madTab === 'f8_open'))
 
   useEffect(() => {
     onBusyChange?.(phasesBusy || (rosterBoardVisible && rosterBusy))
@@ -1147,6 +1148,8 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
           ? <JdfPutaways />
           : isDaily && madTab === 'dpi_pickline'
           ? <DpiPickline />
+          : isDaily && madTab === 'f8_open'
+          ? <F8OpenPositions />
           : warehouseContent}
       </div>
     )
