@@ -113,6 +113,26 @@
 [functions."auto-appt-review-digest-test"]
   timeout = 26
 
+# AI Appointment Intake -- added 2026-09-05. Claude-based extraction from
+# the FIRST inbound message on all 5 Appointments inboxes (CAL/KEN/MAD/
+# WR/EC), with Front Playbook remaining as the fallback (see
+# lib/ai-appt-intake-shared.cjs for the full design writeup and real-data
+# findings). No duckdb/native-module dependency -- calls Supabase REST,
+# Front API, and the Anthropic API directly. Subscribed to Front's
+# "Inbound messages" webhook event (added to the same "Front Webhook" app
+# whose URL was corrected to point at this site this same session).
+[functions."ai-appt-intake-webhook"]
+  timeout = 26
+
+# AI Appointment Intake MANUAL TEST -- no schedule needed (this function
+# was never scheduled to begin with), but kept timeout consistent with the
+# live handler. NOT a dry run -- really calls Claude and, above the
+# confidence threshold, really writes to `submissions`. Bypasses the
+# dedupe/first-message gate. Requires { conversationId, messageId, inboxId }
+# in the POST body.
+[functions."ai-appt-intake-test"]
+  timeout = 26
+
 # --- duckdb-needing functions below (native module: external_node_modules
 # + included_files scoped here only, not globally -- see [functions] header
 # above for the 2026-08-06 ENOSPC fix story) ---
