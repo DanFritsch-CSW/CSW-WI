@@ -17,6 +17,7 @@
 
 const {
   FACILITIES,
+  isConfigured,
   getMaterialMap,
   getExistingLookupCodes,
   createAgencyOrder,
@@ -62,6 +63,62 @@ async function updateBatchRow(batchId, lookupCode, patch) {
   })
 }
 
+function totalQuantity(agency) {
+  return agency.lines.reduce((sum, l) => sum + (Number(l.quantity) || 0), 0)
+}
+
+async function fetchBatchRows(batchId) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/dpi_import_batches?batch_id=eq.${encodeURIComponent(batchId)}`,
+    { headers: supabaseHeaders() }
+  ).catch((err) => {
+    console.error('[dpi-import-push] failed to fetch batch rows for summary:', err.message)
+    return null
+  })
+  if (!res || !res.ok) return []
+  return res.json().catch(() => [])
+}
+
+// Posts a one-line completion summary to the internal DPI status thread —
+// direct send, not a draft (internal-only, informational, no external
+// recipient risk — same posture as the existing CAL Appointments daily
+// digest to cnv_1c7dl7mc). Never blocks/fails the push itself if this
+// errors — a missed status ping shouldn't be treated the same as a failed
+// Datex order.
+//
+// Confirmed 2026-09-06 against front-draft-shared.cjs's createFrontComment:
+// POST /conversations/{id}/comments with { body: <string> } is the right
+// shape for an internal-only note — no draft, no recipient resolution
+// needed (this isn't a reply to a customer thread).
+const FRONT_API_TOKEN = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
+const FRONT_STATUS_CONVERSATION_ID = 'cnv_1cboo2s4'
+
+async function postFrontSummary(facility, monthKey, rows) {
+  if (!FRONT_API_TOKEN) {
+    console.error('[dpi-import-push] FRONT_API_TOKEN not configured — skipping status post')
+    return
+  }
+  const success = rows.filter((r) => r.status === 'success' || r.status === 'simulated')
+  const duplicates = rows.filter((r) => r.status === 'duplicate_skipped').length
+  const failed = rows.filter((r) => r.status === 'failed').length
+  const totalCases = success.reduce((sum, r) => sum + (Number(r.total_quantity) || 0), 0)
+  const simulated = rows.some((r) => r.status === 'simulated')
+
+  const body = simulated
+    ? `**DPI Monthly — ${facility}, ${monthKey}**\nPhase 1 simulated (Datex credentials not yet configured): ${rows.length} agencies parsed, no real orders created.`
+    : `**DPI Monthly — ${facility}, ${monthKey}**\nPhase 1 complete: ${success.length} agencies, ${success.length} orders created, ${totalCases.toLocaleString()} cases total.\n${duplicates} duplicate${duplicates === 1 ? '' : 's'} skipped, ${failed} failed.`
+
+  try {
+    await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FRONT_API_TOKEN}` },
+      body: JSON.stringify({ body }),
+    })
+  } catch (err) {
+    console.error('[dpi-import-push] Front status post failed:', err.message)
+  }
+}
+
 exports.handler = async function (event) {
   let body
   try {
@@ -97,8 +154,26 @@ exports.handler = async function (event) {
       first_name_sent: agency.firstName,
       lookup_code: agency.lookupCode,
       line_count: agency.lines.length,
+      total_quantity: totalQuantity(agency),
       status: 'queued',
     })
+  }
+
+  // Simulate mode — Datex SmartUp credentials aren't configured yet
+  // (blocked on Azure app registration access, Ethan, ~2026-09-09).
+  // Marks every row 'simulated' with no real API calls, so Phase 1 can be
+  // tested end-to-end (parse -> stage -> push -> progress screen) without
+  // pretending a simulated push was a real one. Same convention as the
+  // AIOrderCreator worker's `dryRun` flag.
+  if (!isConfigured()) {
+    for (const agency of agencies) {
+      await updateBatchRow(batchId, agency.lookupCode, {
+        status: 'simulated',
+        error_message: 'Datex SmartUp credentials not configured — no real order was created. Waiting on Azure app registration access.',
+      })
+    }
+    await postFrontSummary(facility, monthKey, await fetchBatchRows(batchId))
+    return
   }
 
   let materialMap
@@ -118,6 +193,7 @@ exports.handler = async function (event) {
         error_message: `Setup failed before any orders were attempted: ${err.message}`,
       })
     }
+    await postFrontSummary(facility, monthKey, await fetchBatchRows(batchId))
     return
   }
 
@@ -133,6 +209,7 @@ exports.handler = async function (event) {
       await updateBatchRow(batchId, agency.lookupCode, {
         status: 'success',
         datex_order_id: result.order_id,
+        total_quantity: totalQuantity(agency),
       })
     } else {
       await updateBatchRow(batchId, agency.lookupCode, {
@@ -142,4 +219,6 @@ exports.handler = async function (event) {
       })
     }
   }
+
+  await postFrontSummary(facility, monthKey, await fetchBatchRows(batchId))
 }
