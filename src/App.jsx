@@ -15,7 +15,12 @@ const APP_MODE = import.meta.env.VITE_APP_MODE || 'csw'
 // belong there: it wastes vertical space Front only gives us a few hundred
 // pixels of, and none of its links are relevant inside Front anyway.
 // Added 2026-08-18 per Dan's request after seeing the plugin embedded live.
-const NO_TOPNAV_ROUTES = ['/scheduling/plugin']
+//
+// /dpimonthly is also excluded — deliberately unlisted in TopNav and reached
+// only by knowing the exact URL (real Datex writes + real emails to school
+// districts; Dan wants it kept off normal nav until it's earned trust).
+// No password gate, per Dan 2026-09-05 — URL obscurity is the only barrier.
+const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly']
 
 const LaborPlanning      = lazy(() => import('./pages/LaborPlanning.jsx'))
 const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
@@ -32,6 +37,7 @@ const Hr                 = lazy(() => import('./pages/Hr.jsx'))
 const SchedulingTab      = lazy(() => import('./pages/SchedulingTab.jsx'))
 const SchedulingDashboard = lazy(() => import('./pages/scheduling/SchedulingDashboard.jsx'))
 const PluginView         = lazy(() => import('./pages/scheduling/PluginView.jsx'))
+const DpiMonthlyProcess  = lazy(() => import('./pages/DpiMonthlyProcess.jsx'))
 
 function PageLoading() {
   return (
@@ -110,6 +116,7 @@ function AppShell() {
             <Route path="/scheduling"            element={<SchedulingTab />}     />
             <Route path="/scheduling/dashboard"  element={<SchedulingDashboard />} />
             <Route path="/scheduling/plugin"     element={<PluginView />}        />
+            <Route path="/dpimonthly"            element={<DpiMonthlyProcess />} />
           </Routes>
         </Suspense>
       </PageErrorBoundary>
