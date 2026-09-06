@@ -6,9 +6,17 @@ import { parseFdp201w, MAX_NAME_LENGTH } from '../lib/dpiMonthlyParser.js'
 // DPI Monthly Process — Phase 1 (Import).
 // Hidden route (/dpimonthly, see src/App.jsx) — not linked from any nav.
 //
-// Flow: drop CSV -> parse client-side -> staging table (flagged rows
-// editable inline) -> "Push to Datex" -> background function creates
-// Datex orders -> this page polls dpi_import_batches for live progress.
+// State persists in Supabase (dpi_monthly_cycles + dpi_staged_agencies), not
+// just React state — a CSR may work this across multiple days and multiple
+// sessions, so reopening this page resumes wherever the facility's active
+// cycle currently sits rather than starting blank. Only one in_progress
+// cycle per facility at a time (enforced by a partial unique index).
+//
+// Flow: drop CSV -> parsed rows written to dpi_staged_agencies immediately
+// (inline edits persist too) -> "Push to Datex" -> background function
+// creates Datex orders -> this page polls dpi_import_batches for progress
+// -> once done, "Start next month" marks the cycle complete and resets to
+// the drop zone, ready for the next CSV.
 //
 // Phases 2-5 are placeholders here; only Phase 1 is built.
 
@@ -43,6 +51,7 @@ function statusMeta(status) {
     case 'success': return { label: 'Pushed', color: colors.success, bg: colors.successBg }
     case 'duplicate_skipped': return { label: 'Already imported', color: colors.textFaint }
     case 'failed': return { label: 'Failed', color: colors.danger, bg: colors.dangerBg }
+    case 'simulated': return { label: 'Simulated — not pushed', color: colors.accent, bg: 'rgba(77,141,255,0.12)' }
     default: return { label: status, color: colors.textMuted }
   }
 }
@@ -68,32 +77,35 @@ function StatCard({ label, value, tone }) {
   )
 }
 
-function DropZone({ facility, onFile }) {
+function DropZone({ facility, onFile, disabled }) {
   const [dragOver, setDragOver] = useState(false)
   const inputRef = useRef(null)
 
   return (
     <div
-      onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+      onDragOver={(e) => { if (!disabled) { e.preventDefault(); setDragOver(true) } }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
         e.preventDefault()
         setDragOver(false)
+        if (disabled) return
         const file = e.dataTransfer.files?.[0]
         if (file) onFile(file)
       }}
-      onClick={() => inputRef.current?.click()}
+      onClick={() => !disabled && inputRef.current?.click()}
       style={{
         border: `1.5px dashed ${dragOver ? colors.accent : colors.borderStrong}`,
         borderRadius: 10, padding: '36px 20px', textAlign: 'center',
         background: dragOver ? 'rgba(77,141,255,0.06)' : colors.panelAlt,
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       <input
         ref={inputRef}
         type="file"
         accept=".csv"
+        disabled={disabled}
         style={{ display: 'none' }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f) }}
       />
@@ -105,83 +117,198 @@ function DropZone({ facility, onFile }) {
   )
 }
 
+// Maps a dpi_staged_agencies row (Supabase, snake_case) to the shape the
+// rest of this component works with (matches dpiMonthlyParser's output).
+function rowToAgency(row) {
+  return {
+    stagedId: row.id,
+    agencyNumber: row.agency_number,
+    agencyName: row.agency_name,
+    firstName: row.first_name,
+    nameWasAbbreviated: row.name_was_abbreviated,
+    line1: row.line1,
+    city: row.city,
+    state: row.state,
+    postalCode: row.postal_code,
+    lookupCode: row.lookup_code,
+    lines: row.lines,
+  }
+}
+
 export default function DpiMonthlyProcess() {
   const [facility, setFacility] = useState('Eau Claire')
+  const [loading, setLoading] = useState(true)
   const [stage, setStage] = useState('empty') // empty | parsed | pushing | done
   const [parseError, setParseError] = useState(null)
+  const [cycle, setCycle] = useState(null) // dpi_monthly_cycles row
   const [monthKey, setMonthKey] = useState(null)
   const [agencies, setAgencies] = useState([])
   const [editingIdx, setEditingIdx] = useState(null)
   const [editValue, setEditValue] = useState('')
-  const [batchId, setBatchId] = useState(null)
-  const [batchRows, setBatchRows] = useState([]) // live status from dpi_import_batches
+  const [batchRows, setBatchRows] = useState([])
   const pollRef = useRef(null)
+
+  // Load (or resume) whatever cycle is active for the selected facility.
+  const loadCycleState = useCallback(async (fac) => {
+    if (!supabase) { setLoading(false); return }
+    setLoading(true)
+
+    const { data: cycles, error: cycleErr } = await supabase
+      .from('dpi_monthly_cycles')
+      .select('*')
+      .eq('facility', fac)
+      .eq('status', 'in_progress')
+      .limit(1)
+    if (cycleErr) { console.error('load cycle:', cycleErr); setLoading(false); return }
+
+    const activeCycle = cycles?.[0] || null
+    if (!activeCycle) {
+      setCycle(null)
+      setAgencies([])
+      setMonthKey(null)
+      setStage('empty')
+      setLoading(false)
+      return
+    }
+
+    setCycle(activeCycle)
+    setMonthKey(activeCycle.month_key)
+
+    const { data: staged, error: stagedErr } = await supabase
+      .from('dpi_staged_agencies')
+      .select('*')
+      .eq('cycle_id', activeCycle.id)
+      .order('agency_number')
+    if (stagedErr) console.error('load staged agencies:', stagedErr)
+    setAgencies((staged || []).map(rowToAgency))
+
+    const { data: batch, error: batchErr } = await supabase
+      .from('dpi_import_batches')
+      .select('*')
+      .eq('batch_id', activeCycle.batch_id)
+    if (batchErr) console.error('load batch rows:', batchErr)
+    setBatchRows(batch || [])
+
+    if (!batch || batch.length === 0) {
+      setStage('parsed')
+    } else if (batch.every((r) => r.status !== 'queued')) {
+      setStage('done')
+    } else {
+      setStage('pushing')
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { loadCycleState(facility) }, [facility, loadCycleState])
 
   const handleFile = useCallback((file) => {
     setParseError(null)
     Papa.parse(file, {
       skipEmptyLines: false,
-      complete: (results) => {
+      complete: async (results) => {
+        let parsed
         try {
-          const { monthKey: mk, agencies: parsedAgencies } = parseFdp201w(results.data)
-          setMonthKey(mk)
-          setAgencies(parsedAgencies)
-          setStage('parsed')
+          parsed = parseFdp201w(results.data)
         } catch (err) {
           setParseError(err.message)
+          return
         }
+        if (!supabase) { setParseError('Supabase not configured — cannot persist staged agencies.'); return }
+
+        const { data: newCycle, error: cycleErr } = await supabase
+          .from('dpi_monthly_cycles')
+          .insert({ facility, month_key: parsed.monthKey })
+          .select()
+          .single()
+        if (cycleErr) {
+          // Most likely the partial unique index (an in_progress cycle already
+          // exists for this facility) — reload actual state rather than guess.
+          console.error('create cycle:', cycleErr)
+          setParseError('Could not start a new cycle — reloading current state.')
+          loadCycleState(facility)
+          return
+        }
+
+        const { data: insertedRows, error: insertErr } = await supabase
+          .from('dpi_staged_agencies')
+          .insert(parsed.agencies.map((a) => ({
+            cycle_id: newCycle.id,
+            agency_number: a.agencyNumber,
+            agency_name: a.agencyName,
+            first_name: a.firstName,
+            name_was_abbreviated: a.nameWasAbbreviated,
+            line1: a.line1,
+            city: a.city,
+            state: a.state,
+            postal_code: a.postalCode,
+            lookup_code: a.lookupCode,
+            lines: a.lines,
+          })))
+          .select()
+        if (insertErr) {
+          console.error('insert staged agencies:', insertErr)
+          setParseError(`Parsed but failed to save: ${insertErr.message}`)
+          return
+        }
+
+        setCycle(newCycle)
+        setMonthKey(newCycle.month_key)
+        setAgencies((insertedRows || []).map(rowToAgency))
+        setBatchRows([])
+        setStage('parsed')
       },
       error: (err) => setParseError(err.message),
     })
-  }, [])
+  }, [facility, loadCycleState])
 
   const startEdit = (idx) => {
     setEditingIdx(idx)
     setEditValue(agencies[idx].firstName)
   }
 
-  const saveEdit = (idx) => {
+  const saveEdit = async (idx) => {
+    const agency = agencies[idx]
     setAgencies((prev) => prev.map((a, i) => (i === idx ? { ...a, firstName: editValue } : a)))
     setEditingIdx(null)
+    if (supabase && agency.stagedId) {
+      const { error } = await supabase
+        .from('dpi_staged_agencies')
+        .update({ first_name: editValue, updated_at: new Date().toISOString() })
+        .eq('id', agency.stagedId)
+      if (error) console.error('save name edit:', error)
+    }
   }
 
   const pushToDatex = async () => {
-    const newBatchId = crypto.randomUUID()
-    setBatchId(newBatchId)
+    if (!cycle) return
     setStage('pushing')
 
-    // expectedDate is a placeholder (1st of the delivery month) — real
-    // delivery date isn't known until Phase 2/4 route + agency confirmation.
-    // Flagged as open: whether this order field can even be corrected later
-    // (no update_outbound_order endpoint seen in the SmartUp API function
-    // list — needs a live check before this matters for real).
     const expectedDate = monthKey ? `${monthKey}-01T00:00:00.000Z` : null
 
     await fetch('/.netlify/functions/dpi-import-push-background', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        batchId: newBatchId,
+        batchId: cycle.batch_id,
         facility,
         monthKey,
         agencies: agencies.map((a) => ({ ...a, expectedDate })),
       }),
     }).catch(() => {
-      // Background functions don't return a useful body — errors here are
-      // just network-level (request never reached Netlify). Real push
-      // failures show up per-row via the dpi_import_batches poll below.
+      // Background functions don't return a useful body — real failures
+      // show up per-row via the dpi_import_batches poll below.
     })
   }
 
   // Poll dpi_import_batches while a push is in flight.
   useEffect(() => {
-    if (stage !== 'pushing' || !batchId || !supabase) return
+    if (stage !== 'pushing' || !cycle || !supabase) return
 
     pollRef.current = setInterval(async () => {
       const { data, error } = await supabase
         .from('dpi_import_batches')
         .select('*')
-        .eq('batch_id', batchId)
+        .eq('batch_id', cycle.batch_id)
       if (error) { console.error('poll dpi_import_batches:', error); return }
       setBatchRows(data ?? [])
 
@@ -193,7 +320,21 @@ export default function DpiMonthlyProcess() {
     }, 2000)
 
     return () => clearInterval(pollRef.current)
-  }, [stage, batchId])
+  }, [stage, cycle])
+
+  const startNextMonth = async () => {
+    if (!cycle || !supabase) return
+    const { error } = await supabase
+      .from('dpi_monthly_cycles')
+      .update({ status: 'complete', updated_at: new Date().toISOString() })
+      .eq('id', cycle.id)
+    if (error) { console.error('complete cycle:', error); return }
+    setCycle(null)
+    setAgencies([])
+    setBatchRows([])
+    setMonthKey(null)
+    setStage('empty')
+  }
 
   const flaggedCount = agencies.filter((a) => a.nameWasAbbreviated).length
 
@@ -208,7 +349,7 @@ export default function DpiMonthlyProcess() {
           {['Eau Claire', 'Madison'].map((f) => (
             <button
               key={f}
-              onClick={() => { setFacility(f); setStage('empty'); setAgencies([]) }}
+              onClick={() => setFacility(f)}
               disabled={stage === 'pushing'}
               style={{
                 fontSize: 13, padding: '6px 14px', borderRadius: 6,
@@ -224,18 +365,20 @@ export default function DpiMonthlyProcess() {
         </div>
       </div>
 
-      {stage === 'empty' && (
+      {loading && <div style={{ fontSize: 13, color: colors.textFaint }}>Loading…</div>}
+
+      {!loading && stage === 'empty' && (
         <div style={{ maxWidth: 520 }}>
           <DropZone facility={facility} onFile={handleFile} />
           {parseError && (
             <div style={{ marginTop: 10, fontSize: 13, color: colors.danger }}>
-              Could not parse file: {parseError}
+              {parseError}
             </div>
           )}
         </div>
       )}
 
-      {stage !== 'empty' && (
+      {!loading && stage !== 'empty' && (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <StatCard label="Orders parsed" value={agencies.length} />
@@ -243,9 +386,9 @@ export default function DpiMonthlyProcess() {
             <StatCard label="Name abbreviated" value={flaggedCount} tone={flaggedCount ? colors.warning : undefined} />
             {stage === 'done' && (
               <StatCard
-                label="Pushed"
-                value={batchRows.filter((r) => r.status === 'success').length}
-                tone={colors.success}
+                label={batchRows.some((r) => r.status === 'simulated') ? 'Simulated' : 'Pushed'}
+                value={batchRows.filter((r) => r.status === 'success' || r.status === 'simulated').length}
+                tone={batchRows.some((r) => r.status === 'simulated') ? colors.accent : colors.success}
               />
             )}
           </div>
@@ -324,22 +467,37 @@ export default function DpiMonthlyProcess() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button
-              onClick={pushToDatex}
-              disabled={stage === 'pushing' || stage === 'done'}
-              style={{
-                fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
-                background: stage === 'done' ? colors.borderStrong : colors.accent,
-                color: stage === 'done' ? colors.textFaint : '#fff',
-                cursor: stage === 'pushing' || stage === 'done' ? 'default' : 'pointer',
-                fontWeight: 500,
-              }}
-            >
-              {stage === 'pushing' ? 'Pushing to Datex…' : stage === 'done' ? 'Pushed' : `Push ${agencies.length} orders to Datex`}
-            </button>
+            {stage !== 'done' && (
+              <button
+                onClick={pushToDatex}
+                disabled={stage === 'pushing'}
+                style={{
+                  fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
+                  background: colors.accent, color: '#fff',
+                  cursor: stage === 'pushing' ? 'default' : 'pointer',
+                  fontWeight: 500,
+                }}
+              >
+                {stage === 'pushing' ? 'Pushing to Datex…' : `Push ${agencies.length} orders to Datex`}
+              </button>
+            )}
+            {stage === 'done' && (
+              <button
+                onClick={startNextMonth}
+                style={{
+                  fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
+                  background: colors.success, color: '#08110c', fontWeight: 500, cursor: 'pointer',
+                }}
+              >
+                Start next month
+              </button>
+            )}
             <span style={{ fontSize: 12, color: colors.textFaint }}>
               {flaggedCount > 0 && stage === 'parsed' && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
-              {stage === 'done' && `${batchRows.filter((r) => r.status === 'duplicate_skipped').length} already in Datex, skipped. ${batchRows.filter((r) => r.status === 'failed').length} failed — hover ⚠ for details.`}
+              {stage === 'done' && batchRows.some((r) => r.status === 'simulated') &&
+                `Simulated — Datex credentials aren't configured yet, no real orders were created.`}
+              {stage === 'done' && !batchRows.some((r) => r.status === 'simulated') &&
+                `${batchRows.filter((r) => r.status === 'duplicate_skipped').length} already in Datex, skipped. ${batchRows.filter((r) => r.status === 'failed').length} failed — hover ⚠ for details.`}
             </span>
           </div>
         </>
