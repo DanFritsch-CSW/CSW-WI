@@ -128,7 +128,7 @@ exports.handler = async function (event) {
     return
   }
 
-  const { batchId, facility, monthKey, agencies } = body
+  const { batchId, facility, monthKey, agencies, forceSimulate } = body
 
   if (!batchId || !facility || !Array.isArray(agencies) || agencies.length === 0) {
     console.error('[dpi-import-push] missing batchId/facility/agencies — nothing to do')
@@ -159,17 +159,21 @@ exports.handler = async function (event) {
     })
   }
 
-  // Simulate mode — Datex SmartUp credentials aren't configured yet
-  // (blocked on Azure app registration access, Ethan, ~2026-09-09).
-  // Marks every row 'simulated' with no real API calls, so Phase 1 can be
-  // tested end-to-end (parse -> stage -> push -> progress screen) without
-  // pretending a simulated push was a real one. Same convention as the
-  // AIOrderCreator worker's `dryRun` flag.
-  if (!isConfigured()) {
+  // Simulate mode — either credentials genuinely aren't configured, or Dan
+  // manually forced it (checkbox on the page) to keep testing downstream
+  // flow while SmartUp credentials are present but not yet actually working
+  // (e.g. Ethan's Azure work is partway done — isConfigured() can return
+  // true while the real API still rejects every call). forceSimulate always
+  // wins over isConfigured() so this is never dependent on guessing whether
+  // Azure's current state happens to look "configured."
+  if (forceSimulate || !isConfigured()) {
+    const reason = forceSimulate
+      ? 'Manually forced to simulate — no real order was created.'
+      : 'Datex SmartUp credentials not configured — no real order was created. Waiting on Azure app registration access.'
     for (const agency of agencies) {
       await updateBatchRow(batchId, agency.lookupCode, {
         status: 'simulated',
-        error_message: 'Datex SmartUp credentials not configured — no real order was created. Waiting on Azure app registration access.',
+        error_message: reason,
       })
     }
     await postFrontSummary(facility, monthKey, await fetchBatchRows(batchId))
