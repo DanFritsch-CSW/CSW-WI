@@ -15,10 +15,17 @@ import { parseFdp201w, MAX_NAME_LENGTH } from '../lib/dpiMonthlyParser.js'
 // Flow: drop CSV -> parsed rows written to dpi_staged_agencies immediately
 // (inline edits persist too) -> "Push to Datex" -> background function
 // creates Datex orders -> this page polls dpi_import_batches for progress
-// -> once done, "Start next month" marks the cycle complete and resets to
-// the drop zone, ready for the next CSV.
+// -> once done, cycle.current_phase advances to 2 (Build & Flag). The cycle
+// stays in_progress — it is NOT reset here. Resetting to a fresh cycle
+// ("Start next month") only happens once the WHOLE pipeline (through
+// Phase 5's final push) completes — corrected 2026-09-06 per Dan: an
+// earlier version of this page showed that reset button right after
+// Phase 1, which would have let someone start next month's import while
+// this month's routes/comms/final push hadn't happened yet.
 //
-// Phases 2-5 are placeholders here; only Phase 1 is built.
+// Phases 2-5 aren't built yet — once Phase 1 finishes, this page shows a
+// "Phase 2 not built yet" placeholder rather than a dead end or a
+// premature reset option.
 
 const colors = {
   bg: '#0f1115',
@@ -43,6 +50,33 @@ const cardStyle = {
   border: `1px solid ${colors.border}`,
   borderRadius: 8,
   padding: '14px 16px',
+}
+
+const PHASE_LABELS = ['1. Import', '2. Build & flag', '3. Carrier approval', '4. Agency comms', '5. Push final']
+
+function PhasePills({ currentPhase }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+      {PHASE_LABELS.map((label, i) => {
+        const phaseNum = i + 1
+        const isCurrent = phaseNum === currentPhase
+        return (
+          <div
+            key={label}
+            style={{
+              fontSize: 13, padding: '6px 12px', borderRadius: 6,
+              border: `1px solid ${isCurrent ? colors.accent : colors.border}`,
+              color: isCurrent ? colors.accent : colors.textFaint,
+              background: isCurrent ? 'rgba(77,141,255,0.08)' : 'transparent',
+              opacity: isCurrent ? 1 : 0.55,
+            }}
+          >
+            {label}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 function statusMeta(status) {
@@ -302,7 +336,9 @@ export default function DpiMonthlyProcess() {
     })
   }
 
-  // Poll dpi_import_batches while a push is in flight.
+  // Poll dpi_import_batches while a push is in flight. Once every row is
+  // terminal, advance the cycle to Phase 2 — the cycle stays in_progress
+  // (this is NOT a reset/completion point; see file header).
   useEffect(() => {
     if (stage !== 'pushing' || !cycle || !supabase) return
 
@@ -318,32 +354,28 @@ export default function DpiMonthlyProcess() {
       if (allDone) {
         clearInterval(pollRef.current)
         setStage('done')
+        if (cycle.current_phase < 2) {
+          const { error: advanceErr } = await supabase
+            .from('dpi_monthly_cycles')
+            .update({ current_phase: 2, updated_at: new Date().toISOString() })
+            .eq('id', cycle.id)
+          if (advanceErr) console.error('advance cycle phase:', advanceErr)
+          else setCycle((prev) => (prev ? { ...prev, current_phase: 2 } : prev))
+        }
       }
     }, 2000)
 
     return () => clearInterval(pollRef.current)
   }, [stage, cycle])
 
-  const startNextMonth = async () => {
-    if (!cycle || !supabase) return
-    const { error } = await supabase
-      .from('dpi_monthly_cycles')
-      .update({ status: 'complete', updated_at: new Date().toISOString() })
-      .eq('id', cycle.id)
-    if (error) { console.error('complete cycle:', error); return }
-    setCycle(null)
-    setAgencies([])
-    setBatchRows([])
-    setMonthKey(null)
-    setStage('empty')
-  }
-
   const flaggedCount = agencies.filter((a) => a.nameWasAbbreviated).length
 
   return (
     <div style={{ background: colors.bg, minHeight: '100vh', padding: 24, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: colors.text }}>
       <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>DPI Monthly Process</div>
-      <div style={{ fontSize: 13, color: colors.textFaint, marginBottom: 20 }}>Phase 1 — Import</div>
+      <div style={{ fontSize: 13, color: colors.textFaint, marginBottom: 20 }}>Eau Claire &amp; Madison monthly school-district delivery cycle</div>
+
+      <PhasePills currentPhase={cycle?.current_phase ?? 1} />
 
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 8 }}>Facility</div>
@@ -468,18 +500,18 @@ export default function DpiMonthlyProcess() {
             })}
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            {stage === 'parsed' && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textFaint, cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={forceSimulate}
-                  onChange={(e) => setForceSimulate(e.target.checked)}
-                />
-                Force simulate (skip real Datex push)
-              </label>
-            )}
-            {stage !== 'done' && (
+          {stage !== 'done' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              {stage === 'parsed' && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textFaint, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={forceSimulate}
+                    onChange={(e) => setForceSimulate(e.target.checked)}
+                  />
+                  Force simulate (skip real Datex push)
+                </label>
+              )}
               <button
                 onClick={pushToDatex}
                 disabled={stage === 'pushing'}
@@ -492,26 +524,24 @@ export default function DpiMonthlyProcess() {
               >
                 {stage === 'pushing' ? 'Pushing to Datex…' : `Push ${agencies.length} orders to Datex`}
               </button>
-            )}
-            {stage === 'done' && (
-              <button
-                onClick={startNextMonth}
-                style={{
-                  fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
-                  background: colors.success, color: '#08110c', fontWeight: 500, cursor: 'pointer',
-                }}
-              >
-                Start next month
-              </button>
-            )}
-            <span style={{ fontSize: 12, color: colors.textFaint }}>
-              {flaggedCount > 0 && stage === 'parsed' && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
-              {stage === 'done' && batchRows.some((r) => r.status === 'simulated') &&
-                `Simulated — no real orders were created (see hover on ⚠ for why).`}
-              {stage === 'done' && !batchRows.some((r) => r.status === 'simulated') &&
-                `${batchRows.filter((r) => r.status === 'duplicate_skipped').length} already in Datex, skipped. ${batchRows.filter((r) => r.status === 'failed').length} failed — hover ⚠ for details.`}
-            </span>
-          </div>
+              <span style={{ fontSize: 12, color: colors.textFaint }}>
+                {flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
+              </span>
+            </div>
+          )}
+
+          {stage === 'done' && (
+            <div style={{ ...cardStyle, borderColor: colors.borderStrong }}>
+              <div style={{ fontSize: 13, color: colors.textMuted, marginBottom: 4 }}>
+                {batchRows.some((r) => r.status === 'simulated')
+                  ? 'Simulated — no real orders were created (hover ⚠ above for why).'
+                  : `${batchRows.filter((r) => r.status === 'duplicate_skipped').length} already in Datex, skipped. ${batchRows.filter((r) => r.status === 'failed').length} failed — hover ⚠ above for details.`}
+              </div>
+              <div style={{ fontSize: 13, color: colors.textFaint }}>
+                Phase 1 complete. Phase 2 (Build &amp; flag) isn't built yet — this cycle stays open until the full process (through Phase 5's final push) completes. No reset option shows here on purpose.
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
