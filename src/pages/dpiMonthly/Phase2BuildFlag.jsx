@@ -5,11 +5,21 @@ import {
   PLACEHOLDER_LBS_PER_CASE, CAPACITY_LBS_LIMIT, CAPACITY_CASES_LIMIT, agencyTotalCases,
 } from './dpiMonthlyStyles.js'
 
-// Phase 2 — Build & flag. Route board: drag agency tiles from "Unassigned"
-// into route lanes, weight/case totals recompute live, over-capacity routes
-// flag red. Phase 3 (carrier approval) has no screen of its own — the
-// capacity flag here IS that gate, cleared by eye per the original design
-// discussion, not a generated document.
+// Phase 2 — Build & flag. Route board seeded from the real master route
+// template (dpi_route_templates/dpi_route_template_stops — parsed
+// 2026-09-06 from the actual "Eau Claire template"/"Madison template"
+// workbook tabs: 13 EC routes/84 stops, 16 Madison routes/73 stops).
+// Matches Dan's described process: an annual template copied forward each
+// month, not rebuilt from scratch — an agency present in this month's
+// staged list AND in the template auto-lands on its usual route; an
+// agency in the template but NOT ordering this month is simply skipped;
+// an agency ordering this month but NOT in any template (new agency) shows
+// in Unassigned for manual placement.
+//
+// Then: drag agency tiles between route lanes, weight/case totals
+// recompute live, over-capacity routes flag red. Phase 3 (carrier
+// approval) has no screen of its own — the capacity flag here IS that
+// gate, cleared by eye, not a generated document.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
@@ -20,27 +30,93 @@ import {
 //     through, worth revisiting for polish/consistency later.
 //   - Travel time and cubage/bulk capacity are out of scope entirely, per
 //     the original Phase 2 design discussion.
-
-function agencyKey(a) { return a.agencyNumber }
+//   - Madison route codes are named (MADISON, OSHKO, DODGE...), EC's are
+//     numeric (105, 109...) — route_number is stored as text to fit both;
+//     "+ Add route" takes a free-text code rather than auto-numbering,
+//     since auto-numbering only makes sense for EC's convention.
 
 export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const [routes, setRoutes] = useState([]) // [{ id, route_number, stops: [agencyNumber,...] }]
   const [unassigned, setUnassigned] = useState([]) // [agencyNumber,...]
   const [loading, setLoading] = useState(true)
   const [draggingAgency, setDraggingAgency] = useState(null)
+  const [newRouteCode, setNewRouteCode] = useState('')
 
   const agencyByNumber = new Map(stagedAgencies.map((a) => [a.agencyNumber, a]))
+
+  // Seeds dpi_routes/dpi_route_stops from the master template, matched
+  // against this cycle's actual staged agencies. Only runs once, when a
+  // cycle first reaches Phase 2 with no routes yet.
+  const seedFromTemplate = useCallback(async () => {
+    const { data: templates, error: tErr } = await supabase
+      .from('dpi_route_templates')
+      .select('*, dpi_route_template_stops(*)')
+      .eq('facility', cycle.facility)
+    if (tErr) { console.error('load templates:', tErr); return false }
+    if (!templates || templates.length === 0) return false
+
+    const stagedNumbers = new Set(stagedAgencies.map((a) => a.agencyNumber))
+
+    for (const template of templates) {
+      const matchingStops = (template.dpi_route_template_stops || [])
+        .filter((s) => stagedNumbers.has(s.agency_number))
+        .sort((a, b) => a.sequence - b.sequence)
+      if (matchingStops.length === 0) continue // nobody on this route ordered this month
+
+      const { data: newRoute, error: routeErr } = await supabase
+        .from('dpi_routes')
+        .insert({
+          cycle_id: cycle.id,
+          facility: cycle.facility,
+          month_key: cycle.month_key,
+          route_number: template.route_code,
+          load_day: template.load_day,
+          deliver_day: template.deliver_day,
+          load_time: template.load_time,
+          depart_time: template.depart_time,
+          notes: template.notes,
+        })
+        .select()
+        .single()
+      if (routeErr) { console.error('seed route:', template.route_code, routeErr); continue }
+
+      const stopRows = matchingStops.map((s, i) => {
+        const agency = agencyByNumber.get(s.agency_number)
+        return {
+          route_id: newRoute.id,
+          sequence: i + 1,
+          agency_number: s.agency_number,
+          agency_name: agency?.agencyName || s.agency_name,
+          city: s.city,
+          delivery_window_start: s.delivery_window,
+          travel_time: s.travel_time,
+          total_cases: agency ? agencyTotalCases(agency) : null,
+          gross_weight: agency ? agencyTotalCases(agency) * PLACEHOLDER_LBS_PER_CASE : null,
+        }
+      })
+      const { error: stopsErr } = await supabase.from('dpi_route_stops').insert(stopRows)
+      if (stopsErr) console.error('seed stops for route:', template.route_code, stopsErr)
+    }
+    return true
+  }, [cycle, stagedAgencies])
 
   const loadRoutes = useCallback(async () => {
     if (!supabase || !cycle) { setLoading(false); return }
     setLoading(true)
 
-    const { data: routeRows, error: routesErr } = await supabase
+    let { data: routeRows, error: routesErr } = await supabase
       .from('dpi_routes')
       .select('*')
       .eq('cycle_id', cycle.id)
       .order('route_number')
     if (routesErr) console.error('load dpi_routes:', routesErr)
+
+    // First time Phase 2 is opened for this cycle — seed from the template.
+    if ((routeRows || []).length === 0) {
+      await seedFromTemplate()
+      const reload = await supabase.from('dpi_routes').select('*').eq('cycle_id', cycle.id).order('route_number')
+      routeRows = reload.data
+    }
 
     const { data: stopRows, error: stopsErr } = await supabase
       .from('dpi_route_stops')
@@ -61,25 +137,25 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     setRoutes(routesWithStops)
     setUnassigned(unassignedNumbers)
     setLoading(false)
-  }, [cycle, stagedAgencies])
+  }, [cycle, stagedAgencies, seedFromTemplate])
 
   useEffect(() => { loadRoutes() }, [loadRoutes])
 
   const addRoute = async () => {
-    if (!supabase || !cycle) return
-    const nextNumber = routes.length > 0 ? Math.max(...routes.map((r) => r.route_number)) + 1 : 101
+    if (!supabase || !cycle || !newRouteCode.trim()) return
     const { data, error } = await supabase
       .from('dpi_routes')
       .insert({
         cycle_id: cycle.id,
         facility: cycle.facility,
         month_key: cycle.month_key,
-        route_number: nextNumber,
+        route_number: newRouteCode.trim(),
       })
       .select()
       .single()
     if (error) { console.error('add route:', error); return }
     setRoutes((prev) => [...prev, { id: data.id, route_number: data.route_number, stops: [] }])
+    setNewRouteCode('')
   }
 
   // Moves an agency into targetRouteId (null = Unassigned), persisting the
@@ -88,7 +164,6 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     const agency = agencyByNumber.get(agencyNumber)
     if (!agency) return
 
-    // Optimistic local update
     setUnassigned((prev) => prev.filter((n) => n !== agencyNumber))
     setRoutes((prev) => prev.map((r) => ({ ...r, stops: r.stops.filter((n) => n !== agencyNumber) })))
     if (targetRouteId == null) {
@@ -99,7 +174,6 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
 
     if (!supabase) return
 
-    // Remove any existing stop row for this agency across all routes in this cycle
     const routeIds = routes.map((r) => r.id)
     if (routeIds.length > 0) {
       await supabase
@@ -206,25 +280,35 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         ))}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+        <input
+          value={newRouteCode}
+          onChange={(e) => setNewRouteCode(e.target.value)}
+          placeholder="New route code (e.g. 121 or GREEN)"
+          style={{ fontSize: 13, padding: '6px 10px', borderRadius: 6, border: `1px solid ${colors.borderStrong}`, background: colors.bg, color: colors.text }}
+        />
         <button
           onClick={addRoute}
-          style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.border}`, background: colors.panel, color: colors.textMuted, cursor: 'pointer' }}
+          disabled={!newRouteCode.trim()}
+          style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.border}`, background: colors.panel, color: colors.textMuted, cursor: newRouteCode.trim() ? 'pointer' : 'default', opacity: newRouteCode.trim() ? 1 : 0.5 }}
         >
           + Add route
         </button>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button onClick={advance} disabled={!canAdvance} style={{ ...buttonPrimary, opacity: canAdvance ? 1 : 0.4, cursor: canAdvance ? 'pointer' : 'default' }}>
           Continue to Phase 4 — Agency comms
         </button>
         {!canAdvance && (
           <span style={{ fontSize: 12, color: colors.textFaint }}>
-            {routes.length === 0 ? 'Add at least one route.' : `${unassigned.length} agenc${unassigned.length === 1 ? 'y' : 'ies'} still unassigned.`}
+            {routes.length === 0 ? 'No template routes matched — add routes manually.' : `${unassigned.length} agenc${unassigned.length === 1 ? 'y' : 'ies'} still unassigned.`}
           </span>
         )}
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions.
+        Routes seeded from the master template (last month's assignments) — new agencies not in the template land in Unassigned. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions.
       </div>
     </div>
   )
