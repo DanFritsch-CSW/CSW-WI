@@ -31,6 +31,12 @@ import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
 // pipeline — NOT here. An earlier version of this page showed that button
 // right after Phase 1, which was wrong (see 2026-09-06 fix): a cycle should
 // never be resettable while routes/comms/final push haven't happened yet.
+//
+// "Reset test cycle" (in the header row below) is a SEPARATE, deliberately
+// destructive testing convenience — deletes the whole in_progress cycle
+// outright, at any phase, so a test run can be abandoned without dragging
+// every agency back into place. Not part of the real workflow; added
+// 2026-09-06 specifically for iterating on test data.
 
 const PHASE_LABELS = ['1. Import', '2. Build & flag', '3. Carrier approval', '4. Agency comms', '5. Push final']
 
@@ -358,6 +364,34 @@ export default function DpiMonthlyProcess() {
     setStage('empty')
   }, [])
 
+  // Testing convenience — NOT the real "cycle complete" flow (that's
+  // Phase5FinalPush's "Start next month", gated to actual completion).
+  // This permanently deletes the current in_progress cycle and everything
+  // under it (staged agencies, routes/stops via cascade, import batch
+  // rows), so a test run can be abandoned at any phase without dragging
+  // every agency back into place. Added 2026-09-06 after leftover manual
+  // test routes (from before the template auto-seed existed) got stuck in
+  // a cycle with no easy way out.
+  const resetTestCycle = async () => {
+    if (!cycle || !supabase) return
+    if (!window.confirm(`Permanently delete this ${facility} test cycle (${monthKey}) — all staged agencies, routes, and comms progress? This cannot be undone.`)) {
+      return
+    }
+    const { error: batchDeleteErr } = await supabase
+      .from('dpi_import_batches')
+      .delete()
+      .eq('batch_id', cycle.batch_id)
+    if (batchDeleteErr) console.error('delete batch rows:', batchDeleteErr)
+
+    const { error: cycleDeleteErr } = await supabase
+      .from('dpi_monthly_cycles')
+      .delete()
+      .eq('id', cycle.id)
+    if (cycleDeleteErr) { console.error('delete cycle:', cycleDeleteErr); return }
+
+    resetToEmpty()
+  }
+
   const flaggedCount = agencies.filter((a) => a.nameWasAbbreviated).length
   const currentPhase = cycle?.current_phase ?? 1
 
@@ -368,26 +402,40 @@ export default function DpiMonthlyProcess() {
 
       <PhasePills currentPhase={currentPhase} />
 
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 8 }}>Facility</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {['Eau Claire', 'Madison'].map((f) => (
-            <button
-              key={f}
-              onClick={() => setFacility(f)}
-              disabled={stage === 'pushing'}
-              style={{
-                fontSize: 13, padding: '6px 14px', borderRadius: 6,
-                border: `1px solid ${facility === f ? colors.accent : colors.border}`,
-                background: facility === f ? 'rgba(77,141,255,0.1)' : colors.panel,
-                color: facility === f ? colors.accent : colors.textMuted,
-                cursor: stage === 'pushing' ? 'default' : 'pointer',
-              }}
-            >
-              {f}
-            </button>
-          ))}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 8 }}>Facility</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['Eau Claire', 'Madison'].map((f) => (
+              <button
+                key={f}
+                onClick={() => setFacility(f)}
+                disabled={stage === 'pushing'}
+                style={{
+                  fontSize: 13, padding: '6px 14px', borderRadius: 6,
+                  border: `1px solid ${facility === f ? colors.accent : colors.border}`,
+                  background: facility === f ? 'rgba(77,141,255,0.1)' : colors.panel,
+                  color: facility === f ? colors.accent : colors.textMuted,
+                  cursor: stage === 'pushing' ? 'default' : 'pointer',
+                }}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
         </div>
+        {cycle && (
+          <button
+            onClick={resetTestCycle}
+            style={{
+              fontSize: 12, padding: '5px 10px', borderRadius: 6,
+              border: `1px solid ${colors.danger}`, background: 'transparent',
+              color: colors.danger, cursor: 'pointer',
+            }}
+          >
+            Reset test cycle
+          </button>
+        )}
       </div>
 
       {loading && <div style={{ fontSize: 13, color: colors.textFaint }}>Loading…</div>}
