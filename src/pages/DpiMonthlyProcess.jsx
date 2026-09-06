@@ -2,55 +2,35 @@ import React, { useState, useCallback, useRef, useEffect } from 'react'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase.js'
 import { parseFdp201w, MAX_NAME_LENGTH } from '../lib/dpiMonthlyParser.js'
+import { colors, cardStyle } from './dpiMonthly/dpiMonthlyStyles.js'
+import Phase2BuildFlag from './dpiMonthly/Phase2BuildFlag.jsx'
+import Phase4AgencyComms from './dpiMonthly/Phase4AgencyComms.jsx'
+import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
 
-// DPI Monthly Process — Phase 1 (Import).
-// Hidden route (/dpimonthly, see src/App.jsx) — not linked from any nav.
+// DPI Monthly Process — full pipeline, hidden route (/dpimonthly, see
+// src/App.jsx) — not linked from any nav.
+//
+// This shell owns Phase 1 (import) directly and Supabase-backed cycle
+// state/resume logic; Phases 2, 4, 5 are separate components rendered
+// based on cycle.current_phase (Phase 3 has no screen — folded into
+// Phase 2's capacity flag, per the original design discussion).
 //
 // State persists in Supabase (dpi_monthly_cycles + dpi_staged_agencies), not
 // just React state — a CSR may work this across multiple days and multiple
 // sessions, so reopening this page resumes wherever the facility's active
-// cycle currently sits rather than starting blank. Only one in_progress
-// cycle per facility at a time (enforced by a partial unique index).
+// cycle currently sits. Only one in_progress cycle per facility at a time
+// (partial unique index).
 //
-// Flow: drop CSV -> parsed rows written to dpi_staged_agencies immediately
-// (inline edits persist too) -> "Push to Datex" -> background function
-// creates Datex orders -> this page polls dpi_import_batches for progress
-// -> once done, cycle.current_phase advances to 2 (Build & Flag). The cycle
-// stays in_progress — it is NOT reset here. Resetting to a fresh cycle
-// ("Start next month") only happens once the WHOLE pipeline (through
-// Phase 5's final push) completes — corrected 2026-09-06 per Dan: an
-// earlier version of this page showed that reset button right after
-// Phase 1, which would have let someone start next month's import while
-// this month's routes/comms/final push hadn't happened yet.
+// AS OF 2026-09-06: Phases 2, 4, 5 are SIMULATE-ONLY — no real Datex
+// pushes, no real Front sends, no real PDF generation. Built to let Dan
+// click through the entire pipeline UI with real test data before any of
+// those integrations are wired up for real. See each phase component's
+// header comment for its specific simplifications.
 //
-// Phases 2-5 aren't built yet — once Phase 1 finishes, this page shows a
-// "Phase 2 not built yet" placeholder rather than a dead end or a
-// premature reset option.
-
-const colors = {
-  bg: '#0f1115',
-  panel: '#171a21',
-  panelAlt: '#1d2129',
-  border: '#2a2f3a',
-  borderStrong: '#3a4150',
-  text: '#e8eaed',
-  textMuted: '#9aa1ad',
-  textFaint: '#6b7280',
-  accent: '#4d8dff',
-  success: '#3ecf8e',
-  successBg: 'rgba(62,207,142,0.12)',
-  warning: '#e0a83e',
-  warningBg: 'rgba(224,168,62,0.12)',
-  danger: '#e05a4e',
-  dangerBg: 'rgba(224,90,78,0.12)',
-}
-
-const cardStyle = {
-  background: colors.panel,
-  border: `1px solid ${colors.border}`,
-  borderRadius: 8,
-  padding: '14px 16px',
-}
+// "Start next month" lives ONLY in Phase5FinalPush, at the true end of the
+// pipeline — NOT here. An earlier version of this page showed that button
+// right after Phase 1, which was wrong (see 2026-09-06 fix): a cycle should
+// never be resettable while routes/comms/final push haven't happened yet.
 
 const PHASE_LABELS = ['1. Import', '2. Build & flag', '3. Carrier approval', '4. Agency comms', '5. Push final']
 
@@ -172,7 +152,7 @@ function rowToAgency(row) {
 export default function DpiMonthlyProcess() {
   const [facility, setFacility] = useState('Eau Claire')
   const [loading, setLoading] = useState(true)
-  const [stage, setStage] = useState('empty') // empty | parsed | pushing | done
+  const [stage, setStage] = useState('empty') // empty | parsed | pushing | done (Phase 1 only)
   const [parseError, setParseError] = useState(null)
   const [cycle, setCycle] = useState(null) // dpi_monthly_cycles row
   const [monthKey, setMonthKey] = useState(null)
@@ -256,8 +236,6 @@ export default function DpiMonthlyProcess() {
           .select()
           .single()
         if (cycleErr) {
-          // Most likely the partial unique index (an in_progress cycle already
-          // exists for this facility) — reload actual state rather than guess.
           console.error('create cycle:', cycleErr)
           setParseError('Could not start a new cycle — reloading current state.')
           loadCycleState(facility)
@@ -337,8 +315,7 @@ export default function DpiMonthlyProcess() {
   }
 
   // Poll dpi_import_batches while a push is in flight. Once every row is
-  // terminal, advance the cycle to Phase 2 — the cycle stays in_progress
-  // (this is NOT a reset/completion point; see file header).
+  // terminal, advance the cycle to Phase 2 — the cycle stays in_progress.
   useEffect(() => {
     if (stage !== 'pushing' || !cycle || !supabase) return
 
@@ -368,14 +345,28 @@ export default function DpiMonthlyProcess() {
     return () => clearInterval(pollRef.current)
   }, [stage, cycle])
 
+  // Phase 2/4 components call this after they advance current_phase
+  // themselves — just reloads so the shell picks up the new phase + any
+  // refreshed data (e.g. phase_data).
+  const handlePhaseAdvance = useCallback(() => { loadCycleState(facility) }, [facility, loadCycleState])
+
+  const resetToEmpty = useCallback(() => {
+    setCycle(null)
+    setAgencies([])
+    setBatchRows([])
+    setMonthKey(null)
+    setStage('empty')
+  }, [])
+
   const flaggedCount = agencies.filter((a) => a.nameWasAbbreviated).length
+  const currentPhase = cycle?.current_phase ?? 1
 
   return (
     <div style={{ background: colors.bg, minHeight: '100vh', padding: 24, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: colors.text }}>
       <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>DPI Monthly Process</div>
       <div style={{ fontSize: 13, color: colors.textFaint, marginBottom: 20 }}>Eau Claire &amp; Madison monthly school-district delivery cycle</div>
 
-      <PhasePills currentPhase={cycle?.current_phase ?? 1} />
+      <PhasePills currentPhase={currentPhase} />
 
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 8 }}>Facility</div>
@@ -401,7 +392,7 @@ export default function DpiMonthlyProcess() {
 
       {loading && <div style={{ fontSize: 13, color: colors.textFaint }}>Loading…</div>}
 
-      {!loading && stage === 'empty' && (
+      {!loading && !cycle && (
         <div style={{ maxWidth: 520 }}>
           <DropZone facility={facility} onFile={handleFile} />
           {parseError && (
@@ -412,19 +403,12 @@ export default function DpiMonthlyProcess() {
         </div>
       )}
 
-      {!loading && stage !== 'empty' && (
+      {!loading && cycle && currentPhase === 1 && (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <StatCard label="Orders parsed" value={agencies.length} />
             <StatCard label="Delivery month" value={monthKey || '—'} />
             <StatCard label="Name abbreviated" value={flaggedCount} tone={flaggedCount ? colors.warning : undefined} />
-            {stage === 'done' && (
-              <StatCard
-                label={batchRows.some((r) => r.status === 'simulated') ? 'Simulated' : 'Pushed'}
-                value={batchRows.filter((r) => r.status === 'success' || r.status === 'simulated').length}
-                tone={batchRows.some((r) => r.status === 'simulated') ? colors.accent : colors.success}
-              />
-            )}
           </div>
 
           <div style={{ ...cardStyle, padding: 0, overflow: 'hidden', marginBottom: 16 }}>
@@ -437,7 +421,7 @@ export default function DpiMonthlyProcess() {
             </div>
             {agencies.map((agency, idx) => {
               const liveRow = batchRows.find((r) => r.lookup_code === agency.lookupCode)
-              const status = liveRow?.status || (stage === 'pushing' || stage === 'done' ? 'queued' : null)
+              const status = liveRow?.status || (stage === 'pushing' ? 'queued' : null)
               return (
                 <React.Fragment key={agency.agencyNumber}>
                   <div style={{
@@ -500,49 +484,44 @@ export default function DpiMonthlyProcess() {
             })}
           </div>
 
-          {stage !== 'done' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              {stage === 'parsed' && (
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textFaint, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={forceSimulate}
-                    onChange={(e) => setForceSimulate(e.target.checked)}
-                  />
-                  Force simulate (skip real Datex push)
-                </label>
-              )}
-              <button
-                onClick={pushToDatex}
-                disabled={stage === 'pushing'}
-                style={{
-                  fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
-                  background: colors.accent, color: '#fff',
-                  cursor: stage === 'pushing' ? 'default' : 'pointer',
-                  fontWeight: 500,
-                }}
-              >
-                {stage === 'pushing' ? 'Pushing to Datex…' : `Push ${agencies.length} orders to Datex`}
-              </button>
-              <span style={{ fontSize: 12, color: colors.textFaint }}>
-                {flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
-              </span>
-            </div>
-          )}
-
-          {stage === 'done' && (
-            <div style={{ ...cardStyle, borderColor: colors.borderStrong }}>
-              <div style={{ fontSize: 13, color: colors.textMuted, marginBottom: 4 }}>
-                {batchRows.some((r) => r.status === 'simulated')
-                  ? 'Simulated — no real orders were created (hover ⚠ above for why).'
-                  : `${batchRows.filter((r) => r.status === 'duplicate_skipped').length} already in Datex, skipped. ${batchRows.filter((r) => r.status === 'failed').length} failed — hover ⚠ above for details.`}
-              </div>
-              <div style={{ fontSize: 13, color: colors.textFaint }}>
-                Phase 1 complete. Phase 2 (Build &amp; flag) isn't built yet — this cycle stays open until the full process (through Phase 5's final push) completes. No reset option shows here on purpose.
-              </div>
-            </div>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textFaint, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={forceSimulate}
+                onChange={(e) => setForceSimulate(e.target.checked)}
+              />
+              Force simulate (skip real Datex push)
+            </label>
+            <button
+              onClick={pushToDatex}
+              disabled={stage === 'pushing'}
+              style={{
+                fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
+                background: colors.accent, color: '#fff',
+                cursor: stage === 'pushing' ? 'default' : 'pointer',
+                fontWeight: 500,
+              }}
+            >
+              {stage === 'pushing' ? 'Pushing to Datex…' : `Push ${agencies.length} orders to Datex`}
+            </button>
+            <span style={{ fontSize: 12, color: colors.textFaint }}>
+              {flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
+            </span>
+          </div>
         </>
+      )}
+
+      {!loading && cycle && currentPhase === 2 && (
+        <Phase2BuildFlag cycle={cycle} stagedAgencies={agencies} onAdvance={handlePhaseAdvance} />
+      )}
+
+      {!loading && cycle && currentPhase === 4 && (
+        <Phase4AgencyComms cycle={cycle} onAdvance={handlePhaseAdvance} />
+      )}
+
+      {!loading && cycle && currentPhase === 5 && (
+        <Phase5FinalPush cycle={cycle} onCycleComplete={resetToEmpty} />
       )}
     </div>
   )
