@@ -146,6 +146,7 @@ export default function DpiMonthlyProcess() {
   const [editingIdx, setEditingIdx] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [batchRows, setBatchRows] = useState([])
+  const [forceSimulate, setForceSimulate] = useState(false)
   const pollRef = useRef(null)
 
   // Load (or resume) whatever cycle is active for the selected facility.
@@ -292,6 +293,7 @@ export default function DpiMonthlyProcess() {
         batchId: cycle.batch_id,
         facility,
         monthKey,
+        forceSimulate,
         agencies: agencies.map((a) => ({ ...a, expectedDate })),
       }),
     }).catch(() => {
@@ -466,7 +468,17 @@ export default function DpiMonthlyProcess() {
             })}
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            {stage === 'parsed' && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textFaint, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={forceSimulate}
+                  onChange={(e) => setForceSimulate(e.target.checked)}
+                />
+                Force simulate (skip real Datex push)
+              </label>
+            )}
             {stage !== 'done' && (
               <button
                 onClick={pushToDatex}
@@ -495,7 +507,7 @@ export default function DpiMonthlyProcess() {
             <span style={{ fontSize: 12, color: colors.textFaint }}>
               {flaggedCount > 0 && stage === 'parsed' && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
               {stage === 'done' && batchRows.some((r) => r.status === 'simulated') &&
-                `Simulated — Datex credentials aren't configured yet, no real orders were created.`}
+                `Simulated — no real orders were created (see hover on ⚠ for why).`}
               {stage === 'done' && !batchRows.some((r) => r.status === 'simulated') &&
                 `${batchRows.filter((r) => r.status === 'duplicate_skipped').length} already in Datex, skipped. ${batchRows.filter((r) => r.status === 'failed').length} failed — hover ⚠ for details.`}
             </span>
