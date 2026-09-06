@@ -31,6 +31,17 @@ const FACILITIES = {
   'Madison':    { project_id: 122, warehouse_id: 4, order_class_id: 2, packaging_id: 3 },
 }
 
+// Mirrors the AIOrderCreator Cloudflare Worker's `dryRun = !env.DATEX_CLIENT_ID`
+// pattern — lets the push function simulate instead of failing when
+// credentials aren't set up yet (blocked on Azure app registration access
+// as of 2026-09-06 — Ethan, expected ~2026-09-09).
+function isConfigured() {
+  return Boolean(
+    DATEX_SMARTUP_TENANT_ID && DATEX_SMARTUP_CLIENT_ID &&
+    DATEX_SMARTUP_CLIENT_SECRET && DATEX_SMARTUP_SCOPE
+  )
+}
+
 // ── Azure AD token cache (module-level; cold starts just re-fetch) ─────────
 
 let _tokenCache = null
@@ -226,6 +237,7 @@ async function createAgencyOrder(facility, agency, materialMap) {
 
 module.exports = {
   FACILITIES,
+  isConfigured,
   getSmartUpToken,
   getMaterialMap,
   getExistingLookupCodes,
