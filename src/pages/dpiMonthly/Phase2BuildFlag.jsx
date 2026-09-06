@@ -4,6 +4,7 @@ import {
   colors, cardStyle, buttonPrimary,
   PLACEHOLDER_LBS_PER_CASE, CAPACITY_LBS_LIMIT, CAPACITY_CASES_LIMIT, agencyTotalCases,
 } from './dpiMonthlyStyles.js'
+import RouteMap from './RouteMap.jsx'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -21,6 +22,10 @@ import {
 // approval) has no screen of its own — the capacity flag here IS that
 // gate, cleared by eye, not a generated document.
 //
+// Paired with a read-only route map (RouteMap.jsx) below the board —
+// list drives the map, never the reverse, per the original design
+// discussion.
+//
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
 //     materials/packaging weight lookup. Must be replaced before this phase
@@ -36,11 +41,13 @@ import {
 //     since auto-numbering only makes sense for EC's convention.
 
 export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
-  const [routes, setRoutes] = useState([]) // [{ id, route_number, stops: [agencyNumber,...] }]
+  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, stops: [agencyNumber,...] }]
   const [unassigned, setUnassigned] = useState([]) // [agencyNumber,...]
   const [loading, setLoading] = useState(true)
   const [draggingAgency, setDraggingAgency] = useState(null)
   const [newRouteCode, setNewRouteCode] = useState('')
+  const [editingRouteId, setEditingRouteId] = useState(null)
+  const [editRouteValue, setEditRouteValue] = useState('')
 
   const agencyByNumber = new Map(stagedAgencies.map((a) => [a.agencyNumber, a]))
 
@@ -128,6 +135,10 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     const routesWithStops = (routeRows || []).map((r) => ({
       id: r.id,
       route_number: r.route_number,
+      load_day: r.load_day,
+      deliver_day: r.deliver_day,
+      load_time: r.load_time,
+      depart_time: r.depart_time,
       stops: (stopRows || []).filter((s) => s.route_id === r.id).map((s) => s.agency_number),
     }))
 
@@ -154,8 +165,26 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       .select()
       .single()
     if (error) { console.error('add route:', error); return }
-    setRoutes((prev) => [...prev, { id: data.id, route_number: data.route_number, stops: [] }])
+    setRoutes((prev) => [...prev, { id: data.id, route_number: data.route_number, load_day: null, deliver_day: null, load_time: null, depart_time: null, stops: [] }])
     setNewRouteCode('')
+  }
+
+  const startEditRoute = (route) => {
+    setEditingRouteId(route.id)
+    setEditRouteValue(route.route_number)
+  }
+
+  const saveRouteRename = async (routeId) => {
+    const trimmed = editRouteValue.trim()
+    if (!trimmed) { setEditingRouteId(null); return }
+    setRoutes((prev) => prev.map((r) => (r.id === routeId ? { ...r, route_number: trimmed } : r)))
+    setEditingRouteId(null)
+    if (!supabase) return
+    const { error } = await supabase
+      .from('dpi_routes')
+      .update({ route_number: trimmed, updated_at: new Date().toISOString() })
+      .eq('id', routeId)
+    if (error) console.error('rename route:', error)
   }
 
   // Moves an agency into targetRouteId (null = Unassigned), persisting the
@@ -232,13 +261,13 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       >
         <div style={{ color: colors.text }}>{agency.firstName}</div>
         <div style={{ fontSize: 11, color: colors.textFaint }}>
-          {agency.city} · {agencyTotalCases(agency)} cases
+          #{agency.agencyNumber} · {agency.city} · {agencyTotalCases(agency)} cases
         </div>
       </div>
     )
   }
 
-  const Lane = ({ title, agencyNumbers, onDropHere, totals }) => (
+  const Lane = ({ route, title, agencyNumbers, onDropHere, totals }) => (
     <div
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => { e.preventDefault(); if (draggingAgency) onDropHere(draggingAgency) }}
@@ -247,12 +276,38 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         border: `1px solid ${totals?.overCapacity ? colors.danger : colors.border}`,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>{title}</div>
-        {totals && (
-          <div style={{ fontSize: 11, color: totals.overCapacity ? colors.danger : colors.textFaint }}>
-            {totals.cases} cases / {totals.weight.toLocaleString()} lb
-            {totals.overCapacity && ' ⚠'}
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          {editingRouteId === route?.id ? (
+            <div style={{ display: 'flex', gap: 4 }}>
+              <input
+                autoFocus
+                value={editRouteValue}
+                onChange={(e) => setEditRouteValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveRouteRename(route.id) }}
+                style={{ fontSize: 13, padding: '2px 6px', borderRadius: 4, border: `1px solid ${colors.accent}`, background: colors.bg, color: colors.text, width: 90 }}
+              />
+              <button onClick={() => saveRouteRename(route.id)} style={{ fontSize: 11, color: colors.accent, background: 'none', border: 'none', cursor: 'pointer' }}>Save</button>
+            </div>
+          ) : (
+            <div
+              style={{ fontSize: 13, fontWeight: 600, color: colors.text, cursor: route ? 'pointer' : 'default' }}
+              onClick={() => route && startEditRoute(route)}
+              title={route ? 'Click to rename' : undefined}
+            >
+              {title} {route && <span style={{ color: colors.textFaint, fontSize: 11 }}>✎</span>}
+            </div>
+          )}
+          {totals && (
+            <div style={{ fontSize: 11, color: totals.overCapacity ? colors.danger : colors.textFaint }}>
+              {totals.cases} cases / {totals.weight.toLocaleString()} lb
+              {totals.overCapacity && ' ⚠'}
+            </div>
+          )}
+        </div>
+        {route && (route.load_day || route.deliver_day) && (
+          <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 2 }}>
+            {route.load_day || ''}{route.load_day && route.deliver_day ? ' → ' : ''}{route.deliver_day || ''}
           </div>
         )}
       </div>
@@ -272,6 +327,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         {routes.map((route) => (
           <Lane
             key={route.id}
+            route={route}
             title={`Route ${route.route_number}`}
             agencyNumbers={route.stops}
             onDropHere={(n) => moveAgency(n, route.id)}
@@ -295,6 +351,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           + Add route
         </button>
       </div>
+
+      <RouteMap routes={routes} agencyByNumber={agencyByNumber} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button onClick={advance} disabled={!canAdvance} style={{ ...buttonPrimary, opacity: canAdvance ? 1 : 0.4, cursor: canAdvance ? 'pointer' : 'default' }}>
