@@ -53,7 +53,7 @@ function PhasePills({ currentPhase }) {
               fontSize: 13, padding: '6px 12px', borderRadius: 6,
               border: `1px solid ${isCurrent ? colors.accent : colors.border}`,
               color: isCurrent ? colors.accent : colors.textFaint,
-              background: isCurrent ? 'rgba(77,141,255,0.08)' : 'transparent',
+              background: isCurrent ? colors.accentBg : 'transparent',
               opacity: isCurrent ? 1 : 0.55,
             }}
           >
@@ -71,7 +71,7 @@ function statusMeta(status) {
     case 'success': return { label: 'Pushed', color: colors.success, bg: colors.successBg }
     case 'duplicate_skipped': return { label: 'Already imported', color: colors.textFaint }
     case 'failed': return { label: 'Failed', color: colors.danger, bg: colors.dangerBg }
-    case 'simulated': return { label: 'Simulated — not pushed', color: colors.accent, bg: 'rgba(77,141,255,0.12)' }
+    case 'simulated': return { label: 'Simulated — not pushed', color: colors.accent, bg: colors.accentBg }
     default: return { label: status, color: colors.textMuted }
   }
 }
@@ -116,7 +116,7 @@ function DropZone({ facility, onFile, disabled }) {
       style={{
         border: `1.5px dashed ${dragOver ? colors.accent : colors.borderStrong}`,
         borderRadius: 10, padding: '36px 20px', textAlign: 'center',
-        background: dragOver ? 'rgba(77,141,255,0.06)' : colors.panelAlt,
+        background: dragOver ? colors.accentBg : colors.panelAlt,
         cursor: disabled ? 'default' : 'pointer',
         opacity: disabled ? 0.5 : 1,
       }}
@@ -396,7 +396,7 @@ export default function DpiMonthlyProcess() {
   const currentPhase = cycle?.current_phase ?? 1
 
   return (
-    <div style={{ background: colors.bg, minHeight: '100vh', padding: 24, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: colors.text }}>
+    <div style={{ background: colors.bg, minHeight: '100vh', padding: 24, color: colors.text }}>
       <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>DPI Monthly Process</div>
       <div style={{ fontSize: 13, color: colors.textFaint, marginBottom: 20 }}>Eau Claire &amp; Madison monthly school-district delivery cycle</div>
 
@@ -414,7 +414,7 @@ export default function DpiMonthlyProcess() {
                 style={{
                   fontSize: 13, padding: '6px 14px', borderRadius: 6,
                   border: `1px solid ${facility === f ? colors.accent : colors.border}`,
-                  background: facility === f ? 'rgba(77,141,255,0.1)' : colors.panel,
+                  background: facility === f ? colors.accentBg : colors.panel,
                   color: facility === f ? colors.accent : colors.textMuted,
                   cursor: stage === 'pushing' ? 'default' : 'pointer',
                 }}
@@ -521,7 +521,7 @@ export default function DpiMonthlyProcess() {
                       <span style={{ fontSize: 11, color: colors.textFaint }}>{editValue.length}/{MAX_NAME_LENGTH}</span>
                       <button
                         onClick={() => saveEdit(idx)}
-                        style={{ fontSize: 12, padding: '5px 12px', borderRadius: 5, border: `1px solid ${colors.accent}`, background: 'rgba(77,141,255,0.1)', color: colors.accent, cursor: 'pointer' }}
+                        style={{ fontSize: 12, padding: '5px 12px', borderRadius: 5, border: `1px solid ${colors.accent}`, background: colors.accentBg, color: colors.accent, cursor: 'pointer' }}
                       >
                         Save
                       </button>
