@@ -727,6 +727,30 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Dan's Footprint Variance digest -- added 2026-09-07. Private to /dan (not
+# linked in TopNav). Unlike every other digest above, this does NOT post a
+# comment into one fixed pre-existing Front conversation -- it creates a
+# BRAND-NEW Front discussion every time it fires, addressed only to Dan
+# (front_teammates tea_a3e8k via notification_recipients list_name
+# 'dan_footprint_variance'), mirroring front-daily-discussion-run.cjs's
+# pattern instead. Backs facility='dan', dashboard_type='footprint_variance'
+# in prepick_notify_settings (front_conversation_id stays unused for this
+# row). No duckdb/native-module dependency -- proxies Active LPs through
+# omni-query.cjs via SITE_URL and calls Supabase REST + the Front API
+# directly. Seeded active=false pending Dan configuring a trigger time/days
+# and flipping Enabled from the /dan Notify settings panel.
+[functions."dan-footprint-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# Dan's Footprint Variance digest MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as every other *-digest-test.cjs in this
+# app -- see lib/dan-footprint-digest-shared.cjs). NOT a dry run -- really
+# creates a new Front discussion addressed to Dan, bypassing the time/day/
+# active gate and skipping the last_sent_date write.
+[functions."dan-footprint-digest-test"]
+  timeout = 26
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
