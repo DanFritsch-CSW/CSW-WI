@@ -20,7 +20,11 @@ const APP_MODE = import.meta.env.VITE_APP_MODE || 'csw'
 // only by knowing the exact URL (real Datex writes + real emails to school
 // districts; Dan wants it kept off normal nav until it's earned trust).
 // No password gate, per Dan 2026-09-05 — URL obscurity is the only barrier.
-const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly']
+//
+// /dan (added 2026-09-07) — Dan's private personal automations area. Same
+// posture as /dpimonthly: no password gate, no TopNav, reached only by
+// knowing the URL. First module: Madison footprint variance tracker.
+const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly', '/dan']
 
 const LaborPlanning      = lazy(() => import('./pages/LaborPlanning.jsx'))
 const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
@@ -38,6 +42,7 @@ const SchedulingTab      = lazy(() => import('./pages/SchedulingTab.jsx'))
 const SchedulingDashboard = lazy(() => import('./pages/scheduling/SchedulingDashboard.jsx'))
 const PluginView         = lazy(() => import('./pages/scheduling/PluginView.jsx'))
 const DpiMonthlyProcess  = lazy(() => import('./pages/DpiMonthlyProcess.jsx'))
+const Dan                = lazy(() => import('./pages/Dan.jsx'))
 
 function PageLoading() {
   return (
@@ -117,6 +122,7 @@ function AppShell() {
             <Route path="/scheduling/dashboard"  element={<SchedulingDashboard />} />
             <Route path="/scheduling/plugin"     element={<PluginView />}        />
             <Route path="/dpimonthly"            element={<DpiMonthlyProcess />} />
+            <Route path="/dan"                   element={<Dan />}                />
           </Routes>
         </Suspense>
       </PageErrorBoundary>
