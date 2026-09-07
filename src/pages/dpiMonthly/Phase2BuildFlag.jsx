@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import {
   colors, cardStyle, buttonPrimary,
@@ -45,10 +45,10 @@ import RouteCalendar from './RouteCalendar.jsx'
 //     since auto-numbering only makes sense for EC's convention.
 
 export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
-  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, delivery_date, stops: [agencyNumber,...] }]
+  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, delivery_date, template_week, stops: [agencyNumber,...] }]
   const [unassigned, setUnassigned] = useState([]) // [agencyNumber,...]
   const [loading, setLoading] = useState(true)
-  const [draggingAgency, setDraggingAgency] = useState(null)
+  const draggingAgencyRef = useRef(null)
   const [newRouteCode, setNewRouteCode] = useState('')
   const [editingRouteId, setEditingRouteId] = useState(null)
   const [editRouteValue, setEditRouteValue] = useState('')
@@ -86,6 +86,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           load_time: template.load_time,
           depart_time: template.depart_time,
           notes: template.notes,
+          template_week: template.template_week,
         })
         .select()
         .single()
@@ -144,6 +145,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       load_time: r.load_time,
       depart_time: r.depart_time,
       delivery_date: r.delivery_date,
+      template_week: r.template_week,
       stops: (stopRows || []).filter((s) => s.route_id === r.id).map((s) => s.agency_number),
     }))
 
@@ -257,12 +259,18 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     return (
       <div
         draggable
-        onDragStart={() => setDraggingAgency(agencyNumber)}
-        onDragEnd={() => setDraggingAgency(null)}
+        onDragStart={(e) => {
+          draggingAgencyRef.current = agencyNumber
+          e.currentTarget.style.opacity = '0.4' // direct DOM write, not React state — avoids a mid-drag
+        }}                                       // re-render that was breaking the native drag session
+        onDragEnd={(e) => {
+          draggingAgencyRef.current = null
+          e.currentTarget.style.opacity = '1'
+        }}
         style={{
           padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
           border: `1px solid ${colors.border}`, fontSize: 13, marginBottom: 6,
-          cursor: 'grab', opacity: draggingAgency === agencyNumber ? 0.4 : 1,
+          cursor: 'grab',
         }}
       >
         <div style={{ color: colors.text }}>{agency.firstName}</div>
@@ -276,7 +284,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const Lane = ({ route, title, agencyNumbers, onDropHere, totals }) => (
     <div
       onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => { e.preventDefault(); if (draggingAgency) onDropHere(draggingAgency) }}
+      onDrop={(e) => { e.preventDefault(); if (draggingAgencyRef.current) onDropHere(draggingAgencyRef.current) }}
       style={{
         ...cardStyle, minWidth: 220, minHeight: 160, flex: '0 0 auto',
         border: `1px solid ${totals?.overCapacity ? colors.danger : colors.border}`,
@@ -328,6 +336,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
 
   return (
     <div>
+      <RouteCalendar cycle={cycle} routes={routes} onRoutesChanged={loadRoutes} />
+
       <div style={{ display: 'flex', gap: 12, marginBottom: 16, overflowX: 'auto', paddingBottom: 8 }}>
         <Lane title="Unassigned" agencyNumbers={unassigned} onDropHere={(n) => moveAgency(n, null)} />
         {routes.map((route) => (
@@ -359,8 +369,6 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <RouteMap routes={routes} agencyByNumber={agencyByNumber} />
-
-      <RouteCalendar cycle={cycle} routes={routes} onRoutesChanged={loadRoutes} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button onClick={advance} disabled={!canAdvance} style={{ ...buttonPrimary, opacity: canAdvance ? 1 : 0.4, cursor: canAdvance ? 'pointer' : 'default' }}>
