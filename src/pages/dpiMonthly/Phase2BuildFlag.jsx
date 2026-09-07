@@ -5,6 +5,7 @@ import {
   PLACEHOLDER_LBS_PER_CASE, CAPACITY_LBS_LIMIT, CAPACITY_CASES_LIMIT, agencyTotalCases,
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
+import RouteCalendar from './RouteCalendar.jsx'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -24,7 +25,10 @@ import RouteMap from './RouteMap.jsx'
 //
 // Paired with a read-only route map (RouteMap.jsx) below the board —
 // list drives the map, never the reverse, per the original design
-// discussion.
+// discussion. Also paired with RouteCalendar.jsx for assigning each
+// route's actual delivery date — real dock appointment history showed
+// the WEEK is predictable (matches the template) but the WEEKDAY isn't,
+// so that's a drag-onto-calendar choice, not an auto-computed date.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
@@ -41,7 +45,7 @@ import RouteMap from './RouteMap.jsx'
 //     since auto-numbering only makes sense for EC's convention.
 
 export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
-  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, stops: [agencyNumber,...] }]
+  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, delivery_date, stops: [agencyNumber,...] }]
   const [unassigned, setUnassigned] = useState([]) // [agencyNumber,...]
   const [loading, setLoading] = useState(true)
   const [draggingAgency, setDraggingAgency] = useState(null)
@@ -139,6 +143,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       deliver_day: r.deliver_day,
       load_time: r.load_time,
       depart_time: r.depart_time,
+      delivery_date: r.delivery_date,
       stops: (stopRows || []).filter((s) => s.route_id === r.id).map((s) => s.agency_number),
     }))
 
@@ -233,7 +238,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     return { cases, weight, overCapacity: weight > CAPACITY_LBS_LIMIT || cases > CAPACITY_CASES_LIMIT }
   }
 
-  const canAdvance = unassigned.length === 0 && routes.length > 0
+  const allRoutesScheduled = routes.length > 0 && routes.every((r) => r.delivery_date)
+  const canAdvance = unassigned.length === 0 && allRoutesScheduled
 
   const advance = async () => {
     if (!supabase || !cycle) return
@@ -354,13 +360,19 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
 
       <RouteMap routes={routes} agencyByNumber={agencyByNumber} />
 
+      <RouteCalendar cycle={cycle} routes={routes} onRoutesChanged={loadRoutes} />
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button onClick={advance} disabled={!canAdvance} style={{ ...buttonPrimary, opacity: canAdvance ? 1 : 0.4, cursor: canAdvance ? 'pointer' : 'default' }}>
           Continue to Phase 4 — Agency comms
         </button>
         {!canAdvance && (
           <span style={{ fontSize: 12, color: colors.textFaint }}>
-            {routes.length === 0 ? 'No template routes matched — add routes manually.' : `${unassigned.length} agenc${unassigned.length === 1 ? 'y' : 'ies'} still unassigned.`}
+            {routes.length === 0
+              ? 'No template routes matched — add routes manually.'
+              : unassigned.length > 0
+                ? `${unassigned.length} agenc${unassigned.length === 1 ? 'y' : 'ies'} still unassigned.`
+                : `${routes.filter((r) => !r.delivery_date).length} route${routes.filter((r) => !r.delivery_date).length === 1 ? '' : 's'} still need a delivery date.`}
           </span>
         )}
       </div>
