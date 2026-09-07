@@ -17,6 +17,9 @@ import { colors as themeColors, cardStyle } from './dpiMonthlyStyles.js'
 // A distinct color is assigned per route_id (stable hash into a fixed
 // palette) so a reshuffle's geographic effect is visually obvious.
 
+// Distinct rainbow palette for telling routes apart on the map — intentionally
+// independent of the app's brand/theme colors, since these need to be visually
+// distinct from EACH OTHER, not brand-consistent.
 const PALETTE = ['#4d8dff', '#3ecf8e', '#e0a83e', '#e05a4e', '#a855f7', '#22d3ee', '#f472b6', '#84cc16', '#fb923c', '#818cf8']
 
 function colorForRoute(routeId) {
@@ -27,7 +30,7 @@ function colorForRoute(routeId) {
 // at CDN images directly rather than fighting the bundler over asset URLs.
 const markerIcon = (color) => L.divIcon({
   className: 'dpi-route-marker',
-  html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #0f1115;box-shadow:0 0 0 1px ${color}"></div>`,
+  html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 0 1px ${color}"></div>`,
   iconSize: [14, 14],
   iconAnchor: [7, 7],
 })
@@ -126,7 +129,7 @@ export default function RouteMap({ routes, agencyByNumber }) {
         <span>Route map — read-only, reflects the lists above</span>
         {geocoding && <span>Geocoding new stops…</span>}
       </div>
-      <div ref={mapContainerRef} style={{ height: 360, width: '100%', background: '#1a1d24' }} />
+      <div ref={mapContainerRef} style={{ height: 360, width: '100%', background: themeColors.panelAlt }} />
     </div>
   )
 }
