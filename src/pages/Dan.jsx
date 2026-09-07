@@ -337,7 +337,7 @@ function FootprintNotifyPanel() {
   async function createNow() {
     setCreating(true); setMsg(null)
     try {
-      const result = await triggerDigestTest('dan-footprint-digest-run', {})
+      const result = await triggerDigestTest('dan-footprint-digest-test', {})
       if (result?.success) {
         setMsg({ err: false, text: 'Thread created — check Front.' })
       } else {
