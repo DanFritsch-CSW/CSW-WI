@@ -156,29 +156,29 @@ async function fetchMadActiveInventory() {
 
 function fmt(n) { return Math.round(n).toLocaleString('en-US') }
 
+// Per Dan's explicit format request (2026-09-07): project name as its own
+// line, then Active/Projected/Variance as separate "Key = value" lines, a
+// blank line between projects, and NO trailing total line — replaces the
+// earlier compressed one-line-per-project + totals version.
 function buildDiscussionBody(rows) {
   const lines = []
-  let totalActive = 0
-  let totalProjected = 0
   for (const r of rows) {
     const variance = r.activeLps - r.projected
-    totalActive += r.activeLps
-    totalProjected += r.projected
     const sign = variance >= 0 ? '+' : ''
-    lines.push(`${r.projectName}: Active ${fmt(r.activeLps)} · Projected ${fmt(r.projected)} · Variance ${sign}${fmt(variance)}`)
+    lines.push(r.projectName)
+    lines.push(`Active = ${fmt(r.activeLps)}`)
+    lines.push(`Projected = ${fmt(r.projected)}`)
+    lines.push(`Variance = ${sign}${fmt(variance)}`)
+    lines.push('')
   }
-  const totalVariance = totalActive - totalProjected
-  const sign = totalVariance >= 0 ? '+' : ''
-  lines.push('')
-  lines.push(`Total: Active ${fmt(totalActive)} · Projected ${fmt(totalProjected)} · Variance ${sign}${fmt(totalVariance)}`)
-  return lines.join('\n')
+  return lines.join('\n').trimEnd()
 }
 
 function subjectFor(dateObj) {
   const m = dateObj.getUTCMonth() + 1
   const d = dateObj.getUTCDate()
   const y = dateObj.getUTCFullYear()
-  return `Madison Footprint Variance — ${m}/${d}/${y}`
+  return `Madison Footprint / Projected ${m}/${d}/${y}`
 }
 
 // Creates the new Front discussion + (on the scheduled path) stamps
