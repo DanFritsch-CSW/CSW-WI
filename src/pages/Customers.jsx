@@ -53,6 +53,12 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // ('pretzillashortage') and its Kenosha/Pretzilla scope are unchanged,
 // only the visible text, ahead of eventually tying in other customers the
 // same way FEFO Rotation already covers multiple customers/projects.
+// Route id renamed from 'pretzillashortage' to 'shortage' 2026-09-08, per
+// Dan's ask ("the URL is misleading — it isn't just pretzillashortage
+// anymore") once the tab genuinely covered multiple customers via the
+// dropdown (Pretzilla + Sargento). Old bookmarked URLs with
+// ?tab=pretzillashortage will fall through to the 'dvr' default rather
+// than 404ing, same as any unrecognized tab id.
 // Demand logic also simplified the same day to appointments-only (dropped
 // the requested_delivery_date cross-check/"needs review" concept) per
 // Dan's explicit ask — see the backend function's header for detail.
@@ -107,7 +113,7 @@ const SUB_TABS = [
     subtitle: 'Pretzilla · EXP date vs. manufacture date + shelf life reconciliation',
   },
   {
-    id: 'pretzillashortage',
+    id: 'shortage',
     label: 'Customer Shortage Report',
     subtitle: 'Appointment-scheduled orders vs. available inventory · live from MotherDuck',
   },
@@ -214,15 +220,15 @@ export default function Customers() {
 
       {/* Sub-tab content */}
       <div style={{ padding: '24px' }}>
-        {subTab === 'dvr'               && <DvrTab />}
-        {subTab === 'fefo'              && <FefoRotationTab />}
-        {subTab === 'expcheck'          && <ExpCheckTab />}
-        {subTab === 'pretzillashortage' && <CustomerShortageReportTab />}
-        {subTab === 'scorecard'         && <ScorecardDraftsTab />}
-        {subTab === 'pvi'               && <PviShelfLife />}
-        {subTab === 'space'             && <SpacePlanningTab />}
-        {subTab === 'pvishortage'       && <PviShortageTab />}
-        {subTab === 'onboarding'        && <OnboardingTab />}
+        {subTab === 'dvr'       && <DvrTab />}
+        {subTab === 'fefo'      && <FefoRotationTab />}
+        {subTab === 'expcheck'  && <ExpCheckTab />}
+        {subTab === 'shortage'  && <CustomerShortageReportTab />}
+        {subTab === 'scorecard' && <ScorecardDraftsTab />}
+        {subTab === 'pvi'       && <PviShelfLife />}
+        {subTab === 'space'     && <SpacePlanningTab />}
+        {subTab === 'pvishortage' && <PviShortageTab />}
+        {subTab === 'onboarding'  && <OnboardingTab />}
       </div>
     </div>
   )
