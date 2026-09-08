@@ -547,8 +547,24 @@
 # shared.cjs files are now orphaned/unregistered (left in place, no
 # file-delete tool, same pattern as dockcounts-digest-run.cjs). See
 # lib/shortage-report-email-shared.cjs for the full design writeup.
+#
+# SCHEDULE REMOVED 2026-09-02, per Dan's explicit decision: "the automatic
+# scheduling of the email does not always correlate to the timing of the
+# processing of the orders" -- a fixed daily send time can catch orders
+# mid-processing, producing a stale/wrong shortage picture regardless of
+# whether the schedule itself fires reliably. Manual generation (the
+# "Generate Email Draft" button, calling shortage-report-email-test.cjs)
+# is now the ONLY way this draft gets created -- there is no automatic
+# path anymore. This function file is left in place (no file-delete tool)
+# but is now fully inert: with no `schedule` key, Netlify would treat any
+# invocation as non-scheduled, and the function's own internal check
+# (`x-netlify-event !== 'schedule'` -> 405) means it can never actually
+# run, scheduled or otherwise. Also incidentally removes one function
+# from the crowded */15 * * * * pool (16 -> 15) -- see the Netlify support
+# ticket filed 2026-09-02 re: scheduled functions intermittently not
+# being invoked, which raised function-count/concurrency as a possible
+# contributing factor.
 [functions."shortage-report-email-run"]
-  schedule = "*/15 * * * *"
   timeout = 26
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
