@@ -15,14 +15,38 @@ import { fetchFrontTeammates } from '../../lib/supabase.js'
 // Customer Shortage Report [tab] for when we get more customers other
 // than Pretzilla built within it."
 //
+// REBUILT 2026-09-02, per Dan's explicit ask: "the automatic scheduling
+// of the email does not always correlate to the timing of the processing
+// of the orders" -- a fixed daily send time can catch orders
+// mid-processing regardless of whether the schedule fires reliably (see
+// the Netlify support ticket filed the same day for the separate
+// reliability problem). Manual generation is now the ONLY path:
+//
+//   - The old "Create Draft Now (test)" button is now the PRIMARY action,
+//     renamed "Generate Email Draft" and moved to the top of the
+//     component -- not a secondary/test control anymore.
+//   - Auto-create checkbox, send-time picker, and day-of-week toggles are
+//     REMOVED from this UI entirely. The schedule itself was removed from
+//     netlify.toml (shortage-report-email-run.cjs has no `schedule` key
+//     anymore and is fully inert) -- there is no automatic path left to
+//     configure, so no controls for it.
+//   - The component is no longer collapsed-by-default -- it's the
+//     primary way this feature gets used, so it's always expanded.
+//   - Settings still persisted: TO/CC, From channel, Draft Author,
+//     internal comment, internal followers. `active`/`notify_hour`/
+//     `notify_minute`/`notify_days` are still written to
+//     prepick_notify_settings (schema unchanged) but hardcoded to inert
+//     defaults (active=false, hour/minute=0) on every save -- defensive,
+//     so a schedule can never accidentally fire off stale saved values if
+//     the function's schedule key were ever restored without updating
+//     this file.
+//
 // Content is the shortage table itself (Material/Needed/Active/Inactive/
-// Allocated/Short) — see the backend function's header
+// Allocated/Short) -- see the backend function's header
 // (netlify/functions/lib/shortage-report-email-shared.cjs) for the full
 // query/design writeup.
 //
-// Self-contained: fetches its own teammates list (unlike the earlier
-// Settings-tab version, which shared a parent's already-loaded list —
-// there's no equivalent parent state here). Takes `reportKey` +
+// Self-contained: fetches its own teammates list. Takes `reportKey` +
 // `reportLabel` as props rather than a facility, so a future second
 // customer report in this same tab can render another instance of this
 // component with a different reportKey — no restructuring needed.
@@ -84,6 +108,7 @@ function EmailListEditor({ label, emails, onChange }) {
 }
 
 const btnStyle = { background: 'var(--bg2, #1a1d24)', color: 'var(--text-primary, #fff)', border: '1px solid var(--border, #2a2e38)', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }
+const primaryBtnStyle = { background: '#38a169', color: '#fff', border: '1px solid #38a169', borderRadius: 6, padding: '10px 20px', cursor: 'pointer', fontSize: 14, fontWeight: 600 }
 const subStyle = { fontSize: 11, color: 'var(--text-secondary, #9aa1ac)' }
 const labelRowStyle = { fontSize: 11, color: 'var(--text-secondary, #9aa1ac)', marginBottom: 6 }
 
@@ -97,15 +122,11 @@ export default function ShortageReportEmailEditor({ reportKey, reportLabel }) {
   const [comment, setComment] = useState('')
   const [authorId, setAuthorId] = useState('')
   const [channelId, setChannelId] = useState('')
-  const [notifyHour, setNotifyHour] = useState(18)
-  const [notifyMinute, setNotifyMinute] = useState(0)
-  const [notifyDays, setNotifyDays] = useState([1, 2, 3, 4, 5, 6, 7])
-  const [active, setActive] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [expanded, setExpanded] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [saveState, setSave] = useState(null)
-  const [testState, setTestState] = useState(null)
-  const [testDetail, setTestDetail] = useState(null)
+  const [generateState, setGenerateState] = useState(null)
+  const [generateDetail, setGenerateDetail] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -124,10 +145,6 @@ export default function ShortageReportEmailEditor({ reportKey, reportLabel }) {
       setCcEmails((emails.cc || []).map(r => r.email))
       setSelectedFollowers(new Set(followers.filter(r => r.front_teammate_id).map(r => r.front_teammate_id)))
       if (s) {
-        setNotifyHour(s.notify_hour ?? 18)
-        setNotifyMinute(s.notify_minute ?? 0)
-        setNotifyDays(s.notify_days ?? [1, 2, 3, 4, 5, 6, 7])
-        setActive(!!s.active)
         setComment(s.discussion_comment ?? '')
         setAuthorId(s.author_teammate_id ?? '')
         setChannelId(s.from_channel_id ?? '')
@@ -136,10 +153,6 @@ export default function ShortageReportEmailEditor({ reportKey, reportLabel }) {
     })()
     return () => { cancelled = true }
   }, [reportKey])
-
-  function toggleDay(day) {
-    setNotifyDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
-  }
 
   function toggleFollower(teammateId) {
     setSelectedFollowers(prev => {
@@ -162,10 +175,12 @@ export default function ShortageReportEmailEditor({ reportKey, reportLabel }) {
     }
   }
 
+  // notify_hour/notify_minute/active are hardcoded to inert defaults on
+  // every save -- see file header. This feature has no scheduled path.
   async function persist() {
     await Promise.all([
       upsertShortageReportEmailSettings(reportKey, {
-        notifyHour, notifyMinute, notifyDays, active,
+        notifyHour: 0, notifyMinute: 0, notifyDays: [], active: false,
         discussionComment: comment, authorTeammateId: authorId || null, fromChannelId: channelId || null,
       }),
       saveShortageReportEmailRecipients(reportKey, toEmails, ccEmails),
@@ -188,80 +203,64 @@ export default function ShortageReportEmailEditor({ reportKey, reportLabel }) {
     }
   }
 
-  async function handleTest() {
-    setTestState('running')
-    setTestDetail(null)
+  async function handleGenerate() {
+    setGenerateState('running')
+    setGenerateDetail(null)
     try {
       await persist()
       const res = await triggerShortageReportEmailTest(reportKey)
       if (res?.success) {
-        setTestState('ok')
-        setTestDetail(`Draft created: "${res.subject}" — ${res.materialCount} material(s), ${res.shortCount} short, ${res.toCount} TO / ${res.ccCount} CC, ${res.followerCount} follower(s).`)
+        setGenerateState('ok')
+        setGenerateDetail(`Draft created: "${res.subject}" — ${res.materialCount} material(s), ${res.shortCount} short, ${res.toCount} TO / ${res.ccCount} CC, ${res.followerCount} follower(s).`)
       } else {
-        setTestState('error')
-        setTestDetail(res?.reason || 'No result returned.')
+        setGenerateState('error')
+        setGenerateDetail(res?.reason || 'No result returned.')
       }
     } catch (err) {
-      setTestState('error')
-      setTestDetail(err.message)
+      setGenerateState('error')
+      setGenerateDetail(err.message)
     }
-    setTimeout(() => { setTestState(null); setTestDetail(null) }, 8000)
+    setTimeout(() => { setGenerateState(null); setGenerateDetail(null) }, 10000)
   }
 
   if (loading) {
     return <div style={{ color: 'var(--text-secondary, #9aa1ac)', padding: '12px 0' }}>Loading…</div>
   }
 
-  const DAY_LABELS = [['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6], ['Sun', 7]]
-
   return (
-    <div style={{ marginTop: 24, background: 'var(--bg2, #1a1d24)', border: '1px solid var(--border, #2a2e38)', borderRadius: 6, overflow: 'hidden' }}>
+    <div style={{ marginTop: 24, background: 'var(--bg2, #1a1d24)', border: '1px solid var(--border, #2a2e38)', borderRadius: 6, padding: '16px 14px' }}>
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary, #fff)', marginBottom: 4 }}>Email Draft</div>
+        <p style={{ ...subStyle, margin: 0 }}>
+          Creates a Front <strong>email draft</strong> (never sent automatically) with this shortage table's data
+          for {reportLabel}, exactly as shown above right now. A human still reviews and sends it. There's no
+          automatic schedule for this anymore — generate it manually once orders have finished processing for the day.
+        </p>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <button onClick={handleGenerate} disabled={generateState === 'running' || !authorId || toEmails.length === 0} style={primaryBtnStyle}>
+          {generateState === 'running' ? 'Generating…' : generateState === 'ok' ? 'Generated ✓' : generateState === 'error' ? 'Failed — see below' : 'Generate Email Draft'}
+        </button>
+        {!authorId && <span style={{ ...subStyle, fontStyle: 'italic' }}>Set a Draft Author below first.</span>}
+        {authorId && toEmails.length === 0 && <span style={{ ...subStyle, fontStyle: 'italic' }}>Add at least one TO recipient below first.</span>}
+      </div>
+
+      {generateDetail && (
+        <div style={{ fontSize: 12, color: generateState === 'error' ? '#e5484d' : 'var(--text-secondary, #9aa1ac)', marginBottom: 16, padding: '8px 10px', background: 'rgba(0,0,0,0.15)', borderRadius: 4 }}>
+          {generateDetail}
+        </div>
+      )}
+
       <button
-        onClick={() => setExpanded(s => !s)}
-        style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--text-primary, #fff)', padding: '10px 14px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+        onClick={() => setShowSettings(s => !s)}
+        style={{ ...btnStyle, marginBottom: showSettings ? 16 : 0 }}
       >
-        <span>
-          Email Draft{' '}
-          <span style={subStyle}>({reportLabel} — TO/CC editable below)</span>
-        </span>
-        <span style={subStyle}>{expanded ? 'Hide' : 'Show'}</span>
+        {showSettings ? 'Hide' : 'Show'} recipients & settings
       </button>
 
-      {expanded && (
-        <div style={{ padding: '0 14px 16px', borderTop: '1px solid var(--border, #2a2e38)' }}>
-          <p style={{ ...subStyle, marginTop: 12 }}>
-            Creates a Front <strong>email draft</strong> (never sent automatically) with this shortage table's data
-            for {reportLabel}. A human still reviews and sends it.
-          </p>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginTop: 12, marginBottom: 12 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-secondary, #9aa1ac)' }}>
-              <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />
-              Auto-create nightly (for the next day)
-            </label>
-            <label style={labelRowStyle}>
-              Send time (CT){' '}
-              <select value={notifyHour} onChange={e => setNotifyHour(Number(e.target.value))} style={{ background: 'var(--bg2, #1a1d24)', color: 'var(--text-primary, #fff)', border: '1px solid var(--border, #2a2e38)', borderRadius: 4, padding: '2px 4px' }}>
-                {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{h}:00</option>)}
-              </select>
-              <select value={notifyMinute} onChange={e => setNotifyMinute(Number(e.target.value))} style={{ background: 'var(--bg2, #1a1d24)', color: 'var(--text-primary, #fff)', border: '1px solid var(--border, #2a2e38)', borderRadius: 4, padding: '2px 4px', marginLeft: 4 }}>
-                {[0, 15, 30, 45].map(m => <option key={m} value={m}>:{String(m).padStart(2, '0')}</option>)}
-              </select>
-            </label>
-          </div>
-
-          <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-            {DAY_LABELS.map(([label, day]) => (
-              <button
-                key={day}
-                onClick={() => toggleDay(day)}
-                style={{ ...btnStyle, padding: '4px 10px', fontSize: 11, background: notifyDays.includes(day) ? 'rgba(61,186,126,0.12)' : 'transparent' }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
+      {showSettings && (
+        <div style={{ borderTop: '1px solid var(--border, #2a2e38)', paddingTop: 16 }}>
           <EmailListEditor label="TO (external — receives the draft)" emails={toEmails} onChange={setToEmails} />
           <EmailListEditor label="CC (external — receives the draft)" emails={ccEmails} onChange={setCcEmails} />
 
@@ -334,20 +333,9 @@ export default function ShortageReportEmailEditor({ reportKey, reportLabel }) {
 
           <div style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
             <button onClick={handleSave} disabled={saveState === 'saving'} style={btnStyle}>
-              {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
+              {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save recipients & settings'}
             </button>
-            <button onClick={handleTest} disabled={testState === 'running' || !authorId} style={btnStyle}>
-              {testState === 'running' ? 'Creating…' : testState === 'ok' ? 'Created ✓' : testState === 'error' ? 'Failed' : 'Create Draft Now (test)'}
-            </button>
-            {testDetail && (
-              <span style={{ fontSize: 10, color: testState === 'error' ? '#e5484d' : 'var(--text-secondary, #9aa1ac)' }}>
-                {testDetail}
-              </span>
-            )}
           </div>
-          {!authorId && (
-            <p style={{ ...subStyle, marginTop: 8, fontStyle: 'italic' }}>Select a Draft Author above to enable the test button.</p>
-          )}
         </div>
       )}
     </div>
