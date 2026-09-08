@@ -65,6 +65,14 @@
 // function to fetch ALL outbound appointments now (not just relationally
 // linked ones via INNER JOIN, as before) so it can identify which ones
 // are unlinked and extract order numbers from their free-text names.
+//
+// MULTI-FIELD ORDER MATCHING, FIXED 2026-09-09 (kept in sync with
+// motherduck-shortage-report.cjs — see that file's header for the full
+// Sargento vendor_reference story): the existence check now matches
+// lookup_code, owner_reference, AND vendor_reference (LIKE prefix), with
+// ROW_NUMBER() dedup per lookup_code to avoid double/triple-counting
+// chain-versioned order rows. extractOrderNumbers also extended to allow
+// a trailing single uppercase letter (e.g. "5421184I").
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -135,11 +143,14 @@ function escapeHtml(s) {
 function fmt(n) { return Number(n ?? 0).toLocaleString('en-US') }
 
 // Pulls candidate order numbers out of an appointment name via regex —
-// exact mirror of motherduck-shortage-report.cjs's extractOrderNumbers.
-// Kept as a literal copy (not a shared import) for the same reason the
-// rest of this file duplicates that function's query logic — see header.
+// exact mirror of motherduck-shortage-report.cjs's extractOrderNumbers,
+// extended 2026-09-09 to allow one trailing uppercase letter (e.g.
+// "5421184I") — see that file's header for the full Sargento
+// vendor_reference story. Kept as a literal copy (not a shared import)
+// for the same reason the rest of this file duplicates that function's
+// query logic — see header.
 function extractOrderNumbers(text) {
-  return [...new Set((text.match(/\b(?:[A-Z]{0,3}\d{6,})\b/g) || []))]
+  return [...new Set((text.match(/\b(?:[A-Z]{0,3}\d{6,}[A-Z]?)\b/g) || []))]
 }
 
 // Builds the shortage-table HTML — same six columns as the app's own
@@ -229,15 +240,33 @@ async function queryShortageMaterials(config, date) {
   const candidateNumbers = [...new Set(unlinkedAppts.flatMap(r => extractOrderNumbers(r.appt_code)))]
   let existingOrdersByCode = new Map()
   if (candidateNumbers.length) {
-    const quoted = candidateNumbers.map(c => `'${c}'`).join(',')
+    // Matches lookup_code, owner_reference (exact), AND vendor_reference
+    // (LIKE prefix) — mirrors motherduck-shortage-report.cjs's identical
+    // fix 2026-09-09; see that file's header for the full Sargento
+    // vendor_reference story and why ROW_NUMBER() dedup is required
+    // (chain-versioned orders sharing one lookup_code across multiple
+    // order_id rows would otherwise be double/triple counted).
+    const quotedCandidates = candidateNumbers.map(c => `'${c.replace(/'/g, "''")}'`).join(', ')
     const existSql = `
-      SELECT lookup_code, order_id
-      FROM production_db.silver.datex_slv_orders
-      WHERE lookup_code IN (${quoted})
-        AND project_id IN (${projectIds.join(',')})
+      WITH candidates(c) AS (VALUES (${quotedCandidates}))
+      , matched AS (
+        SELECT o.*, ROW_NUMBER() OVER (PARTITION BY o.lookup_code ORDER BY o.order_id DESC) AS rn
+        FROM production_db.silver.datex_slv_orders o
+        WHERE o.project_id IN (${projectIds.join(',')})
+          AND EXISTS (
+            SELECT 1 FROM candidates c
+            WHERE o.lookup_code = c.c OR o.owner_reference = c.c OR o.vendor_reference LIKE c.c || '%'
+          )
+      )
+      SELECT c.c AS candidate, m.order_id
+      FROM candidates c
+      LEFT JOIN matched m
+        ON (m.lookup_code = c.c OR m.owner_reference = c.c OR m.vendor_reference LIKE c.c || '%')
+        AND m.rn = 1
+      WHERE m.order_id IS NOT NULL
     `
     const existRows = await runQuery(existSql)
-    existingOrdersByCode = new Map(existRows.map(r => [r.lookup_code, r.order_id]))
+    existingOrdersByCode = new Map(existRows.map(r => [r.candidate, r.order_id]))
   }
 
   const orderIds = [...new Set([
