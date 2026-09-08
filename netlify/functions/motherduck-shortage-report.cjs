@@ -19,10 +19,24 @@
 // Allocated-column and Inbound-removed decisions). None of that logic
 // changed, only the scope parameters.
 //
-// DEMAND (Needed) — appointments-only, sourced STRICTLY from
-// dockappointmentitems -> Order links, scoped to the reportKey's
-// warehouse/projects/appointment tag. Unlinked/no-order appointments are
-// surfaced for visibility (linkStatus) but excluded from Needed.
+// DEMAND (Needed) — sourced from BOTH Linked and Not Linked appointment
+// order references, as of 2026-09-08. Originally Linked-only; per Dan's
+// explicit ask after confirming how the link-status/order-status logic
+// actually worked ("yes I want them counted towards needed"), Not Linked
+// orders — real orders confirmed to exist in Datex via lookup_code,
+// project-scoped, that just haven't been relationally connected to their
+// appointment yet — now contribute their real order-line quantities too.
+// Only "No Order Within Datex" (candidate numbers with no matching real
+// order at all) are excluded from Needed; that's now the ONLY excluded
+// category, not two. Order STATUS (Created/Processing/etc.) has never
+// gated Needed and still doesn't — no order_status_id filter exists
+// anywhere in this file; status is informational-only on the appointments
+// panel. See extractOrderNumbers()/existingOrdersByCode below for the
+// existence check, which is now project-scoped (confirmed live that
+// lookup_code is NOT globally unique across projects — an earlier
+// version of this existence check had no project filter, a real
+// correctness gap that could have attributed a different customer's
+// order's demand to this report; fixed in the same pass as this change).
 //
 // OUTBOUND ONLY, FIXED 2026-09-01 (later same day): appointment query now
 // joins silver.datex_slv_dockappointmenttypes and filters to
@@ -152,6 +166,7 @@ exports.handler = async (event) => {
         LEFT JOIN production_db.silver.datex_slv_orderstatuses s
           ON s.order_status_id = o.order_status_id
         WHERE o.lookup_code IN (${quoted})
+          AND o.project_id IN (${PROJECT_IDS.join(',')})
       `;
       const existRows = await runQuery(existSql);
       existingOrdersByCode = new Map(existRows.map((r) => [r.lookup_code, { orderId: r.order_id, orderStatus: r.order_status }]));
@@ -191,7 +206,22 @@ exports.handler = async (event) => {
       };
     });
 
-    const orderIds = [...new Set(linkedRows.map((r) => r.order_id))];
+    const orderIds = [...new Set([
+      ...linkedRows.map((r) => r.order_id),
+      // Not Linked orders count toward Needed too, added 2026-09-08 per
+      // Dan's explicit ask ("yes I want them counted towards needed") —
+      // see the header note above for the full reasoning. These are
+      // confirmed-real orders (existingOrdersByCode, project-scoped) that
+      // Datex just hasn't relationally connected to their appointment
+      // yet; excluding their real quantities produced a silent gap.
+      // "No Order Within Datex" candidates are never in this map, so they
+      // correctly still contribute nothing.
+      ...unlinkedAppts.flatMap((r) =>
+        extractOrderNumbers(r.appt_code)
+          .map((c) => existingOrdersByCode.get(c)?.orderId)
+          .filter(Boolean)
+      ),
+    ])];
 
     if (orderIds.length === 0) {
       return {
