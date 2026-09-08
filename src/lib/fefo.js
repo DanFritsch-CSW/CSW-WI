@@ -516,7 +516,29 @@ function lotSuffix(rem) {
   return ` (lot ${rem.lot})`
 }
 
-export function verdictCopy(line, projId) {
+// shelfLifeDaysRemaining/shelfLifeSuffix — added 2026-09-08 per Hill's
+// follow-up on the same PALVI9 conversation: "add the expiration date and
+// shelf life days remaining to this message whenever specific lots are
+// referenced." Only meaningful for dateSemantic:'expiration' projects
+// (e.g. Palermo's) — pack/receive/man-date projects have no expiration to
+// count down to. Same helper (and the same digest-side "Immediate Action
+// Summary" near-expiry callout) added to lib/fefo-digest-shared.cjs.
+function shelfLifeDaysRemaining(remDateDisplay, asOfDate) {
+  const expDate = parseDisplayDate(remDateDisplay)
+  if (!expDate || !asOfDate) return null
+  const asOfMidnight = new Date(Date.UTC(asOfDate.getUTCFullYear(), asOfDate.getUTCMonth(), asOfDate.getUTCDate()))
+  return Math.round((expDate.getTime() - asOfMidnight.getTime()) / 86400000)
+}
+
+function shelfLifeSuffix(remDateDisplay, asOfDate, projId) {
+  const project = getProject(projId)
+  if (project?.dateSemantic !== 'expiration') return ''
+  const days = shelfLifeDaysRemaining(remDateDisplay, asOfDate)
+  if (days == null) return ''
+  return days < 0 ? ` (expired ${Math.abs(days)}d ago)` : ` (${days}d shelf life left)`
+}
+
+export function verdictCopy(line, projId, asOfDate = new Date()) {
   const verb = dateVerb(projId)
   const v = lineVerdict(line)
   if (v === 'violation') {
@@ -525,16 +547,17 @@ export function verdictCopy(line, projId) {
     const stockUnit = line.rem.lps > 0 ? `${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}` : 'stock'
     const loc = locSuffix(line.rem)
     const lot = lotSuffix(line.rem)
+    const shelf = shelfLifeSuffix(line.rem.date, asOfDate, projId)
     const days = lineDaysOlder(line)
     const drift = days > 0 ? ` (${days} day${days === 1 ? '' : 's'} older)` : ''
-    return `Out of rotation${drift} — ${stockUnit}${lot} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
+    return `Out of rotation${drift} — ${stockUnit}${lot} ${verb} ${line.rem.date}${shelf} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
   }
   if (v === 'hold') {
-    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, projId)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
   }
   if (v === 'blocked') {
     const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
-    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, projId)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
   }
   if (!line.rem || line.rem.lps === 0) {
     return 'In rotation — the oldest stock on hand is shipping first… fully cleared.'
