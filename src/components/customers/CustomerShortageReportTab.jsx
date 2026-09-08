@@ -18,11 +18,14 @@ import PretzillaShortageTab from './PretzillaShortageTab.jsx'
 // {key, label} pairs for the dropdown, not the full warehouse/project/
 // appt-tag scope config the backend needs. Add a new customer here AND
 // in shortage-report-configs.cjs when one gets built — the key must
-// match exactly.
+// match exactly. Pedone Pinsa (pedone_ken) added 2026-09-08, third
+// customer on the same tab — see that file's header for a known gap
+// specific to Pedone's shorter order-number format.
 
 const REPORTS = [
   { key: 'pretzilla_ken', label: 'Pretzilla — Kenosha' },
   { key: 'sargento_cal', label: 'Sargento — Caledonia' },
+  { key: 'pedone_ken', label: 'Pedone Pinsa — Kenosha' },
 ]
 
 const selectStyle = {
