@@ -41,6 +41,22 @@
 // <date>". closedOrders (JDF) is completely unaffected — it still reviews
 // a specific closed/shipped calendar day via sameCalendarDayDateObj.
 //
+// ── Shelf life countdown + Immediate Action Summary (2026-09-08) ───────────
+//
+// Hill's follow-up on the same PALVI9 conversation (cnv_1c0ok3dg) that
+// prompted the lot-number fix below: "add the expiration date and shelf
+// life days remaining to this message whenever specific lots are
+// referenced. Anything with less than 140 days that is getting skipped
+// needs to get called as part of the Immediate Action Summary." Two
+// changes: (1) verdictCopy now appends a shelf-life countdown next to the
+// expiration date, for dateSemantic:'expiration' projects only; (2) the
+// "Biggest issues today" section (renamed to "Immediate Action Summary"
+// per Hill's own term) now also scans hold/blocked lines across ALL
+// orders for anything under 140 days remaining and explicitly feeds them
+// to Claude as must-call-out items — previously that section only ever
+// saw violations, so a near-expiry lot stuck on hold could never surface
+// there no matter how urgent it was.
+//
 // ── "Biggest issues" AI summary (2026-08-26) ────────────────────────────────
 //
 // Per Dan (Front cnv_1c0ok3dg): Hill's own manual workaround for these
@@ -259,7 +275,33 @@ function lotSuffix(rem) {
   return ` (lot ${rem.lot})`
 }
 
-function verdictCopy(line, project) {
+// shelfLifeDaysRemaining/shelfLifeSuffix — added 2026-09-08 per Hill's
+// follow-up on the same PALVI9 conversation (cnv_1c0ok3dg): "can you add
+// the expiration date and shelf life days remaining to this message
+// whenever specific lots are referenced." The expiration DATE was already
+// shown for expiration-semantic projects (dateVerb returns 'expiring' and
+// the date itself is already in the sentence) — what was missing was the
+// countdown. Only meaningful for dateSemantic:'expiration' projects (e.g.
+// Palermo's); pack/receive/man-date projects don't have an expiration to
+// count down to, so this is a no-op for them. asOfDate defaults to "now"
+// but buildDigestBody passes its own dateObj through explicitly so the
+// digest's countdown matches the header's "as of" date rather than the
+// exact millisecond the Claude call happens to run.
+function shelfLifeDaysRemaining(remDateDisplay, asOfDate) {
+  const expDate = parseDisplayDate(remDateDisplay)
+  if (!expDate || !asOfDate) return null
+  const asOfMidnight = new Date(Date.UTC(asOfDate.getUTCFullYear(), asOfDate.getUTCMonth(), asOfDate.getUTCDate()))
+  return Math.round((expDate.getTime() - asOfMidnight.getTime()) / 86400000)
+}
+
+function shelfLifeSuffix(remDateDisplay, asOfDate, project) {
+  if (project?.dateSemantic !== 'expiration') return ''
+  const days = shelfLifeDaysRemaining(remDateDisplay, asOfDate)
+  if (days == null) return ''
+  return days < 0 ? ` (expired ${Math.abs(days)}d ago)` : ` (${days}d shelf life left)`
+}
+
+function verdictCopy(line, project, asOfDate = new Date()) {
   const verb = dateVerb(project)
   const v = lineVerdict(line)
   if (v === 'violation') {
@@ -268,16 +310,17 @@ function verdictCopy(line, project) {
     const stockUnit = line.rem.lps > 0 ? `${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}` : 'stock'
     const loc = locSuffix(line.rem)
     const lot = lotSuffix(line.rem)
+    const shelf = shelfLifeSuffix(line.rem.date, asOfDate, project)
     const days = lineDaysOlder(line)
     const drift = days > 0 ? ` (${days} day${days === 1 ? '' : 's'} older)` : ''
-    return `Out of rotation${drift} — ${stockUnit}${lot} ${verb} ${line.rem.date} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
+    return `Out of rotation${drift} — ${stockUnit}${lot} ${verb} ${line.rem.date}${shelf} (${line.rem.cases} cs)${loc} sit unallocated and off hold, older than the ${oldShip.date} stock on this order. Swap them in before it ships.`
   }
   if (v === 'hold') {
-    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, project)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
   }
   if (v === 'blocked') {
     const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
-    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, project)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
   }
   if (!line.rem || line.rem.lps === 0) {
     return 'In rotation — the oldest stock on hand is shipping first… fully cleared.'
@@ -325,28 +368,74 @@ async function callClaude(prompt) {
   return textBlock.text
 }
 
+// SHELF_LIFE_ALERT_THRESHOLD_DAYS / findNearExpiryStuckLines — added
+// 2026-09-08 per Hill's same feedback: "Anything with less than 140 days
+// that is getting skipped needs to get called as part of the Immediate
+// Action Summary." "Getting skipped" = hold or blocked verdict (older
+// stock correctly not shipping today) — these were NEVER fed into the
+// summary before this change, since generateBiggestIssuesSummary only
+// ever saw the violation list. A near-expiry hold/blocked lot could sit
+// there indefinitely, risk expiring in the warehouse, and never once
+// surface in the one section meant to flag urgent issues. Scoped to
+// dateSemantic:'expiration' projects only, same as shelfLifeSuffix above —
+// scans ALL orders (not just violations) for hold/blocked lines under the
+// threshold, independent of whether the project has any violations today.
+const SHELF_LIFE_ALERT_THRESHOLD_DAYS = 140
+
+function findNearExpiryStuckLines(orders, project, asOfDate) {
+  if (project?.dateSemantic !== 'expiration') return []
+  const out = []
+  for (const o of orders) {
+    for (const line of (o.lines || [])) {
+      const v = lineVerdict(line)
+      if (v !== 'hold' && v !== 'blocked') continue
+      const days = shelfLifeDaysRemaining(line.rem?.date, asOfDate)
+      if (days == null || days >= SHELF_LIFE_ALERT_THRESHOLD_DAYS) continue
+      out.push({ order: o, line, days })
+    }
+  }
+  return out
+}
+
 // Formats one violating order for the prompt — same per-line detail
 // (verdictCopy + severity) as the digest's own violation list, so the
 // summary is grounded in exactly what a human reading the digest sees,
 // not a separately-computed view that could disagree.
-function formatViolationForPrompt(o, project) {
+function formatViolationForPrompt(o, project, asOfDate) {
   const out = [`${o.id} — ${o.dest || 'dest unknown'}`]
   for (const line of (o.lines || [])) {
     if (lineVerdict(line) !== 'violation') continue
     const sev = lineSeverity(line)
-    out.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
+    out.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project, asOfDate)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
   }
   return out.join('\n')
 }
 
-async function generateBiggestIssuesSummary(violatingOrders, project) {
-  if (!ANTHROPIC_API_KEY || !violatingOrders.length) return null
-  const violationText = violatingOrders.map((o) => formatViolationForPrompt(o, project)).join('\n\n')
-  const prompt = `You are looking at today's FEFO (First-Expired-First-Out) rotation violation report for ${project.name} (${project.code}), a CSW-WI 3PL warehouse customer. Below is the full list of every order currently violating FEFO — newer stock shipping while older, unallocated, off-hold stock of the same material sits unused.
+// Formats one near-expiry stuck line for the prompt — added 2026-09-08
+// alongside findNearExpiryStuckLines above.
+function formatStuckLineForPrompt({ order, line, days }, project, asOfDate) {
+  const tag = days < 0 ? 'EXPIRED' : `${days}d SHELF LIFE LEFT`
+  return `${order.id} — ${order.dest || 'dest unknown'} — ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project, asOfDate)} [${tag}]`
+}
 
+async function generateBiggestIssuesSummary(violatingOrders, nearExpiryStuck, project, asOfDate) {
+  if (!ANTHROPIC_API_KEY) return null
+  if (!violatingOrders.length && !nearExpiryStuck.length) return null
+  const violationText = violatingOrders.length
+    ? violatingOrders.map((o) => formatViolationForPrompt(o, project, asOfDate)).join('\n\n')
+    : '(none today)'
+  const stuckText = nearExpiryStuck.length
+    ? nearExpiryStuck.map((entry) => formatStuckLineForPrompt(entry, project, asOfDate)).join('\n')
+    : '(none)'
+  const prompt = `You are looking at today's FEFO (First-Expired-First-Out) rotation report for ${project.name} (${project.code}), a CSW-WI 3PL warehouse customer.
+
+VIOLATIONS — newer stock shipping while older, unallocated, off-hold stock of the same material sits unused:
 ${violationText}
 
-In 3-5 short sentences, summarize the BIGGEST issues in this list for a warehouse operations manager to act on today — which specific materials or locations show up repeatedly, which are the most severe (oldest stock, most cases), and anything that looks like a genuine data/process problem worth investigating (e.g. the same lot showing up dozens of times) versus a one-off. Be direct and concise — this is a working summary for someone about to go fix these, not a report. Do not just restate every violation; synthesize.`
+STUCK LOTS NEAR EXPIRATION — these are correctly NOT shipping today (on hold or not yet put away), so they are NOT FEFO violations, but each has under ${SHELF_LIFE_ALERT_THRESHOLD_DAYS} days of shelf life remaining and risks expiring while stuck in the warehouse:
+${stuckText}
+
+In 3-6 short sentences, summarize the BIGGEST issues here for a warehouse operations manager to act on today. Explicitly name every lot listed under STUCK LOTS NEAR EXPIRATION by its lot number as an immediate action item, even if there are no violations at all — a near-expiry lot stuck on hold is exactly the kind of thing this summary must never omit. For the violations, cover which specific materials or locations show up repeatedly, which are most severe (oldest stock, most cases), and anything that looks like a genuine data/process problem (e.g. the same lot showing up dozens of times) versus a one-off. Be direct and concise — this is a working summary for someone about to go fix these, not a report. Do not just restate every line; synthesize.`
   // Never let a Claude failure (rate limit, timeout, bad response) block
   // the digest itself from posting — the exhaustive list below is the
   // part that must always go out; this summary is additive context only.
@@ -402,15 +491,20 @@ async function buildDigestBody(orders, project, dateObj) {
   lines.push(divider)
   lines.push('')
 
-  // Biggest issues summary (2026-08-26) — see generateBiggestIssuesSummary
-  // above for the full story. Sits between the badge and the exhaustive
-  // list below on purpose: quick synthesis first for someone skimming,
-  // full detail still right there for anyone who wants to dig in — the
-  // exhaustive list is NOT replaced or shortened by this.
-  if (byVerdict.violation.length > 0) {
-    const summary = await generateBiggestIssuesSummary(byVerdict.violation, project)
+  // Immediate Action Summary (was "Biggest issues today", renamed
+  // 2026-09-08 to match Hill's own terminology from the Front feedback
+  // that prompted this section originally). Sits between the badge and
+  // the exhaustive list below on purpose: quick synthesis first for
+  // someone skimming, full detail still right there for anyone who wants
+  // to dig in — the exhaustive list is NOT replaced or shortened by this.
+  // Now fires on near-expiry stuck lots too, not just violations — see
+  // findNearExpiryStuckLines above for why that mattered (a near-expiry
+  // hold/blocked lot could never have surfaced here before).
+  const nearExpiryStuck = findNearExpiryStuckLines(orders, project, dateObj)
+  if (byVerdict.violation.length > 0 || nearExpiryStuck.length > 0) {
+    const summary = await generateBiggestIssuesSummary(byVerdict.violation, nearExpiryStuck, project, dateObj)
     if (summary) {
-      lines.push('**Biggest issues today:**')
+      lines.push('**Immediate Action Summary:**')
       lines.push(summary.trim())
       lines.push('')
     }
@@ -429,7 +523,7 @@ async function buildDigestBody(orders, project, dateObj) {
       for (const line of (o.lines || [])) {
         if (lineVerdict(line) !== 'violation') continue
         const sev = lineSeverity(line)
-        lines.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
+        lines.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project, dateObj)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
       }
       lines.push('')
     }
