@@ -52,6 +52,24 @@
 // uniformly to any future customer per Dan's ask ("make this consistent
 // across all customers").
 //
+// MULTI-FIELD ORDER MATCHING, FIXED 2026-09-09: the Not Linked existence
+// check now matches candidate order numbers against lookup_code,
+// owner_reference, AND vendor_reference — not lookup_code alone.
+// Confirmed live on Sargento that appointment names commonly embed
+// vendor_reference values (real orders, real quantities) rather than the
+// order's own lookup_code; these were previously always misclassified as
+// "No Order Within Datex" and excluded from Needed. Also extended
+// extractOrderNumbers to capture a trailing single uppercase letter
+// (e.g. "5421184I") — Sargento's vendor_reference format the original
+// regex (leading-letters-only) could never match at all. Deduplication
+// via ROW_NUMBER() is required alongside this: the same lookup_code can
+// have multiple order_id rows from Datex's own re-plan/chain-versioning,
+// confirmed live (one lookup_code had 3 order_id rows with identical
+// orderlines) — without dedup, matching on owner_reference/
+// vendor_reference (which returns every historical row) would double- or
+// triple-count that order's real demand. See the inline comment above
+// existSql for the full query-level explanation.
+//
 // SHORT = Active - Needed, only returned when negative. Inactive and
 // Allocated (soft + hard) are informational only, not netted in.
 //
@@ -69,12 +87,16 @@ function isValidDate(s) {
   return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
-// Pulls candidate order numbers (e.g. "SO620394", "0010308494") out of an
-// appointment name via regex. Both Pretzilla (SO######) and Sargento
-// (0010######) order lookup_codes observed live match this pattern —
-// 6+ digit numeric runs, with or without a leading letter prefix.
+// Pulls candidate order numbers (e.g. "SO620394", "0010308494",
+// "5421184I") out of an appointment name via regex. Extended 2026-09-09
+// to allow ONE trailing uppercase letter after the digit run — confirmed
+// live on Sargento that several real vendor_reference values look like
+// "5421184I", "5652744P", etc. (digit run + single letter suffix), which
+// the original prefix-only pattern ([A-Z]{0,3} BEFORE digits) could never
+// match. Both Pretzilla (SO######) and Sargento (0010######, and now the
+// letter-suffixed vendor-reference style) order references match this.
 function extractOrderNumbers(text) {
-  return [...new Set((text.match(/\b(?:[A-Z]{0,3}\d{6,})\b/g) || []))];
+  return [...new Set((text.match(/\b(?:[A-Z]{0,3}\d{6,}[A-Z]?)\b/g) || []))];
 }
 
 exports.handler = async (event) => {
@@ -159,17 +181,52 @@ exports.handler = async (event) => {
     )];
     let existingOrdersByCode = new Map();
     if (candidateNumbers.length) {
-      const quoted = candidateNumbers.map((c) => `'${c}'`).join(',');
+      // Matches against lookup_code, owner_reference (exact), AND
+      // vendor_reference (prefix match via LIKE) — added 2026-09-09.
+      // Confirmed live on Sargento: appointment names commonly embed
+      // vendor_reference values (e.g. "ME10144090-01"), not the order's
+      // own lookup_code, and the existence check previously only ever
+      // looked at lookup_code — meaning these were real, linkable orders
+      // that always fell through to "No Order Within Datex" and
+      // contributed nothing to Needed. LIKE-prefix (not exact equality)
+      // on vendor_reference specifically because vendor_reference can
+      // carry a suffix the appointment text doesn't (confirmed: stored
+      // "ME10144090-01" vs. extracted "ME10144090" — the regex correctly
+      // stops at the hyphen, a real word-boundary, not a bug).
+      //
+      // ROW_NUMBER() dedup is required here: confirmed live that the
+      // SAME lookup_code can have multiple order_id rows from Datex's own
+      // re-plan/chain-versioning (same pattern noted for
+      // datex_slv_tasks elsewhere in this app) — one lookup_code
+      // ('0010309382') had 3 order_id rows, each with IDENTICAL
+      // orderlines (600 units). Without dedup, matching via
+      // vendor_reference/owner_reference (which returns ALL historical
+      // rows sharing that lookup_code) would double- or triple-count that
+      // single order's real demand. Only the highest order_id (the most
+      // recent chain link, confirmed via created_sys_date_time ordering)
+      // is kept per lookup_code.
+      const quotedCandidates = candidateNumbers.map((c) => `'${c.replace(/'/g, "''")}'`).join(', ');
       const existSql = `
-        SELECT o.lookup_code, o.order_id, s.status_name AS order_status
-        FROM production_db.silver.datex_slv_orders o
-        LEFT JOIN production_db.silver.datex_slv_orderstatuses s
-          ON s.order_status_id = o.order_status_id
-        WHERE o.lookup_code IN (${quoted})
-          AND o.project_id IN (${PROJECT_IDS.join(',')})
+        WITH candidates(c) AS (VALUES (${quotedCandidates}))
+        , matched AS (
+          SELECT o.*, ROW_NUMBER() OVER (PARTITION BY o.lookup_code ORDER BY o.order_id DESC) AS rn
+          FROM production_db.silver.datex_slv_orders o
+          WHERE o.project_id IN (${PROJECT_IDS.join(',')})
+            AND EXISTS (
+              SELECT 1 FROM candidates c
+              WHERE o.lookup_code = c.c OR o.owner_reference = c.c OR o.vendor_reference LIKE c.c || '%'
+            )
+        )
+        SELECT c.c AS candidate, m.order_id, s.status_name AS order_status
+        FROM candidates c
+        LEFT JOIN matched m
+          ON (m.lookup_code = c.c OR m.owner_reference = c.c OR m.vendor_reference LIKE c.c || '%')
+          AND m.rn = 1
+        LEFT JOIN production_db.silver.datex_slv_orderstatuses s ON s.order_status_id = m.order_status_id
+        WHERE m.order_id IS NOT NULL
       `;
       const existRows = await runQuery(existSql);
-      existingOrdersByCode = new Map(existRows.map((r) => [r.lookup_code, { orderId: r.order_id, orderStatus: r.order_status }]));
+      existingOrdersByCode = new Map(existRows.map((r) => [r.candidate, { orderId: r.order_id, orderStatus: r.order_status }]));
     }
 
     const appointments = allApptRows.map((r) => {
