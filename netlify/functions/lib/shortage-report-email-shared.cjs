@@ -54,6 +54,17 @@
 // applied to motherduck-shortage-report.cjs the same session — see that
 // file's header for the full Sargento Inbound-PO story. Kept in sync here
 // so the email draft's numbers can never diverge from what the tab shows.
+//
+// NOT LINKED COUNTS TOWARD NEEDED, ADDED 2026-09-08 (kept in sync with
+// motherduck-shortage-report.cjs — see that file's header for the full
+// reasoning): queryShortageMaterials now also pulls unlinked outbound
+// appointments, extracts candidate order numbers from their appt_code
+// text, checks existence project-scoped against datex_slv_orders, and
+// includes any confirmed-real matches' order_ids in the Needed sum. Only
+// candidates with no matching real order are excluded. This requires the
+// function to fetch ALL outbound appointments now (not just relationally
+// linked ones via INNER JOIN, as before) so it can identify which ones
+// are unlinked and extract order numbers from their free-text names.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -123,6 +134,14 @@ function escapeHtml(s) {
 
 function fmt(n) { return Number(n ?? 0).toLocaleString('en-US') }
 
+// Pulls candidate order numbers out of an appointment name via regex —
+// exact mirror of motherduck-shortage-report.cjs's extractOrderNumbers.
+// Kept as a literal copy (not a shared import) for the same reason the
+// rest of this file duplicates that function's query logic — see header.
+function extractOrderNumbers(text) {
+  return [...new Set((text.match(/\b(?:[A-Z]{0,3}\d{6,})\b/g) || []))]
+}
+
 // Builds the shortage-table HTML — same six columns as the app's own
 // Customer Shortage Report tab (Material / Needed / Active / Inactive /
 // Allocated / Short).
@@ -165,11 +184,12 @@ function buildDraftHtml(materials, dateObj, reportDisplay) {
     </div>`
 }
 
-// Mirrors motherduck-pretzilla-shortage.cjs's query logic exactly — see
+// Mirrors motherduck-shortage-report.cjs's query logic exactly — see
 // that file's header for the appointment-coverage and soft-allocated
-// validation history. Demand STRICTLY from linked appointment→order
-// relations only (unlinked/no-order appointments excluded, same as the
-// tab itself).
+// validation history. Demand now comes from BOTH Linked and Not Linked
+// order references (2026-09-08 — see that file's header for the full
+// "Not Linked counts toward Needed" reasoning). Only "No Order Within
+// Datex" candidates (no matching real order at all) are excluded.
 async function queryShortageMaterials(config, date) {
   process.env.HOME = '/tmp'
   process.env.motherduck_token = MOTHERDUCK_TOKEN
@@ -181,24 +201,51 @@ async function queryShortageMaterials(config, date) {
 
   const { warehouseId, projectIds, apptTag } = config
 
-  const linkedApptsSql = `
-    SELECT dai.dock_appointment_id AS appt_id, o.order_id AS order_id
+  const allApptsSql = `
+    SELECT da.dock_appointment_id AS appt_id, da.lookup_code AS appt_code
     FROM production_db.silver.datex_slv_dockappointments da
     JOIN production_db.silver.datex_slv_dockappointmenttypes t
       ON t.dock_appointment_type_id = da.type_id
-    JOIN production_db.silver.datex_slv_dockappointmentitems dai
-      ON dai.dock_appointment_id = da.dock_appointment_id
-    JOIN production_db.silver.datex_slv_orders o
-      ON o.order_id = dai.item_entity_id AND dai.item_entity_type = 'Order'
     WHERE da.warehouse_id = ${warehouseId}
       AND da.lookup_code LIKE '%${apptTag}%'
       AND da.status_id NOT IN (4, 5)
       AND t.dock_appointment_type_name LIKE 'Outbound%'
       AND CAST(da.scheduled_arrival AS DATE) = DATE '${date}'
-      AND o.project_id IN (${projectIds.join(',')})
   `
-  const linkedRows = await runQuery(linkedApptsSql)
-  const orderIds = [...new Set(linkedRows.map(r => r.order_id))]
+  const allApptRows = await runQuery(allApptsSql)
+
+  const linkedSql = `
+    SELECT dai.dock_appointment_id AS appt_id, o.order_id AS order_id
+    FROM production_db.silver.datex_slv_dockappointmentitems dai
+    JOIN production_db.silver.datex_slv_orders o
+      ON o.order_id = dai.item_entity_id AND dai.item_entity_type = 'Order'
+    WHERE o.project_id IN (${projectIds.join(',')})
+      AND dai.dock_appointment_id IN (${allApptRows.map(r => r.appt_id).join(',') || '-1'})
+  `
+  const linkedRows = allApptRows.length ? await runQuery(linkedSql) : []
+  const linkedApptIds = new Set(linkedRows.map(r => r.appt_id))
+
+  const unlinkedAppts = allApptRows.filter(r => !linkedApptIds.has(r.appt_id))
+  const candidateNumbers = [...new Set(unlinkedAppts.flatMap(r => extractOrderNumbers(r.appt_code)))]
+  let existingOrdersByCode = new Map()
+  if (candidateNumbers.length) {
+    const quoted = candidateNumbers.map(c => `'${c}'`).join(',')
+    const existSql = `
+      SELECT lookup_code, order_id
+      FROM production_db.silver.datex_slv_orders
+      WHERE lookup_code IN (${quoted})
+        AND project_id IN (${projectIds.join(',')})
+    `
+    const existRows = await runQuery(existSql)
+    existingOrdersByCode = new Map(existRows.map(r => [r.lookup_code, r.order_id]))
+  }
+
+  const orderIds = [...new Set([
+    ...linkedRows.map(r => r.order_id),
+    ...unlinkedAppts.flatMap(r =>
+      extractOrderNumbers(r.appt_code).map(c => existingOrdersByCode.get(c)).filter(Boolean)
+    ),
+  ])]
   if (orderIds.length === 0) {
     conn.close(); db.close()
     return { materials: [], orderCount: 0 }
