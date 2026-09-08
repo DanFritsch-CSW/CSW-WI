@@ -418,6 +418,109 @@ function formatStuckLineForPrompt({ order, line, days }, project, asOfDate) {
   return `${order.id} — ${order.dest || 'dest unknown'} — ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project, asOfDate)} [${tag}]`
 }
 
+// aggregateLotActions/formatLotActionLine — added 2026-09-09 per Dan's
+// feedback: the AI-written "Immediate Action Summary" paragraph, while
+// synthesized well, packed multiple lots' worth of counts/dates into dense
+// prose ("lot X ... 124 days ... 13+ orders ... lot Y ... 55 days ... 20+
+// orders") that was hard to scan and, worse, risked the model mis-stating
+// a count or date someone would then act on in Datex. Replaced the
+// per-lot detail with a DETERMINISTIC, code-computed list — one block per
+// distinct lot, exact order counts (no more "13+" hedging), sorted by
+// urgency — so there's zero hallucination risk on the numbers a warehouse
+// manager actually uses to go find and reallocate a pallet. The AI call
+// (generateBiggestIssuesSummary, below) now only writes a short 1-2
+// sentence PATTERN-level observation (chronic/systemic vs. one-off) —
+// exactly the kind of judgment call an LLM is good at and a deterministic
+// aggregation can't make — with the per-lot specifics handled entirely by
+// this function instead.
+//
+// Groups by LOT NUMBER (not by order) across both violating orders and
+// near-expiry stuck lines, since the same lot commonly recurs across many
+// orders (see the PALDSD9 example that prompted this: lot 17526 alone hit
+// 20+ orders) — a per-order list would just repeat the same lot's detail
+// dozens of times, exactly what made the old format hard to scan.
+function aggregateLotActions(violatingOrders, nearExpiryStuck, project, asOfDate) {
+  const byLot = new Map()
+
+  for (const o of violatingOrders) {
+    for (const line of (o.lines || [])) {
+      if (lineVerdict(line) !== 'violation') continue
+      const lot = line.rem?.lot
+      if (!lot) continue
+      if (!byLot.has(lot)) {
+        byLot.set(lot, {
+          lot, code: line.code, desc: line.desc, location: line.rem.location || '',
+          date: line.rem.date, orderIds: new Set(), maxSeverity: null, maxDaysOlder: 0,
+          isViolation: true, isStuck: false, holdType: null,
+        })
+      }
+      const entry = byLot.get(lot)
+      entry.orderIds.add(o.id)
+      const sev = lineSeverity(line)
+      if (sev === 'critical') entry.maxSeverity = 'critical'
+      else if (sev === 'warning' && entry.maxSeverity !== 'critical') entry.maxSeverity = 'warning'
+      const d = lineDaysOlder(line)
+      if (d > entry.maxDaysOlder) entry.maxDaysOlder = d
+    }
+  }
+
+  for (const { order: o, line, days } of nearExpiryStuck) {
+    const lot = line.rem?.lot
+    if (!lot) continue
+    if (!byLot.has(lot)) {
+      byLot.set(lot, {
+        lot, code: line.code, desc: line.desc, location: line.rem.location || '',
+        date: line.rem.date, orderIds: new Set(), maxSeverity: null, maxDaysOlder: 0,
+        isViolation: false, isStuck: false, holdType: null,
+      })
+    }
+    const entry = byLot.get(lot)
+    entry.orderIds.add(o.id)
+    entry.isStuck = true
+    entry.holdType = entry.holdType || line.rem.holdType || null
+  }
+
+  const list = [...byLot.values()].map(e => ({
+    ...e,
+    orderCount: e.orderIds.size,
+    shelfLifeDays: project?.dateSemantic === 'expiration' ? shelfLifeDaysRemaining(e.date, asOfDate) : null,
+  }))
+
+  // Sort: anything with a known shelf-life countdown sorts by SOONEST TO
+  // EXPIRE first regardless of violation/stuck status — that's the axis
+  // that actually determines urgency (see the PALDSD9 example: a 4-day
+  // lot needed to outrank a 74-day lot even though the 74-day one hit
+  // more orders). Ties/no-shelf-life fall back to violation-before-stuck,
+  // then severity, then order count.
+  const sevRank = s => (s === 'critical' ? 0 : s === 'warning' ? 1 : 2)
+  list.sort((a, b) => {
+    if (a.shelfLifeDays != null && b.shelfLifeDays != null && a.shelfLifeDays !== b.shelfLifeDays) {
+      return a.shelfLifeDays - b.shelfLifeDays
+    }
+    if (a.shelfLifeDays != null && b.shelfLifeDays == null) return -1
+    if (a.shelfLifeDays == null && b.shelfLifeDays != null) return 1
+    if (a.isViolation !== b.isViolation) return a.isViolation ? -1 : 1
+    if (sevRank(a.maxSeverity) !== sevRank(b.maxSeverity)) return sevRank(a.maxSeverity) - sevRank(b.maxSeverity)
+    return b.orderCount - a.orderCount
+  })
+
+  return list
+}
+
+function formatLotActionLine(entry, project) {
+  const verb = dateVerb(project)
+  const shelf = entry.shelfLifeDays != null
+    ? (entry.shelfLifeDays < 0 ? `EXPIRED ${Math.abs(entry.shelfLifeDays)}d ago` : `${entry.shelfLifeDays}d shelf life left`)
+    : null
+  const parts = [entry.location || 'location unknown']
+  parts.push(shelf || `${verb} ${entry.date}`)
+  parts.push(`${entry.orderCount} order${entry.orderCount === 1 ? '' : 's'}`)
+  if (entry.isViolation && entry.maxSeverity) parts.push(entry.maxSeverity.toUpperCase())
+  if (entry.isStuck && !entry.isViolation) parts.push(`ON ${entry.holdType || 'HOLD'} — NEAR EXPIRY`)
+  const icon = entry.isViolation ? '⚠' : '⏸'
+  return `${icon} Lot ${entry.lot} — ${entry.code}${entry.desc ? ' ' + entry.desc : ''}\n   ${parts.join(' · ')}`
+}
+
 async function generateBiggestIssuesSummary(violatingOrders, nearExpiryStuck, project, asOfDate) {
   if (!ANTHROPIC_API_KEY) return null
   if (!violatingOrders.length && !nearExpiryStuck.length) return null
@@ -427,6 +530,11 @@ async function generateBiggestIssuesSummary(violatingOrders, nearExpiryStuck, pr
   const stuckText = nearExpiryStuck.length
     ? nearExpiryStuck.map((entry) => formatStuckLineForPrompt(entry, project, asOfDate)).join('\n')
     : '(none)'
+  // Prompt simplified 2026-09-09 — see aggregateLotActions above for why.
+  // Deliberately asks for PATTERN judgment only (chronic/systemic vs.
+  // one-off), not per-lot counts/dates — those are now computed
+  // deterministically right below this in buildDigestBody, with zero risk
+  // of the model mis-stating a number someone will act on in Datex.
   const prompt = `You are looking at today's FEFO (First-Expired-First-Out) rotation report for ${project.name} (${project.code}), a CSW-WI 3PL warehouse customer.
 
 VIOLATIONS — newer stock shipping while older, unallocated, off-hold stock of the same material sits unused:
@@ -435,7 +543,7 @@ ${violationText}
 STUCK LOTS NEAR EXPIRATION — these are correctly NOT shipping today (on hold or not yet put away), so they are NOT FEFO violations, but each has under ${SHELF_LIFE_ALERT_THRESHOLD_DAYS} days of shelf life remaining and risks expiring while stuck in the warehouse:
 ${stuckText}
 
-In 3-6 short sentences, summarize the BIGGEST issues here for a warehouse operations manager to act on today. Explicitly name every lot listed under STUCK LOTS NEAR EXPIRATION by its lot number as an immediate action item, even if there are no violations at all — a near-expiry lot stuck on hold is exactly the kind of thing this summary must never omit. For the violations, cover which specific materials or locations show up repeatedly, which are most severe (oldest stock, most cases), and anything that looks like a genuine data/process problem (e.g. the same lot showing up dozens of times) versus a one-off. Be direct and concise — this is a working summary for someone about to go fix these, not a report. Do not just restate every line; synthesize.`
+In exactly 1-2 short sentences, describe the overall PATTERN here for a warehouse operations manager — is this concentrated in a small number of chronic lots/locations that keep recurring across many orders (pointing to a systemic allocation-bypass or WMS rule issue), or is it spread across many one-off cases? Do NOT list individual lot numbers, dates, or order counts — those are shown separately in an exact, itemized list right after this. Just the pattern-level read, in plain direct language.`
   // Never let a Claude failure (rate limit, timeout, bad response) block
   // the digest itself from posting — the exhaustive list below is the
   // part that must always go out; this summary is additive context only.
@@ -492,21 +600,30 @@ async function buildDigestBody(orders, project, dateObj) {
   lines.push('')
 
   // Immediate Action Summary (was "Biggest issues today", renamed
-  // 2026-09-08 to match Hill's own terminology from the Front feedback
-  // that prompted this section originally). Sits between the badge and
-  // the exhaustive list below on purpose: quick synthesis first for
+  // 2026-09-08 to match Hill's own terminology). Sits between the badge
+  // and the exhaustive list below on purpose: quick synthesis first for
   // someone skimming, full detail still right there for anyone who wants
   // to dig in — the exhaustive list is NOT replaced or shortened by this.
-  // Now fires on near-expiry stuck lots too, not just violations — see
-  // findNearExpiryStuckLines above for why that mattered (a near-expiry
-  // hold/blocked lot could never have surfaced here before).
+  //
+  // Restructured 2026-09-09 per Dan's feedback: the old AI-written prose
+  // packed every lot's counts/dates into dense paragraphs that were hard
+  // to scan and risked the model mis-stating a number. Now: one short
+  // AI-written PATTERN sentence (chronic/systemic vs. one-off — genuine
+  // LLM judgment call), followed by a deterministic, code-computed list
+  // (aggregateLotActions/formatLotActionLine above) — one block per
+  // distinct lot, exact order counts, sorted soonest-to-expire first, zero
+  // hallucination risk on the numbers someone acts on in Datex.
   const nearExpiryStuck = findNearExpiryStuckLines(orders, project, dateObj)
   if (byVerdict.violation.length > 0 || nearExpiryStuck.length > 0) {
     const summary = await generateBiggestIssuesSummary(byVerdict.violation, nearExpiryStuck, project, dateObj)
-    if (summary) {
+    const lotActions = aggregateLotActions(byVerdict.violation, nearExpiryStuck, project, dateObj)
+    if (summary || lotActions.length) {
       lines.push('**Immediate Action Summary:**')
-      lines.push(summary.trim())
-      lines.push('')
+      if (summary) { lines.push(summary.trim()); lines.push('') }
+      for (const entry of lotActions) {
+        lines.push(formatLotActionLine(entry, project))
+        lines.push('')
+      }
     }
   }
 
