@@ -150,7 +150,7 @@ function computeShiftHours(startTime, endTime) {
 // resolved here — it's irrelevant to the facility-wide totals this function
 // computes, since LANE_TO_SHIFT maps side12_* and side35_* to the same
 // shift bucket either way.
-function scheduleToLane(workSchedule, startTime) {
+function scheduleToLane(workSchedule, startTime, facilityId) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
   if (ws.includes('mid')) return 'mid'
@@ -159,6 +159,14 @@ function scheduleToLane(workSchedule, startTime) {
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
     if (!isNaN(hour)) {
+      // MAD-specific boundaries (2026-09-18) -- see src/lib/omni.js
+      // scheduleToLane for the full explanation (Isaiah Her, employee 5560).
+      if (facilityId === 'mad') {
+        if (hour < 8) return 'shift1'
+        if (hour < 13) return 'mid'
+        if (hour < 20) return 'shift2'
+        return 'shift3'
+      }
       if (hour < 10) return 'shift1'
       if (hour < 14) return 'mid'
       if (hour < 20) return 'shift2'
@@ -256,7 +264,7 @@ async function fetchCarryoverEmployees(facilityId, date) {
     if (linearEnd <= 24 + 5) continue // doesn't actually tail into today's 5am+ window
 
     const fullName = [r[`${SCHEDULE}.first_name`] || '', r[`${SCHEDULE}.last_name`] || ''].filter(Boolean).join(' ')
-    const lane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+    const lane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
     carryovers.push({
       id: `${id}__carryover`,
       originalId: id,

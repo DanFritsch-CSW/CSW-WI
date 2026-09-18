@@ -149,7 +149,7 @@ function cal2FallbackLane(name, shiftLane) {
   return `${side}_${suffix}`
 }
 
-function scheduleToLane(workSchedule, startTime) {
+function scheduleToLane(workSchedule, startTime, facilityId) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
   if (ws.includes('mid'))       return 'mid'
@@ -158,6 +158,14 @@ function scheduleToLane(workSchedule, startTime) {
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
     if (!isNaN(hour)) {
+      // MAD-specific boundaries (2026-09-18) -- see src/lib/omni.js
+      // scheduleToLane for the full explanation (Isaiah Her, employee 5560).
+      if (facilityId === 'mad') {
+        if (hour < 8) return 'shift1'
+        if (hour < 13) return 'mid'
+        if (hour < 20) return 'shift2'
+        return 'shift3'
+      }
       if (hour < 10) return 'shift1'
       if (hour < 14) return 'mid'
       if (hour < 20) return 'shift2'
@@ -259,7 +267,7 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
       const firstName = r[`${SCHEDULE}.first_name`] || ''
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
-      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
 
       let defaultLane
       if (isCal) {

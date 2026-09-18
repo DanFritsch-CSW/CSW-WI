@@ -371,7 +371,7 @@ function cal2FallbackLane(name, shiftLane) {
   return `${side}_${suffix}`
 }
 
-function scheduleToLane(workSchedule, startTime) {
+function scheduleToLane(workSchedule, startTime, facilityId) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
   if (ws.includes('mid'))       return 'mid'
@@ -380,6 +380,20 @@ function scheduleToLane(workSchedule, startTime) {
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
     if (!isNaN(hour)) {
+      // MAD-specific boundaries (2026-09-18): MAD's real pattern is
+      // 1st=6:00, Mid=8:00, 2nd=1:30pm. B2E has no "Madison - Mid Shift"
+      // template yet, so a Mid hire's schedule row lands here as a bare
+      // time range (e.g. "8:00am - 4:30pm") with no keyword to match above
+      // -- the generic hour<10 boundary below misclassified that as
+      // shift1 (case: Isaiah Her, employee 5560). Every other facility's
+      // fallback is unchanged pending an audit of KEN/CAL/EC's similarly
+      // unlabeled schedules.
+      if (facilityId === 'mad') {
+        if (hour < 8)  return 'shift1'
+        if (hour < 13) return 'mid'
+        if (hour < 20) return 'shift2'
+        return 'shift3'
+      }
       if (hour < 10)  return 'shift1'
       if (hour < 14)  return 'mid'
       if (hour < 20)  return 'shift2'
@@ -1359,7 +1373,7 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
       const firstName = r[`${SCHEDULE}.first_name`] || ''
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
-      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
 
       let defaultLane
       if (isCal) {
@@ -1480,7 +1494,7 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
       const firstName = r[`${SCHEDULE}.first_name`] || ''
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
-      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
 
       let defaultLane
       if (isCal) {
