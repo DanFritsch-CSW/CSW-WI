@@ -17,6 +17,17 @@
 //   Madison: project_id 122 (lookup_code 'DPI1'), warehouse_id 4
 //   order_class_id 2 (both facilities, confirmed against existing "{Mon}{YY} - {AgencyNbr}" orders)
 //   packaging_id 3 (CS), confirmed against real order lines on order 780998
+//
+// Carrier IDs confirmed against production_db.silver.datex_slv_carriers
+// 2026-09-18, per Dan's direction (Madison -> J&J, EC -> Echo Brook):
+//   Madison: carrier_id 463 ("J&J") — Dan explicitly picked this one over
+//     a second identically-named "J&J" record (carrier_id 1392) and
+//     several other J&J-ish carriers (J&J Bros, J&J TRUCKING, J&J GRAY,
+//     etc.) that also exist in the table — those are NOT interchangeable.
+//   EC: carrier_id 1322 ("ECHO BROOK") — the only real match; "Echobrook"
+//     as one word doesn't exist in Datex, several other Echo/Brook
+//     carriers do (Echo Express, Echo Lake Transport, Cressbrook, etc.)
+//     and are NOT this one.
 
 const DATEX_SMARTUP_BASE_URL =
   process.env.DATEX_SMARTUP_BASE_URL || 'https://csw-smartup-api.wavelength.host'
@@ -27,8 +38,8 @@ const DATEX_SMARTUP_CLIENT_SECRET = process.env.DATEX_SMARTUP_CLIENT_SECRET || p
 const DATEX_SMARTUP_SCOPE         = process.env.DATEX_SMARTUP_SCOPE         || process.env.DATEX_SCOPE
 
 const FACILITIES = {
-  'Eau Claire': { project_id: 253, warehouse_id: 3, order_class_id: 2, packaging_id: 3 },
-  'Madison':    { project_id: 122, warehouse_id: 4, order_class_id: 2, packaging_id: 3 },
+  'Eau Claire': { project_id: 253, warehouse_id: 3, order_class_id: 2, packaging_id: 3, carrier_id: 1322 },
+  'Madison':    { project_id: 122, warehouse_id: 4, order_class_id: 2, packaging_id: 3, carrier_id: 463 },
 }
 
 // Mirrors the AIOrderCreator Cloudflare Worker's `dryRun = !env.DATEX_CLIENT_ID`
@@ -292,6 +303,11 @@ async function createAgencyOrder(facility, agency, materialMap) {
   // at a different fix (an internal "AccountId/ContactId" address-book
   // mechanism the FootPrint UI itself uses turned out to be a different,
   // unrelated internal-only path — not what this public API call needs).
+  //
+  // carrier_id added same day, per Dan's explicit facility assignment
+  // (see FACILITIES comment above for the exact carrier_id disambiguation
+  // — several near-identical carrier names exist in Datex for both J&J
+  // and Echo Brook, so these are NOT safe to re-derive by name lookup).
   const orderResult = await smartUpPost('/api/create_outbound_order', {
     project_id: cfg.project_id,
     warehouse_id: cfg.warehouse_id,
@@ -300,6 +316,7 @@ async function createAgencyOrder(facility, agency, materialMap) {
     owner_reference: agency.lookupCode,
     vendor_reference: agency.lookupCode,
     expected_date: agency.expectedDate,
+    carrier_id: cfg.carrier_id,
     shipping_address: {
       name: agency.firstName,
       first_name: agency.firstName,
