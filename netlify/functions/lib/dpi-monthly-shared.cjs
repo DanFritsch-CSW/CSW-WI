@@ -144,6 +144,14 @@ function sleep(ms) {
 // once the real sync caught up. MotherDuck remains safe to use here only
 // for the material catalog, which is slow-changing reference data where a
 // 30-minute staleness window is not a correctness risk.
+//
+// 2026-09-18 (later): a SEPARATE, later-running reconciliation process
+// (lib/dpi-reconciliation-shared.cjs) now DOES use MotherDuck to verify
+// and backfill missing lines — safely, because it only ever checks 45+
+// minutes after a push/backfill attempt, well past the real sync delay.
+// That's a fundamentally different timing regime than the same-day
+// in-process attempt described above, which is why it's safe there and
+// wasn't safe here.
 
 async function runMotherDuckQuery(sql, { retries = 2 } = {}) {
   const TOKEN = process.env.MOTHERDUCK_TOKEN
@@ -254,39 +262,64 @@ async function getExistingLookupCodes(project_id) {
 // ~40% missing to 0% missing; two others from ~60% to 10-20%) but did not
 // eliminate it.
 //
-// A "verify what persisted via MotherDuck and backfill the gap" step was
-// built the same day and then REVERTED once a real ~30-minute Datex→
-// MotherDuck sync delay was confirmed — a short in-process wait cannot see
-// true state on a 30-minute-delayed replica, and doing so risked
-// resubmitting genuinely-successful lines as if they were missing,
-// creating duplicates once the real sync caught up. Any future
-// verification/backfill against MotherCk must run as a SEPARATE, later
-// process (well past the sync delay), never synchronously inside this
-// push.
-//
 // 2026-09-18 (later): raised the delay from 300ms to 1000ms per Dan's
 // request, then REVERTED back down the same day once real production
-// volume was factored in. Netlify's background function execution limit
-// is a confirmed, documented HARD ceiling of 15 minutes (900 seconds) —
-// not an estimate, it's an AWS Lambda-backed function that gets killed
-// mid-run when it hits this, with no graceful wind-down. Dan's real
-// volume: a full month's CSV import can total 1,000-1,500 lines across
-// ALL agencies in one facility push, all processed sequentially in this
-// ONE function invocation. At 1000ms delay alone, that's 1,000-1,500
-// seconds (16.7-25 min) of pure sleep — already over budget before
-// counting a single real API call.
+// volume was factored in — Netlify's background function execution limit
+// is a confirmed, documented HARD ceiling of 15 minutes (900 seconds), and
+// a full month's CSV import can total 1,000-1,500 lines across ALL
+// agencies in one facility push.
 //
-// 2026-09-18 (final): raised again to 750ms after dpi-import-push-
-// background.cjs gained self-chaining (tracks its own elapsed time and
-// hands off remaining agencies to a fresh invocation before hitting the
-// 15-minute ceiling, so total push volume is no longer tied to any single
-// invocation's time budget). That was the actual constraint on this
-// value, not reliability — with it removed, a full-volume push just costs
-// an extra chain hop or two instead of risking a timeout. Real testing at
-// 300ms still missed a couple of lines on a couple of orders even after
-// the earlier fixes, so 750ms is a genuine attempt at further improving
-// first-attempt reliability, not just a safe-but-arbitrary number.
+// 2026-09-18 (final for the delay itself): raised again to 750ms after
+// dpi-import-push-background.cjs gained self-chaining (tracks its own
+// elapsed time and hands off remaining agencies to a fresh invocation
+// before hitting the 15-minute ceiling), which removed the timeout
+// constraint that previously capped this value.
+//
+// 2026-09-18 (real production run, later still): a real 67-agency Madison
+// push at 750ms came back 59/67 fully correct, 8/67 short by 1-5 lines
+// each (20 total lines out of 1,000+ pushed) — real, substantial
+// improvement over 300ms, but not zero. Per Dan: import should be 100%
+// accurate every time, and reconciliation should not require routine
+// human intervention. Conclusion: no per-line delay value can be proven
+// to reach exactly zero on an endpoint this unreliable, so the fix is
+// making reconciliation SELF-HEALING (see lib/dpi-reconciliation-
+// shared.cjs) — automatically resubmit whatever's missing 45+ min later
+// (safely past the real sync delay), re-verify, and only ever surface to
+// a human if a genuine gap survives multiple backfill attempts.
+// submitLines is exported so reconciliation's backfill step reuses the
+// exact same line_number + delay logic, not a separate reimplementation.
 const LINE_CREATE_DELAY_MS = 750
+
+// Submits a list of resolved lines (each { code, material_id, quantity })
+// sequentially, with explicit sequential line_number continuing from
+// startingLineNumber and a delay between calls. Shared by the initial
+// push (createAgencyOrder below) and reconciliation's backfill step.
+async function submitLines(order_id, shipment_id, packaging_id, linesToSubmit, startingLineNumber) {
+  let lineNumber = startingLineNumber
+  for (let i = 0; i < linesToSubmit.length; i++) {
+    const { code, material_id, quantity } = linesToSubmit[i]
+    lineNumber += 1
+
+    const lineResult = await smartUpPost('/api/create_outbound_order_line', {
+      order_id,
+      shipment_id,
+      line_number: lineNumber,
+      material_id,
+      expected_quantity: quantity,
+      actual_quantity: quantity,
+      packaging_id,
+    })
+    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code} (line_number ${lineNumber}): ${lineResult.text.slice(0, 500)}`)
+    if (!lineResult.ok) {
+      return { ok: false, lastLineNumber: lineNumber, error: `create_outbound_order_line failed for material ${code} (${lineResult.status}): ${lineResult.text.slice(0, 300)}` }
+    }
+
+    if (i < linesToSubmit.length - 1) {
+      await sleep(LINE_CREATE_DELAY_MS)
+    }
+  }
+  return { ok: true, lastLineNumber: lineNumber }
+}
 
 async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
@@ -347,7 +380,7 @@ async function createAgencyOrder(facility, agency, materialMap) {
   }
 
   const missingMaterials = []
-  let lineNumber = 0
+  const resolvedLines = [] // [{ code, material_id, quantity }]
   for (const line of agency.lines) {
     const code = String(line.materialLookupCode || '').trim()
     const material_id = materialMap.get(code)
@@ -355,48 +388,30 @@ async function createAgencyOrder(facility, agency, materialMap) {
       missingMaterials.push(code)
       continue // don't call create_outbound_order_line with a null material_id
     }
-    lineNumber += 1
+    resolvedLines.push({ code, material_id, quantity: Number(line.quantity) || 0 })
+  }
 
-    const lineResult = await smartUpPost('/api/create_outbound_order_line', {
-      order_id,
-      shipment_id,
-      line_number: lineNumber,
-      material_id,
-      expected_quantity: Number(line.quantity) || 0,
-      actual_quantity: Number(line.quantity) || 0,
-      packaging_id: cfg.packaging_id,
-    })
-    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code} (line_number ${lineNumber}): ${lineResult.text.slice(0, 500)}`)
-    if (!lineResult.ok) {
-      return {
-        success: false,
-        order_id,
-        error: `create_outbound_order_line failed for material ${code} (${lineResult.status}): ${lineResult.text.slice(0, 300)}`,
-      }
-    }
-
-    // Spacing out rapid-fire writes to the same order/shipment — see the
-    // 2026-09-18 investigation note above this function. Only sleeps
-    // between calls, not after the last one.
-    if (lineNumber < agency.lines.length) {
-      await sleep(LINE_CREATE_DELAY_MS)
-    }
+  const submitResult = await submitLines(order_id, shipment_id, cfg.packaging_id, resolvedLines, 0)
+  if (!submitResult.ok) {
+    return { success: false, order_id, shipment_id, error: submitResult.error }
   }
 
   if (missingMaterials.length > 0) {
     return {
       success: false,
       order_id,
+      shipment_id,
       error: `Order created but ${missingMaterials.length} line(s) skipped — material lookup_code not found in MotherDuck for project ${cfg.project_id}: ${[...new Set(missingMaterials)].join(', ')}`,
     }
   }
 
   // NOTE: "success" here means every create_outbound_order_line call
   // returned an HTTP-level success response — it does NOT guarantee every
-  // line actually persisted in Datex (see investigation note above). A
-  // reliable post-hoc check needs to run separately, well after the real
-  // Datex→MotherDuck sync delay — not decided/built yet as of 2026-09-18.
-  return { success: true, order_id, line_count: agency.lines.length }
+  // line actually persisted in Datex (see investigation note above).
+  // shipment_id is returned so it can be persisted on the batch row —
+  // reconciliation's backfill step needs it later and it's otherwise
+  // never stored anywhere durable.
+  return { success: true, order_id, shipment_id, line_count: agency.lines.length }
 }
 
 module.exports = {
@@ -406,5 +421,6 @@ module.exports = {
   getMaterialMap,
   getExistingLookupCodes,
   createAgencyOrder,
+  submitLines,
   runMotherDuckQuery,
 }
