@@ -141,6 +141,31 @@ const _materialCache = new Map() // project_id -> Map(lookup_code -> material_id
 async function getMaterialMap(project_id) {
   if (_materialCache.has(project_id)) return _materialCache.get(project_id)
 
+  // 2026-09-18: consistently failed on the FIRST push attempt after a
+  // deploy/idle period with "This operation was aborted," always
+  // succeeding on manual retry. That pattern points at a cold-start cost
+  // in the MotherDuck extension install/load — a fresh container has to
+  // download the extension before it can query anything. Retrying here
+  // automatically (instead of making Dan click "Retry push" every time)
+  // so a cold container gets a second, faster attempt once whatever
+  // partial setup happened on try 1 is in place.
+  const MAX_ATTEMPTS = 2
+  let lastErr
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fetchMaterialMapFromMotherDuck(project_id)
+    } catch (err) {
+      lastErr = err
+      console.error(`[dpi-monthly-shared] getMaterialMap(${project_id}) attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err.message}`)
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+      }
+    }
+  }
+  throw new Error(`getMaterialMap(${project_id}) failed after ${MAX_ATTEMPTS} attempts (likely a cold-start MotherDuck extension load issue): ${lastErr.message}`)
+}
+
+async function fetchMaterialMapFromMotherDuck(project_id) {
   const TOKEN = process.env.MOTHERDUCK_TOKEN
   if (!TOKEN) {
     throw new Error('MOTHERDUCK_TOKEN not configured — cannot resolve materials from MotherDuck')
