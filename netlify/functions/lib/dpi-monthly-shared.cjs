@@ -203,18 +203,13 @@ async function createAgencyOrder(facility, agency, materialMap) {
 
   // Real historical orders (confirmed via MotherDuck 2026-09-05) show every
   // line sharing one shipment_id under the order — create_outbound_order_line's
-  // own schema has a shipment_id field we were never populating. First real
-  // test push (2026-09-18) showed the order itself created cleanly but the
-  // Datex UI showing 0 lines despite every create_outbound_order_line call
-  // returning success — consistent with lines landing without a shipment
-  // reference and not showing up on the order's default Lines grid.
+  // own schema has a shipment_id field we were never populating.
   //
-  // This field name is trying the likely candidates and is UNVERIFIED against
-  // a real response. If none match, this fails loudly with the raw response
-  // body rather than silently proceeding to repeat the exact same
-  // "success but 0 lines" bug — the whole point of the Phase 1 push_failed
-  // banner (see DpiMonthlyProcess.jsx, 2026-09-18) is that a failure here
-  // must be visible, not swallowed.
+  // This field name is trying the likely candidates. If none match, this
+  // fails loudly with the raw response body rather than silently proceeding
+  // — the whole point of the Phase 1 push_failed banner (see
+  // DpiMonthlyProcess.jsx, 2026-09-18) is that a failure here must be
+  // visible, not swallowed.
   const shipment_id = orderResult.data?.shipment_id ?? orderResult.data?.ShipmentId ?? orderResult.data?.shipment?.id ?? null
   if (shipment_id == null) {
     return {
@@ -224,6 +219,21 @@ async function createAgencyOrder(facility, agency, materialMap) {
     }
   }
 
+  // 2026-09-18 investigation: order + shipment_id both confirmed correct
+  // (order creates cleanly, shipment_id resolves and matches the same field
+  // name a proven working ASN integration uses), yet every
+  // create_outbound_order_line call returned HTTP success while ZERO rows
+  // persisted in Datex (confirmed via direct MotherDuck query AND the live
+  // FootPrint UI showing "0 items"). Compared against a browser network
+  // capture of Datex's own UI creating a line manually: that internal call
+  // (a different, session-authenticated endpoint we can't reach from a
+  // service integration) sends `packagedAmount`, not `expectedAmount`.
+  // Cross-referencing real historical order lines pulled from MotherDuck
+  // weeks earlier: `expected_package_amount` was NULL on every real line,
+  // while `packaged_amount` held the actual quantity. Both signals point
+  // the same direction — Datex's outbound fulfillment model tracks the
+  // "actual/packaged" quantity as the real value, not "expected". Adding
+  // `actual_quantity` alongside `expected_quantity` on this theory.
   const missingMaterials = []
   for (const line of agency.lines) {
     const code = String(line.materialLookupCode || '').trim()
@@ -237,8 +247,15 @@ async function createAgencyOrder(facility, agency, materialMap) {
       shipment_id,
       material_id,
       expected_quantity: Number(line.quantity) || 0,
+      actual_quantity: Number(line.quantity) || 0,
       packaging_id: cfg.packaging_id,
     })
+    // Log the raw response even on HTTP success — the API can return 200
+    // without actually persisting a line (confirmed 2026-09-18: order and
+    // every line-create call succeeded, but zero rows existed in Datex).
+    // If this attempt still doesn't work, Netlify function logs will show
+    // exactly what Datex sent back instead of another blind guess.
+    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code}: ${lineResult.text.slice(0, 500)}`)
     if (!lineResult.ok) {
       return {
         success: false,
