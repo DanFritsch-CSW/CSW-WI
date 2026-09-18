@@ -339,12 +339,14 @@ exports.handler = async function (event) {
       await updateBatchRow(batchId, agency.lookupCode, {
         status: 'success',
         datex_order_id: result.order_id,
+        shipment_id: result.shipment_id ?? null,
         total_quantity: totalQuantity(agency),
       })
     } else {
       await updateBatchRow(batchId, agency.lookupCode, {
         status: 'failed',
         datex_order_id: result.order_id ?? null,
+        shipment_id: result.shipment_id ?? null,
         error_message: result.error,
       })
     }
