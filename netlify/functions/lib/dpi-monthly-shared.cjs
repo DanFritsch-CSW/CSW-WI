@@ -117,6 +117,10 @@ async function smartUpPost(path, body) {
   return { ok: res.ok, status: res.status, data, text }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 // ── Material resolution — via MotherDuck, not the SmartUp API ─────────────
 // 2026-09-18: the SmartUp API's get_materials_by_project has unreliable
 // pagination — repeated calls with our best-guess page/limit/offset params
@@ -128,13 +132,6 @@ async function smartUpPost(path, body) {
 // resolution instead of trusting this API endpoint. Same connection
 // pattern as netlify/functions/motherduck-dpi-pickline.cjs (duckdb npm
 // package + MOTHERDUCK_TOKEN, already configured in this app).
-//
-// NOTE: this does NOT address the separate, deeper problem also found in
-// this investigation — create_outbound_order_line itself silently drops a
-// meaningful fraction of otherwise-identical requests with no
-// distinguishing error in its response. That is a suspected Datex-side
-// reliability defect, unrelated to material resolution, and is not fixed
-// by this change.
 
 const _materialCache = new Map() // project_id -> Map(lookup_code -> material_id)
 
@@ -158,7 +155,7 @@ async function getMaterialMap(project_id) {
       lastErr = err
       console.error(`[dpi-monthly-shared] getMaterialMap(${project_id}) attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err.message}`)
       if (attempt < MAX_ATTEMPTS) {
-        await new Promise((resolve) => setTimeout(resolve, 2000))
+        await sleep(2000)
       }
     }
   }
@@ -238,6 +235,29 @@ async function getExistingLookupCodes(project_id) {
 //   lines: [{ materialLookupCode, quantity }]
 // }
 
+// 2026-09-18: full investigation summary for create_outbound_order_line's
+// silent-drop behavior. Order + shipment_id + material_id + quantity all
+// independently confirmed correct, yet a meaningful fraction of otherwise-
+// identical line-creation calls never persist, with the response body
+// coming back byte-identical ({"line_number":null,"reason":null}) whether
+// a given line succeeds or not — `line_number` null even on success calls,
+// `reason` null even on the ones that silently fail, so Datex's own
+// response carries no distinguishing signal at all.
+//
+// Two remaining hypotheses, both fully within our control to test (no
+// Datex/Ethan needed):
+//   1. A race condition on rapid sequential writes to the same
+//      order/shipment — our calls are sequential from our side, but if
+//      Datex's backend write is async behind an instant ack, back-to-back
+//      calls to the SAME order could still collide on their end.
+//   2. We never populate `line_number` ourselves, leaving Datex to
+//      auto-assign it — plausible that auto-numbering has its own race
+//      under rapid calls.
+// Addressing both at once below: explicit sequential line_number, plus a
+// short delay between calls to reduce write pressure on the same
+// order/shipment.
+const LINE_CREATE_DELAY_MS = 300
+
 async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
   if (!cfg) throw new Error(`Unknown facility "${facility}" — expected "Eau Claire" or "Madison"`)
@@ -269,15 +289,6 @@ async function createAgencyOrder(facility, agency, materialMap) {
     return { success: false, error: `create_outbound_order returned no order_id: ${JSON.stringify(orderResult.data)}` }
   }
 
-  // Real historical orders (confirmed via MotherDuck 2026-09-05) show every
-  // line sharing one shipment_id under the order — create_outbound_order_line's
-  // own schema has a shipment_id field we were never populating.
-  //
-  // This field name is trying the likely candidates. If none match, this
-  // fails loudly with the raw response body rather than silently proceeding
-  // — the whole point of the Phase 1 push_failed banner (see
-  // DpiMonthlyProcess.jsx, 2026-09-18) is that a failure here must be
-  // visible, not swallowed.
   const shipment_id = orderResult.data?.shipment_id ?? orderResult.data?.ShipmentId ?? orderResult.data?.shipment?.id ?? null
   if (shipment_id == null) {
     return {
@@ -287,16 +298,8 @@ async function createAgencyOrder(facility, agency, materialMap) {
     }
   }
 
-  // KNOWN OPEN ISSUE (2026-09-18, unresolved): even with a correct order_id,
-  // shipment_id, and a correctly-resolved material_id (now sourced from
-  // MotherDuck, see getMaterialMap above), create_outbound_order_line has
-  // been observed to silently drop a meaningful fraction of otherwise-
-  // identical line-creation calls — every response comes back byte-identical
-  // ({"line_number":null,"reason":null}) whether or not the line actually
-  // persists, with no distinguishing signal. This looks like a Datex-side
-  // reliability defect in this specific endpoint, not something fixable
-  // from the request shape. Flagging for Datex support; not solved here.
   const missingMaterials = []
+  let lineNumber = 0
   for (const line of agency.lines) {
     const code = String(line.materialLookupCode || '').trim()
     const material_id = materialMap.get(code)
@@ -304,21 +307,31 @@ async function createAgencyOrder(facility, agency, materialMap) {
       missingMaterials.push(code)
       continue // don't call create_outbound_order_line with a null material_id
     }
+    lineNumber += 1
+
     const lineResult = await smartUpPost('/api/create_outbound_order_line', {
       order_id,
       shipment_id,
+      line_number: lineNumber,
       material_id,
       expected_quantity: Number(line.quantity) || 0,
       actual_quantity: Number(line.quantity) || 0,
       packaging_id: cfg.packaging_id,
     })
-    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code}: ${lineResult.text.slice(0, 500)}`)
+    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code} (line_number ${lineNumber}): ${lineResult.text.slice(0, 500)}`)
     if (!lineResult.ok) {
       return {
         success: false,
         order_id,
         error: `create_outbound_order_line failed for material ${code} (${lineResult.status}): ${lineResult.text.slice(0, 300)}`,
       }
+    }
+
+    // Spacing out rapid-fire writes to the same order/shipment — see the
+    // 2026-09-18 investigation note above this function. Only sleeps
+    // between calls, not after the last one.
+    if (lineNumber < agency.lines.length) {
+      await sleep(LINE_CREATE_DELAY_MS)
     }
   }
 
