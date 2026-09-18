@@ -90,6 +90,25 @@
 // fix): 102 materials with available stock -> 88 primary / 1 secondary /
 // 13 warehouse. Numbers will drift run to run — live production snapshot.
 //
+// ── Fix 2026-09-18: primary_nums used a bare CAST(regexp_extract(...) AS
+// INTEGER) over every is_primary_pick=true row. regexp_extract returns ''
+// (not NULL) when a location_name doesn't match the P0xx[A/B] pattern, and
+// CAST('' AS INTEGER) throws a hard Conversion Error, taking down the
+// entire tab. This had run clean for ~2 months, so the trigger is a live
+// Datex location: some location now flagged is_primary_pick=true in the
+// warehouse-6/project-320 scope has a name that doesn't fit the expected
+// pattern (e.g. missing the A/B suffix, a third-level suffix, or a
+// non-picklne location repurposed as a primary slot). Rather than guess
+// which one and patch around it, primary_nums now (a) only feeds rows
+// whose location_name actually matches the pattern into the cast, and
+// (b) uses TRY_CAST as a second layer so a future non-matching value
+// degrades to NULL/excluded instead of erroring the whole query. A
+// location excluded here still gets bucketed 'primary' downstream (that
+// classification reads is_primary_pick directly, not primary_nums) — it
+// just won't contribute a computed F/G secondary-rack code, which only
+// matters if a genuinely new pickline slot shape shows up (worth a manual
+// check against Datex if this tab's secondary counts ever look off).
+//
 // POST body: {} (no params — live "right now" snapshot, not date-scoped).
 
 const NO_CACHE_HEADERS = {
@@ -177,8 +196,18 @@ exports.handler = async (event) => {
         WHERE avail_cases > 0
       ),
       primary_nums AS (
-        SELECT DISTINCT material_id, CAST(regexp_extract(location_name, '^P0*([0-9]+)[AB]$', 1) AS INTEGER) AS loc_num
-        FROM onhand WHERE is_primary_pick = true
+        -- TRY_CAST + an explicit format filter, added 2026-09-18: a live
+        -- is_primary_pick=true location whose name doesn't match the
+        -- standard P0xx[A/B] pattern used to crash this whole query
+        -- (CAST('' AS INTEGER) errors when regexp_extract finds no match).
+        -- Now any such location is simply excluded from the secondary-code
+        -- lookup instead of taking down the tab -- it still gets bucketed
+        -- 'primary' downstream via is_primary_pick directly, it just won't
+        -- contribute a computed F/G secondary code.
+        SELECT DISTINCT material_id, TRY_CAST(regexp_extract(location_name, '^P0*([0-9]+)[AB]$', 1) AS INTEGER) AS loc_num
+        FROM onhand
+        WHERE is_primary_pick = true
+          AND regexp_matches(location_name, '^P0*[0-9]+[AB]$')
       ),
       material_secondary_codes AS (
         SELECT material_id,
