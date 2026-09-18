@@ -37,6 +37,15 @@ import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
 // outright, at any phase, so a test run can be abandoned without dragging
 // every agency back into place. Not part of the real workflow; added
 // 2026-09-06 specifically for iterating on test data.
+//
+// 2026-09-18 FIX: the poll effect used to advance to Phase 2 whenever every
+// batch row left "queued" — that included "failed" rows. A real push
+// attempt failed entirely (wrong Azure client ID) and the app silently
+// advanced anyway, looking successful. A CSR with no reason to check Front
+// or Supabase would have had zero indication anything was wrong. Now the
+// cycle only advances if every row succeeded or was simulated; any failure
+// blocks advance and shows a clear, visible failure banner with a retry
+// action, instead of a silent per-row ⚠ tooltip nobody has reason to hover.
 
 const PHASE_LABELS = ['1. Import', '2. Build & flag', '3. Carrier approval', '4. Agency comms', '5. Push final']
 
@@ -158,7 +167,7 @@ function rowToAgency(row) {
 export default function DpiMonthlyProcess() {
   const [facility, setFacility] = useState('Eau Claire')
   const [loading, setLoading] = useState(true)
-  const [stage, setStage] = useState('empty') // empty | parsed | pushing | done (Phase 1 only)
+  const [stage, setStage] = useState('empty') // empty | parsed | pushing | done | push_failed (Phase 1 only)
   const [parseError, setParseError] = useState(null)
   const [cycle, setCycle] = useState(null) // dpi_monthly_cycles row
   const [monthKey, setMonthKey] = useState(null)
@@ -213,7 +222,7 @@ export default function DpiMonthlyProcess() {
     if (!batch || batch.length === 0) {
       setStage('parsed')
     } else if (batch.every((r) => r.status !== 'queued')) {
-      setStage('done')
+      setStage(batch.some((r) => r.status === 'failed') ? 'push_failed' : 'done')
     } else {
       setStage('pushing')
     }
@@ -320,8 +329,9 @@ export default function DpiMonthlyProcess() {
     })
   }
 
-  // Poll dpi_import_batches while a push is in flight. Once every row is
-  // terminal, advance the cycle to Phase 2 — the cycle stays in_progress.
+  // Poll dpi_import_batches while a push is in flight. Only advances to
+  // Phase 2 if every row succeeded or was simulated — any failure blocks
+  // advance and surfaces a visible banner instead (see file header, 2026-09-18).
   useEffect(() => {
     if (stage !== 'pushing' || !cycle || !supabase) return
 
@@ -336,6 +346,13 @@ export default function DpiMonthlyProcess() {
       const allDone = data?.length > 0 && data.every((r) => r.status !== 'queued')
       if (allDone) {
         clearInterval(pollRef.current)
+        const anyFailed = data.some((r) => r.status === 'failed')
+
+        if (anyFailed) {
+          setStage('push_failed')
+          return // stay on Phase 1 — do not advance
+        }
+
         setStage('done')
         if (cycle.current_phase < 2) {
           const { error: advanceErr } = await supabase
@@ -394,6 +411,7 @@ export default function DpiMonthlyProcess() {
 
   const flaggedCount = agencies.filter((a) => a.nameWasAbbreviated).length
   const currentPhase = cycle?.current_phase ?? 1
+  const failedCount = batchRows.filter((r) => r.status === 'failed').length
 
   return (
     <div style={{ background: colors.bg, minHeight: '100vh', padding: 24, color: colors.text }}>
@@ -453,6 +471,20 @@ export default function DpiMonthlyProcess() {
 
       {!loading && cycle && currentPhase === 1 && (
         <>
+          {stage === 'push_failed' && (
+            <div style={{
+              ...cardStyle, marginBottom: 16,
+              border: `1px solid ${colors.danger}`, background: colors.dangerBg,
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: colors.danger, marginBottom: 4 }}>
+                Push failed — {failedCount} of {agencies.length} order{agencies.length === 1 ? '' : 's'} did not reach Datex
+              </div>
+              <div style={{ fontSize: 13, color: colors.textMuted }}>
+                Nothing advanced to Phase 2. Hover ⚠ on a row below for the exact error, fix it, then push again — succeeded/duplicate rows won't be re-created.
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <StatCard label="Orders parsed" value={agencies.length} />
             <StatCard label="Delivery month" value={monthKey || '—'} />
@@ -546,15 +578,15 @@ export default function DpiMonthlyProcess() {
               disabled={stage === 'pushing'}
               style={{
                 fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
-                background: colors.accent, color: '#fff',
+                background: stage === 'push_failed' ? colors.danger : colors.accent, color: '#fff',
                 cursor: stage === 'pushing' ? 'default' : 'pointer',
                 fontWeight: 500,
               }}
             >
-              {stage === 'pushing' ? 'Pushing to Datex…' : `Push ${agencies.length} orders to Datex`}
+              {stage === 'pushing' ? 'Pushing to Datex…' : stage === 'push_failed' ? `Retry push (${failedCount} failed)` : `Push ${agencies.length} orders to Datex`}
             </button>
             <span style={{ fontSize: 12, color: colors.textFaint }}>
-              {flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
+              {stage === 'parsed' && flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
             </span>
           </div>
         </>
