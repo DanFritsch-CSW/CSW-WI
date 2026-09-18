@@ -117,72 +117,73 @@ async function smartUpPost(path, body) {
   return { ok: res.ok, status: res.status, data, text }
 }
 
-// ── Material resolution — fetched live per project, not hardcoded ──────────
-// Unlike JDF/Pretzilla/McCain (35-200 SKUs, hardcoded maps), DPI runs the
-// full state catalog (~700+ codes) — a hardcoded map isn't practical.
-// Cached per-invocation (module-level Map), refreshed every cold start.
+// ── Material resolution — via MotherDuck, not the SmartUp API ─────────────
+// 2026-09-18: the SmartUp API's get_materials_by_project has unreliable
+// pagination — repeated calls with our best-guess page/limit/offset params
+// returned different, overlapping-but-incomplete subsets each time (never
+// the full ~700+ SKU catalog). Dan's call: since MotherDuck's replica of
+// Datex's own material table has already proven 100% accurate in this
+// investigation (every code checked there matched Datex's real catalog
+// exactly), use MotherDuck as the source of truth for material_id
+// resolution instead of trusting this API endpoint. Same connection
+// pattern as netlify/functions/motherduck-dpi-pickline.cjs (duckdb npm
+// package + MOTHERDUCK_TOKEN, already configured in this app).
+//
+// NOTE: this does NOT address the separate, deeper problem also found in
+// this investigation — create_outbound_order_line itself silently drops a
+// meaningful fraction of otherwise-identical requests with no
+// distinguishing error in its response. That is a suspected Datex-side
+// reliability defect, unrelated to material resolution, and is not fixed
+// by this change.
 
 const _materialCache = new Map() // project_id -> Map(lookup_code -> material_id)
 
 async function getMaterialMap(project_id) {
   if (_materialCache.has(project_id)) return _materialCache.get(project_id)
 
-  // 2026-09-18 finding: a real test order only got 8 of 25 expected lines
-  // created. Checked MotherDuck directly — all 25 material codes exist
-  // under project_id 122 in Datex's own catalog, so this isn't a data gap.
-  // The prior version of this function called get_materials_by_project with
-  // no size/page parameter at all and just used whatever came back in one
-  // response — almost certainly hitting a server-side default page size and
-  // silently truncating DPI's ~700+ SKU catalog. Paginating here using the
-  // most likely parameter name conventions; capped at 20 pages (2,000
-  // materials at page_size 100) as a safety net in case the real parameter
-  // names differ and every "page" just returns the same first page.
-  const map = new Map()
-  const PAGE_SIZE = 100
-  const MAX_PAGES = 20
-  let previousPageCodes = null
-
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const result = await smartUpPost('/api/get_materials_by_project', {
-      project_id,
-      page,
-      page_size: PAGE_SIZE,
-      limit: PAGE_SIZE,
-      offset: (page - 1) * PAGE_SIZE,
-    })
-    if (!result.ok) {
-      throw new Error(`get_materials_by_project failed (${result.status}): ${result.text.slice(0, 300)}`)
-    }
-
-    const rows = Array.isArray(result.data) ? result.data : (result.data?.materials || result.data?.items || [])
-    if (rows.length === 0) break // no more data
-
-    const pageCodes = []
-    for (const row of rows) {
-      const code = row.lookup_code ?? row.LookupCode ?? row.material_lookup_code
-      const id = row.material_id ?? row.MaterialId ?? row.id
-      if (code != null && id != null) {
-        map.set(String(code).trim(), id)
-        pageCodes.push(String(code).trim())
-      }
-    }
-
-    // Safety valve: if our guessed pagination params aren't respected at
-    // all, every "page" will return the identical row set — detect that
-    // and stop rather than looping MAX_PAGES times for nothing.
-    const pageCodesKey = pageCodes.join(',')
-    if (previousPageCodes === pageCodesKey) {
-      console.error(`[dpi-monthly-shared] get_materials_by_project page ${page} identical to previous page — pagination params likely not respected by this API, stopping.`)
-      break
-    }
-    previousPageCodes = pageCodesKey
-
-    if (rows.length < PAGE_SIZE) break // last page (short page = end of data)
+  const TOKEN = process.env.MOTHERDUCK_TOKEN
+  if (!TOKEN) {
+    throw new Error('MOTHERDUCK_TOKEN not configured — cannot resolve materials from MotherDuck')
   }
 
-  console.error(`[dpi-monthly-shared] getMaterialMap(${project_id}) resolved ${map.size} materials total.`)
-  _materialCache.set(project_id, map)
-  return map
+  process.env.HOME = '/tmp'
+  process.env.motherduck_token = TOKEN
+
+  const duckdb = require('duckdb')
+  const db = new duckdb.Database(':memory:')
+  const conn = db.connect()
+
+  const exec = (sql) => new Promise((resolve, reject) => {
+    conn.run(sql, (err) => (err ? reject(err) : resolve()))
+  })
+  const runQuery = (sql) => new Promise((resolve, reject) => {
+    conn.all(sql, (err, rows) => (err ? reject(err) : resolve(rows)))
+  })
+
+  try {
+    await exec("SET home_directory='/tmp'")
+    await exec('INSTALL motherduck')
+    await exec('LOAD motherduck')
+    await exec(`ATTACH 'md:production_db'`)
+
+    const rows = await runQuery(`
+      SELECT lookup_code, material_id
+      FROM production_db.silver.datex_slv_materials
+      WHERE project_id = ${Number(project_id)}
+    `)
+
+    const map = new Map()
+    for (const row of rows) {
+      if (row.lookup_code != null && row.material_id != null) {
+        map.set(String(row.lookup_code).trim(), row.material_id)
+      }
+    }
+    console.error(`[dpi-monthly-shared] getMaterialMap(${project_id}) resolved ${map.size} materials via MotherDuck.`)
+    _materialCache.set(project_id, map)
+    return map
+  } finally {
+    try { conn.close(); db.close() } catch (_) { /* best effort cleanup */ }
+  }
 }
 
 // ── Duplicate check ──────────────────────────────────────────────────────
@@ -261,21 +262,15 @@ async function createAgencyOrder(facility, agency, materialMap) {
     }
   }
 
-  // 2026-09-18 investigation: order + shipment_id both confirmed correct
-  // (order creates cleanly, shipment_id resolves and matches the same field
-  // name a proven working ASN integration uses), yet every
-  // create_outbound_order_line call returned HTTP success while ZERO rows
-  // persisted in Datex (confirmed via direct MotherDuck query AND the live
-  // FootPrint UI showing "0 items"). Compared against a browser network
-  // capture of Datex's own UI creating a line manually: that internal call
-  // (a different, session-authenticated endpoint we can't reach from a
-  // service integration) sends `packagedAmount`, not `expectedAmount`.
-  // Cross-referencing real historical order lines pulled from MotherDuck
-  // weeks earlier: `expected_package_amount` was NULL on every real line,
-  // while `packaged_amount` held the actual quantity. Both signals point
-  // the same direction — Datex's outbound fulfillment model tracks the
-  // "actual/packaged" quantity as the real value, not "expected". Adding
-  // `actual_quantity` alongside `expected_quantity` on this theory.
+  // KNOWN OPEN ISSUE (2026-09-18, unresolved): even with a correct order_id,
+  // shipment_id, and a correctly-resolved material_id (now sourced from
+  // MotherDuck, see getMaterialMap above), create_outbound_order_line has
+  // been observed to silently drop a meaningful fraction of otherwise-
+  // identical line-creation calls — every response comes back byte-identical
+  // ({"line_number":null,"reason":null}) whether or not the line actually
+  // persists, with no distinguishing signal. This looks like a Datex-side
+  // reliability defect in this specific endpoint, not something fixable
+  // from the request shape. Flagging for Datex support; not solved here.
   const missingMaterials = []
   for (const line of agency.lines) {
     const code = String(line.materialLookupCode || '').trim()
@@ -292,11 +287,6 @@ async function createAgencyOrder(facility, agency, materialMap) {
       actual_quantity: Number(line.quantity) || 0,
       packaging_id: cfg.packaging_id,
     })
-    // Log the raw response even on HTTP success — the API can return 200
-    // without actually persisting a line (confirmed 2026-09-18: order and
-    // every line-create call succeeded, but zero rows existed in Datex).
-    // If this attempt still doesn't work, Netlify function logs will show
-    // exactly what Datex sent back instead of another blind guess.
     console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code}: ${lineResult.text.slice(0, 500)}`)
     if (!lineResult.ok) {
       return {
@@ -311,7 +301,7 @@ async function createAgencyOrder(facility, agency, materialMap) {
     return {
       success: false,
       order_id,
-      error: `Order created but ${missingMaterials.length} line(s) skipped — material lookup_code not found in project ${cfg.project_id}: ${[...new Set(missingMaterials)].join(', ')}`,
+      error: `Order created but ${missingMaterials.length} line(s) skipped — material lookup_code not found in MotherDuck for project ${cfg.project_id}: ${[...new Set(missingMaterials)].join(', ')}`,
     }
   }
 
