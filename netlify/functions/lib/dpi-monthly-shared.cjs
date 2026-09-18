@@ -383,4 +383,5 @@ module.exports = {
   getMaterialMap,
   getExistingLookupCodes,
   createAgencyOrder,
+  runMotherDuckQuery,
 }
