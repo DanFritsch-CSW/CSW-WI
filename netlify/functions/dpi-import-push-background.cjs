@@ -141,6 +141,18 @@ exports.handler = async function (event) {
     return
   }
 
+  // Clear any rows from a previous attempt on this same batchId before
+  // starting fresh — without this, retrying a failed push (same cycle,
+  // same batch_id) accumulates duplicate historical rows instead of
+  // replacing them, and the polling query returns stale entries alongside
+  // the new attempt.
+  await fetch(`${SUPABASE_URL}/rest/v1/dpi_import_batches?batch_id=eq.${encodeURIComponent(batchId)}`, {
+    method: 'DELETE',
+    headers: supabaseHeaders(),
+  }).catch((err) => {
+    console.error('[dpi-import-push] failed to clear previous batch rows:', err.message)
+  })
+
   // Write initial "queued" rows for every agency up front, so the polling
   // UI can show the full list immediately rather than rows appearing one
   // at a time as they're processed.
