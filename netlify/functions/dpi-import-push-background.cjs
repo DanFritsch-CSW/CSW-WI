@@ -192,21 +192,37 @@ exports.handler = async function (event) {
     return
   }
 
+  // Run these separately (not Promise.all) so a failure names which
+  // subsystem broke — "This operation was aborted" alone gave no clue
+  // whether it was MotherDuck's cold-start extension load or the SmartUp
+  // duplicate-check call, and this always failed on the FIRST attempt
+  // after a deploy/idle period, succeeding on retry once the container
+  // was warm. getMaterialMap now retries its own cold-start case
+  // internally (see dpi-monthly-shared.cjs); this still catches either
+  // failing and says which one.
   let materialMap
   let existingLookupCodes
   try {
-    ;[materialMap, existingLookupCodes] = await Promise.all([
-      getMaterialMap(cfg.project_id),
-      getExistingLookupCodes(cfg.project_id),
-    ])
+    materialMap = await getMaterialMap(cfg.project_id)
   } catch (err) {
-    // Can't resolve materials or check duplicates — fail the whole batch
-    // loudly rather than push blind guesses at Datex.
-    console.error('[dpi-import-push] setup failed:', err.message)
+    console.error('[dpi-import-push] setup failed (materials):', err.message)
     for (const agency of agencies) {
       await updateBatchRow(batchId, agency.lookupCode, {
         status: 'failed',
-        error_message: `Setup failed before any orders were attempted: ${err.message}`,
+        error_message: `Setup failed before any orders were attempted (material resolution via MotherDuck): ${err.message}`,
+      })
+    }
+    await postFrontSummary(facility, monthKey, await fetchBatchRows(batchId))
+    return
+  }
+  try {
+    existingLookupCodes = await getExistingLookupCodes(cfg.project_id)
+  } catch (err) {
+    console.error('[dpi-import-push] setup failed (duplicate check):', err.message)
+    for (const agency of agencies) {
+      await updateBatchRow(batchId, agency.lookupCode, {
+        status: 'failed',
+        error_message: `Setup failed before any orders were attempted (duplicate check via SmartUp API): ${err.message}`,
       })
     }
     await postFrontSummary(facility, monthKey, await fetchBatchRows(batchId))
