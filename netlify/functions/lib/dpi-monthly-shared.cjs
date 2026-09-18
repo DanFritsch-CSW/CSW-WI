@@ -281,6 +281,17 @@ async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
   if (!cfg) throw new Error(`Unknown facility "${facility}" — expected "Eau Claire" or "Madison"`)
 
+  // 2026-09-18 fix: the "Shipped to" address on real orders was coming
+  // through blank. Compared our shipping_address payload against the
+  // real /api/create_outbound_order schema (pulled from Datex's own API
+  // docs) — we were only sending `first_name`, never `name`. Real
+  // historical orders (confirmed via MotherDuck's datex_slv_orderaddresses,
+  // order 780998) show BOTH Name and first_name populated with the
+  // identical value on a working ship-to record. Adding `name` alongside
+  // first_name to match that real pattern exactly, rather than guessing
+  // at a different fix (an internal "AccountId/ContactId" address-book
+  // mechanism the FootPrint UI itself uses turned out to be a different,
+  // unrelated internal-only path — not what this public API call needs).
   const orderResult = await smartUpPost('/api/create_outbound_order', {
     project_id: cfg.project_id,
     warehouse_id: cfg.warehouse_id,
@@ -290,6 +301,7 @@ async function createAgencyOrder(facility, agency, materialMap) {
     vendor_reference: agency.lookupCode,
     expected_date: agency.expectedDate,
     shipping_address: {
+      name: agency.firstName,
       first_name: agency.firstName,
       line1: agency.line1 || null,
       city: agency.city || null,
