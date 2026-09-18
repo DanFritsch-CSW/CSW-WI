@@ -743,6 +743,29 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# DPI Monthly Process reconciliation -- added 2026-09-18. Checks pushed
+# orders 45+ minutes after import against the original staged CSV data,
+# well past the confirmed ~30-minute real Datex-to-MotherDuck sync delay
+# (see lib/dpi-reconciliation-shared.cjs for the full design writeup and
+# the earlier same-day in-process verification attempt that was built and
+# reverted once that delay was confirmed). Report-only -- flags
+# discrepancies via a Front summary and reconciliation_status/details on
+# dpi_import_batches, does not auto-backfill.
+[functions."dpi-reconciliation-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# DPI Monthly reconciliation MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as every other *-digest-test.cjs in
+# this app). Bypasses the 45-minute age gate so it can be exercised right
+# after a test push. NOT a dry run.
+[functions."dpi-reconciliation-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 # Dan's Footprint Variance digest -- added 2026-09-07. Private to /dan (not
 # linked in TopNav). Unlike every other digest above, this does NOT post a
 # comment into one fixed pre-existing Front conversation -- it creates a
