@@ -121,10 +121,18 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// ── MotherDuck query helper — shared by material resolution and the ─────────
-// line-persistence verification below. Retries once on failure (the same
-// cold-start extension-load issue affects any fresh connection, not just
-// the first one made in a container).
+// ── MotherDuck query helper ─────────────────────────────────────────────
+// Used for material catalog resolution only (see below) — NOT for
+// verifying recently-written order lines. 2026-09-18: confirmed there is
+// a real ~30 minute sync delay between Datex and MotherDuck. A short-wait
+// "verify what persisted" check against MotherDuck was built and then
+// REVERTED the same day once this was confirmed — a 5-15 second wait
+// cannot see true state on a 30-minute-delayed replica, and treating
+// genuinely-successful-but-not-yet-synced lines as "missing" would have
+// caused this code to resubmit them, creating duplicate lines in Datex
+// once the real sync caught up. MotherDuck remains safe to use here only
+// for the material catalog, which is slow-changing reference data where a
+// 30-minute staleness window is not a correctness risk.
 
 async function runMotherDuckQuery(sql, { retries = 2 } = {}) {
   const TOKEN = process.env.MOTHERDUCK_TOKEN
@@ -164,12 +172,16 @@ async function runMotherDuckQuery(sql, { retries = 2 } = {}) {
 // pagination — repeated calls with our best-guess page/limit/offset params
 // returned different, overlapping-but-incomplete subsets each time (never
 // the full ~700+ SKU catalog). Dan's call: since MotherDuck's replica of
-// Datex's own material table has already proven 100% accurate in this
-// investigation (every code checked there matched Datex's real catalog
-// exactly), use MotherDuck as the source of truth for material_id
+// Datex's material table has proven 100% accurate for this kind of slow-
+// changing reference data, use it as the source of truth for material_id
 // resolution instead of trusting this API endpoint. Same connection
 // pattern as netlify/functions/motherduck-dpi-pickline.cjs (duckdb npm
 // package + MOTHERDUCK_TOKEN, already configured in this app).
+//
+// This is safe specifically because the material catalog changes rarely —
+// unlike order lines just written moments ago (see the note on
+// runMotherDuckQuery above), there's no meaningful risk that a material
+// added to Datex minutes ago wouldn't yet be visible here.
 
 const _materialCache = new Map() // project_id -> Map(lookup_code -> material_id)
 
@@ -191,17 +203,6 @@ async function getMaterialMap(project_id) {
   console.error(`[dpi-monthly-shared] getMaterialMap(${project_id}) resolved ${map.size} materials via MotherDuck.`)
   _materialCache.set(project_id, map)
   return map
-}
-
-// Returns the set of material_ids MotherDuck currently shows as persisted
-// on this order — the read side of the verify-and-backfill loop below.
-async function getPersistedMaterialIds(order_id) {
-  const rows = await runMotherDuckQuery(`
-    SELECT DISTINCT material_id
-    FROM production_db.silver.datex_slv_orderlines
-    WHERE order_id = ${Number(order_id)}
-  `)
-  return new Set(rows.map((r) => r.material_id).filter((id) => id != null))
 }
 
 // ── Duplicate check ──────────────────────────────────────────────────────
@@ -238,44 +239,20 @@ async function getExistingLookupCodes(project_id) {
 // byte-identical ({"line_number":null,"reason":null}) whether a line
 // succeeds or not, so Datex's own response carries no distinguishing
 // signal. Explicit sequential line_number + a delay between calls (below)
-// measurably reduced the drop rate (one real order went from ~40% missing
-// to 0% missing; two others from ~60% to 10-20%) but did not eliminate it.
+// measurably reduced the drop rate in real testing (one order went from
+// ~40% missing to 0% missing; two others from ~60% to 10-20%) but did not
+// eliminate it.
 //
-// Since Datex won't reliably tell us whether a given line actually took,
-// the only remaining fully self-controlled fix is to VERIFY what actually
-// persisted (via MotherDuck, the same source that's been 100% accurate
-// throughout this investigation) and BACKFILL whatever didn't, rather than
-// trusting the create call's response at all.
+// A "verify what persisted via MotherDuck and backfill the gap" step was
+// built the same day and then REVERTED once a real ~30-minute Datex→
+// MotherDuck sync delay was confirmed — a short in-process wait cannot see
+// true state on a 30-minute-delayed replica, and doing so risked
+// resubmitting genuinely-successful lines as if they were missing,
+// creating duplicates once the real sync caught up. Any future
+// verification/backfill against MotherCk must run as a SEPARATE, later
+// process (well past the sync delay), never synchronously inside this
+// push.
 const LINE_CREATE_DELAY_MS = 300
-const VERIFY_WAIT_MS = 5000
-const MAX_BACKFILL_ROUNDS = 2
-
-async function submitLines(order_id, shipment_id, packaging_id, linesToSubmit, startingLineNumber) {
-  let lineNumber = startingLineNumber
-  for (let i = 0; i < linesToSubmit.length; i++) {
-    const { code, material_id, quantity } = linesToSubmit[i]
-    lineNumber += 1
-
-    const lineResult = await smartUpPost('/api/create_outbound_order_line', {
-      order_id,
-      shipment_id,
-      line_number: lineNumber,
-      material_id,
-      expected_quantity: quantity,
-      actual_quantity: quantity,
-      packaging_id,
-    })
-    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code} (line_number ${lineNumber}): ${lineResult.text.slice(0, 500)}`)
-    if (!lineResult.ok) {
-      return { ok: false, lastLineNumber: lineNumber, error: `create_outbound_order_line failed for material ${code} (${lineResult.status}): ${lineResult.text.slice(0, 300)}` }
-    }
-
-    if (i < linesToSubmit.length - 1) {
-      await sleep(LINE_CREATE_DELAY_MS)
-    }
-  }
-  return { ok: true, lastLineNumber: lineNumber }
-}
 
 async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
@@ -317,99 +294,57 @@ async function createAgencyOrder(facility, agency, materialMap) {
     }
   }
 
-  // Resolve every line up front — anything not in MotherDuck's material
-  // table is a genuine data gap, not a create_outbound_order_line
-  // reliability issue, and is reported separately below.
   const missingMaterials = []
-  const resolvedLines = [] // [{ code, material_id, quantity }]
-  const materialIdToCode = new Map()
+  let lineNumber = 0
   for (const line of agency.lines) {
     const code = String(line.materialLookupCode || '').trim()
     const material_id = materialMap.get(code)
     if (material_id == null) {
       missingMaterials.push(code)
-      continue
+      continue // don't call create_outbound_order_line with a null material_id
     }
-    resolvedLines.push({ code, material_id, quantity: Number(line.quantity) || 0 })
-    materialIdToCode.set(material_id, code)
-  }
+    lineNumber += 1
 
-  // Initial pass — submit every resolvable line.
-  const firstPass = await submitLines(order_id, shipment_id, cfg.packaging_id, resolvedLines, 0)
-  if (!firstPass.ok) {
-    return { success: false, order_id, error: firstPass.error }
-  }
-
-  // Verify-and-backfill: Datex's create call gives no reliable success/
-  // failure signal (see investigation note above), so check what actually
-  // persisted via MotherDuck and re-submit anything missing, up to
-  // MAX_BACKFILL_ROUNDS times.
-  let lastLineNumber = firstPass.lastLineNumber
-  let verifiedComplete = false
-  let lastKnownPersistedIds = null
-  for (let round = 1; round <= MAX_BACKFILL_ROUNDS; round++) {
-    await sleep(VERIFY_WAIT_MS)
-
-    let persistedIds
-    try {
-      persistedIds = await getPersistedMaterialIds(order_id)
-      lastKnownPersistedIds = persistedIds
-    } catch (err) {
-      console.error(`[dpi-monthly-shared] verify round ${round} for order ${order_id} failed to read MotherDuck: ${err.message}`)
-      break // can't verify — fall through to the final check below
-    }
-
-    const stillMissingIds = new Set(
-      resolvedLines.map((l) => l.material_id).filter((id) => !persistedIds.has(id))
-    )
-
-    if (stillMissingIds.size === 0) {
-      console.error(`[dpi-monthly-shared] order ${order_id} verified complete after round ${round}: all ${resolvedLines.length} lines persisted.`)
-      verifiedComplete = true
-      break
-    }
-
-    console.error(`[dpi-monthly-shared] order ${order_id} verify round ${round}: ${stillMissingIds.size} of ${resolvedLines.length} lines missing, backfilling.`)
-    const toBackfill = resolvedLines.filter((l) => stillMissingIds.has(l.material_id))
-    const backfillResult = await submitLines(order_id, shipment_id, cfg.packaging_id, toBackfill, lastLineNumber)
-    if (!backfillResult.ok) {
-      return { success: false, order_id, error: `Backfill round ${round} failed: ${backfillResult.error}` }
-    }
-    lastLineNumber = backfillResult.lastLineNumber
-  }
-
-  // Final check — skip re-querying if the backfill loop already confirmed
-  // completeness on its last round; otherwise do one more check after the
-  // last backfill attempt before deciding.
-  let finalPersistedIds
-  if (verifiedComplete) {
-    finalPersistedIds = lastKnownPersistedIds
-  } else {
-    try {
-      await sleep(VERIFY_WAIT_MS)
-      finalPersistedIds = await getPersistedMaterialIds(order_id)
-    } catch (err) {
+    const lineResult = await smartUpPost('/api/create_outbound_order_line', {
+      order_id,
+      shipment_id,
+      line_number: lineNumber,
+      material_id,
+      expected_quantity: Number(line.quantity) || 0,
+      actual_quantity: Number(line.quantity) || 0,
+      packaging_id: cfg.packaging_id,
+    })
+    console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code} (line_number ${lineNumber}): ${lineResult.text.slice(0, 500)}`)
+    if (!lineResult.ok) {
       return {
         success: false,
         order_id,
-        error: `Order and lines submitted, but could not do a final MotherDuck verification (${err.message}) — check this order manually before trusting it.`,
+        error: `create_outbound_order_line failed for material ${code} (${lineResult.status}): ${lineResult.text.slice(0, 300)}`,
       }
     }
-  }
-  const finalMissing = resolvedLines.filter((l) => !finalPersistedIds.has(l.material_id))
 
-  if (missingMaterials.length > 0 || finalMissing.length > 0) {
-    const parts = []
-    if (missingMaterials.length > 0) {
-      parts.push(`${missingMaterials.length} line(s) skipped — material lookup_code not found in MotherDuck for project ${cfg.project_id}: ${[...new Set(missingMaterials)].join(', ')}`)
+    // Spacing out rapid-fire writes to the same order/shipment — see the
+    // 2026-09-18 investigation note above this function. Only sleeps
+    // between calls, not after the last one.
+    if (lineNumber < agency.lines.length) {
+      await sleep(LINE_CREATE_DELAY_MS)
     }
-    if (finalMissing.length > 0) {
-      parts.push(`${finalMissing.length} line(s) submitted but never persisted after ${MAX_BACKFILL_ROUNDS} backfill attempt(s): ${finalMissing.map((l) => l.code).join(', ')}`)
-    }
-    return { success: false, order_id, error: `Order ${order_id}: ${parts.join(' | ')}` }
   }
 
-  return { success: true, order_id, line_count: resolvedLines.length }
+  if (missingMaterials.length > 0) {
+    return {
+      success: false,
+      order_id,
+      error: `Order created but ${missingMaterials.length} line(s) skipped — material lookup_code not found in MotherDuck for project ${cfg.project_id}: ${[...new Set(missingMaterials)].join(', ')}`,
+    }
+  }
+
+  // NOTE: "success" here means every create_outbound_order_line call
+  // returned an HTTP-level success response — it does NOT guarantee every
+  // line actually persisted in Datex (see investigation note above). A
+  // reliable post-hoc check needs to run separately, well after the real
+  // Datex→MotherDuck sync delay — not decided/built yet as of 2026-09-18.
+  return { success: true, order_id, line_count: agency.lines.length }
 }
 
 module.exports = {
