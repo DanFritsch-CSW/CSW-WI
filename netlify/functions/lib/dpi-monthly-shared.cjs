@@ -186,6 +186,43 @@ async function runMotherDuckQuery(sql, { retries = 2 } = {}) {
   throw new Error(`MotherDuck query failed after ${retries} attempts: ${lastErr.message}`)
 }
 
+// ── Diagnostic response logging — 2026-09-18, TEMPORARY ────────────────
+// Purpose: settle definitively whether create_outbound_order_line's
+// response (specifically the `reason` field) ever carries real
+// success/failure signal, or whether it is always byte-identical
+// regardless of outcome as every prior investigation this session
+// suggested. console.error alone isn't queryable after the fact, so this
+// persists every raw response to a dedicated Supabase table
+// (dpi_line_create_debug) that can be cross-referenced against
+// MotherDuck's actual persisted lines once the ~30 min sync delay has
+// passed. Fire-and-forget and fully isolated in try/catch — a failure
+// here must NEVER break or slow down the real push. Safe to remove this
+// whole block (and drop the table) once the investigation concludes.
+
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
+const SUPABASE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  ''
+
+async function logLineCreateDebug(row) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/dpi_line_create_debug`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(row),
+    })
+  } catch (err) {
+    console.error(`[dpi-monthly-shared] logLineCreateDebug failed (non-fatal): ${err.message}`)
+  }
+}
+
 // ── Material resolution — via MotherDuck, not the SmartUp API ─────────────
 // 2026-09-18: the SmartUp API's get_materials_by_project has unreliable
 // pagination — repeated calls with our best-guess page/limit/offset params
@@ -288,6 +325,15 @@ async function getExistingLookupCodes(project_id) {
 // a human if a genuine gap survives multiple backfill attempts.
 // submitLines is exported so reconciliation's backfill step reuses the
 // exact same line_number + delay logic, not a separate reimplementation.
+//
+// 2026-09-18 (settling the response-signal question): before accepting
+// self-healing reconciliation as the permanent answer, Dan asked to
+// settle definitively whether the response actually carries no signal at
+// all, or whether it does and this code just wasn't reading it right.
+// Every raw response is now also persisted to dpi_line_create_debug (see
+// logLineCreateDebug above) so it can be joined against MotherDuck's
+// actual persisted lines once the sync delay has passed — proof either
+// way, not another inference from console logs alone.
 const LINE_CREATE_DELAY_MS = 750
 
 // Submits a list of resolved lines (each { code, material_id, quantity })
@@ -310,6 +356,19 @@ async function submitLines(order_id, shipment_id, packaging_id, linesToSubmit, s
       packaging_id,
     })
     console.error(`[dpi-monthly-shared] create_outbound_order_line response for material ${code} (line_number ${lineNumber}): ${lineResult.text.slice(0, 500)}`)
+
+    // Diagnostic capture — see header comment above. Never awaited in a
+    // way that could slow down or fail the real push.
+    logLineCreateDebug({
+      order_id,
+      shipment_id,
+      material_code: code,
+      line_number: lineNumber,
+      quantity,
+      http_status: lineResult.status,
+      raw_response: lineResult.text.slice(0, 2000),
+    })
+
     if (!lineResult.ok) {
       return { ok: false, lastLineNumber: lineNumber, error: `create_outbound_order_line failed for material ${code} (${lineResult.status}): ${lineResult.text.slice(0, 300)}` }
     }
