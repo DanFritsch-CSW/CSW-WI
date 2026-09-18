@@ -263,25 +263,19 @@ async function getExistingLookupCodes(project_id) {
 // ALL agencies in one facility push, all processed sequentially in this
 // ONE function invocation. At 1000ms delay alone, that's 1,000-1,500
 // seconds (16.7-25 min) of pure sleep — already over budget before
-// counting a single real API call. Even at 300ms, real per-call API
-// latency (network + Datex processing, separate from this deliberate
-// sleep) likely adds another 300-500ms per line on its own, meaning
-// 1,500 lines could plausibly consume 7.5-12.5 minutes from unavoidable
-// latency alone, leaving very little headroom for deliberate delay on
-// top of it.
+// counting a single real API call.
 //
-// Bottom line: no single per-line delay value is safe at true production
-// scale without real risk of the whole push timing out mid-run (which
-// would be worse than a partial line-drop — agencies not yet reached get
-// no final status written at all). Tuning this number further is NOT a
-// complete fix. The real fix is removing the "everything in one 15-minute
-// invocation" constraint entirely — batching a full push across multiple
-// chained function invocations — discussed with Dan 2026-09-18, not yet
-// built. Reverting to 300ms here as the safest known value pending that
-// architectural change: real test data showed it got one order (Fall
-// River, 26 lines) to 100% correct and two others to 80-90%, without the
-// same acute timeout risk 1000ms carries at real volume.
-const LINE_CREATE_DELAY_MS = 300
+// 2026-09-18 (final): raised again to 750ms after dpi-import-push-
+// background.cjs gained self-chaining (tracks its own elapsed time and
+// hands off remaining agencies to a fresh invocation before hitting the
+// 15-minute ceiling, so total push volume is no longer tied to any single
+// invocation's time budget). That was the actual constraint on this
+// value, not reliability — with it removed, a full-volume push just costs
+// an extra chain hop or two instead of risking a timeout. Real testing at
+// 300ms still missed a couple of lines on a couple of orders even after
+// the earlier fixes, so 750ms is a genuine attempt at further improving
+// first-attempt reliability, not just a safe-but-arbitrary number.
+const LINE_CREATE_DELAY_MS = 750
 
 async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
