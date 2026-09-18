@@ -207,13 +207,21 @@ async function createAgencyOrder(facility, agency, materialMap) {
   // test push (2026-09-18) showed the order itself created cleanly but the
   // Datex UI showing 0 lines despite every create_outbound_order_line call
   // returning success — consistent with lines landing without a shipment
-  // reference and not showing up on the order's default Lines grid. Trying
-  // the likely response field names; if none are present, still proceeds
-  // (better than blocking entirely) but flags loudly so this can be checked
-  // against the real response shape rather than assumed fixed.
+  // reference and not showing up on the order's default Lines grid.
+  //
+  // This field name is trying the likely candidates and is UNVERIFIED against
+  // a real response. If none match, this fails loudly with the raw response
+  // body rather than silently proceeding to repeat the exact same
+  // "success but 0 lines" bug — the whole point of the Phase 1 push_failed
+  // banner (see DpiMonthlyProcess.jsx, 2026-09-18) is that a failure here
+  // must be visible, not swallowed.
   const shipment_id = orderResult.data?.shipment_id ?? orderResult.data?.ShipmentId ?? orderResult.data?.shipment?.id ?? null
   if (shipment_id == null) {
-    console.error(`[dpi-monthly-shared] create_outbound_order response had no shipment_id — response was: ${JSON.stringify(orderResult.data)}`)
+    return {
+      success: false,
+      order_id,
+      error: `Order ${order_id} created but response had no recognizable shipment_id field — cannot safely create lines without it (would repeat the "order created, 0 lines" bug). Raw response: ${JSON.stringify(orderResult.data)}`,
+    }
   }
 
   const missingMaterials = []
