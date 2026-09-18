@@ -39,6 +39,26 @@
 // already known-bad (flagged at push time with a specific error),
 // 'duplicate_skipped' never created anything new, 'simulated' never
 // touched Datex at all — none of those need this check.
+//
+// 2026-09-18 (whole-batch gating fix): a real 70-agency push spanned
+// ~14 minutes end-to-end (orders processed sequentially, each with its
+// own updated_at). The original per-ROW age check let a reconciliation
+// tick fire the moment the FIRST-pushed rows crossed 45 minutes, while
+// the last few pushed were still a few minutes short — producing a
+// confusing partial report ("checked 67" when 70 were pushed), with the
+// remaining 3 silently picked up and reported separately on the next
+// tick. Nothing was ever lost or wrong, but Dan's call: a batch should
+// be checked and reported as ONE complete unit, not dribbled across
+// multiple Front messages. findFreshEligibleRows now gates on the
+// OLDEST-eligible-moment of the whole batch — a batch's rows are only
+// included once every 'success' row in that batch is at least
+// RECONCILE_AFTER_MINUTES old (i.e. gated on the batch's most-recently-
+// pushed row, not each row individually). If a batch isn't fully ready
+// yet, it's simply skipped this tick and picked up whole on a later one
+// — this is the "wait another 15 minutes and try again" behavior.
+// Phase 2 (backfill re-checks) is intentionally NOT batch-gated — each
+// row's own backfill timer is independent of its siblings, since only
+// SOME rows in a batch typically need backfilling in the first place.
 
 const { runMotherDuckQuery, getMaterialMap, submitLines, FACILITIES } = require('./dpi-monthly-shared.cjs')
 
@@ -95,25 +115,47 @@ async function supabasePatch(path, body) {
   }
 }
 
-// Rows never checked before. See file header for why only status='success'
-// rows qualify. ignoreAgeForTesting bypasses the 45-minute wait — used
+// Rows never checked before, gated on WHOLE-BATCH readiness (see file
+// header). ignoreAgeForTesting bypasses the age gate entirely — used
 // only by the -test entry point.
 async function findFreshEligibleRows({ ignoreAgeForTesting = false, batchIdFilter = null } = {}) {
-  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000).toISOString()
   const filters = [
     'status=eq.success',
     'datex_order_id=not.is.null',
     'reconciliation_status=is.null',
   ]
-  if (!ignoreAgeForTesting) filters.push(`updated_at=lt.${encodeURIComponent(cutoff)}`)
   if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
 
-  return supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
+  // Fetch all not-yet-checked 'success' rows first, WITHOUT an age filter
+  // — age is evaluated per-batch below, not per-row, so it can't be
+  // pushed down into the REST query the way it used to be.
+  const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
+  if (ignoreAgeForTesting || candidates.length === 0) return candidates
+
+  const cutoffMs = Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000
+  const latestUpdatedByBatch = new Map() // batch_id -> most recent updated_at (ms) among its candidate rows
+
+  for (const row of candidates) {
+    const t = new Date(row.updated_at).getTime()
+    const prev = latestUpdatedByBatch.get(row.batch_id)
+    if (prev == null || t > prev) latestUpdatedByBatch.set(row.batch_id, t)
+  }
+
+  // A batch is ready only once its OWN most-recently-touched row has
+  // crossed the age threshold — i.e. every row in it has, since none can
+  // be newer than that one.
+  const readyBatchIds = new Set(
+    [...latestUpdatedByBatch.entries()].filter(([, latestMs]) => latestMs < cutoffMs).map(([id]) => id)
+  )
+
+  return candidates.filter((row) => readyBatchIds.has(row.batch_id))
 }
 
 // Rows where a backfill was attempted and are now old enough (45+ min
 // since THAT attempt, not since the original push) to safely re-check
-// against MotherDuck.
+// against MotherDuck. Intentionally per-ROW, not per-batch — see file
+// header for why this phase doesn't need the same batch-gating as
+// findFreshEligibleRows.
 async function findBackfillingEligibleRows({ ignoreAgeForTesting = false, batchIdFilter = null } = {}) {
   const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000).toISOString()
   const filters = [
