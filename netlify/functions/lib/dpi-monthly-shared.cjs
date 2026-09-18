@@ -201,6 +201,21 @@ async function createAgencyOrder(facility, agency, materialMap) {
     return { success: false, error: `create_outbound_order returned no order_id: ${JSON.stringify(orderResult.data)}` }
   }
 
+  // Real historical orders (confirmed via MotherDuck 2026-09-05) show every
+  // line sharing one shipment_id under the order — create_outbound_order_line's
+  // own schema has a shipment_id field we were never populating. First real
+  // test push (2026-09-18) showed the order itself created cleanly but the
+  // Datex UI showing 0 lines despite every create_outbound_order_line call
+  // returning success — consistent with lines landing without a shipment
+  // reference and not showing up on the order's default Lines grid. Trying
+  // the likely response field names; if none are present, still proceeds
+  // (better than blocking entirely) but flags loudly so this can be checked
+  // against the real response shape rather than assumed fixed.
+  const shipment_id = orderResult.data?.shipment_id ?? orderResult.data?.ShipmentId ?? orderResult.data?.shipment?.id ?? null
+  if (shipment_id == null) {
+    console.error(`[dpi-monthly-shared] create_outbound_order response had no shipment_id — response was: ${JSON.stringify(orderResult.data)}`)
+  }
+
   const missingMaterials = []
   for (const line of agency.lines) {
     const code = String(line.materialLookupCode || '').trim()
@@ -211,6 +226,7 @@ async function createAgencyOrder(facility, agency, materialMap) {
     }
     const lineResult = await smartUpPost('/api/create_outbound_order_line', {
       order_id,
+      shipment_id,
       material_id,
       expected_quantity: Number(line.quantity) || 0,
       packaging_id: cfg.packaging_id,
