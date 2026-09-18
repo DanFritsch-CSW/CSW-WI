@@ -127,18 +127,60 @@ const _materialCache = new Map() // project_id -> Map(lookup_code -> material_id
 async function getMaterialMap(project_id) {
   if (_materialCache.has(project_id)) return _materialCache.get(project_id)
 
-  const result = await smartUpPost('/api/get_materials_by_project', { project_id })
-  if (!result.ok) {
-    throw new Error(`get_materials_by_project failed (${result.status}): ${result.text.slice(0, 300)}`)
+  // 2026-09-18 finding: a real test order only got 8 of 25 expected lines
+  // created. Checked MotherDuck directly — all 25 material codes exist
+  // under project_id 122 in Datex's own catalog, so this isn't a data gap.
+  // The prior version of this function called get_materials_by_project with
+  // no size/page parameter at all and just used whatever came back in one
+  // response — almost certainly hitting a server-side default page size and
+  // silently truncating DPI's ~700+ SKU catalog. Paginating here using the
+  // most likely parameter name conventions; capped at 20 pages (2,000
+  // materials at page_size 100) as a safety net in case the real parameter
+  // names differ and every "page" just returns the same first page.
+  const map = new Map()
+  const PAGE_SIZE = 100
+  const MAX_PAGES = 20
+  let previousPageCodes = null
+
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const result = await smartUpPost('/api/get_materials_by_project', {
+      project_id,
+      page,
+      page_size: PAGE_SIZE,
+      limit: PAGE_SIZE,
+      offset: (page - 1) * PAGE_SIZE,
+    })
+    if (!result.ok) {
+      throw new Error(`get_materials_by_project failed (${result.status}): ${result.text.slice(0, 300)}`)
+    }
+
+    const rows = Array.isArray(result.data) ? result.data : (result.data?.materials || result.data?.items || [])
+    if (rows.length === 0) break // no more data
+
+    const pageCodes = []
+    for (const row of rows) {
+      const code = row.lookup_code ?? row.LookupCode ?? row.material_lookup_code
+      const id = row.material_id ?? row.MaterialId ?? row.id
+      if (code != null && id != null) {
+        map.set(String(code).trim(), id)
+        pageCodes.push(String(code).trim())
+      }
+    }
+
+    // Safety valve: if our guessed pagination params aren't respected at
+    // all, every "page" will return the identical row set — detect that
+    // and stop rather than looping MAX_PAGES times for nothing.
+    const pageCodesKey = pageCodes.join(',')
+    if (previousPageCodes === pageCodesKey) {
+      console.error(`[dpi-monthly-shared] get_materials_by_project page ${page} identical to previous page — pagination params likely not respected by this API, stopping.`)
+      break
+    }
+    previousPageCodes = pageCodesKey
+
+    if (rows.length < PAGE_SIZE) break // last page (short page = end of data)
   }
 
-  const rows = Array.isArray(result.data) ? result.data : (result.data?.materials || result.data?.items || [])
-  const map = new Map()
-  for (const row of rows) {
-    const code = row.lookup_code ?? row.LookupCode ?? row.material_lookup_code
-    const id = row.material_id ?? row.MaterialId ?? row.id
-    if (code != null && id != null) map.set(String(code).trim(), id)
-  }
+  console.error(`[dpi-monthly-shared] getMaterialMap(${project_id}) resolved ${map.size} materials total.`)
   _materialCache.set(project_id, map)
   return map
 }
