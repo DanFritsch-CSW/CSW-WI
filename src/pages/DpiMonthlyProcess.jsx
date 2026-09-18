@@ -164,6 +164,20 @@ function rowToAgency(row) {
   }
 }
 
+// 2026-09-18 fix: expected_date / requested delivery date were always
+// coming through as the 1st of the delivery month (e.g. "10/1/2026" for
+// an October cycle) — Dan expected the LAST day of the month instead,
+// since that's when a month's deliveries need to be complete by, not
+// when they start. monthKey is "YYYY-MM"; Date.UTC(year, month, 0) gives
+// day 0 of the given 1-indexed month, which JS resolves to the last day
+// of the PRECEDING (0-indexed) month — i.e. exactly the month monthKey
+// names. UTC throughout to avoid local-timezone off-by-one issues.
+function lastDayOfMonth(monthKey) {
+  const [year, month] = monthKey.split('-').map(Number)
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  return `${monthKey}-${String(lastDay).padStart(2, '0')}T00:00:00.000Z`
+}
+
 export default function DpiMonthlyProcess() {
   const [facility, setFacility] = useState('Eau Claire')
   const [loading, setLoading] = useState(true)
@@ -311,7 +325,7 @@ export default function DpiMonthlyProcess() {
     if (!cycle) return
     setStage('pushing')
 
-    const expectedDate = monthKey ? `${monthKey}-01T00:00:00.000Z` : null
+    const expectedDate = monthKey ? lastDayOfMonth(monthKey) : null
 
     await fetch('/.netlify/functions/dpi-import-push-background', {
       method: 'POST',
