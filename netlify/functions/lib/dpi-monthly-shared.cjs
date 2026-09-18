@@ -252,7 +252,26 @@ async function getExistingLookupCodes(project_id) {
 // verification/backfill against MotherCk must run as a SEPARATE, later
 // process (well past the sync delay), never synchronously inside this
 // push.
-const LINE_CREATE_DELAY_MS = 300
+//
+// 2026-09-18 (later): raised the delay from 300ms to 1000ms per Dan's
+// request, to push first-attempt correctness as high as possible before
+// leaning on a later reconciliation check at all. Real ceiling on how far
+// this can go: every agency in a push is processed SEQUENTIALLY in one
+// Netlify background function invocation (see dpi-import-push-background.cjs),
+// so this delay is paid once per line, for every line, across the ENTIRE
+// monthly run — not just one order. A full production run across 60-70
+// agencies could total 800-1,000+ lines; at 1000ms that's already
+// 13-17 minutes of pure delay before counting real API round-trip time,
+// against Netlify's background function execution ceiling (~15 minutes).
+// Going meaningfully higher than this risks the whole push timing out
+// mid-run, which is worse than a partial-success outcome (agencies not
+// yet reached would be left with no final status written at all). Also
+// worth noting: Fall River (26 lines) came through 100% clean at the OLD
+// 300ms delay, while Cambria-Friesland (25 lines, a similar count) still
+// dropped 5 lines under the same conditions — that inconsistency across
+// similarly-sized orders suggests delay is part of the fix, not
+// necessarily the whole story.
+const LINE_CREATE_DELAY_MS = 1000
 
 async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
