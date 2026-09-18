@@ -254,24 +254,34 @@ async function getExistingLookupCodes(project_id) {
 // push.
 //
 // 2026-09-18 (later): raised the delay from 300ms to 1000ms per Dan's
-// request, to push first-attempt correctness as high as possible before
-// leaning on a later reconciliation check at all. Real ceiling on how far
-// this can go: every agency in a push is processed SEQUENTIALLY in one
-// Netlify background function invocation (see dpi-import-push-background.cjs),
-// so this delay is paid once per line, for every line, across the ENTIRE
-// monthly run — not just one order. A full production run across 60-70
-// agencies could total 800-1,000+ lines; at 1000ms that's already
-// 13-17 minutes of pure delay before counting real API round-trip time,
-// against Netlify's background function execution ceiling (~15 minutes).
-// Going meaningfully higher than this risks the whole push timing out
-// mid-run, which is worse than a partial-success outcome (agencies not
-// yet reached would be left with no final status written at all). Also
-// worth noting: Fall River (26 lines) came through 100% clean at the OLD
-// 300ms delay, while Cambria-Friesland (25 lines, a similar count) still
-// dropped 5 lines under the same conditions — that inconsistency across
-// similarly-sized orders suggests delay is part of the fix, not
-// necessarily the whole story.
-const LINE_CREATE_DELAY_MS = 1000
+// request, then REVERTED back down the same day once real production
+// volume was factored in. Netlify's background function execution limit
+// is a confirmed, documented HARD ceiling of 15 minutes (900 seconds) —
+// not an estimate, it's an AWS Lambda-backed function that gets killed
+// mid-run when it hits this, with no graceful wind-down. Dan's real
+// volume: a full month's CSV import can total 1,000-1,500 lines across
+// ALL agencies in one facility push, all processed sequentially in this
+// ONE function invocation. At 1000ms delay alone, that's 1,000-1,500
+// seconds (16.7-25 min) of pure sleep — already over budget before
+// counting a single real API call. Even at 300ms, real per-call API
+// latency (network + Datex processing, separate from this deliberate
+// sleep) likely adds another 300-500ms per line on its own, meaning
+// 1,500 lines could plausibly consume 7.5-12.5 minutes from unavoidable
+// latency alone, leaving very little headroom for deliberate delay on
+// top of it.
+//
+// Bottom line: no single per-line delay value is safe at true production
+// scale without real risk of the whole push timing out mid-run (which
+// would be worse than a partial line-drop — agencies not yet reached get
+// no final status written at all). Tuning this number further is NOT a
+// complete fix. The real fix is removing the "everything in one 15-minute
+// invocation" constraint entirely — batching a full push across multiple
+// chained function invocations — discussed with Dan 2026-09-18, not yet
+// built. Reverting to 300ms here as the safest known value pending that
+// architectural change: real test data showed it got one order (Fall
+// River, 26 lines) to 100% correct and two others to 80-90%, without the
+// same acute timeout risk 1000ms carries at real volume.
+const LINE_CREATE_DELAY_MS = 300
 
 async function createAgencyOrder(facility, agency, materialMap) {
   const cfg = FACILITIES[facility]
