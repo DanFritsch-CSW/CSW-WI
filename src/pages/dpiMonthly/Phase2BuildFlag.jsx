@@ -6,6 +6,7 @@ import {
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
 import RouteCalendar from './RouteCalendar.jsx'
+import { computeAutoDeliveryDate } from './dpiCalendarUtils.js'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -28,7 +29,20 @@ import RouteCalendar from './RouteCalendar.jsx'
 // discussion. Also paired with RouteCalendar.jsx for assigning each
 // route's actual delivery date — real dock appointment history showed
 // the WEEK is predictable (matches the template) but the WEEKDAY isn't,
-// so that's a drag-onto-calendar choice, not an auto-computed date.
+// so a human can still drag a route to a different day than its
+// auto-filled guess if that month's dock/carrier availability calls
+// for it.
+//
+// 2026-09-18: routes used to seed with delivery_date left null — the
+// calendar started fully blank, drag-only. Per Dan, seedFromTemplate now
+// computes an initial best-guess date for each route (its usual week x
+// usual weekday, via computeAutoDeliveryDate) at the moment it's created,
+// so the calendar comes pre-populated and a human only needs to move
+// what's actually wrong for this month, rather than placing every route
+// from scratch. This only runs here, at one-time seeding — a later
+// manual re-drag (via RouteCalendar's assignDate) is a completely
+// separate write to the same field and is never revisited or overwritten
+// by this seeding logic, since seeding never runs twice for one cycle.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
@@ -74,6 +88,14 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         .sort((a, b) => a.sequence - b.sequence)
       if (matchingStops.length === 0) continue // nobody on this route ordered this month
 
+      // 2026-09-18: pre-fill an initial delivery_date guess (usual week x
+      // usual weekday) so the calendar doesn't start blank. Returns null
+      // when it can't be computed (no template_week, unparseable
+      // deliver_day text, or a template_week with no matching full week
+      // this month) — the route just starts unscheduled in that case,
+      // exactly like before this change.
+      const autoDate = computeAutoDeliveryDate(cycle.month_key, template.template_week, template.deliver_day)
+
       const { data: newRoute, error: routeErr } = await supabase
         .from('dpi_routes')
         .insert({
@@ -87,6 +109,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           depart_time: template.depart_time,
           notes: template.notes,
           template_week: template.template_week,
+          delivery_date: autoDate,
         })
         .select()
         .single()
@@ -386,7 +409,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Routes seeded from the master template (last month's assignments) — new agencies not in the template land in Unassigned. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions.
+        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions.
       </div>
     </div>
   )
