@@ -20,13 +20,13 @@
 // require routine human intervention. No per-line delay value can be
 // proven to reach exactly zero on an endpoint this unreliable, so this
 // now SELF-HEALS instead of just reporting:
-//   1. First check (45+ min after push, well past the real sync delay):
+//   1. First check (60+ min after push, well past the real sync delay):
 //      if lines are missing, automatically resubmit just the missing
 //      ones (safe at this point — see the sync-delay note above; this is
 //      a fundamentally different timing regime than the same-day
 //      in-process attempt that was reverted). Row moves to
 //      'backfilling', not 'mismatch'.
-//   2. Second check (45+ min after the backfill attempt): re-verify. If
+//   2. Second check (60+ min after the backfill attempt): re-verify. If
 //      now clean, 'verified'. If still short and attempts remain, backfill
 //      AGAIN with whatever's still missing. Only after MAX_BACKFILL_ATTEMPTS
 //      genuine attempts does a row finally become 'mismatch' — the only
@@ -69,7 +69,18 @@ const SUPABASE_KEY =
   process.env.SUPABASE_ANON_KEY ||
   ''
 
-const RECONCILE_AFTER_MINUTES = 45
+// 2026-09-19: raised from 45 to 60 minutes after a real, confirmed
+// failure of the 45-minute assumption. A fresh Madison push that night
+// had 4 orders where the ORIGINAL line hadn't yet synced into MotherDuck
+// at the 45-minute mark — reconciliation saw it as genuinely missing,
+// resubmitted it, and once the real original line finally synced in
+// alongside the new duplicate, the quantity came back doubled (or
+// tripled). The ~30-minute MotherDuck sync delay this whole design leans
+// on is a typical figure, not a guarantee — 45 minutes wasn't always
+// enough margin. 60 minutes doesn't make this impossible, just less
+// likely; if it recurs, the fix is a bigger structural change (e.g.
+// checking sync completion directly), not another bump of this number.
+const RECONCILE_AFTER_MINUTES = 60
 // A gap surviving this many genuine backfill attempts (each spaced
 // RECONCILE_AFTER_MINUTES apart) finally becomes a human-visible
 // 'mismatch' — at that point the same lines have failed to persist
@@ -151,7 +162,7 @@ async function findFreshEligibleRows({ ignoreAgeForTesting = false, batchIdFilte
   return candidates.filter((row) => readyBatchIds.has(row.batch_id))
 }
 
-// Rows where a backfill was attempted and are now old enough (45+ min
+// Rows where a backfill was attempted and are now old enough (60+ min
 // since THAT attempt, not since the original push) to safely re-check
 // against MotherDuck. Intentionally per-ROW, not per-batch — see file
 // header for why this phase doesn't need the same batch-gating as
@@ -356,7 +367,7 @@ async function backfillMissingLines(row, missingLines, expectedLineCount) {
 }
 
 // Runs one full reconciliation pass (both fresh checks and backfill
-// re-checks) and posts the Front summary. isTest bypasses the 45-minute
+// re-checks) and posts the Front summary. isTest bypasses the 60-minute
 // age gates; batchIdFilter scopes to one specific push (both -test-only
 // conveniences).
 async function runReconciliation(isTest = false, batchIdFilter = null) {
