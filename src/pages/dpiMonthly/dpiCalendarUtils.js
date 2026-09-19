@@ -60,15 +60,27 @@ function parseWeekdayIndex(text) {
 // after that, so a human's later manual re-drag or intentional
 // unscheduling is never clobbered by a repeat auto-fill).
 //
+// 2026-09-18 (Madison fix): confirmed live against production_db that
+// EVERY Madison route template has deliver_day = NULL — the real
+// delivery weekday text is sitting in load_day instead, e.g.
+// "Del Date Thur -" (literally labeled "Del[ivery] Date", just entered
+// into the wrong column, apparently from however these templates were
+// originally keyed in). EC's templates are correctly split (deliver_day
+// populated, load_day genuinely a different, earlier day), so this only
+// ever matters for Madison in practice. deliverDayText is tried first;
+// loadDayText is only consulted as a fallback when deliverDayText
+// doesn't parse to anything, so a properly-populated deliver_day is
+// never second-guessed or overridden by a route's real load day.
+//
 // Returns a "YYYY-MM-DD" date string, or null if it can't be computed
-// (no template_week, unparseable deliver_day, or — for a short month —
-// a template_week that doesn't actually have a full matching week this
-// month, e.g. a "Week 5" route in a month with only 4 full weeks). A
-// null result just means the route starts unscheduled, exactly like
-// today, and still needs a manual drag.
-function computeAutoDeliveryDate(monthKey, templateWeek, deliverDayText) {
+// (no template_week, neither field parses to a weekday, or — for a
+// short month — a template_week that doesn't actually have a full
+// matching week this month, e.g. a "Week 5" route in a month with only
+// 4 full weeks). A null result just means the route starts unscheduled,
+// exactly like today, and still needs a manual drag.
+function computeAutoDeliveryDate(monthKey, templateWeek, deliverDayText, loadDayText) {
   if (templateWeek == null) return null
-  const weekdayIndex = parseWeekdayIndex(deliverDayText)
+  const weekdayIndex = parseWeekdayIndex(deliverDayText) ?? parseWeekdayIndex(loadDayText)
   if (weekdayIndex == null) return null
 
   const weeks = buildMonthGrid(monthKey)
