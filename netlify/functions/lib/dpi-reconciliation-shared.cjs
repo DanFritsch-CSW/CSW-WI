@@ -4,61 +4,79 @@
 //
 // create_outbound_order_line gives no reliable success/failure signal
 // (confirmed 2026-09-18: response comes back byte-identical whether a
-// line persists or not), and MotherDuck has a real ~30-minute sync delay
-// from Datex, so this can never be checked reliably inside the push
-// itself (see dpi-monthly-shared.cjs and dpi-import-push-background.cjs
-// for the full investigation, including an earlier same-day attempt at
-// in-process verification that was built and then reverted once the real
-// sync delay was confirmed — it checked far too soon and risked creating
-// duplicate lines).
+// line persists or not), and MotherDuck has a real, NON-deterministic
+// sync delay from Datex — typically well under 30 minutes, but confirmed
+// live to sometimes run 80+ minutes for an isolated straggler line — so
+// this can never be checked reliably inside the push itself (see
+// dpi-monthly-shared.cjs and dpi-import-push-background.cjs for the full
+// investigation, including an earlier same-day attempt at in-process
+// verification that was built and then reverted once the real sync delay
+// was confirmed).
 //
-// 2026-09-18 (self-healing rewrite): this originally ran report-only —
-// flag discrepancies, let a human manually add missing lines via the
-// Datex UI. A real 67-agency production push at 750ms/line came back
-// 59/67 fully correct, 8/67 short by 1-5 lines each. Per Dan: import
-// should be 100% accurate every time, and reconciliation should not
-// require routine human intervention. No per-line delay value can be
-// proven to reach exactly zero on an endpoint this unreliable, so this
-// now SELF-HEALS instead of just reporting:
-//   1. First check (60+ min after push, well past the real sync delay):
-//      if lines are missing, automatically resubmit just the missing
-//      ones (safe at this point — see the sync-delay note above; this is
-//      a fundamentally different timing regime than the same-day
-//      in-process attempt that was reverted). Row moves to
-//      'backfilling', not 'mismatch'.
-//   2. Second check (60+ min after the backfill attempt): re-verify. If
-//      now clean, 'verified'. If still short and attempts remain, backfill
-//      AGAIN with whatever's still missing. Only after MAX_BACKFILL_ATTEMPTS
-//      genuine attempts does a row finally become 'mismatch' — the only
-//      state that should ever need a human to look at it.
-// A human is now only needed for the rare case where the SAME lines keep
-// failing to persist across multiple real resubmission attempts, not for
-// routine single-attempt drops.
+// 2026-09-19 (three-phase redesign): earlier versions of this file used a
+// single-observation "if it looks missing, backfill it immediately" model
+// (first at 45, then 60 minutes after push), with up to 2 retry attempts
+// spaced 60 minutes apart if the first backfill didn't fix it. This had a
+// real, serious flaw, confirmed live TWICE: a line that's merely slow to
+// sync — not actually missing — looks identical to a genuinely missing
+// line at the moment of the FIRST look. Backfilling on a single
+// observation means betting that "missing right now" means "actually
+// missing," and losing that bet doesn't produce a harmless false alarm —
+// it creates a real, permanent duplicate line in Datex, because there is
+// no way to submit a line "only if it doesn't already exist." The fix
+// mechanism was, in a real sense, the thing causing the defect.
+//
+// Per Dan, this redesigns around that specific failure mode instead of
+// just tuning how long to wait: rather than act on the first sighting of
+// a discrepancy, CONFIRM it independently before ever touching Datex.
+// Three fixed, absolute checkpoints, all measured from the ORIGINAL push
+// completion (not chained relative to each other, so every order's
+// timeline is fixed and predictable regardless of exactly when a cron
+// tick happens to fire):
+//
+//   T+60 min  — OBSERVE. Compare expected (CSV) vs actual (MotherDuck).
+//               Clean → 'verified', done. A discrepancy → 'pending_
+//               confirmation' — noted, but NOTHING is written to Datex
+//               yet. This is deliberately a look-only step.
+//   T+90 min  — CONFIRM & HEAL. Re-compare, independently, 30 minutes
+//               later. Now clean → 'verified' — this is the case that
+//               used to become a duplicate: a line that was merely
+//               syncing slowly at T+60 has had 30 more minutes and, in
+//               every case seen so far, shows up by T+90. Confirmed
+//               missing-only → backfill now (exactly once — this design
+//               doesn't retry backfills, because acting on a CONFIRMED
+//               absence is a fundamentally more trustworthy signal than
+//               acting on a single sighting, so a second unconditional
+//               retry adds little). Confirmed quantity mismatch →
+//               'mismatch' directly — never auto-healed regardless of
+//               timing (see compareLines).
+//   T+150 min — FINAL SWEEP. One independent, comprehensive, closing
+//               check of EVERY order in the push, regardless of its
+//               current status — including ones already 'verified' at
+//               T+60 or T+90, which nothing else ever looks at again.
+//               Overwrites reconciliation_status with the true, current
+//               answer. This is the one message per push meant to be
+//               trusted completely as the final word, and it also
+//               naturally catches anything that fell through a crack
+//               elsewhere (a crashed invocation leaving a row stuck
+//               mid-claim, for instance).
+//
+// Every order gets a deterministic final answer by T+150 (2.5 hours) —
+// no open-ended retry loop, no attempt counting, no "worst case could
+// take 3 hours" — comfortably inside the 3-4 hour target with margin.
 //
 // Scope: only dpi_import_batches rows with status='success'. 'failed' is
 // already known-bad (flagged at push time with a specific error),
 // 'duplicate_skipped' never created anything new, 'simulated' never
 // touched Datex at all — none of those need this check.
 //
-// 2026-09-18 (whole-batch gating fix): a real 70-agency push spanned
-// ~14 minutes end-to-end (orders processed sequentially, each with its
-// own updated_at). The original per-ROW age check let a reconciliation
-// tick fire the moment the FIRST-pushed rows crossed 45 minutes, while
-// the last few pushed were still a few minutes short — producing a
-// confusing partial report ("checked 67" when 70 were pushed), with the
-// remaining 3 silently picked up and reported separately on the next
-// tick. Nothing was ever lost or wrong, but Dan's call: a batch should
-// be checked and reported as ONE complete unit, not dribbled across
-// multiple Front messages. findFreshEligibleRows now gates on the
-// OLDEST-eligible-moment of the whole batch — a batch's rows are only
-// included once every 'success' row in that batch is at least
-// RECONCILE_AFTER_MINUTES old (i.e. gated on the batch's most-recently-
-// pushed row, not each row individually). If a batch isn't fully ready
-// yet, it's simply skipped this tick and picked up whole on a later one
-// — this is the "wait another 15 minutes and try again" behavior.
-// Phase 2 (backfill re-checks) is intentionally NOT batch-gated — each
-// row's own backfill timer is independent of its siblings, since only
-// SOME rows in a batch typically need backfilling in the first place.
+// Whole-batch gating (unchanged principle from the prior design): a real
+// push can span ~15 minutes end-to-end (orders processed sequentially,
+// each with its own updated_at). Every phase below gates on the WHOLE
+// batch's oldest-eligible-moment — a batch is only included once every
+// 'success' row in it has crossed the relevant threshold (i.e. gated on
+// the batch's most-recently-pushed row) — so a push is always checked
+// and reported as one complete unit, never dribbled across messages.
 
 const { runMotherDuckQuery, getMaterialMap, submitLines, FACILITIES } = require('./dpi-monthly-shared.cjs')
 
@@ -69,24 +87,9 @@ const SUPABASE_KEY =
   process.env.SUPABASE_ANON_KEY ||
   ''
 
-// 2026-09-19: raised from 45 to 60 minutes after a real, confirmed
-// failure of the 45-minute assumption. A fresh Madison push that night
-// had 4 orders where the ORIGINAL line hadn't yet synced into MotherDuck
-// at the 45-minute mark — reconciliation saw it as genuinely missing,
-// resubmitted it, and once the real original line finally synced in
-// alongside the new duplicate, the quantity came back doubled (or
-// tripled). The ~30-minute MotherDuck sync delay this whole design leans
-// on is a typical figure, not a guarantee — 45 minutes wasn't always
-// enough margin. 60 minutes doesn't make this impossible, just less
-// likely; if it recurs, the fix is a bigger structural change (e.g.
-// checking sync completion directly), not another bump of this number.
-const RECONCILE_AFTER_MINUTES = 60
-// A gap surviving this many genuine backfill attempts (each spaced
-// RECONCILE_AFTER_MINUTES apart) finally becomes a human-visible
-// 'mismatch' — at that point the same lines have failed to persist
-// across multiple real, independent resubmissions, which is a
-// meaningfully different (and much rarer) situation than a single drop.
-const MAX_BACKFILL_ATTEMPTS = 2
+const FIRST_CHECK_AFTER_MINUTES = 60
+const CONFIRM_AFTER_MINUTES = 90
+const FINAL_SWEEP_AFTER_MINUTES = 150
 // Caps total lines backfilled in one invocation so this stays well under
 // this function's ~26s timeout (LINE_CREATE_DELAY_MS alone is 750ms/line
 // — 20 lines is 15s of pure delay, leaving headroom for the MotherDuck/
@@ -126,29 +129,17 @@ async function supabasePatch(path, body) {
   }
 }
 
-// 2026-09-19: closes a real race condition confirmed live — two
-// reconciliation invocations running close together (a scheduled tick
-// overlapping with another, no lock ever existed) both queried "not yet
-// checked" rows and split a 70-order batch's processing between them
-// (18 rows in one, 52 in the other), so the Front summary for the
-// second invocation only described the 52 IT had touched, looking like
-// 18 orders had vanished when they hadn't — everything was still
-// correctly processed exactly once, purely by luck of timing, but nothing
-// prevented two invocations from grabbing the SAME row instead, which
-// would risk a genuine duplicate backfill (a second, code-level cause of
-// duplicate lines, stacked on top of the MotherDuck-sync-delay one).
-//
-// This atomically claims one row by PATCHing it with a filter matching
-// its CURRENT status (fromStatus) — Postgres applies that filter as part
-// of the same UPDATE statement, so if two invocations race for the same
-// row, only the one whose PATCH lands first actually matches the filter;
-// the second one's WHERE clause matches zero rows and gets an empty
-// array back. 'checking' is a transitional status that always gets
-// overwritten with a real outcome (verified/mismatch/backfilling) by the
-// end of processing that row — a row should never be visibly stuck in
-// 'checking' unless its invocation crashed mid-row, which the next
-// tick's fresh/backfilling queries won't pick back up (a real but rare
-// gap; a stuck 'checking' row would need a manual status reset).
+// Atomically claims one row by PATCHing it with a filter matching its
+// CURRENT status — Postgres applies that filter as part of the same
+// UPDATE, so if two invocations race for the same row, only the one
+// whose PATCH lands first actually matches; the second gets an empty
+// array back. Confirmed live 2026-09-19: two reconciliation invocations
+// running close together, with no lock at all, split a 70-order batch's
+// processing between them — didn't corrupt anything that time purely by
+// luck of which rows each happened to grab, but nothing prevented them
+// from grabbing the SAME row instead, which would risk a genuine
+// duplicate backfill. 'checking' is a transitional status always
+// overwritten with a real outcome by the end of processing that row.
 async function claimRow(rowId, fromStatusFilter) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/dpi_import_batches?id=eq.${rowId}&${fromStatusFilter}`, {
     method: 'PATCH',
@@ -160,56 +151,39 @@ async function claimRow(rowId, fromStatusFilter) {
   return Array.isArray(rows) && rows.length > 0
 }
 
-// Rows never checked before, gated on WHOLE-BATCH readiness (see file
-// header). ignoreAgeForTesting bypasses the age gate entirely — used
-// only by the -test entry point.
-async function findFreshEligibleRows({ ignoreAgeForTesting = false, batchIdFilter = null } = {}) {
-  const filters = [
-    'status=eq.success',
-    'datex_order_id=not.is.null',
-    'reconciliation_status=is.null',
-  ]
-  if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
-
-  // Fetch all not-yet-checked 'success' rows first, WITHOUT an age filter
-  // — age is evaluated per-batch below, not per-row, so it can't be
-  // pushed down into the REST query the way it used to be.
-  const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
-  if (ignoreAgeForTesting || candidates.length === 0) return candidates
-
-  const cutoffMs = Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000
-  const latestUpdatedByBatch = new Map() // batch_id -> most recent updated_at (ms) among its candidate rows
-
-  for (const row of candidates) {
-    const t = new Date(row.updated_at).getTime()
-    const prev = latestUpdatedByBatch.get(row.batch_id)
-    if (prev == null || t > prev) latestUpdatedByBatch.set(row.batch_id, t)
-  }
-
-  // A batch is ready only once its OWN most-recently-touched row has
-  // crossed the age threshold — i.e. every row in it has, since none can
-  // be newer than that one.
-  const readyBatchIds = new Set(
-    [...latestUpdatedByBatch.entries()].filter(([, latestMs]) => latestMs < cutoffMs).map(([id]) => id)
-  )
-
-  return candidates.filter((row) => readyBatchIds.has(row.batch_id))
+// Same claim pattern, applied to a dpi_monthly_cycles row instead of a
+// dpi_import_batches row — used to gate the final sweep so two
+// invocations can't both run (and both post) it for the same cycle.
+async function claimCycleForFinalSweep(cycleId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/dpi_monthly_cycles?id=eq.${cycleId}&final_sweep_at=is.null`, {
+    method: 'PATCH',
+    headers: supabaseHeaders({ Prefer: 'return=representation' }),
+    body: JSON.stringify({ final_sweep_at: new Date().toISOString() }),
+  })
+  if (!res.ok) return false
+  const rows = await res.json().catch(() => [])
+  return Array.isArray(rows) && rows.length > 0
 }
 
-// Rows where a backfill was attempted and are now old enough (60+ min
-// since THAT attempt, not since the original push) to safely re-check
-// against MotherDuck. Intentionally per-ROW, not per-batch — see file
-// header for why this phase doesn't need the same batch-gating as
-// findFreshEligibleRows.
-async function findBackfillingEligibleRows({ ignoreAgeForTesting = false, batchIdFilter = null } = {}) {
-  const cutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000).toISOString()
-  const filters = [
-    'reconciliation_status=eq.backfilling',
-  ]
-  if (!ignoreAgeForTesting) filters.push(`reconciliation_backfilled_at=lt.${encodeURIComponent(cutoff)}`)
-  if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
-
-  return supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
+// Shared by all three phases: of the given batch_ids, which ones have
+// EVERY 'success' row at least `minutesThreshold` old — i.e. the batch's
+// own most-recently-pushed row has crossed that age. All three phases
+// measure from the same fixed point (the original push), not from each
+// other, so every order's checkpoint schedule stays absolute and
+// predictable.
+async function batchesPastPushThreshold(batchIds, minutesThreshold) {
+  if (batchIds.length === 0) return new Set()
+  const rows = await supabaseGet(
+    `/rest/v1/dpi_import_batches?status=eq.success&batch_id=in.(${batchIds.map((id) => encodeURIComponent(id)).join(',')})&select=batch_id,updated_at`
+  )
+  const latestByBatch = new Map()
+  for (const row of rows) {
+    const t = new Date(row.updated_at).getTime()
+    const prev = latestByBatch.get(row.batch_id)
+    if (prev == null || t > prev) latestByBatch.set(row.batch_id, t)
+  }
+  const cutoffMs = Date.now() - minutesThreshold * 60 * 1000
+  return new Set([...latestByBatch.entries()].filter(([, t]) => t < cutoffMs).map(([id]) => id))
 }
 
 // Resolves the ORIGINAL staged CSV lines for a set of batch rows. Two
@@ -305,103 +279,6 @@ function compareLines(expectedLines, actualLineMap) {
   return { verified, details: parts.length > 0 ? parts.join(' | ') : null, missingLines, hasQtyMismatch: wrongQty.length > 0 }
 }
 
-const FRONT_API_TOKEN = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
-const FRONT_STATUS_CONVERSATION_ID = 'cnv_1cboo2s4'
-
-async function postReconciliationSummary(summary, isTest) {
-  if (!FRONT_API_TOKEN) {
-    console.error('[dpi-reconciliation] FRONT_API_TOKEN not configured — skipping status post')
-    return
-  }
-  const totalChecked = summary.freshChecked + summary.recheckChecked
-  if (totalChecked === 0) return // nothing to report this run — no noise post
-
-  const prefix = isTest ? '**DPI Monthly Reconciliation (manual test run)**' : '**DPI Monthly Reconciliation**'
-  const mismatchLines = summary.mismatches
-    .slice(0, 10)
-    .map((m) => `- ${m.agency_name} (#${m.agency_number}, order ${m.datex_order_id}): ${m.details}`)
-  const extra = summary.mismatches.length > 10 ? `\n...and ${summary.mismatches.length - 10} more` : ''
-
-  // Auto-healed backfills are routine, working-as-intended behavior — not
-  // something Dan needs to review — so they're mentioned only as a quiet
-  // count, never itemized like genuine mismatches are. Genuine mismatches
-  // (survived MAX_BACKFILL_ATTEMPTS) are the only thing this message
-  // treats as needing attention.
-  const healedNote = summary.healedByBackfill > 0
-    ? ` (${summary.healedByBackfill} auto-corrected after a missing-line resubmission)`
-    : ''
-  const inProgressNote = summary.stillBackfilling > 0
-    ? ` ${summary.stillBackfilling} more currently self-healing, will re-check automatically.`
-    : ''
-
-  // 2026-09-18 fix: mismatches were previously always described as
-  // "still short after N resubmission attempts," even for a row where
-  // zero attempts were made (no shipment_id stored — pushed before that
-  // column existed, so a safe automatic resubmit was never possible in
-  // the first place). That wording falsely implied a resubmission had
-  // silently failed, when in fact none was ever tried.
-  //
-  // 2026-09-19 fix: the "exhausted" half of that same wording had a
-  // related, subtler version of the same problem — it always named
-  // MAX_BACKFILL_ATTEMPTS (2) regardless of how many attempts that
-  // SPECIFIC row actually went through (a row can be exhausted after
-  // just 1 real attempt if the retry itself produces a quantity
-  // mismatch, since compareLines treats any quantity mismatch as
-  // immediately exhausted — see the doubled-quantity incident this
-  // night). The per-row reconciliation_details line was already
-  // accurate here; only this rolled-up summary sentence wasn't. Rather
-  // than assert a specific attempt count that can vary per row, this
-  // just points at the itemized lines below, which already state each
-  // row's real count.
-  const neverAttemptedCount = summary.mismatches.filter((m) => m.neverAttempted).length
-  const exhaustedCount = summary.mismatches.length - neverAttemptedCount
-  const mismatchReasonParts = []
-  if (exhaustedCount > 0) mismatchReasonParts.push(`${exhaustedCount} still short after a resubmission attempt (see below for each)`)
-  if (neverAttemptedCount > 0) mismatchReasonParts.push(`${neverAttemptedCount} could not be auto-backfilled at all (pushed before shipment_id tracking existed)`)
-  const mismatchReasonSummary = mismatchReasonParts.join(', ')
-
-  // 2026-09-19 fix: a single tick can run a FRESH check (a batch just
-  // crossing the age gate) and a BACKFILL RE-CHECK (rows already
-  // self-healing from an earlier, unrelated tick) at the same time —
-  // different operations, often different facilities and order counts,
-  // previously combined into one undifferentiated "Checked N order(s)"
-  // number with no facility named at all (e.g. a fresh check of 42
-  // Eau Claire/Madison rows and a re-check of 3 unrelated Madison rows
-  // from an hour earlier looked like two inexplicable, arbitrary
-  // numbers back to back). Each phase now gets its own clearly-labeled
-  // clause, only included if that phase actually ran this tick.
-  const phaseClauses = []
-  if (summary.freshChecked > 0) {
-    phaseClauses.push(`Checked ${summary.freshChecked} new order(s) (${summary.freshFacilities.join(', ')})`)
-  }
-  if (summary.recheckChecked > 0) {
-    phaseClauses.push(`re-checked ${summary.recheckChecked} order(s) previously self-healing (${summary.recheckFacilities.join(', ')})`)
-  }
-  const phaseSummary = phaseClauses.join(', ')
-
-  const body =
-    summary.mismatches.length === 0
-      ? `${prefix}\n${phaseSummary} — ${summary.verified} verified complete against the original CSV${healedNote}.${inProgressNote}`
-      : `${prefix}\n${phaseSummary} — ${summary.verified} verified${healedNote}, ${summary.mismatches.length} need manual review (${mismatchReasonSummary}):\n${mismatchLines.join('\n')}${extra}${inProgressNote}`
-
-  await postToFront(body)
-}
-
-// Shared by postReconciliationSummary and postFinalSweepSummary — both
-// post to the same status thread, just with different message shapes.
-async function postToFront(body) {
-  if (!FRONT_API_TOKEN) return
-  try {
-    await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FRONT_API_TOKEN}` },
-      body: JSON.stringify({ body }),
-    })
-  } catch (err) {
-    console.error('[dpi-reconciliation] Front status post failed:', err.message)
-  }
-}
-
 // Resubmits missingLines for one order via submitLines, using a starting
 // line_number safely beyond the original expected count (avoids any
 // possible collision with the original submission's numbering — line_number
@@ -439,52 +316,215 @@ async function backfillMissingLines(row, missingLines, expectedLineCount) {
   return { ok: true, submittedCount: resolved.length }
 }
 
-// 2026-09-19: FINAL SWEEP — per Dan, every barrier to guarantee a push is
-// clear, accurate, and fully resolved within 3-4 hours. The 60-minute
-// self-healing cycle above handles the vast majority of gaps
-// automatically and quickly, but it has real, structural limits: a
-// quantity mismatch (including one self-healing itself causes, per the
-// duplicate-line incidents this session) is intentionally never retried,
-// a missing shipment_id blocks any auto-backfill outright, and — closed
-// this same session, but worth designing around regardless — a crashed
-// invocation could in principle leave a row stuck mid-claim. Rather than
-// trust that every one of these edge cases individually reports itself
-// correctly, this runs ONE independent, comprehensive, authoritative
-// re-check of EVERY 'success' order in a push, regardless of whatever
-// reconciliation_status it currently holds, a fixed FINAL_SWEEP_AFTER_HOURS
-// after the push completed — using the exact same expected-vs-actual
-// comparison as everything above, just scoped to "the whole push" instead
-// of "whatever's due for a check this tick." Its own PATCH to each row
-// overwrites reconciliation_status with the true, current answer
-// (verified/mismatch) regardless of prior state, so a stuck 'checking'
-// row or a missed edge case gets caught and corrected here even if
-// nothing upstream ever flagged it. Runs once per cycle (final_sweep_at
-// gates re-running it) and always posts its own message, clearly labeled
-// as the final word — so there's exactly one message per push that can
-// be trusted as the complete, closing answer without needing to piece
-// together everything that came before it.
-// 2026-09-19: lowered from 3.5 to 2 hours per Dan — comfortably past
-// the ~80-minute MotherDuck sync-delay outlier confirmed live tonight,
-// while still landing well inside the 3-4 hour target window. Not a
-// race against self-healing's own schedule despite the tighter number:
-// see the deferral check in findCyclesNeedingFinalSweep below — a cycle
-// only gets swept once nothing in it is still legitimately mid-flight
-// on its own backfill clock.
-const FINAL_SWEEP_AFTER_HOURS = 2
+const FRONT_API_TOKEN = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
+const FRONT_STATUS_CONVERSATION_ID = 'cnv_1cboo2s4'
 
-async function findCyclesNeedingFinalSweep() {
-  // 2026-09-19 fix: deliberately NOT filtered to status=eq.in_progress —
-  // a cycle can reach 'complete' (all the way through Phase 5) well
-  // before FINAL_SWEEP_AFTER_HOURS have passed, since a human can click
-  // through Phases 2-5 in minutes. The sweep is about whether the REAL
-  // Datex orders are correct, which has nothing to do with what UI phase
-  // the cycle has reached — filtering to in_progress would have silently
-  // skipped every push that got wrapped up quickly, which is likely most
-  // of them.
-  // Also bounded to recently-created cycles: final_sweep_at is a brand
-  // new column, so every historical cycle (all of today's test runs,
-  // older abandoned test cycles, etc.) starts out NULL — without this
-  // bound, the very first tick after this ships would try to sweep every
+async function postToFront(body) {
+  if (!FRONT_API_TOKEN) {
+    console.error('[dpi-reconciliation] FRONT_API_TOKEN not configured — skipping status post')
+    return
+  }
+  try {
+    await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FRONT_API_TOKEN}` },
+      body: JSON.stringify({ body }),
+    })
+  } catch (err) {
+    console.error('[dpi-reconciliation] Front status post failed:', err.message)
+  }
+}
+
+// ── Phase 1: OBSERVE (T+60) ──────────────────────────────────────────
+// Look-only. Never writes to Datex. A discrepancy just gets noted for
+// Phase 2 to independently confirm 30 minutes later.
+async function runObservePhase(isTest, batchIdFilter) {
+  const filters = ['status=eq.success', 'datex_order_id=not.is.null', 'reconciliation_status=is.null']
+  if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
+  const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
+  if (candidates.length === 0) return { checked: 0, verified: 0, flagged: 0, facilities: [] }
+
+  let rows = candidates
+  if (!isTest) {
+    const batchIds = [...new Set(candidates.map((r) => r.batch_id))]
+    const ready = await batchesPastPushThreshold(batchIds, FIRST_CHECK_AFTER_MINUTES)
+    rows = candidates.filter((r) => ready.has(r.batch_id))
+  }
+  if (rows.length === 0) return { checked: 0, verified: 0, flagged: 0, facilities: [] }
+
+  const expectedByRowId = await resolveExpectedLines(rows)
+  const orderIds = [...new Set(rows.map((r) => r.datex_order_id))]
+  const actualByOrderId = await fetchActualLines(orderIds)
+
+  const facilities = new Set()
+  let checked = 0
+  let verified = 0
+  let flagged = 0
+
+  for (const row of rows) {
+    facilities.add(row.facility)
+    const claimed = await claimRow(row.id, 'reconciliation_status=is.null')
+    if (!claimed) continue // another invocation already grabbed this row this tick
+
+    const expectedLines = expectedByRowId.get(row.id)
+    checked += 1
+
+    if (!expectedLines) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'mismatch',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: 'Could not resolve original staged CSV lines for this agency — cycle/staged data may have been deleted.',
+      })
+      continue
+    }
+
+    const { verified: isVerified, details } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+
+    if (isVerified) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'verified',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: null,
+      })
+      verified += 1
+    } else {
+      // Deliberately look-only — nothing is submitted to Datex here.
+      // reconciliation_checked_at doubles as "first seen at" for Phase 2
+      // to measure its own 30-minute confirmation window from.
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'pending_confirmation',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: details,
+      })
+      flagged += 1
+    }
+  }
+
+  return { checked, verified, flagged, facilities: [...facilities] }
+}
+
+// ── Phase 2: CONFIRM & HEAL (T+90) ───────────────────────────────────
+// Independently re-checks anything flagged by Phase 1, 30 minutes after
+// it was first seen. A line that was merely syncing slowly at T+60 has
+// had 30 more minutes here — in every case seen so far, that's enough
+// for it to show up, which is exactly what turns this into a caught
+// false alarm instead of a duplicate. Backfills exactly once if the gap
+// is still genuinely there; never retries afterward — see file header.
+async function runConfirmAndHealPhase(isTest, batchIdFilter) {
+  const filters = ['status=eq.success', 'reconciliation_status=eq.pending_confirmation']
+  if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
+  const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
+  if (candidates.length === 0) return { checked: 0, verified: 0, healed: 0, mismatches: [], facilities: [] }
+
+  let rows = candidates
+  if (!isTest) {
+    const batchIds = [...new Set(candidates.map((r) => r.batch_id))]
+    const ready = await batchesPastPushThreshold(batchIds, CONFIRM_AFTER_MINUTES)
+    rows = candidates.filter((r) => ready.has(r.batch_id))
+  }
+  if (rows.length === 0) return { checked: 0, verified: 0, healed: 0, mismatches: [], facilities: [] }
+
+  const expectedByRowId = await resolveExpectedLines(rows)
+  const orderIds = [...new Set(rows.map((r) => r.datex_order_id))]
+  const actualByOrderId = await fetchActualLines(orderIds)
+
+  const facilities = new Set()
+  const mismatches = []
+  let checked = 0
+  let verified = 0
+  let healed = 0
+  let linesBackfilledThisRun = 0
+
+  for (const row of rows) {
+    facilities.add(row.facility)
+    const claimed = await claimRow(row.id, 'reconciliation_status=eq.pending_confirmation')
+    if (!claimed) continue
+
+    const expectedLines = expectedByRowId.get(row.id)
+    checked += 1
+
+    if (!expectedLines) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'mismatch',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: 'Could not resolve original staged CSV lines for this agency during confirmation check.',
+      })
+      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+      continue
+    }
+
+    const { verified: isVerified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+
+    if (isVerified) {
+      // The exact case this redesign targets: looked wrong at T+60,
+      // looks right now — a sync-delay false alarm, caught and closed
+      // without ever touching Datex.
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'verified',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: null,
+      })
+      verified += 1
+      continue
+    }
+
+    if (hasQtyMismatch || row.shipment_id == null) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'mismatch',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: row.shipment_id == null ? `${details} | cannot auto-backfill: no shipment_id stored for this order (pushed before backfill support existed)` : `${details} | confirmed at T+${CONFIRM_AFTER_MINUTES}min, not auto-healed (quantity mismatch)`,
+      })
+      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details, neverAttempted: true })
+      continue
+    }
+
+    // Confirmed, missing-only — safe to backfill exactly once.
+    if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
+      // Over budget this run — revert to pending_confirmation so it's
+      // picked back up (still "confirmed," no need to re-observe) as
+      // soon as there's budget on a later tick.
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: 'pending_confirmation' })
+      continue
+    }
+
+    const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
+    linesBackfilledThisRun += missingLines.length
+
+    if (!backfillResult.ok) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: 'mismatch',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: `${details} | backfill attempt failed: ${backfillResult.error}`,
+      })
+      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (backfill failed: ${backfillResult.error})` })
+      continue
+    }
+
+    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+      reconciliation_status: 'backfilling',
+      reconciliation_backfilled_at: new Date().toISOString(),
+      reconciliation_backfill_count: 1,
+      reconciliation_details: `Confirmed missing at T+${CONFIRM_AFTER_MINUTES}min, resubmitted ${backfillResult.submittedCount} line(s). Final answer at T+${FINAL_SWEEP_AFTER_MINUTES}min.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
+    })
+    healed += 1
+  }
+
+  return { checked, verified, healed, mismatches, facilities: [...facilities] }
+}
+
+// ── Phase 3: FINAL SWEEP (T+150) ─────────────────────────────────────
+// One independent, comprehensive, closing check of EVERY order in the
+// push, regardless of current status — including rows already
+// 'verified' at T+60/T+90, which nothing else ever re-examines.
+// Overwrites reconciliation_status with the true, current answer
+// regardless of prior state, so this also self-corrects any row stuck
+// mid-claim from a crashed invocation. Runs once per cycle
+// (final_sweep_at, claimed atomically, gates re-running it) and always
+// posts its own message, clearly labeled as the final word.
+async function runFinalSweepPhase() {
+  // Bounded to recently-created cycles: final_sweep_at only exists going
+  // forward, so every historical cycle starts out NULL — without this
+  // bound, the first tick after this shipped would try to sweep every
   // cycle ever created in one go.
   const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
   const cycles = await supabaseGet(
@@ -492,114 +532,72 @@ async function findCyclesNeedingFinalSweep() {
   )
   if (cycles.length === 0) return []
 
-  const batchIds = [...new Set(cycles.map((c) => c.batch_id))]
-  const rows = await supabaseGet(
-    `/rest/v1/dpi_import_batches?status=eq.success&batch_id=in.(${batchIds.map((id) => encodeURIComponent(id)).join(',')})&select=batch_id,updated_at`
-  )
-  if (rows.length === 0) return [] // no real orders in any of these cycles yet — nothing to sweep
+  const batchIds = cycles.map((c) => c.batch_id)
+  const ready = await batchesPastPushThreshold(batchIds, FINAL_SWEEP_AFTER_MINUTES)
+  const eligibleCycles = cycles.filter((c) => ready.has(c.batch_id))
+  if (eligibleCycles.length === 0) return []
 
-  const latestByBatch = new Map()
-  for (const row of rows) {
-    const t = new Date(row.updated_at).getTime()
-    const prev = latestByBatch.get(row.batch_id)
-    if (prev == null || t > prev) latestByBatch.set(row.batch_id, t)
-  }
+  const results = []
+  for (const cycle of eligibleCycles) {
+    const claimed = await claimCycleForFinalSweep(cycle.id)
+    if (!claimed) continue // another invocation already swept (or is sweeping) this cycle
 
-  const cutoffMs = Date.now() - FINAL_SWEEP_AFTER_HOURS * 60 * 60 * 1000
-  const timeEligible = cycles.filter((c) => {
-    const latest = latestByBatch.get(c.batch_id)
-    return latest != null && latest < cutoffMs
-  })
-  if (timeEligible.length === 0) return []
-
-  // 2026-09-19: at a 2-hour sweep window, it's genuinely possible for a
-  // row to still be mid-flight on its OWN legitimate backfill schedule
-  // (self-healing's worst case — 2 real attempts, each needing
-  // RECONCILE_AFTER_MINUTES to verify — can take up to 3 hours). Phase 1
-  // and 2 above already run before this in the same invocation, so
-  // anything that was DUE this tick has already been handled by the time
-  // we get here — a row still showing 'backfilling' with a backfilled_at
-  // younger than RECONCILE_AFTER_MINUTES is therefore genuinely not due
-  // yet, not something Phase 2 missed. Sweeping it now would mean
-  // reporting "mismatch" on something that might still resolve itself
-  // within the hour, one attempt early. Any cycle with such a row is
-  // simply skipped THIS tick — not marked swept — so it's naturally
-  // reconsidered again in 15 minutes, once that row's own window has
-  // either resolved it or made it due for Phase 2 to act on first.
-  const pendingCutoff = new Date(Date.now() - RECONCILE_AFTER_MINUTES * 60 * 1000).toISOString()
-  const eligibleBatchIds = timeEligible.map((c) => c.batch_id)
-  const stillMidFlight = await supabaseGet(
-    `/rest/v1/dpi_import_batches?status=eq.success&reconciliation_status=eq.backfilling&reconciliation_backfilled_at=gte.${encodeURIComponent(pendingCutoff)}&batch_id=in.(${eligibleBatchIds.map((id) => encodeURIComponent(id)).join(',')})&select=batch_id`
-  )
-  const midFlightBatchIds = new Set(stillMidFlight.map((r) => r.batch_id))
-
-  return timeEligible.filter((c) => !midFlightBatchIds.has(c.batch_id))
-}
-
-async function runFinalSweepForCycle(cycle) {
-  const rows = await supabaseGet(
-    `/rest/v1/dpi_import_batches?batch_id=eq.${encodeURIComponent(cycle.batch_id)}&status=eq.success&select=*`
-  )
-  if (rows.length === 0) {
-    await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, {
-      final_sweep_at: new Date().toISOString(),
-      final_sweep_details: 'No real (status=success) orders existed to sweep.',
-    })
-    return { swept: 0, verified: 0, problems: [] }
-  }
-
-  const expectedByRowId = await resolveExpectedLines(rows)
-  const orderIds = [...new Set(rows.map((r) => r.datex_order_id).filter((id) => id != null))]
-  const actualByOrderId = await fetchActualLines(orderIds)
-
-  const problems = []
-  let cleanCount = 0
-
-  for (const row of rows) {
-    const expectedLines = expectedByRowId.get(row.id)
-    if (!expectedLines) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: 'original staged CSV data not found (final sweep)',
-      })
-      problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+    const rows = await supabaseGet(
+      `/rest/v1/dpi_import_batches?batch_id=eq.${encodeURIComponent(cycle.batch_id)}&status=eq.success&select=*`
+    )
+    if (rows.length === 0) {
+      await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, { final_sweep_details: 'No real (status=success) orders existed to sweep.' })
+      results.push({ facility: cycle.facility, monthKey: cycle.month_key, swept: 0, verified: 0, problems: [] })
       continue
     }
 
-    const { verified, details } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-    // Overwrites reconciliation_status regardless of its current value —
-    // this is the authoritative, closing answer for this row, not
-    // subject to whatever intermediate state it was left in.
-    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-      reconciliation_status: verified ? 'verified' : 'mismatch',
-      reconciliation_checked_at: new Date().toISOString(),
-      reconciliation_details: verified ? null : `${details} | found during final ${FINAL_SWEEP_AFTER_HOURS}hr sweep`,
-    })
+    const expectedByRowId = await resolveExpectedLines(rows)
+    const orderIds = [...new Set(rows.map((r) => r.datex_order_id).filter((id) => id != null))]
+    const actualByOrderId = await fetchActualLines(orderIds)
 
-    if (verified) {
-      cleanCount += 1
-    } else {
-      problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
+    const problems = []
+    let cleanCount = 0
+
+    for (const row of rows) {
+      const expectedLines = expectedByRowId.get(row.id)
+      if (!expectedLines) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: 'original staged CSV data not found (final sweep)',
+        })
+        problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+        continue
+      }
+
+      const { verified, details } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+      // Overwrites reconciliation_status regardless of its current value
+      // — the authoritative, closing answer for this row.
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        reconciliation_status: verified ? 'verified' : 'mismatch',
+        reconciliation_checked_at: new Date().toISOString(),
+        reconciliation_details: verified ? null : `${details} | found during final T+${FINAL_SWEEP_AFTER_MINUTES}min sweep`,
+      })
+
+      if (verified) cleanCount += 1
+      else problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
     }
+
+    const detailsText = problems.length === 0
+      ? `All ${rows.length} orders verified complete.`
+      : `${cleanCount} of ${rows.length} orders verified complete. ${problems.length} do not match the original CSV.`
+    await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, { final_sweep_details: detailsText })
+
+    await postFinalSweepSummary(cycle, rows.length, cleanCount, problems)
+    results.push({ facility: cycle.facility, monthKey: cycle.month_key, swept: rows.length, verified: cleanCount, problems })
   }
 
-  const detailsText = problems.length === 0
-    ? `All ${rows.length} orders verified complete.`
-    : `${cleanCount} of ${rows.length} orders verified complete. ${problems.length} do not match the original CSV.`
-
-  await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, {
-    final_sweep_at: new Date().toISOString(),
-    final_sweep_details: detailsText,
-  })
-
-  await postFinalSweepSummary(cycle, rows.length, cleanCount, problems)
-  return { swept: rows.length, verified: cleanCount, problems }
+  return results
 }
 
 async function postFinalSweepSummary(cycle, totalCount, cleanCount, problems) {
   const prefix = `**DPI Monthly FINAL SWEEP — ${cycle.facility}, ${cycle.month_key}**`
-  const intro = `${FINAL_SWEEP_AFTER_HOURS} hours after import — a complete, independent re-check of every order against the original CSV, regardless of any earlier reconciliation status. This is the final word on this push.`
+  const intro = `T+${FINAL_SWEEP_AFTER_MINUTES} minutes after import — a complete, independent re-check of every order against the original CSV, regardless of any earlier reconciliation status. This is the final word on this push.`
 
   if (problems.length === 0) {
     await postToFront(`${prefix}\n${intro}\nAll ${totalCount} orders verified complete. Nothing further needed.`)
@@ -613,223 +611,64 @@ async function postFinalSweepSummary(cycle, totalCount, cleanCount, problems) {
   )
 }
 
-// Runs one full reconciliation pass (both fresh checks and backfill
-// re-checks) and posts the Front summary. isTest bypasses the 60-minute
-// age gates; batchIdFilter scopes to one specific push (both -test-only
-// conveniences).
-async function runReconciliation(isTest = false, batchIdFilter = null) {
-  let linesBackfilledThisRun = 0
-  let verifiedCount = 0
-  let healedByBackfill = 0
-  let stillBackfilling = 0
-  const mismatches = []
-  // 2026-09-19 fix: a single reconciliation tick can run a FRESH check
-  // (a batch just crossing the age gate for the first time) and a
-  // BACKFILL RE-CHECK (rows already self-healing from an earlier,
-  // unrelated tick) in the same invocation — two different operations on
-  // two different, often differently-facilitied sets of rows. The old
-  // combined "checked N" count gave no way to tell these apart (e.g. "42"
-  // vs "3" back to back looked arbitrary), so they're now tracked and
-  // reported separately, along with which facility(ies) each phase
-  // touched.
-  let freshCheckedCount = 0
-  let recheckCheckedCount = 0
-  const freshFacilities = new Set()
-  const recheckFacilities = new Set()
+async function postRoutineSummary(observeResult, confirmResult, isTest) {
+  const prefix = isTest ? '**DPI Monthly Reconciliation (manual test run)**' : '**DPI Monthly Reconciliation**'
+  const clauses = []
 
-  // ── Phase 1: rows never checked before ────────────────────────────────
-  const freshRows = await findFreshEligibleRows({ ignoreAgeForTesting: isTest, batchIdFilter })
-  if (freshRows.length > 0) {
-    const expectedByRowId = await resolveExpectedLines(freshRows)
-    const orderIds = [...new Set(freshRows.map((r) => r.datex_order_id))]
-    const actualByOrderId = await fetchActualLines(orderIds)
-
-    for (const row of freshRows) {
-      freshFacilities.add(row.facility)
-      const claimed = await claimRow(row.id, 'reconciliation_status=is.null')
-      if (!claimed) continue // another invocation already grabbed this row this tick — not double-counted, not double-processed
-      const expectedLines = expectedByRowId.get(row.id)
-
-      if (!expectedLines) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'mismatch',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: 'Could not resolve original staged CSV lines for this agency — cycle/staged data may have been deleted.',
-        })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', neverAttempted: true })
-        freshCheckedCount += 1
-        continue
-      }
-
-      const { verified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-      freshCheckedCount += 1
-
-      if (verified) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'verified',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: null,
-        })
-        verifiedCount += 1
-        continue
-      }
-
-      // Quantity mismatches, or a row with no shipment_id stored (pushed
-      // before this column existed), can't be safely auto-healed — go
-      // straight to 'mismatch' for a human.
-      if (hasQtyMismatch || row.shipment_id == null) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'mismatch',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: row.shipment_id == null ? `${details} | cannot auto-backfill: no shipment_id stored for this order (pushed before backfill support existed)` : details,
-        })
-        // 2026-09-18 fix: NEITHER reason for reaching this branch ever
-        // attempts a backfill — a quantity mismatch is intentionally
-        // never auto-healed (too risky, see compareLines), and a missing
-        // shipment_id makes a safe resubmit impossible outright. The old
-        // summary wording said "still short after N resubmission
-        // attempts" for every mismatch uniformly, which is simply false
-        // here (0 attempts were made, not N) and was confusing Dan into
-        // thinking a real resubmission had silently failed.
-        // neverAttempted lets postReconciliationSummary word this
-        // honestly, whichever of the two reasons applies.
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details, neverAttempted: true })
-        continue
-      }
-
-      // Missing-only gap on a row we CAN backfill — attempt it now,
-      // budget permitting.
-      if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
-        // Over budget this run — leave the row untouched (no status
-        // change), so it's still eligible on the very next scheduled tick.
-        continue
-      }
-
-      const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
-      linesBackfilledThisRun += missingLines.length
-
-      if (!backfillResult.ok) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'mismatch',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: `${details} | backfill attempt failed: ${backfillResult.error}`,
-        })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (backfill failed: ${backfillResult.error})` })
-        continue
-      }
-
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'backfilling',
-        reconciliation_backfilled_at: new Date().toISOString(),
-        reconciliation_backfill_count: 1,
-        reconciliation_details: `Resubmitted ${backfillResult.submittedCount} missing line(s); will re-verify in ${RECONCILE_AFTER_MINUTES}+ min.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
-      })
-      stillBackfilling += 1
-    }
+  if (observeResult.checked > 0) {
+    clauses.push(
+      `Observed ${observeResult.checked} new order(s) (${observeResult.facilities.join(', ')}) — ${observeResult.verified} verified` +
+      (observeResult.flagged > 0 ? `, ${observeResult.flagged} flagged for independent confirmation in 30 min (not yet touched in Datex)` : '')
+    )
   }
 
-  // ── Phase 2: rows currently self-healing, ready for re-check ──────────
-  const backfillingRows = await findBackfillingEligibleRows({ ignoreAgeForTesting: isTest, batchIdFilter })
-  if (backfillingRows.length > 0) {
-    const expectedByRowId = await resolveExpectedLines(backfillingRows)
-    const orderIds = [...new Set(backfillingRows.map((r) => r.datex_order_id))]
-    const actualByOrderId = await fetchActualLines(orderIds)
-
-    for (const row of backfillingRows) {
-      recheckFacilities.add(row.facility)
-      const claimed = await claimRow(row.id, 'reconciliation_status=eq.backfilling')
-      if (!claimed) continue // another invocation already grabbed this row this tick
-      const expectedLines = expectedByRowId.get(row.id)
-      if (!expectedLines) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'mismatch',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: 'Could not resolve original staged CSV lines for this agency during backfill re-check.',
-        })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', neverAttempted: true })
-        recheckCheckedCount += 1
-        continue
-      }
-
-      const { verified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-      recheckCheckedCount += 1
-
-      if (verified) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'verified',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: null,
-        })
-        verifiedCount += 1
-        healedByBackfill += 1
-        continue
-      }
-
-      const attemptsSoFar = row.reconciliation_backfill_count || 1
-      const exhausted = hasQtyMismatch || attemptsSoFar >= MAX_BACKFILL_ATTEMPTS
-
-      if (exhausted) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'mismatch',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: `${details} | still short after ${attemptsSoFar} backfill attempt(s) — needs manual review.`,
-        })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
-        continue
-      }
-
-      if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
-        continue // over budget this run — retry on the next tick, backfilled_at unchanged so it's still eligible immediately
-      }
-
-      const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
-      linesBackfilledThisRun += missingLines.length
-
-      if (!backfillResult.ok) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-          reconciliation_status: 'mismatch',
-          reconciliation_checked_at: new Date().toISOString(),
-          reconciliation_details: `${details} | second backfill attempt failed: ${backfillResult.error}`,
-        })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (backfill failed: ${backfillResult.error})` })
-        continue
-      }
-
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'backfilling',
-        reconciliation_backfilled_at: new Date().toISOString(),
-        reconciliation_backfill_count: attemptsSoFar + 1,
-        reconciliation_details: `Resubmitted ${backfillResult.submittedCount} missing line(s) (attempt ${attemptsSoFar + 1}); will re-verify in ${RECONCILE_AFTER_MINUTES}+ min.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
-      })
-      stillBackfilling += 1
-    }
+  if (confirmResult.checked > 0) {
+    const mismatchCount = confirmResult.mismatches.length
+    clauses.push(
+      `confirmed ${confirmResult.checked} previously-flagged order(s) (${confirmResult.facilities.join(', ')}) — ${confirmResult.verified} were false alarms (sync caught up, nothing touched)` +
+      (confirmResult.healed > 0 ? `, ${confirmResult.healed} confirmed missing and resubmitted` : '') +
+      (mismatchCount > 0 ? `, ${mismatchCount} need manual review` : '')
+    )
   }
 
-  const summary = {
-    ok: true,
-    freshChecked: freshCheckedCount,
-    freshFacilities: [...freshFacilities],
-    recheckChecked: recheckCheckedCount,
-    recheckFacilities: [...recheckFacilities],
-    verified: verifiedCount,
-    healedByBackfill,
-    stillBackfilling,
-    mismatches,
-  }
-  await postReconciliationSummary(summary, isTest)
+  if (clauses.length === 0) return // nothing happened this tick — no noise post
 
-  // ── Phase 3: final sweep for any cycle whose push crossed the
-  // FINAL_SWEEP_AFTER_HOURS mark and hasn't been swept yet ─────────────
-  // Deliberately NOT scoped by batchIdFilter — a final sweep is about
-  // "is this whole push actually done," independent of whatever single
-  // batch a -test call might be targeting.
-  const cyclesNeedingSweep = await findCyclesNeedingFinalSweep()
-  const finalSweeps = []
-  for (const cycle of cyclesNeedingSweep) {
-    finalSweeps.push({ facility: cycle.facility, monthKey: cycle.month_key, ...(await runFinalSweepForCycle(cycle)) })
+  let body = `${prefix}\n${clauses.join('; ')}.`
+  if (confirmResult.mismatches.length > 0) {
+    const lines = confirmResult.mismatches.slice(0, 10).map((m) => `- ${m.agency_name} (#${m.agency_number}, order ${m.datex_order_id}): ${m.details}`)
+    const extra = confirmResult.mismatches.length > 10 ? `\n...and ${confirmResult.mismatches.length - 10} more` : ''
+    body += `\n${lines.join('\n')}${extra}`
   }
 
-  return { ...summary, finalSweeps }
+  await postToFront(body)
 }
 
-module.exports = { runReconciliation, RECONCILE_AFTER_MINUTES, MAX_BACKFILL_ATTEMPTS, FINAL_SWEEP_AFTER_HOURS }
+// Runs all three phases and posts whatever Front messages are due this
+// tick. isTest bypasses the timing gates on Phases 1/2 (never on Phase
+// 3 — a final sweep must reflect real elapsed time, not testing
+// convenience, since prematurely closing out a push defeats the point).
+// batchIdFilter scopes Phases 1/2 to one specific push (both -test-only
+// conveniences); Phase 3 is deliberately never scoped by it, since a
+// final sweep is about whether a whole push is done, independent of
+// whatever single batch a -test call might be targeting.
+async function runReconciliation(isTest = false, batchIdFilter = null) {
+  const observeResult = await runObservePhase(isTest, batchIdFilter)
+  const confirmResult = await runConfirmAndHealPhase(isTest, batchIdFilter)
+  await postRoutineSummary(observeResult, confirmResult, isTest)
+
+  const finalSweeps = await runFinalSweepPhase()
+
+  return {
+    ok: true,
+    observed: observeResult.checked,
+    observeVerified: observeResult.verified,
+    flagged: observeResult.flagged,
+    confirmed: confirmResult.checked,
+    confirmVerified: confirmResult.verified,
+    healed: confirmResult.healed,
+    mismatches: confirmResult.mismatches,
+    finalSweeps,
+  }
+}
+
+module.exports = { runReconciliation, FIRST_CHECK_AFTER_MINUTES, CONFIRM_AFTER_MINUTES, FINAL_SWEEP_AFTER_MINUTES }
