@@ -275,6 +275,32 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const allRoutesScheduled = routes.length > 0 && routes.every((r) => r.delivery_date)
   const canAdvance = unassigned.length === 0 && allRoutesScheduled
 
+  // 2026-09-18: seedFromTemplate only ever runs once (see loadRoutes' guard
+  // above) — if that first attempt produces an incomplete or wrong result
+  // (a template-parsing gap, a fix like the Madison deliver_day issue that
+  // only gets caught after the fact, etc.), there was previously no way to
+  // retry it short of "Reset test cycle," which is much more destructive
+  // than necessary — it deletes the ENTIRE cycle, including the imported
+  // orders and staged CSV data from Phase 1. This only clears the derived
+  // routes/stops and re-runs seeding against the SAME staged agencies, so
+  // Phase 1's work is untouched. Explicitly destructive to anything done
+  // IN Phase 2 so far, though — any manual route renames, agency moves, or
+  // delivery-date drags are lost, hence the confirmation.
+  const regenerateRoutes = async () => {
+    if (!supabase || !cycle) return
+    if (!window.confirm('Delete all routes for this cycle and rebuild them fresh from the template? Any manual route renames, agency moves, or delivery-date changes made so far will be lost. Imported orders from Phase 1 are not affected.')) {
+      return
+    }
+    const routeIds = routes.map((r) => r.id)
+    if (routeIds.length > 0) {
+      const { error: stopsDelErr } = await supabase.from('dpi_route_stops').delete().in('route_id', routeIds)
+      if (stopsDelErr) { console.error('regenerate routes: delete stops:', stopsDelErr); return }
+      const { error: routesDelErr } = await supabase.from('dpi_routes').delete().in('id', routeIds)
+      if (routesDelErr) { console.error('regenerate routes: delete routes:', routesDelErr); return }
+    }
+    await loadRoutes() // finds zero routes, re-seeds from template, reloads
+  }
+
   const advance = async () => {
     if (!supabase || !cycle) return
     const { error } = await supabase
@@ -397,6 +423,13 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.border}`, background: colors.panel, color: colors.textMuted, cursor: newRouteCode.trim() ? 'pointer' : 'default', opacity: newRouteCode.trim() ? 1 : 0.5 }}
         >
           + Add route
+        </button>
+        <button
+          onClick={regenerateRoutes}
+          title="Delete all routes and rebuild from the template — Phase 1's imported orders are not affected"
+          style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.warning}`, background: 'transparent', color: colors.warning, cursor: 'pointer' }}
+        >
+          ↺ Regenerate routes
         </button>
       </div>
 
