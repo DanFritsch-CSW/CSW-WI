@@ -288,10 +288,24 @@ async function postReconciliationSummary(summary, isTest) {
     ? ` ${summary.stillBackfilling} more currently self-healing, will re-check automatically.`
     : ''
 
+  // 2026-09-18 fix: mismatches were previously always described as
+  // "still short after N resubmission attempts," even for a row where
+  // zero attempts were made (no shipment_id stored — pushed before that
+  // column existed, so a safe automatic resubmit was never possible in
+  // the first place). That wording falsely implied a resubmission had
+  // silently failed, when in fact none was ever tried. Split the count
+  // so the message says the true reason for each kind of mismatch.
+  const neverAttemptedCount = summary.mismatches.filter((m) => m.neverAttempted).length
+  const exhaustedCount = summary.mismatches.length - neverAttemptedCount
+  const mismatchReasonParts = []
+  if (exhaustedCount > 0) mismatchReasonParts.push(`${exhaustedCount} still short after ${MAX_BACKFILL_ATTEMPTS} resubmission attempts`)
+  if (neverAttemptedCount > 0) mismatchReasonParts.push(`${neverAttemptedCount} could not be auto-backfilled at all (pushed before shipment_id tracking existed)`)
+  const mismatchReasonSummary = mismatchReasonParts.join(', ')
+
   const body =
     summary.mismatches.length === 0
       ? `${prefix}\nChecked ${summary.checked} order(s) — ${summary.verified} verified complete against the original CSV${healedNote}.${inProgressNote}`
-      : `${prefix}\nChecked ${summary.checked} order(s) — ${summary.verified} verified${healedNote}, ${summary.mismatches.length} still short after ${MAX_BACKFILL_ATTEMPTS} resubmission attempts and need manual review:\n${mismatchLines.join('\n')}${extra}${inProgressNote}`
+      : `${prefix}\nChecked ${summary.checked} order(s) — ${summary.verified} verified${healedNote}, ${summary.mismatches.length} need manual review (${mismatchReasonSummary}):\n${mismatchLines.join('\n')}${extra}${inProgressNote}`
 
   try {
     await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
@@ -369,7 +383,7 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
           reconciliation_checked_at: new Date().toISOString(),
           reconciliation_details: 'Could not resolve original staged CSV lines for this agency — cycle/staged data may have been deleted.',
         })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', neverAttempted: true })
         checkedCount += 1
         continue
       }
@@ -396,7 +410,17 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
           reconciliation_checked_at: new Date().toISOString(),
           reconciliation_details: row.shipment_id == null ? `${details} | cannot auto-backfill: no shipment_id stored for this order (pushed before backfill support existed)` : details,
         })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
+        // 2026-09-18 fix: NEITHER reason for reaching this branch ever
+        // attempts a backfill — a quantity mismatch is intentionally
+        // never auto-healed (too risky, see compareLines), and a missing
+        // shipment_id makes a safe resubmit impossible outright. The old
+        // summary wording said "still short after N resubmission
+        // attempts" for every mismatch uniformly, which is simply false
+        // here (0 attempts were made, not N) and was confusing Dan into
+        // thinking a real resubmission had silently failed.
+        // neverAttempted lets postReconciliationSummary word this
+        // honestly, whichever of the two reasons applies.
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details, neverAttempted: true })
         continue
       }
 
@@ -446,7 +470,7 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
           reconciliation_checked_at: new Date().toISOString(),
           reconciliation_details: 'Could not resolve original staged CSV lines for this agency during backfill re-check.',
         })
-        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', neverAttempted: true })
         checkedCount += 1
         continue
       }
