@@ -47,17 +47,31 @@ import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
 // blocks advance and shows a clear, visible failure banner with a retry
 // action, instead of a silent per-row ⚠ tooltip nobody has reason to hover.
 
-const PHASE_LABELS = ['1. Import', '2. Build & flag', '3. Carrier approval', '4. Agency comms', '5. Push final']
+// 2026-09-18: renamed Phase 1 and 2 for clarity per Dan, and dropped
+// Phase 3 from this stepper display entirely — it was ALREADY never
+// visited in practice (Phase2BuildFlag's advance() jumps current_phase
+// straight from 2 to 4; nothing in this codebase ever sets it to 3), so
+// showing "3. Carrier approval" in the stepper just misrepresented what
+// actually happens. Using explicit {number, label} pairs instead of
+// array index -> phase number, so real current_phase values (1, 2, 4, 5
+// — genuinely non-contiguous) still match correctly after removing the
+// entry, rather than the remaining labels silently shifting onto the
+// wrong numbers.
+const PHASES = [
+  { number: 1, label: 'Order Import Process' },
+  { number: 2, label: 'Route Build and Assign Days' },
+  { number: 4, label: 'Agency comms' },
+  { number: 5, label: 'Push final' },
+]
 
 function PhasePills({ currentPhase }) {
   return (
     <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
-      {PHASE_LABELS.map((label, i) => {
-        const phaseNum = i + 1
-        const isCurrent = phaseNum === currentPhase
+      {PHASES.map(({ number, label }) => {
+        const isCurrent = number === currentPhase
         return (
           <div
-            key={label}
+            key={number}
             style={{
               fontSize: 13, padding: '6px 12px', borderRadius: 6,
               border: `1px solid ${isCurrent ? colors.accent : colors.border}`,
