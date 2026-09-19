@@ -279,7 +279,8 @@ async function postReconciliationSummary(summary, isTest) {
     console.error('[dpi-reconciliation] FRONT_API_TOKEN not configured — skipping status post')
     return
   }
-  if (summary.checked === 0) return // nothing to report this run — no noise post
+  const totalChecked = summary.freshChecked + summary.recheckChecked
+  if (totalChecked === 0) return // nothing to report this run — no noise post
 
   const prefix = isTest ? '**DPI Monthly Reconciliation (manual test run)**' : '**DPI Monthly Reconciliation**'
   const mismatchLines = summary.mismatches
@@ -304,19 +305,50 @@ async function postReconciliationSummary(summary, isTest) {
   // zero attempts were made (no shipment_id stored — pushed before that
   // column existed, so a safe automatic resubmit was never possible in
   // the first place). That wording falsely implied a resubmission had
-  // silently failed, when in fact none was ever tried. Split the count
-  // so the message says the true reason for each kind of mismatch.
+  // silently failed, when in fact none was ever tried.
+  //
+  // 2026-09-19 fix: the "exhausted" half of that same wording had a
+  // related, subtler version of the same problem — it always named
+  // MAX_BACKFILL_ATTEMPTS (2) regardless of how many attempts that
+  // SPECIFIC row actually went through (a row can be exhausted after
+  // just 1 real attempt if the retry itself produces a quantity
+  // mismatch, since compareLines treats any quantity mismatch as
+  // immediately exhausted — see the doubled-quantity incident this
+  // night). The per-row reconciliation_details line was already
+  // accurate here; only this rolled-up summary sentence wasn't. Rather
+  // than assert a specific attempt count that can vary per row, this
+  // just points at the itemized lines below, which already state each
+  // row's real count.
   const neverAttemptedCount = summary.mismatches.filter((m) => m.neverAttempted).length
   const exhaustedCount = summary.mismatches.length - neverAttemptedCount
   const mismatchReasonParts = []
-  if (exhaustedCount > 0) mismatchReasonParts.push(`${exhaustedCount} still short after ${MAX_BACKFILL_ATTEMPTS} resubmission attempts`)
+  if (exhaustedCount > 0) mismatchReasonParts.push(`${exhaustedCount} still short after a resubmission attempt (see below for each)`)
   if (neverAttemptedCount > 0) mismatchReasonParts.push(`${neverAttemptedCount} could not be auto-backfilled at all (pushed before shipment_id tracking existed)`)
   const mismatchReasonSummary = mismatchReasonParts.join(', ')
 
+  // 2026-09-19 fix: a single tick can run a FRESH check (a batch just
+  // crossing the age gate) and a BACKFILL RE-CHECK (rows already
+  // self-healing from an earlier, unrelated tick) at the same time —
+  // different operations, often different facilities and order counts,
+  // previously combined into one undifferentiated "Checked N order(s)"
+  // number with no facility named at all (e.g. a fresh check of 42
+  // Eau Claire/Madison rows and a re-check of 3 unrelated Madison rows
+  // from an hour earlier looked like two inexplicable, arbitrary
+  // numbers back to back). Each phase now gets its own clearly-labeled
+  // clause, only included if that phase actually ran this tick.
+  const phaseClauses = []
+  if (summary.freshChecked > 0) {
+    phaseClauses.push(`Checked ${summary.freshChecked} new order(s) (${summary.freshFacilities.join(', ')})`)
+  }
+  if (summary.recheckChecked > 0) {
+    phaseClauses.push(`re-checked ${summary.recheckChecked} order(s) previously self-healing (${summary.recheckFacilities.join(', ')})`)
+  }
+  const phaseSummary = phaseClauses.join(', ')
+
   const body =
     summary.mismatches.length === 0
-      ? `${prefix}\nChecked ${summary.checked} order(s) — ${summary.verified} verified complete against the original CSV${healedNote}.${inProgressNote}`
-      : `${prefix}\nChecked ${summary.checked} order(s) — ${summary.verified} verified${healedNote}, ${summary.mismatches.length} need manual review (${mismatchReasonSummary}):\n${mismatchLines.join('\n')}${extra}${inProgressNote}`
+      ? `${prefix}\n${phaseSummary} — ${summary.verified} verified complete against the original CSV${healedNote}.${inProgressNote}`
+      : `${prefix}\n${phaseSummary} — ${summary.verified} verified${healedNote}, ${summary.mismatches.length} need manual review (${mismatchReasonSummary}):\n${mismatchLines.join('\n')}${extra}${inProgressNote}`
 
   try {
     await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
@@ -376,7 +408,19 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
   let healedByBackfill = 0
   let stillBackfilling = 0
   const mismatches = []
-  let checkedCount = 0
+  // 2026-09-19 fix: a single reconciliation tick can run a FRESH check
+  // (a batch just crossing the age gate for the first time) and a
+  // BACKFILL RE-CHECK (rows already self-healing from an earlier,
+  // unrelated tick) in the same invocation — two different operations on
+  // two different, often differently-facilitied sets of rows. The old
+  // combined "checked N" count gave no way to tell these apart (e.g. "42"
+  // vs "3" back to back looked arbitrary), so they're now tracked and
+  // reported separately, along with which facility(ies) each phase
+  // touched.
+  let freshCheckedCount = 0
+  let recheckCheckedCount = 0
+  const freshFacilities = new Set()
+  const recheckFacilities = new Set()
 
   // ── Phase 1: rows never checked before ────────────────────────────────
   const freshRows = await findFreshEligibleRows({ ignoreAgeForTesting: isTest, batchIdFilter })
@@ -386,6 +430,7 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
     const actualByOrderId = await fetchActualLines(orderIds)
 
     for (const row of freshRows) {
+      freshFacilities.add(row.facility)
       const expectedLines = expectedByRowId.get(row.id)
 
       if (!expectedLines) {
@@ -395,12 +440,12 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
           reconciliation_details: 'Could not resolve original staged CSV lines for this agency — cycle/staged data may have been deleted.',
         })
         mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', neverAttempted: true })
-        checkedCount += 1
+        freshCheckedCount += 1
         continue
       }
 
       const { verified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-      checkedCount += 1
+      freshCheckedCount += 1
 
       if (verified) {
         await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
@@ -474,6 +519,7 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
     const actualByOrderId = await fetchActualLines(orderIds)
 
     for (const row of backfillingRows) {
+      recheckFacilities.add(row.facility)
       const expectedLines = expectedByRowId.get(row.id)
       if (!expectedLines) {
         await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
@@ -482,12 +528,12 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
           reconciliation_details: 'Could not resolve original staged CSV lines for this agency during backfill re-check.',
         })
         mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', neverAttempted: true })
-        checkedCount += 1
+        recheckCheckedCount += 1
         continue
       }
 
       const { verified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-      checkedCount += 1
+      recheckCheckedCount += 1
 
       if (verified) {
         await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
@@ -540,7 +586,17 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
     }
   }
 
-  const summary = { ok: true, checked: checkedCount, verified: verifiedCount, healedByBackfill, stillBackfilling, mismatches }
+  const summary = {
+    ok: true,
+    freshChecked: freshCheckedCount,
+    freshFacilities: [...freshFacilities],
+    recheckChecked: recheckCheckedCount,
+    recheckFacilities: [...recheckFacilities],
+    verified: verifiedCount,
+    healedByBackfill,
+    stillBackfilling,
+    mismatches,
+  }
   await postReconciliationSummary(summary, isTest)
   return summary
 }
