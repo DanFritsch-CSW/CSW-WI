@@ -417,9 +417,40 @@ export default function DpiMonthlyProcess() {
   // every agency back into place. Added 2026-09-06 after leftover manual
   // test routes (from before the template auto-seed existed) got stuck in
   // a cycle with no easy way out.
+  //
+  // 2026-09-18 fix: this used to show the same generic confirm message
+  // regardless of what was actually in the cycle. A real push (status=
+  // 'success' rows — genuine orders already created in Datex) got reset
+  // this way with no distinct warning, silently deleting the ONLY local
+  // record of what those orders should contain — with reconciliation
+  // unable to ever check them again, and no way to reconstruct it short
+  // of re-parsing the original CSV by hand (see that investigation this
+  // session). Datex itself is never touched by this button either way —
+  // it only ever deletes rows in OUR OWN Supabase tables — but wiping the
+  // tracking for orders that already exist for real is a fundamentally
+  // bigger deal than wiping test-only or simulated data, so it now gets
+  // its own explicit, specific warning naming exactly how many real
+  // orders are involved, rather than being silently folded into the same
+  // generic message. This does not block the reset — sometimes resetting
+  // real-order tracking is exactly what's needed (e.g. deleting the
+  // orders in Datex and resubmitting from scratch) — it just makes sure
+  // that's a known, deliberate choice rather than an accidental one.
   const resetTestCycle = async () => {
     if (!cycle || !supabase) return
-    if (!window.confirm(`Permanently delete this ${facility} test cycle (${monthKey}) — all staged agencies, routes, and comms progress? This cannot be undone.`)) {
+
+    const { data: realRows, error: realErr } = await supabase
+      .from('dpi_import_batches')
+      .select('id')
+      .eq('batch_id', cycle.batch_id)
+      .eq('status', 'success')
+    if (realErr) console.error('check for real orders before reset:', realErr)
+    const realCount = realRows?.length || 0
+
+    const message = realCount > 0
+      ? `This ${facility} cycle (${monthKey}) has ${realCount} REAL order${realCount === 1 ? '' : 's'} already created in Datex — this button does NOT delete them from Datex, but it WILL permanently delete our only local record of what they should contain, and reconciliation will no longer be able to check them. Only continue if you're intentionally starting over (e.g. you're about to delete and resubmit these orders in Datex). Continue?`
+      : `Permanently delete this ${facility} test cycle (${monthKey}) — all staged agencies, routes, and comms progress? This cannot be undone.`
+
+    if (!window.confirm(message)) {
       return
     }
     const { error: batchDeleteErr } = await supabase
