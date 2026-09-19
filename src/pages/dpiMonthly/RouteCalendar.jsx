@@ -24,6 +24,17 @@ import { colors, cardStyle } from './dpiMonthlyStyles.js'
 // earlier version used useState, which re-rendered the whole board on
 // dragstart and broke the native drag session on the first attempt (fixed
 // alongside the same bug in Phase2BuildFlag's agency tiles, 2026-09-07).
+//
+// 2026-09-18 fix: when a month doesn't start on a Sunday, the standard
+// month-grid's first row is a PARTIAL week (e.g. October 2026 starts on
+// a Thursday, so row 0 is just Thu-Sat, Oct 1-3) — really the tail end of
+// the PREVIOUS month's last week, not this month's "Week 1." The old code
+// labeled that partial row "Week 1 usually" regardless, which put the
+// real Week 1 routes (and every week after it) one row off from where
+// they actually belonged. Week numbers now only attach to genuinely full
+// (all 7 days present) rows, counted sequentially from the first one —
+// a leading (or trailing, for months that end mid-week) partial row gets
+// no week-number tray at all, since it isn't a real template week.
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -38,9 +49,18 @@ function buildMonthGrid(monthKey) {
   for (let d = 1; d <= daysInMonth; d++) cells.push(d)
   while (cells.length % 7 !== 0) cells.push(null)
 
-  const weeks = []
-  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7))
-  return weeks
+  const rows = []
+  for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7))
+
+  // Only a fully-populated (no null) row is a genuine calendar week —
+  // week numbers count sequentially across just those rows, so a partial
+  // leading or trailing row never claims a week number it doesn't own.
+  let weekCounter = 0
+  return rows.map((days) => {
+    const isFullWeek = days.every((d) => d != null)
+    const weekNumber = isFullWeek ? ++weekCounter : null
+    return { days, weekNumber }
+  })
 }
 
 export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
@@ -131,10 +151,16 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
           <div key={label} style={{ fontSize: 11, color: colors.textFaint, textAlign: 'center', padding: '4px 0' }}>{label}</div>
         ))}
 
-        {weeks.map((weekDays, weekIdx) => (
+        {weeks.map(({ days, weekNumber }, weekIdx) => (
           <React.Fragment key={weekIdx}>
-            <WeekTray label={`Week ${weekIdx + 1} usually`} routesInWeek={unscheduledByWeek(weekIdx + 1)} />
-            {weekDays.map((day, i) => (
+            {weekNumber != null ? (
+              <WeekTray label={`Week ${weekNumber} usually`} routesInWeek={unscheduledByWeek(weekNumber)} />
+            ) : (
+              <div style={{ fontSize: 10, color: colors.textFaint, padding: 8, fontStyle: 'italic' }}>
+                Partial week — carries over from an adjacent month
+              </div>
+            )}
+            {days.map((day, i) => (
               <div
                 key={i}
                 onDragOver={(e) => { if (day) e.preventDefault() }}
