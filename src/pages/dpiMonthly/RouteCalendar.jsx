@@ -1,6 +1,7 @@
 import React, { useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { colors, cardStyle } from './dpiMonthlyStyles.js'
+import { WEEKDAY_LABELS, buildMonthGrid } from './dpiCalendarUtils.js'
 
 // Phase 2 — delivery date calendar. Real September 2026 dock appointment
 // data (checked live against MotherDuck 2026-09-06) showed: the WEEK a
@@ -8,8 +9,18 @@ import { colors, cardStyle } from './dpiMonthlyStyles.js'
 // 1st/2nd/3rd/4th pattern), but the specific WEEKDAY is not — roughly half
 // of EC's routes ran on a different weekday than their template states.
 // That looks like a real scheduling choice made against that month's dock/
-// carrier availability, not a fixed rule — so this is a calendar you drag
-// routes onto, not an auto-computed date.
+// carrier availability, not a fixed rule.
+//
+// 2026-09-18: this used to mean the calendar started fully blank
+// (drag-only, nothing pre-placed). Per Dan, it now starts PRE-POPULATED
+// with each route's best-guess date (its usual week x usual weekday) —
+// see Phase2BuildFlag's seedFromTemplate, which computes this once via
+// computeAutoDeliveryDate when a cycle's routes are first created — and a
+// human can freely drag any route to a different day afterward if that
+// month's actual truck/dock availability calls for it. The pre-fill only
+// ever happens at that one seeding moment, never again, so a later manual
+// re-drag (including dragging a route back into a tray to unschedule it)
+// is never overwritten by a repeat auto-fill.
 //
 // Unscheduled routes sit in a sidebar, grouped by dpi_routes.template_week
 // (1st/2nd/3rd/4th, parsed once from each template's notes text — see the
@@ -25,43 +36,14 @@ import { colors, cardStyle } from './dpiMonthlyStyles.js'
 // dragstart and broke the native drag session on the first attempt (fixed
 // alongside the same bug in Phase2BuildFlag's agency tiles, 2026-09-07).
 //
-// 2026-09-18 fix: when a month doesn't start on a Sunday, the standard
-// month-grid's first row is a PARTIAL week (e.g. October 2026 starts on
-// a Thursday, so row 0 is just Thu-Sat, Oct 1-3) — really the tail end of
-// the PREVIOUS month's last week, not this month's "Week 1." The old code
-// labeled that partial row "Week 1 usually" regardless, which put the
-// real Week 1 routes (and every week after it) one row off from where
-// they actually belonged. Week numbers now only attach to genuinely full
-// (all 7 days present) rows, counted sequentially from the first one —
-// a leading (or trailing, for months that end mid-week) partial row gets
-// no week-number tray at all, since it isn't a real template week.
-
-const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-
-function buildMonthGrid(monthKey) {
-  const [year, month] = monthKey.split('-').map(Number) // month is 1-indexed
-  const firstOfMonth = new Date(year, month - 1, 1)
-  const daysInMonth = new Date(year, month, 0).getDate()
-  const startWeekday = firstOfMonth.getDay() // 0=Sun
-
-  const cells = []
-  for (let i = 0; i < startWeekday; i++) cells.push(null)
-  for (let d = 1; d <= daysInMonth; d++) cells.push(d)
-  while (cells.length % 7 !== 0) cells.push(null)
-
-  const rows = []
-  for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7))
-
-  // Only a fully-populated (no null) row is a genuine calendar week —
-  // week numbers count sequentially across just those rows, so a partial
-  // leading or trailing row never claims a week number it doesn't own.
-  let weekCounter = 0
-  return rows.map((days) => {
-    const isFullWeek = days.every((d) => d != null)
-    const weekNumber = isFullWeek ? ++weekCounter : null
-    return { days, weekNumber }
-  })
-}
+// 2026-09-18 (week-alignment fix): when a month doesn't start on a Sunday,
+// the standard month-grid's first row is a PARTIAL week (e.g. October
+// 2026 starts on a Thursday, so row 0 is just Thu-Sat, Oct 1-3) — really
+// the tail end of the PREVIOUS month's last week, not this month's
+// "Week 1." buildMonthGrid (now shared with dpiCalendarUtils.js, so this
+// stays in sync with the auto-fill computation above) only assigns week
+// numbers to genuinely full 7-day rows, counted sequentially from the
+// first one — a partial row gets no week-number tray at all.
 
 export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
   const draggingRouteIdRef = useRef(null)
@@ -136,7 +118,7 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
         Delivery dates — {cycle.month_key}
       </div>
       <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 12 }}>
-        Each week's usual routes sit beside that week's row — drag one onto the day it should actually deliver, based on that week's truck availability.
+        Each route starts on its usual week/weekday — drag it to a different day if this month's truck availability calls for it.
       </div>
 
       {unscheduledOther.length > 0 && (
