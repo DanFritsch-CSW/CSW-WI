@@ -44,6 +44,13 @@ import { computeAutoDeliveryDate } from './dpiCalendarUtils.js'
 // separate write to the same field and is never revisited or overwritten
 // by this seeding logic, since seeding never runs twice for one cycle.
 //
+// 2026-09-18 (Madison fix): every Madison route template has deliver_day
+// = NULL — the real delivery weekday is in load_day instead (e.g.
+// "Del Date Thur -"). computeAutoDeliveryDate now takes both fields and
+// falls back to load_day only when deliver_day doesn't parse, so this
+// works for both facilities' differently-shaped real data without a
+// facility-specific special case.
+//
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
 //     materials/packaging weight lookup. Must be replaced before this phase
@@ -89,12 +96,14 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       if (matchingStops.length === 0) continue // nobody on this route ordered this month
 
       // 2026-09-18: pre-fill an initial delivery_date guess (usual week x
-      // usual weekday) so the calendar doesn't start blank. Returns null
-      // when it can't be computed (no template_week, unparseable
-      // deliver_day text, or a template_week with no matching full week
-      // this month) — the route just starts unscheduled in that case,
-      // exactly like before this change.
-      const autoDate = computeAutoDeliveryDate(cycle.month_key, template.template_week, template.deliver_day)
+      // usual weekday) so the calendar doesn't start blank. deliver_day is
+      // tried first; load_day is the fallback for facilities (Madison)
+      // where the real weekday text ended up in that column instead. Returns
+      // null when neither field parses, there's no template_week, or a
+      // template_week has no matching full week this month — the route
+      // just starts unscheduled in that case, exactly like before this
+      // change.
+      const autoDate = computeAutoDeliveryDate(cycle.month_key, template.template_week, template.deliver_day, template.load_day)
 
       const { data: newRoute, error: routeErr } = await supabase
         .from('dpi_routes')
