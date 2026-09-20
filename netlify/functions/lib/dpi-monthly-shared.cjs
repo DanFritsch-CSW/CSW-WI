@@ -264,19 +264,40 @@ async function getMaterialMap(project_id) {
 // ── Duplicate check ──────────────────────────────────────────────────────
 // Returns a Set of lookup_codes that already exist for this project, so the
 // caller can skip re-creating orders on a re-run/re-upload.
-
-async function getExistingLookupCodes(project_id) {
-  const result = await smartUpPost('/api/get_orders_by_project', { project_id })
-  if (!result.ok) {
-    throw new Error(`get_orders_by_project failed (${result.status}): ${result.text.slice(0, 300)}`)
+//
+// 2026-09-19: added a retry — this had NO retry protection at all, unlike
+// getMaterialMap (whose underlying runMotherDuckQuery already retries
+// twice). Confirmed live: a real 70-order Madison push failed 70/70 on its
+// first attempt with "This operation was aborted" from THIS call alone —
+// one flaky/cold SmartUp API response killed the entire push before a
+// single order was attempted, then succeeded immediately on Dan's manual
+// retry. Safe to retry specifically because this is read-only (fetching
+// the existing-orders list has no side effects) — unlike
+// create_outbound_order/create_outbound_order_line, where a timeout
+// doesn't prove the server-side call failed, so blindly retrying those
+// risks creating a real duplicate. This call carries no such risk.
+async function getExistingLookupCodes(project_id, { retries = 2 } = {}) {
+  let lastErr
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await smartUpPost('/api/get_orders_by_project', { project_id })
+      if (!result.ok) {
+        throw new Error(`get_orders_by_project failed (${result.status}): ${result.text.slice(0, 300)}`)
+      }
+      const rows = Array.isArray(result.data) ? result.data : (result.data?.orders || result.data?.items || [])
+      const set = new Set()
+      for (const row of rows) {
+        const code = row.lookup_code ?? row.LookupCode
+        if (code != null) set.add(String(code).trim())
+      }
+      return set
+    } catch (err) {
+      lastErr = err
+      console.error(`[dpi-monthly-shared] getExistingLookupCodes attempt ${attempt}/${retries} failed: ${err.message}`)
+      if (attempt < retries) await sleep(2000)
+    }
   }
-  const rows = Array.isArray(result.data) ? result.data : (result.data?.orders || result.data?.items || [])
-  const set = new Set()
-  for (const row of rows) {
-    const code = row.lookup_code ?? row.LookupCode
-    if (code != null) set.add(String(code).trim())
-  }
-  return set
+  throw lastErr
 }
 
 // ── Order + line creation ───────────────────────────────────────────────
