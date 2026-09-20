@@ -55,11 +55,18 @@
 //               current status — including ones already 'verified' at
 //               T+60 or T+90, which nothing else ever looks at again.
 //               Overwrites reconciliation_status with the true, current
-//               answer. This is the one message per push meant to be
-//               trusted completely as the final word, and it also
-//               naturally catches anything that fell through a crack
-//               elsewhere (a crashed invocation leaving a row stuck
-//               mid-claim, for instance).
+//               answer, but not destructively — the pre-sweep status/
+//               checked_at/details are snapshotted into pre_sweep_*
+//               columns first (added 2026-09-19, after a real batch's
+//               T+60 "observe" pass only processed 38 of 70 rows for a
+//               reason that couldn't be definitively confirmed after the
+//               fact, precisely because the final sweep had already
+//               overwritten the only record of it). This is the one
+//               message per push meant to be trusted completely as the
+//               final word, and it also naturally catches anything that
+//               fell through a crack elsewhere (a crashed invocation
+//               leaving a row stuck mid-claim, for instance) — now
+//               without erasing the evidence of what that crack was.
 //
 // Every order gets a deterministic final answer by T+150 (2.5 hours) —
 // no open-ended retry loop, no attempt counting, no "worst case could
@@ -559,9 +566,31 @@ async function runFinalSweepPhase() {
     let cleanCount = 0
 
     for (const row of rows) {
+      // 2026-09-19 fix: this loop used to overwrite reconciliation_status/
+      // reconciliation_checked_at/reconciliation_details unconditionally,
+      // with no record of what was there before — meaning the very
+      // history needed to diagnose an earlier-phase anomaly (e.g. a batch
+      // whose Phase 1 "observe" only processed some of its rows, most
+      // likely from this app's already-documented Netlify scheduled-
+      // function reliability issue, see netlify.toml) got destroyed by
+      // the same sweep that would otherwise help explain it. Every row
+      // now gets its pre-sweep status/checked_at/details snapshotted into
+      // dedicated pre_sweep_* columns in the SAME patch that overwrites
+      // the live fields, so "what did Phase 1/2 actually do to this row,
+      // if anything" is never lost. row.reconciliation_status/
+      // reconciliation_checked_at/reconciliation_details here are
+      // whatever the earlier fetch found BEFORE this sweep touched
+      // anything — exactly the pre-sweep values.
+      const preSweep = {
+        pre_sweep_status: row.reconciliation_status,
+        pre_sweep_checked_at: row.reconciliation_checked_at,
+        pre_sweep_details: row.reconciliation_details,
+      }
+
       const expectedLines = expectedByRowId.get(row.id)
       if (!expectedLines) {
         await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          ...preSweep,
           reconciliation_status: 'mismatch',
           reconciliation_checked_at: new Date().toISOString(),
           reconciliation_details: 'original staged CSV data not found (final sweep)',
@@ -572,8 +601,10 @@ async function runFinalSweepPhase() {
 
       const { verified, details } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
       // Overwrites reconciliation_status regardless of its current value
-      // — the authoritative, closing answer for this row.
+      // — the authoritative, closing answer for this row. preSweep above
+      // is what keeps that overwrite from being a destructive one.
       await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        ...preSweep,
         reconciliation_status: verified ? 'verified' : 'mismatch',
         reconciliation_checked_at: new Date().toISOString(),
         reconciliation_details: verified ? null : `${details} | found during final T+${FINAL_SWEEP_AFTER_MINUTES}min sweep`,
