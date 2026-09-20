@@ -743,17 +743,18 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
-# DPI Monthly Process reconciliation -- added 2026-09-18. Checks pushed
-# orders 45+ minutes after import against the original staged CSV data,
-# well past the confirmed ~30-minute real Datex-to-MotherDuck sync delay
-# (see lib/dpi-reconciliation-shared.cjs for the full design writeup and
-# the earlier same-day in-process verification attempt that was built and
-# reverted once that delay was confirmed). Report-only -- flags
-# discrepancies via a Front summary and reconciliation_status/details on
-# dpi_import_batches, does not auto-backfill.
-[functions."dpi-reconciliation-run"]
+# DPI Monthly Process reconciliation -- added 2026-09-18, rewritten
+# 2026-09-19 as a three-phase design (observe/confirm+heal/final sweep,
+# see lib/dpi-reconciliation-shared.cjs) and converted to a background
+# function (see dpi-reconciliation-run-background.cjs's own header for
+# the full story: a 70-order batch only got 24 orders observed under the
+# old 26s timeout, with one order going completely unchecked until the
+# final sweep caught it 150 minutes later). Background functions get
+# Netlify's 15-minute allowance instead of a configurable `timeout` key,
+# so that setting is dropped here; the native-module bundling settings
+# still apply the same way.
+[functions."dpi-reconciliation-run-background"]
   schedule = "*/15 * * * *"
-  timeout = 26
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
