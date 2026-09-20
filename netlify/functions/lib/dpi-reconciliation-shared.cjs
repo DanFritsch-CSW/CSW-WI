@@ -417,11 +417,62 @@ async function runObservePhase(isTest, batchIdFilter) {
 // for it to show up, which is exactly what turns this into a caught
 // false alarm instead of a duplicate. Backfills exactly once if the gap
 // is still genuinely there; never retries afterward — see file header.
+// 2026-09-20: closes a real, more severe failure mode than the isolated-
+// straggler one this redesign originally targeted. Confirmed live: an
+// entire 70-order batch's MotherDuck replication stalled for well over
+// 150 minutes (not an isolated line — the WHOLE batch, 0 of 70 verified
+// at any checkpoint). The "confirm independently 30 minutes later"
+// safeguard doesn't catch this, because every order in a batch-wide
+// stall still looks "confirmed missing" on a second look — there's no
+// contradiction for it to catch, since NOTHING in the batch has synced
+// yet. 10 of the 70 happened to reach the backfill step during that
+// window and are now genuine duplicates needing manual cleanup.
+//
+// This computes, for each batch a candidate row belongs to, what
+// fraction of that SAME batch's 'success' rows have already verified
+// cleanly (from T+60 or an earlier confirm) — checked against ALL of the
+// batch's rows, not just the ones currently pending confirmation, so a
+// batch that's mostly fine already registers as healthy even if a few
+// rows are still working through Phase 2. A real per-order drop rate has
+// never been seen above ~12% of a batch (8/67, the worst on record) — a
+// batch showing anywhere near 0% verified is categorically different:
+// the signature of a systemic sync stall, not scattered genuine misses.
+// BATCH_HEALTH_MIN_VERIFIED_RATIO is set well above the worst real drop
+// rate specifically so it never second-guesses genuine per-order
+// backfills, only batch-wide anomalies. Below the minimum batch size,
+// percentages are too noisy to mean anything, so health checking is
+// skipped entirely (small batches also carry proportionally small
+// consequences if this guess is ever wrong).
+const BATCH_HEALTH_MIN_SIZE = 10
+const BATCH_HEALTH_MIN_VERIFIED_RATIO = 0.5
+
+async function computeBatchHealth(batchIds) {
+  const health = new Map() // batch_id -> { healthy: boolean, total, verifiedCount }
+  if (batchIds.length === 0) return health
+
+  const rows = await supabaseGet(
+    `/rest/v1/dpi_import_batches?status=eq.success&batch_id=in.(${batchIds.map((id) => encodeURIComponent(id)).join(',')})&select=batch_id,reconciliation_status`
+  )
+  const byBatch = new Map()
+  for (const row of rows) {
+    if (!byBatch.has(row.batch_id)) byBatch.set(row.batch_id, { total: 0, verifiedCount: 0 })
+    const entry = byBatch.get(row.batch_id)
+    entry.total += 1
+    if (row.reconciliation_status === 'verified') entry.verifiedCount += 1
+  }
+
+  for (const [batchId, entry] of byBatch) {
+    const healthy = entry.total < BATCH_HEALTH_MIN_SIZE || entry.verifiedCount / entry.total >= BATCH_HEALTH_MIN_VERIFIED_RATIO
+    health.set(batchId, { healthy, ...entry })
+  }
+  return health
+}
+
 async function runConfirmAndHealPhase(isTest, batchIdFilter) {
   const filters = ['status=eq.success', 'reconciliation_status=eq.pending_confirmation']
   if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
   const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
-  if (candidates.length === 0) return { checked: 0, verified: 0, healed: 0, mismatches: [], facilities: [] }
+  if (candidates.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, mismatches: [], facilities: [] }
 
   let rows = candidates
   if (!isTest) {
@@ -429,8 +480,9 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
     const ready = await batchesPastPushThreshold(batchIds, CONFIRM_AFTER_MINUTES)
     rows = candidates.filter((r) => ready.has(r.batch_id))
   }
-  if (rows.length === 0) return { checked: 0, verified: 0, healed: 0, mismatches: [], facilities: [] }
+  if (rows.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, mismatches: [], facilities: [] }
 
+  const batchHealth = await computeBatchHealth([...new Set(rows.map((r) => r.batch_id))])
   const expectedByRowId = await resolveExpectedLines(rows)
   const orderIds = [...new Set(rows.map((r) => r.datex_order_id))]
   const actualByOrderId = await fetchActualLines(orderIds)
@@ -440,6 +492,7 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
   let checked = 0
   let verified = 0
   let healed = 0
+  let deferred = 0
   let linesBackfilledThisRun = 0
 
   for (const row of rows) {
@@ -485,6 +538,19 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
       continue
     }
 
+    // Confirmed, missing-only — the one action in this whole file that
+    // actually writes new lines to Datex. Refuse to do it if this row's
+    // batch looks like it's in a systemic sync stall rather than a
+    // genuine per-order gap (see BATCH_HEALTH_MIN_SIZE/RATIO above) —
+    // leave it in pending_confirmation, unbackfilled, for a later tick
+    // to reassess once more of the batch has had a chance to sync.
+    const health = batchHealth.get(row.batch_id)
+    if (health && !health.healthy) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: 'pending_confirmation' })
+      deferred += 1
+      continue
+    }
+
     // Confirmed, missing-only — safe to backfill exactly once.
     if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
       // Over budget this run — revert to pending_confirmation so it's
@@ -516,7 +582,7 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
     healed += 1
   }
 
-  return { checked, verified, healed, mismatches, facilities: [...facilities] }
+  return { checked, verified, healed, deferred, mismatches, facilities: [...facilities] }
 }
 
 // ── Phase 3: FINAL SWEEP (T+150) ─────────────────────────────────────
@@ -658,7 +724,8 @@ async function postRoutineSummary(observeResult, confirmResult, isTest) {
     clauses.push(
       `confirmed ${confirmResult.checked} previously-flagged order(s) (${confirmResult.facilities.join(', ')}) — ${confirmResult.verified} were false alarms (sync caught up, nothing touched)` +
       (confirmResult.healed > 0 ? `, ${confirmResult.healed} confirmed missing and resubmitted` : '') +
-      (mismatchCount > 0 ? `, ${mismatchCount} need manual review` : '')
+      (mismatchCount > 0 ? `, ${mismatchCount} need manual review` : '') +
+      (confirmResult.deferred > 0 ? `, ${confirmResult.deferred} deferred (batch looks like a systemic sync stall, not real drops — will re-check without backfilling anything yet)` : '')
     )
   }
 
