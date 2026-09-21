@@ -6,12 +6,13 @@
 // (confirmed 2026-09-18: response comes back byte-identical whether a
 // line persists or not), and MotherDuck has a real, NON-deterministic
 // sync delay from Datex — typically well under 30 minutes, but confirmed
-// live to sometimes run 80+ minutes for an isolated straggler line — so
-// this can never be checked reliably inside the push itself (see
-// dpi-monthly-shared.cjs and dpi-import-push-background.cjs for the full
-// investigation, including an earlier same-day attempt at in-process
-// verification that was built and then reverted once the real sync delay
-// was confirmed).
+// live to sometimes run 80+ minutes for an isolated straggler line, and
+// TWICE (2026-09-19 and 2026-09-20) to exceed 2.5 HOURS for an entire
+// batch — so this can never be checked reliably inside the push itself
+// (see dpi-monthly-shared.cjs and dpi-import-push-background.cjs for the
+// full investigation, including an earlier same-day attempt at
+// in-process verification that was built and then reverted once the real
+// sync delay was confirmed).
 //
 // 2026-09-19 (three-phase redesign): earlier versions of this file used a
 // single-observation "if it looks missing, backfill it immediately" model
@@ -72,6 +73,27 @@
 // no open-ended retry loop, no attempt counting, no "worst case could
 // take 3 hours" — comfortably inside the 3-4 hour target with margin.
 //
+// 2026-09-20 (replica-lag hardening — three changes, all driven by one
+// real incident): a batch where 69 of 70 orders were PERFECTLY FINE got
+// reported as "0 of 70 verified, 70 need manual review," because the
+// replica hadn't finished syncing at T+150 and every phase in this file
+// implicitly assumed "not in MotherDuck" means "not in Datex." The
+// three changes, in the order they take effect:
+//   #3 SYNC FRESHNESS PROBE (fetchBatchSyncState) — before any phase
+//      does comparison work, ask the replica directly whether this
+//      batch's data has landed AT ALL. If not, skip the batch entirely
+//      this tick. Cheapest and most decisive of the three; catches the
+//      total-stall case before anything expensive or destructive runs.
+//   #1 FINAL SWEEP DEFERRAL — the sweep now checks freshness AND batch
+//      health BEFORE claiming the cycle, so an untrustworthy read no
+//      longer produces a permanent false verdict. Capped by
+//      FINAL_SWEEP_MAX_DEFER_MINUTES so a genuinely broken batch still
+//      gets reported eventually, explicitly flagged as unconfirmed.
+//   #2 LINE-COUNT FAST PATH (fetchActualLineCounts) — a cheap count(*)
+//      per order, used to split the final report into "genuinely short"
+//      vs "no lines at all yet," which read identically before and are
+//      the difference between a 2-minute fix and a false alarm.
+//
 // Scope: only dpi_import_batches rows with status='success'. 'failed' is
 // already known-bad (flagged at push time with a specific error),
 // 'duplicate_skipped' never created anything new, 'simulated' never
@@ -97,6 +119,14 @@ const SUPABASE_KEY =
 const FIRST_CHECK_AFTER_MINUTES = 60
 const CONFIRM_AFTER_MINUTES = 90
 const FINAL_SWEEP_AFTER_MINUTES = 150
+// Outer cap on how long the final sweep will keep deferring while it
+// waits for the replica to catch up (see #1 in runFinalSweepPhase).
+// Deferring indefinitely would mean a genuinely broken batch never gets
+// reported at all; past this point the sweep reports whatever it can
+// see, explicitly flagged as unconfirmed. 12 hours comfortably exceeds
+// the worst observed replica lag (~2.5+ hours, twice) while still
+// guaranteeing a same-day answer.
+const FINAL_SWEEP_MAX_DEFER_MINUTES = 12 * 60
 // Caps total lines backfilled in one invocation so this stays well under
 // this function's ~26s timeout (LINE_CREATE_DELAY_MS alone is 750ms/line
 // — 20 lines is 15s of pure delay, leaving headroom for the MotherDuck/
@@ -249,6 +279,71 @@ async function fetchActualLines(orderIds) {
   return byOrder
 }
 
+// ── #3: SYNC FRESHNESS PROBE (2026-09-20) ────────────────────────────
+// Everything in this file compares expected (Supabase, written at push
+// time) against actual (MotherDuck, a replica of Datex with a real,
+// NON-deterministic lag). Twice in two days that lag has exceeded 2.5
+// HOURS for an entire batch, and a comparison run against a replica
+// that simply hasn't received the data yet is not a meaningful check —
+// it's guaranteed to report every order as broken, which is exactly the
+// false "0 of 70 verified / 70 need manual review" alarm Dan saw, on a
+// batch where 69 of 70 were in fact perfectly fine (the 70th was
+// genuinely short one line — order 802600, material C310).
+//
+// Rather than infer a stall indirectly from "how many orders look bad"
+// (which computeBatchHealth does, and which works, but only AFTER doing
+// all the expensive per-material work), this asks the replica a direct,
+// cheap question up front: for this specific batch's orders, do ANY
+// order lines exist yet at all? If NOTHING in the batch has any lines,
+// the replica is provably behind for this batch and every comparison
+// this tick would be noise — so the caller skips the batch entirely
+// rather than reasoning about individual orders against data that isn't
+// there yet.
+//
+// Deliberately narrow: this only answers "has this batch's data arrived
+// at all," not "is it complete." A batch can pass this probe and still
+// be mid-sync (that's what the confirm phase and computeBatchHealth are
+// for). It exists to catch the total-stall case cheaply and
+// unambiguously, before anything expensive or destructive happens.
+async function fetchBatchSyncState(orderIds) {
+  if (orderIds.length === 0) return { anyLinesPresent: false, ordersWithLines: 0 }
+  const rows = await runMotherDuckQuery(`
+    SELECT count(DISTINCT ol.order_id) AS orders_with_lines
+    FROM production_db.silver.datex_slv_orderlines ol
+    WHERE ol.order_id IN (${orderIds.join(',')})
+  `)
+  const ordersWithLines = Number(rows?.[0]?.orders_with_lines) || 0
+  return { anyLinesPresent: ordersWithLines > 0, ordersWithLines }
+}
+
+// ── #2: LINE-COUNT FAST PATH (2026-09-20) ────────────────────────────
+// A cheap count(*) per order answers "does this order have the right
+// NUMBER of lines" without needing every material row joined and
+// summed. This matters because of how the replica lag actually
+// manifests: an order tends to be either fully present or fully absent,
+// so a count of zero is a strong signal that an order simply hasn't
+// synced. On the 2026-09-20 batch this distinction separates the 69
+// fine-but-lagging orders from the 1 genuinely short one (802600, which
+// had 20 of its 21 lines).
+//
+// NOT a replacement for compareLines: a count match doesn't prove the
+// right MATERIALS or QUANTITIES are present. It's used purely to
+// describe the final report accurately (see postFinalSweepSummary) —
+// every order still gets the full per-material diff before being
+// marked verified.
+async function fetchActualLineCounts(orderIds) {
+  if (orderIds.length === 0) return new Map()
+  const rows = await runMotherDuckQuery(`
+    SELECT ol.order_id, count(*) AS line_count
+    FROM production_db.silver.datex_slv_orderlines ol
+    WHERE ol.order_id IN (${orderIds.join(',')})
+    GROUP BY ol.order_id
+  `)
+  const byOrder = new Map()
+  for (const row of rows) byOrder.set(row.order_id, Number(row.line_count) || 0)
+  return byOrder
+}
+
 // Compares expected (staged CSV) lines against actual (MotherDuck) lines
 // for one order. Returns the missing lines as structured data (not just a
 // display string) so the caller can actually resubmit them.
@@ -349,7 +444,7 @@ async function runObservePhase(isTest, batchIdFilter) {
   const filters = ['status=eq.success', 'datex_order_id=not.is.null', 'reconciliation_status=is.null']
   if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
   const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
-  if (candidates.length === 0) return { checked: 0, verified: 0, flagged: 0, facilities: [] }
+  if (candidates.length === 0) return { checked: 0, verified: 0, flagged: 0, stalledBatches: 0, facilities: [] }
 
   let rows = candidates
   if (!isTest) {
@@ -357,7 +452,34 @@ async function runObservePhase(isTest, batchIdFilter) {
     const ready = await batchesPastPushThreshold(batchIds, FIRST_CHECK_AFTER_MINUTES)
     rows = candidates.filter((r) => ready.has(r.batch_id))
   }
-  if (rows.length === 0) return { checked: 0, verified: 0, flagged: 0, facilities: [] }
+  if (rows.length === 0) return { checked: 0, verified: 0, flagged: 0, stalledBatches: 0, facilities: [] }
+
+  // #3: before doing ANY comparison work, ask the replica whether this
+  // batch's data has landed at all. A batch with zero lines present is
+  // provably not synced yet — comparing against it would flag every
+  // single order as broken (the exact false alarm seen 2026-09-19 and
+  // 2026-09-20). Such a batch is left entirely untouched this tick,
+  // status still NULL, so it's naturally reconsidered on the next tick
+  // with no state to unwind.
+  let stalledBatches = 0
+  const rowsByBatch = new Map()
+  for (const row of rows) {
+    if (!rowsByBatch.has(row.batch_id)) rowsByBatch.set(row.batch_id, [])
+    rowsByBatch.get(row.batch_id).push(row)
+  }
+  const syncedRows = []
+  for (const [batchId, batchRows] of rowsByBatch) {
+    const batchOrderIds = [...new Set(batchRows.map((r) => r.datex_order_id))]
+    const syncState = await fetchBatchSyncState(batchOrderIds)
+    if (!syncState.anyLinesPresent) {
+      console.error(`[dpi-reconciliation] batch ${batchId}: 0 of ${batchOrderIds.length} orders have any lines in MotherDuck yet — replica is behind for this batch, skipping this tick entirely`)
+      stalledBatches += 1
+      continue
+    }
+    syncedRows.push(...batchRows)
+  }
+  if (syncedRows.length === 0) return { checked: 0, verified: 0, flagged: 0, stalledBatches, facilities: [] }
+  rows = syncedRows
 
   const expectedByRowId = await resolveExpectedLines(rows)
   const orderIds = [...new Set(rows.map((r) => r.datex_order_id))]
@@ -407,7 +529,7 @@ async function runObservePhase(isTest, batchIdFilter) {
     }
   }
 
-  return { checked, verified, flagged, facilities: [...facilities] }
+  return { checked, verified, flagged, stalledBatches, facilities: [...facilities] }
 }
 
 // ── Phase 2: CONFIRM & HEAL (T+90) ───────────────────────────────────
@@ -472,7 +594,7 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
   const filters = ['status=eq.success', 'reconciliation_status=eq.pending_confirmation']
   if (batchIdFilter) filters.push(`batch_id=eq.${encodeURIComponent(batchIdFilter)}`)
   const candidates = await supabaseGet(`/rest/v1/dpi_import_batches?${filters.join('&')}&select=*`)
-  if (candidates.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, mismatches: [], facilities: [] }
+  if (candidates.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, stalledBatches: 0, mismatches: [], facilities: [] }
 
   let rows = candidates
   if (!isTest) {
@@ -480,7 +602,34 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
     const ready = await batchesPastPushThreshold(batchIds, CONFIRM_AFTER_MINUTES)
     rows = candidates.filter((r) => ready.has(r.batch_id))
   }
-  if (rows.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, mismatches: [], facilities: [] }
+  if (rows.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, stalledBatches: 0, mismatches: [], facilities: [] }
+
+  // #3: same freshness probe as the observe phase, and MORE important
+  // here — this is the only phase that writes to Datex. A batch whose
+  // lines haven't landed in the replica at all must never reach the
+  // backfill step, since every order would look "confirmed missing"
+  // and get duplicated (exactly what produced 10 duplicate orders on
+  // 2026-09-20 before computeBatchHealth existed). Rows in a stalled
+  // batch are left untouched in pending_confirmation for a later tick.
+  let stalledBatches = 0
+  const rowsByBatch = new Map()
+  for (const row of rows) {
+    if (!rowsByBatch.has(row.batch_id)) rowsByBatch.set(row.batch_id, [])
+    rowsByBatch.get(row.batch_id).push(row)
+  }
+  const syncedRows = []
+  for (const [batchId, batchRows] of rowsByBatch) {
+    const batchOrderIds = [...new Set(batchRows.map((r) => r.datex_order_id))]
+    const syncState = await fetchBatchSyncState(batchOrderIds)
+    if (!syncState.anyLinesPresent) {
+      console.error(`[dpi-reconciliation] confirm phase, batch ${batchId}: 0 of ${batchOrderIds.length} orders have any lines in MotherDuck yet — replica behind, NOT backfilling anything this tick`)
+      stalledBatches += 1
+      continue
+    }
+    syncedRows.push(...batchRows)
+  }
+  if (syncedRows.length === 0) return { checked: 0, verified: 0, healed: 0, deferred: 0, stalledBatches, mismatches: [], facilities: [] }
+  rows = syncedRows
 
   const batchHealth = await computeBatchHealth([...new Set(rows.map((r) => r.batch_id))])
   const expectedByRowId = await resolveExpectedLines(rows)
@@ -582,7 +731,7 @@ async function runConfirmAndHealPhase(isTest, batchIdFilter) {
     healed += 1
   }
 
-  return { checked, verified, healed, deferred, mismatches, facilities: [...facilities] }
+  return { checked, verified, healed, deferred, stalledBatches, mismatches, facilities: [...facilities] }
 }
 
 // ── Phase 3: FINAL SWEEP (T+150) ─────────────────────────────────────
@@ -612,6 +761,53 @@ async function runFinalSweepPhase() {
 
   const results = []
   for (const cycle of eligibleCycles) {
+    // #1 (2026-09-20): the sweep used to claim the cycle and declare a
+    // verdict unconditionally, which is how a batch that was 69/70 FINE
+    // got reported to Dan as "0 of 70 verified, 70 need manual review" —
+    // the replica simply hadn't finished syncing at T+150, and the sweep
+    // had no notion of "I might be looking at incomplete data." Worse,
+    // claiming sets final_sweep_at, so that false verdict was permanent:
+    // nothing would ever re-check the cycle.
+    //
+    // Now the sweep asks the same two questions the earlier phases do,
+    // BEFORE claiming anything: (a) has this batch's data landed in the
+    // replica at all (fetchBatchSyncState), and (b) does the batch look
+    // systemically stalled rather than genuinely broken (the same
+    // verified-ratio test computeBatchHealth uses). If either says the
+    // data isn't trustworthy yet, the cycle is left unclaimed and
+    // unswept — no verdict, no Front message, no final_sweep_at — and
+    // the next 15-minute tick reconsiders it from scratch.
+    //
+    // FINAL_SWEEP_MAX_DEFER_MINUTES is the escape hatch: deferring
+    // forever would mean a genuinely broken batch silently never gets
+    // reported. Past that outer cap, the sweep runs and reports
+    // regardless, with its message explicitly flagging that the replica
+    // never fully caught up — so a human sees "we couldn't confirm
+    // this" rather than either silence or a confident-but-wrong verdict.
+    const sweepRows = await supabaseGet(
+      `/rest/v1/dpi_import_batches?batch_id=eq.${encodeURIComponent(cycle.batch_id)}&status=eq.success&select=datex_order_id,updated_at,reconciliation_status`
+    )
+    const pastDeferCap = await batchesPastPushThreshold([cycle.batch_id], FINAL_SWEEP_MAX_DEFER_MINUTES)
+    const forcedByCap = pastDeferCap.has(cycle.batch_id)
+
+    if (sweepRows.length > 0 && !forcedByCap) {
+      const sweepOrderIds = [...new Set(sweepRows.map((r) => r.datex_order_id).filter((id) => id != null))]
+      const syncState = await fetchBatchSyncState(sweepOrderIds)
+      if (!syncState.anyLinesPresent) {
+        console.error(`[dpi-reconciliation] final sweep deferred for cycle ${cycle.id} (${cycle.facility} ${cycle.month_key}): 0 of ${sweepOrderIds.length} orders have any lines in MotherDuck yet`)
+        continue
+      }
+      // Same ratio test as computeBatchHealth, applied to the sweep's own
+      // full view of the batch. A batch where almost nothing verifies is
+      // far more likely mid-sync than genuinely 100% broken — real
+      // per-order drop rates have never exceeded ~12% of a batch.
+      const verifiedCount = sweepRows.filter((r) => r.reconciliation_status === 'verified').length
+      if (sweepRows.length >= BATCH_HEALTH_MIN_SIZE && verifiedCount / sweepRows.length < BATCH_HEALTH_MIN_VERIFIED_RATIO) {
+        console.error(`[dpi-reconciliation] final sweep deferred for cycle ${cycle.id} (${cycle.facility} ${cycle.month_key}): only ${verifiedCount}/${sweepRows.length} verified so far — looks like the replica is still catching up, will re-check next tick`)
+        continue
+      }
+    }
+
     const claimed = await claimCycleForFinalSweep(cycle.id)
     if (!claimed) continue // another invocation already swept (or is sweeping) this cycle
 
@@ -627,6 +823,12 @@ async function runFinalSweepPhase() {
     const expectedByRowId = await resolveExpectedLines(rows)
     const orderIds = [...new Set(rows.map((r) => r.datex_order_id).filter((id) => id != null))]
     const actualByOrderId = await fetchActualLines(orderIds)
+    // #2: cheap per-order line counts, used to describe the batch
+    // accurately in the final message (see postFinalSweepSummary) —
+    // specifically to distinguish "this order is short a line" from
+    // "this order hasn't synced at all," which read identically in the
+    // old per-material-only output.
+    const actualCountByOrderId = await fetchActualLineCounts(orderIds)
 
     const problems = []
     let cleanCount = 0
@@ -661,7 +863,7 @@ async function runFinalSweepPhase() {
           reconciliation_checked_at: new Date().toISOString(),
           reconciliation_details: 'original staged CSV data not found (final sweep)',
         })
-        problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+        problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', expectedLineCount: 0, actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0 })
         continue
       }
 
@@ -677,7 +879,14 @@ async function runFinalSweepPhase() {
       })
 
       if (verified) cleanCount += 1
-      else problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
+      else problems.push({
+        agency_number: row.agency_number,
+        agency_name: row.agency_name,
+        datex_order_id: row.datex_order_id,
+        details,
+        expectedLineCount: expectedLines.length,
+        actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0,
+      })
     }
 
     const detailsText = problems.length === 0
@@ -685,14 +894,14 @@ async function runFinalSweepPhase() {
       : `${cleanCount} of ${rows.length} orders verified complete. ${problems.length} do not match the original CSV.`
     await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, { final_sweep_details: detailsText })
 
-    await postFinalSweepSummary(cycle, rows.length, cleanCount, problems)
+    await postFinalSweepSummary(cycle, rows.length, cleanCount, problems, forcedByCap)
     results.push({ facility: cycle.facility, monthKey: cycle.month_key, swept: rows.length, verified: cleanCount, problems })
   }
 
   return results
 }
 
-async function postFinalSweepSummary(cycle, totalCount, cleanCount, problems) {
+async function postFinalSweepSummary(cycle, totalCount, cleanCount, problems, forcedByCap) {
   const prefix = `**DPI Monthly FINAL SWEEP — ${cycle.facility}, ${cycle.month_key}**`
   const intro = `T+${FINAL_SWEEP_AFTER_MINUTES} minutes after import — a complete, independent re-check of every order against the original CSV, regardless of any earlier reconciliation status. This is the final word on this push.`
 
@@ -701,11 +910,37 @@ async function postFinalSweepSummary(cycle, totalCount, cleanCount, problems) {
     return
   }
 
-  const problemLines = problems.slice(0, 15).map((p) => `- ${p.agency_name} (#${p.agency_number}, order ${p.datex_order_id}): ${p.details}`)
-  const extra = problems.length > 15 ? `\n...and ${problems.length - 15} more` : ''
-  await postToFront(
-    `${prefix}\n${intro}\n${cleanCount} of ${totalCount} verified complete. ${problems.length} need manual review in Datex — these will NOT be auto-corrected:\n${problemLines.join('\n')}${extra}`
-  )
+  // #2 (2026-09-20): split the problems by what the line COUNTS say,
+  // because "this order is short one line" and "this order hasn't
+  // synced yet" produced identical-looking walls of missing-material
+  // text before, and the difference is the difference between a real
+  // 2-minute fix and a false alarm. An order with ZERO lines present
+  // is almost certainly still syncing (a push that created the order
+  // but not one single line is a failure mode never actually observed);
+  // an order with SOME lines but fewer than expected is a genuine,
+  // actionable gap.
+  const notSyncedYet = problems.filter((p) => p.actualLineCount === 0)
+  const genuinelyShort = problems.filter((p) => p.actualLineCount > 0)
+
+  const capNote = forcedByCap
+    ? `\n**NOTE: this batch never fully caught up in MotherDuck within ${Math.round(FINAL_SWEEP_MAX_DEFER_MINUTES / 60)} hours, so this report is being posted unconfirmed rather than deferred further. Treat the counts below as provisional — verify directly in Datex before acting.**`
+    : ''
+
+  const sections = []
+  if (genuinelyShort.length > 0) {
+    const lines = genuinelyShort.slice(0, 15).map((p) =>
+      `- ${p.agency_name} (#${p.agency_number}, order ${p.datex_order_id}): has ${p.actualLineCount} of ${p.expectedLineCount} lines — ${p.details}`
+    )
+    const extra = genuinelyShort.length > 15 ? `\n...and ${genuinelyShort.length - 15} more` : ''
+    sections.push(`${genuinelyShort.length} order(s) genuinely short — these need manual review in Datex and will NOT be auto-corrected:\n${lines.join('\n')}${extra}`)
+  }
+  if (notSyncedYet.length > 0) {
+    const lines = notSyncedYet.slice(0, 10).map((p) => `- ${p.agency_name} (#${p.agency_number}, order ${p.datex_order_id}): expected ${p.expectedLineCount} lines`)
+    const extra = notSyncedYet.length > 10 ? `\n...and ${notSyncedYet.length - 10} more` : ''
+    sections.push(`${notSyncedYet.length} order(s) show NO lines at all in MotherDuck — almost certainly still syncing rather than actually empty, since a push that creates an order but zero lines has never been observed. Verify in Datex before treating these as real problems:\n${lines.join('\n')}${extra}`)
+  }
+
+  await postToFront(`${prefix}\n${intro}${capNote}\n${cleanCount} of ${totalCount} verified complete.\n\n${sections.join('\n\n')}`)
 }
 
 async function postRoutineSummary(observeResult, confirmResult, isTest) {
@@ -729,7 +964,18 @@ async function postRoutineSummary(observeResult, confirmResult, isTest) {
     )
   }
 
-  if (clauses.length === 0) return // nothing happened this tick — no noise post
+  if (clauses.length === 0) {
+    // #3 (2026-09-20): a tick where every eligible batch was skipped for
+    // being unsynced used to post nothing at all, which is
+    // indistinguishable from "nothing was due." Say so explicitly —
+    // otherwise the first sign of a stall is silence, then a confusing
+    // report much later.
+    const totalStalled = (observeResult.stalledBatches || 0) + (confirmResult.stalledBatches || 0)
+    if (totalStalled > 0) {
+      await postToFront(`${prefix}\nWaiting on MotherDuck — ${totalStalled} batch(es) due for a check have no order lines in the replica yet, so nothing was compared or changed this tick. Will re-check automatically every 15 minutes.`)
+    }
+    return // nothing else happened this tick — no noise post
+  }
 
   let body = `${prefix}\n${clauses.join('; ')}.`
   if (confirmResult.mismatches.length > 0) {
@@ -761,12 +1007,15 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
     observed: observeResult.checked,
     observeVerified: observeResult.verified,
     flagged: observeResult.flagged,
+    observeStalledBatches: observeResult.stalledBatches,
     confirmed: confirmResult.checked,
     confirmVerified: confirmResult.verified,
     healed: confirmResult.healed,
+    deferred: confirmResult.deferred,
+    confirmStalledBatches: confirmResult.stalledBatches,
     mismatches: confirmResult.mismatches,
     finalSweeps,
   }
 }
 
-module.exports = { runReconciliation, FIRST_CHECK_AFTER_MINUTES, CONFIRM_AFTER_MINUTES, FINAL_SWEEP_AFTER_MINUTES }
+module.exports = { runReconciliation, FIRST_CHECK_AFTER_MINUTES, CONFIRM_AFTER_MINUTES, FINAL_SWEEP_AFTER_MINUTES, FINAL_SWEEP_MAX_DEFER_MINUTES }
