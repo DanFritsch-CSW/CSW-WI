@@ -63,10 +63,14 @@
 //     batch, so skip it entirely this tick rather than comparing against
 //     data that isn't there. Cheap (one count), decisive, and it runs
 //     before anything expensive or destructive.
-//   BATCH HEALTH (computeBatchHealth) — a batch where almost nothing
-//     verifies is far more likely mid-sync than genuinely 100% broken;
-//     real per-order drop rates have never exceeded ~12% of a batch.
-//     Gates healing and the final sweep's willingness to declare.
+//   BATCH HEALTH — a batch where almost nothing verifies is far more
+//     likely mid-sync than genuinely 100% broken; real per-order drop
+//     rates have never exceeded ~12% of a batch. Gates healing and the
+//     final sweep's willingness to declare. Judged from THIS RUN's own
+//     comparisons in the first-reconcile phase (see the pre-pass there
+//     — judging from stored status can't work in a phase that is itself
+//     the thing writing those statuses), and from stored status in the
+//     final sweep, where every row genuinely has settled by then.
 //
 // Scope: only dpi_import_batches rows with status='success'. 'failed' is
 // already known-bad (flagged at push time with a specific error),
@@ -295,27 +299,14 @@ async function fetchBatchSyncState(orderIds) {
   return { anyLinesPresent: ordersWithLines > 0, ordersWithLines }
 }
 
-async function computeBatchHealth(batchIds) {
-  const health = new Map()
-  if (batchIds.length === 0) return health
-
-  const rows = await supabaseGet(
-    `/rest/v1/dpi_import_batches?status=eq.success&batch_id=in.(${batchIds.map((id) => encodeURIComponent(id)).join(',')})&select=batch_id,reconciliation_status`
-  )
-  const byBatch = new Map()
-  for (const row of rows) {
-    if (!byBatch.has(row.batch_id)) byBatch.set(row.batch_id, { total: 0, verifiedCount: 0 })
-    const entry = byBatch.get(row.batch_id)
-    entry.total += 1
-    if (row.reconciliation_status === 'verified') entry.verifiedCount += 1
-  }
-
-  for (const [batchId, entry] of byBatch) {
-    const healthy = entry.total < BATCH_HEALTH_MIN_SIZE || entry.verifiedCount / entry.total >= BATCH_HEALTH_MIN_VERIFIED_RATIO
-    health.set(batchId, { healthy, ...entry })
-  }
-  return health
-}
+// NOTE (2026-09-21): a computeBatchHealth() helper used to live here,
+// reading reconciliation_status from the database to judge whether a
+// batch looked systemically stalled. It was removed because reading
+// stored state is exactly what made it wrong in this design — see the
+// batch-health pre-pass in runFirstReconcilePhase for the replacement
+// (health judged from this run's own comparisons) and the inline ratio
+// check in runFinalSweepPhase, which reads stored state legitimately
+// since by then every row genuinely has a settled status.
 
 // Splits `rows` into those whose batch has data in the replica and those
 // whose batch doesn't. Shared by every phase that reads the replica.
@@ -423,6 +414,41 @@ async function postToFront(body) {
   }
 }
 
+// 2026-09-21 fix — orphaned 'checking' rows. claimRow sets 'checking'
+// as a transitional marker that every code path overwrites with a real
+// outcome milliseconds later. But if an invocation dies mid-row — a
+// crash, a platform timeout, or a human interrupting a test run (which
+// is exactly what happened 2026-09-21, leaving Trinity Lutheran #457961
+// stuck for 1h42m) — that row is stranded: no phase queries for
+// 'checking', so nothing ever picks it up again, and because 'checking'
+// counts as non-terminal the FINAL SWEEP waits on it too. One orphan
+// silently blocks a whole cycle's closing report until the 14-hour cap
+// forces it out.
+//
+// Since a legitimate 'checking' lasts milliseconds, anything older than
+// this threshold is definitionally orphaned. Resetting it to NULL puts
+// it back in the first-reconcile queue with no other state to unwind —
+// the row simply gets checked again on the next tick, as if it had
+// never been claimed. Deliberately generous (15 min) so it can never
+// race a genuinely in-flight invocation.
+const ORPHANED_CHECKING_AFTER_MINUTES = 15
+
+async function recoverOrphanedCheckingRows() {
+  const cutoff = new Date(Date.now() - ORPHANED_CHECKING_AFTER_MINUTES * 60 * 1000).toISOString()
+  // updated_at is the only timestamp claimRow leaves behind — it's
+  // touched by the claim PATCH itself, so it reliably marks when the row
+  // entered 'checking'.
+  const stranded = await supabaseGet(
+    `/rest/v1/dpi_import_batches?reconciliation_status=eq.checking&updated_at=lt.${encodeURIComponent(cutoff)}&select=id,agency_number,agency_name,batch_id`
+  )
+  if (stranded.length === 0) return 0
+  for (const row of stranded) {
+    console.error(`[dpi-reconciliation] recovering orphaned 'checking' row ${row.id} (${row.agency_name} #${row.agency_number}, batch ${row.batch_id}) — stuck past ${ORPHANED_CHECKING_AFTER_MINUTES}min, resetting for re-check`)
+    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}&reconciliation_status=eq.checking`, { reconciliation_status: null })
+  }
+  return stranded.length
+}
+
 // ── Phase A: EARLY LOOK (T+60) ───────────────────────────────────────
 // Informational only. Never writes a reconciliation_status, never writes
 // to Datex. Its one durable effect is stamping early_look_at so it
@@ -499,10 +525,50 @@ async function runFirstReconcilePhase(isTest, batchIdFilter) {
   rows = partitioned.syncedRows
   const stalledBatches = partitioned.stalledBatches
 
-  const batchHealth = await computeBatchHealth([...new Set(rows.map((r) => r.batch_id))])
   const expectedByRowId = await resolveExpectedLines(rows)
   const orderIds = [...new Set(rows.map((r) => r.datex_order_id))]
   const actualByOrderId = await fetchActualLines(orderIds)
+
+  // 2026-09-21 fix — batch-health bootstrapping. computeBatchHealth reads
+  // reconciliation_status from the DATABASE, which worked in the old
+  // design because a separate earlier phase had already marked rows
+  // 'verified' before healing was considered. In this design, THIS phase
+  // is the one that does the verifying, so at the moment it runs every
+  // row is still NULL — the ratio is always 0/N, every batch looks like
+  // a total sync stall, and healing gets deferred on the first pass no
+  // matter how healthy the batch actually is. Confirmed live 2026-09-21:
+  // a batch that was 68/70 fine deferred both of its genuinely-short
+  // rows, then healed them a tick later once the 68 had been written as
+  // 'verified'. Correct behavior, but a wasted cycle and a misleading
+  // "looks like a sync stall" message.
+  //
+  // So the health signal now comes from a read-only PRE-PASS over this
+  // run's own comparisons: compare every row first, count how many come
+  // out clean, and use THAT ratio to decide whether the batch looks
+  // trustworthy enough to heal against. Same threshold, same intent —
+  // just sourced from what this run actually observed rather than from
+  // state it hasn't written yet. Cheap: the comparisons are pure
+  // in-memory work over data already fetched above.
+  const preflightByBatch = new Map()
+  const preflightByRowId = new Map()
+  for (const row of rows) {
+    const expectedLines = expectedByRowId.get(row.id)
+    if (!expectedLines) continue
+    const result = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+    preflightByRowId.set(row.id, result)
+    if (!preflightByBatch.has(row.batch_id)) preflightByBatch.set(row.batch_id, { total: 0, verifiedCount: 0 })
+    const entry = preflightByBatch.get(row.batch_id)
+    entry.total += 1
+    if (result.verified) entry.verifiedCount += 1
+  }
+  const batchHealth = new Map()
+  for (const [batchId, entry] of preflightByBatch) {
+    const healthy = entry.total < BATCH_HEALTH_MIN_SIZE || entry.verifiedCount / entry.total >= BATCH_HEALTH_MIN_VERIFIED_RATIO
+    batchHealth.set(batchId, { healthy, ...entry })
+    if (!healthy) {
+      console.error(`[dpi-reconciliation] first reconcile, batch ${batchId}: only ${entry.verifiedCount}/${entry.total} compare clean this run — treating as a sync stall, deferring all healing`)
+    }
+  }
 
   const facilities = new Set()
   const mismatches = []
@@ -530,7 +596,14 @@ async function runFirstReconcilePhase(isTest, batchIdFilter) {
       continue
     }
 
-    const { verified: isVerified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+    // Reuse the pre-pass result so the batch-health judgment above and
+    // this row's actual disposition come from the identical comparison.
+    // Falls back to a fresh compare if the entry is somehow absent —
+    // it shouldn't be (the pre-pass covers every row with expectedLines,
+    // and rows without it already returned above), but destructuring an
+    // undefined here would take down the whole run.
+    const { verified: isVerified, details, missingLines, hasQtyMismatch } =
+      preflightByRowId.get(row.id) || compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
 
     if (isVerified) {
       await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
@@ -927,6 +1000,10 @@ async function postWorkSummary(firstReconcile, postHeal, isTest) {
 // reconciliation, and post-heal validation — never on the final sweep,
 // whose whole purpose is to wait until a cycle has genuinely settled.
 async function runReconciliation(isTest = false, batchIdFilter = null) {
+  // Runs first: an orphaned 'checking' row would otherwise be invisible
+  // to every phase below AND block the final sweep until the 14h cap.
+  const recovered = await recoverOrphanedCheckingRows()
+
   const earlyLook = await runEarlyLookPhase(isTest, batchIdFilter)
   await postEarlyLookSummary(earlyLook, isTest)
 
@@ -936,7 +1013,7 @@ async function runReconciliation(isTest = false, batchIdFilter = null) {
 
   const finalSweeps = await runFinalSweepPhase()
 
-  return { ok: true, earlyLook, firstReconcile, postHeal, finalSweeps }
+  return { ok: true, recovered, earlyLook, firstReconcile, postHeal, finalSweeps }
 }
 
 module.exports = {
@@ -946,4 +1023,5 @@ module.exports = {
   POST_HEAL_VALIDATE_AFTER_MINUTES,
   MAX_BACKFILL_ATTEMPTS,
   FINAL_SWEEP_MAX_DEFER_MINUTES,
+  ORPHANED_CHECKING_AFTER_MINUTES,
 }
