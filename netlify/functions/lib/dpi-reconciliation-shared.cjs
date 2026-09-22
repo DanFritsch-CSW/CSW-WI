@@ -855,8 +855,27 @@ async function runFinalSweepPhase() {
     const actualByOrderId = await fetchActualLines(orderIds)
     const actualCountByOrderId = await fetchActualLineCounts(orderIds)
 
+    // 2026-09-22 fix — the sweep used to compute its verdict and persist
+    // each row inside ONE loop, then patch the cycle, then post to Front
+    // LAST. Confirmed live: both the 2026-09-22 Madison and Eau Claire
+    // sweeps completed correctly (final_sweep_details recorded "All 70 /
+    // All 76 orders verified complete") but neither Front message ever
+    // appeared — the notification sits downstream of 70-76 sequential
+    // Supabase PATCHes, so anything that ends the invocation in that
+    // loop loses the report while leaving the database perfectly
+    // correct. From the operator's side that is indistinguishable from
+    // the sweep never running, which is the worst possible failure mode
+    // for the one message this whole system exists to produce.
+    //
+    // Now split into three ordered stages: COMPUTE the verdict
+    // (read-only), REPORT it, then PERSIST. Reporting no longer depends
+    // on any write succeeding, and the persist loop is idempotent — if
+    // it dies partway, the next tick's sweep would recompute the same
+    // answer anyway (and the cycle-level claim already guards against a
+    // duplicate post).
     const problems = []
     let cleanCount = 0
+    const rowOutcomes = [] // { rowId, patch } — persisted after reporting
 
     for (const row of rows) {
       // Snapshot what the earlier phases recorded before overwriting it,
@@ -870,23 +889,23 @@ async function runFinalSweepPhase() {
 
       const expectedLines = expectedByRowId.get(row.id)
       if (!expectedLines) {
-        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+        rowOutcomes.push({ rowId: row.id, patch: {
           ...preSweep,
           reconciliation_status: 'mismatch',
           reconciliation_checked_at: new Date().toISOString(),
           reconciliation_details: 'original staged CSV data not found (final sweep)',
-        })
+        } })
         problems.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found', expectedLineCount: 0, actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0, healAttempts: row.reconciliation_backfill_count || 0 })
         continue
       }
 
       const { verified, details } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+      rowOutcomes.push({ rowId: row.id, patch: {
         ...preSweep,
         reconciliation_status: verified ? 'verified' : 'mismatch',
         reconciliation_checked_at: new Date().toISOString(),
         reconciliation_details: verified ? null : `${details} | confirmed by final sweep`,
-      })
+      } })
 
       if (verified) cleanCount += 1
       else problems.push({
@@ -900,9 +919,19 @@ async function runFinalSweepPhase() {
     const detailsText = problems.length === 0
       ? `All ${rows.length} orders verified complete.`
       : `${cleanCount} of ${rows.length} orders verified complete. ${problems.length} do not match the original CSV.`
-    await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, { final_sweep_details: detailsText })
 
+    // REPORT before persisting. The cycle-level detail patch goes first
+    // (one cheap write, so the verdict is durable even if Front is
+    // unreachable), then the Front post, then the per-row writes.
+    await supabasePatch(`/rest/v1/dpi_monthly_cycles?id=eq.${cycle.id}`, { final_sweep_details: detailsText })
     await postFinalSweepSummary(cycle, rows.length, cleanCount, problems, forcedByCap)
+
+    // PERSIST. Deliberately last: nothing above depends on it, and the
+    // operator already has the answer by this point.
+    for (const outcome of rowOutcomes) {
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${outcome.rowId}`, outcome.patch)
+    }
+
     results.push({ facility: cycle.facility, monthKey: cycle.month_key, swept: rows.length, verified: cleanCount, problems })
   }
 
