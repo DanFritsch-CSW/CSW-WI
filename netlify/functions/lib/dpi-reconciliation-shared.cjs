@@ -171,11 +171,19 @@ async function supabasePatch(path, body) {
 // prevented them from grabbing the SAME row, which would risk a
 // duplicate backfill. 'checking' is transitional and always overwritten
 // with a real outcome by the end of processing that row.
+//
+// claimed_at (2026-09-23 fix) is a dedicated column stamped by this PATCH
+// — updated_at is NOT a reliable proxy for claim age (confirmed: a row
+// repeatedly claimed still showed its original push-time updated_at, not
+// the claim time), so orphan detection below could never actually measure
+// how long a row had been claimed, and with concurrent invocations risked
+// resetting a still-live claim, defeating the lock this function exists
+// to provide.
 async function claimRow(rowId, fromStatusFilter) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/dpi_import_batches?id=eq.${rowId}&${fromStatusFilter}`, {
     method: 'PATCH',
     headers: supabaseHeaders({ Prefer: 'return=representation' }),
-    body: JSON.stringify({ reconciliation_status: 'checking' }),
+    body: JSON.stringify({ reconciliation_status: 'checking', claimed_at: new Date().toISOString() }),
   })
   if (!res.ok) return false
   const rows = await res.json().catch(() => [])
@@ -398,17 +406,31 @@ async function backfillMissingLines(row, missingLines, expectedLineCount) {
 const FRONT_API_TOKEN = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
 const FRONT_STATUS_CONVERSATION_ID = 'cnv_1cboo2s4'
 
+// 2026-09-23 fix — postToFront never checked res.ok, so a 4xx/5xx from
+// Front was silently swallowed: the fetch resolved, the function
+// returned normally, and nothing downstream (including the caller) had
+// any way to know the message never posted. Confirmed live 2026-09-22:
+// both the Madison and Eau Claire final sweeps completed and recorded
+// the correct verdict in final_sweep_details, but neither Front message
+// ever appeared, with no error anywhere in the prior code. Logging the
+// status and response body on failure is the fix — next occurrence, the
+// Netlify function log will state Front's actual objection instead of
+// this needing to be re-diagnosed from scratch.
 async function postToFront(body) {
   if (!FRONT_API_TOKEN) {
     console.error('[dpi-reconciliation] FRONT_API_TOKEN not configured — skipping status post')
     return
   }
   try {
-    await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
+    const res = await fetch(`https://api2.frontapp.com/conversations/${FRONT_STATUS_CONVERSATION_ID}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FRONT_API_TOKEN}` },
       body: JSON.stringify({ body }),
     })
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      console.error(`[dpi-reconciliation] Front post FAILED (${res.status}): ${errBody.slice(0, 500)}`)
+    }
   } catch (err) {
     console.error('[dpi-reconciliation] Front status post failed:', err.message)
   }
@@ -433,18 +455,22 @@ async function postToFront(body) {
 // race a genuinely in-flight invocation.
 const ORPHANED_CHECKING_AFTER_MINUTES = 15
 
+// 2026-09-23 fix — this used to key off updated_at, which claimRow does
+// NOT reliably touch on its own (confirmed: a repeatedly-claimed row
+// still showed push-time updated_at). That meant this function could
+// never actually measure claim age, and worse, with concurrent
+// invocations it could reset a genuinely live claim — defeating the very
+// lock claimRow exists to provide. Now reads the dedicated claimed_at
+// column, stamped only by claimRow's PATCH.
 async function recoverOrphanedCheckingRows() {
   const cutoff = new Date(Date.now() - ORPHANED_CHECKING_AFTER_MINUTES * 60 * 1000).toISOString()
-  // updated_at is the only timestamp claimRow leaves behind — it's
-  // touched by the claim PATCH itself, so it reliably marks when the row
-  // entered 'checking'.
   const stranded = await supabaseGet(
-    `/rest/v1/dpi_import_batches?reconciliation_status=eq.checking&updated_at=lt.${encodeURIComponent(cutoff)}&select=id,agency_number,agency_name,batch_id`
+    `/rest/v1/dpi_import_batches?reconciliation_status=eq.checking&claimed_at=lt.${encodeURIComponent(cutoff)}&select=id,agency_number,agency_name,batch_id`
   )
   if (stranded.length === 0) return 0
   for (const row of stranded) {
     console.error(`[dpi-reconciliation] recovering orphaned 'checking' row ${row.id} (${row.agency_name} #${row.agency_number}, batch ${row.batch_id}) — stuck past ${ORPHANED_CHECKING_AFTER_MINUTES}min, resetting for re-check`)
-    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}&reconciliation_status=eq.checking`, { reconciliation_status: null })
+    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}&reconciliation_status=eq.checking`, { reconciliation_status: null, claimed_at: null })
   }
   return stranded.length
 }
@@ -583,84 +609,103 @@ async function runFirstReconcilePhase(isTest, batchIdFilter) {
     const claimed = await claimRow(row.id, 'reconciliation_status=is.null')
     if (!claimed) continue
 
-    const expectedLines = expectedByRowId.get(row.id)
-    checked += 1
+    // 2026-09-23 fix — no per-row try/catch. An unhandled exception
+    // anywhere in this block (most likely inside backfillMissingLines,
+    // which makes real network calls to MotherDuck and Datex) used to
+    // propagate straight out of the loop: it killed the rest of the
+    // batch's rows for this tick AND left the current row stuck in
+    // 'checking' with nothing to move it forward, since every phase that
+    // could pick it back up filters on a DIFFERENT status. Confirmed
+    // live: one order stranded itself in 'checking' twice, which is only
+    // explainable by an exception during processing that also silently
+    // killed the remaining rows in that tick's loop. Catching here means
+    // one bad row can no longer take the whole tick down with it, and
+    // immediately un-claiming (rather than waiting for the 15-minute
+    // orphan sweep in recoverOrphanedCheckingRows) gets it re-checked on
+    // the very next tick instead.
+    try {
+      const expectedLines = expectedByRowId.get(row.id)
+      checked += 1
 
-    if (!expectedLines) {
+      if (!expectedLines) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: 'Could not resolve original staged CSV lines for this agency — cycle/staged data may have been deleted.',
+        })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+        continue
+      }
+
+      // Reuse the pre-pass result so the batch-health judgment above and
+      // this row's actual disposition come from the identical comparison.
+      // Falls back to a fresh compare if the entry is somehow absent —
+      // it shouldn't be (the pre-pass covers every row with expectedLines,
+      // and rows without it already returned above), but destructuring an
+      // undefined here would take down the whole run.
+      const { verified: isVerified, details, missingLines, hasQtyMismatch } =
+        preflightByRowId.get(row.id) || compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+
+      if (isVerified) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'verified',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: null,
+        })
+        verified += 1
+        continue
+      }
+
+      if (hasQtyMismatch || row.shipment_id == null) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: row.shipment_id == null
+            ? `${details} | cannot auto-backfill: no shipment_id stored for this order`
+            : `${details} | not auto-healed (quantity mismatch — needs a human)`,
+        })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
+        continue
+      }
+
+      // Missing-only and healable. Still refuse if the batch as a whole
+      // looks like a sync stall rather than genuine per-order gaps.
+      const health = batchHealth.get(row.batch_id)
+      if (health && !health.healthy) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: null, claimed_at: null })
+        deferred += 1
+        continue
+      }
+
+      if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: null, claimed_at: null })
+        continue
+      }
+
+      const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
+      linesBackfilledThisRun += missingLines.length
+
+      if (!backfillResult.ok) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: `${details} | heal attempt failed: ${backfillResult.error}`,
+        })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (heal failed: ${backfillResult.error})` })
+        continue
+      }
+
       await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: 'Could not resolve original staged CSV lines for this agency — cycle/staged data may have been deleted.',
+        reconciliation_status: 'backfilling',
+        reconciliation_backfilled_at: new Date().toISOString(),
+        reconciliation_backfill_count: 1,
+        reconciliation_details: `Resubmitted ${backfillResult.submittedCount} missing line(s) at T+${FIRST_RECONCILE_AFTER_MINUTES}min. Will re-validate ${POST_HEAL_VALIDATE_AFTER_MINUTES}min after this heal.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
       })
-      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
-      continue
+      healed += 1
+    } catch (err) {
+      console.error(`[dpi-reconciliation] first reconcile: unhandled error processing row ${row.id} (order ${row.datex_order_id}) — un-claiming for retry next tick: ${err.message}`)
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}&reconciliation_status=eq.checking`, { reconciliation_status: null, claimed_at: null })
     }
-
-    // Reuse the pre-pass result so the batch-health judgment above and
-    // this row's actual disposition come from the identical comparison.
-    // Falls back to a fresh compare if the entry is somehow absent —
-    // it shouldn't be (the pre-pass covers every row with expectedLines,
-    // and rows without it already returned above), but destructuring an
-    // undefined here would take down the whole run.
-    const { verified: isVerified, details, missingLines, hasQtyMismatch } =
-      preflightByRowId.get(row.id) || compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-
-    if (isVerified) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'verified',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: null,
-      })
-      verified += 1
-      continue
-    }
-
-    if (hasQtyMismatch || row.shipment_id == null) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: row.shipment_id == null
-          ? `${details} | cannot auto-backfill: no shipment_id stored for this order`
-          : `${details} | not auto-healed (quantity mismatch — needs a human)`,
-      })
-      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details })
-      continue
-    }
-
-    // Missing-only and healable. Still refuse if the batch as a whole
-    // looks like a sync stall rather than genuine per-order gaps.
-    const health = batchHealth.get(row.batch_id)
-    if (health && !health.healthy) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: null })
-      deferred += 1
-      continue
-    }
-
-    if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: null })
-      continue
-    }
-
-    const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
-    linesBackfilledThisRun += missingLines.length
-
-    if (!backfillResult.ok) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: `${details} | heal attempt failed: ${backfillResult.error}`,
-      })
-      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (heal failed: ${backfillResult.error})` })
-      continue
-    }
-
-    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-      reconciliation_status: 'backfilling',
-      reconciliation_backfilled_at: new Date().toISOString(),
-      reconciliation_backfill_count: 1,
-      reconciliation_details: `Resubmitted ${backfillResult.submittedCount} missing line(s) at T+${FIRST_RECONCILE_AFTER_MINUTES}min. Will re-validate ${POST_HEAL_VALIDATE_AFTER_MINUTES}min after this heal.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
-    })
-    healed += 1
   }
 
   return { checked, verified, healed, deferred, stalledBatches, mismatches, facilities: [...facilities] }
@@ -703,88 +748,98 @@ async function runPostHealValidationPhase(isTest, batchIdFilter) {
     const claimed = await claimRow(row.id, 'reconciliation_status=eq.backfilling')
     if (!claimed) continue
 
-    const expectedLines = expectedByRowId.get(row.id)
-    checked += 1
+    // 2026-09-23 fix — same per-row try/catch as runFirstReconcilePhase,
+    // and for the identical reason: this phase also claims into
+    // 'checking' and also calls backfillMissingLines, so it carries the
+    // same exposure to one bad row stranding itself and taking the rest
+    // of the tick's rows down with it.
+    try {
+      const expectedLines = expectedByRowId.get(row.id)
+      checked += 1
 
-    if (!expectedLines) {
+      if (!expectedLines) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: 'Could not resolve original staged CSV lines during post-heal validation.',
+        })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
+        continue
+      }
+
+      const { verified: isVerified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
+      const attemptsSoFar = row.reconciliation_backfill_count || 1
+
+      if (isVerified) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'verified',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: null,
+        })
+        verified += 1
+        continue
+      }
+
+      // A quantity mismatch appearing AFTER a heal is the duplicate-line
+      // signature (the heal landed on top of a line that was merely slow).
+      // Never heal that further — it needs a human to delete the extra.
+      if (hasQtyMismatch) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: `${details} | quantity mismatch after heal attempt ${attemptsSoFar} — likely a duplicate line, needs manual review`,
+        })
+        mismatches.push({
+          agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id,
+          details, expectedLineCount: expectedLines.length, actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0,
+        })
+        continue
+      }
+
+      if (attemptsSoFar >= MAX_BACKFILL_ATTEMPTS) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: `${details} | still short after ${attemptsSoFar} independently-validated heal attempts — needs manual review`,
+        })
+        mismatches.push({
+          agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id,
+          details, expectedLineCount: expectedLines.length, actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0,
+        })
+        continue
+      }
+
+      if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
+        // Put it back as-is; backfilled_at is unchanged so it stays
+        // eligible on the next tick.
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: 'backfilling', claimed_at: null })
+        continue
+      }
+
+      const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
+      linesBackfilledThisRun += missingLines.length
+
+      if (!backfillResult.ok) {
+        await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
+          reconciliation_status: 'mismatch',
+          reconciliation_checked_at: new Date().toISOString(),
+          reconciliation_details: `${details} | second heal attempt failed: ${backfillResult.error}`,
+        })
+        mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (heal failed: ${backfillResult.error})` })
+        continue
+      }
+
       await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: 'Could not resolve original staged CSV lines during post-heal validation.',
+        reconciliation_status: 'backfilling',
+        reconciliation_backfilled_at: new Date().toISOString(),
+        reconciliation_backfill_count: attemptsSoFar + 1,
+        reconciliation_details: `Still short after heal ${attemptsSoFar}; resubmitted ${backfillResult.submittedCount} line(s) (attempt ${attemptsSoFar + 1}). Will re-validate ${POST_HEAL_VALIDATE_AFTER_MINUTES}min from now.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
       })
-      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: 'original staged data not found' })
-      continue
+      healedAgain += 1
+    } catch (err) {
+      console.error(`[dpi-reconciliation] post-heal validation: unhandled error processing row ${row.id} (order ${row.datex_order_id}) — reverting to 'backfilling' for retry next cycle: ${err.message}`)
+      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}&reconciliation_status=eq.checking`, { reconciliation_status: 'backfilling', claimed_at: null })
     }
-
-    const { verified: isVerified, details, missingLines, hasQtyMismatch } = compareLines(expectedLines, actualByOrderId.get(row.datex_order_id))
-    const attemptsSoFar = row.reconciliation_backfill_count || 1
-
-    if (isVerified) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'verified',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: null,
-      })
-      verified += 1
-      continue
-    }
-
-    // A quantity mismatch appearing AFTER a heal is the duplicate-line
-    // signature (the heal landed on top of a line that was merely slow).
-    // Never heal that further — it needs a human to delete the extra.
-    if (hasQtyMismatch) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: `${details} | quantity mismatch after heal attempt ${attemptsSoFar} — likely a duplicate line, needs manual review`,
-      })
-      mismatches.push({
-        agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id,
-        details, expectedLineCount: expectedLines.length, actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0,
-      })
-      continue
-    }
-
-    if (attemptsSoFar >= MAX_BACKFILL_ATTEMPTS) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: `${details} | still short after ${attemptsSoFar} independently-validated heal attempts — needs manual review`,
-      })
-      mismatches.push({
-        agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id,
-        details, expectedLineCount: expectedLines.length, actualLineCount: actualCountByOrderId.get(row.datex_order_id) || 0,
-      })
-      continue
-    }
-
-    if (linesBackfilledThisRun + missingLines.length > MAX_BACKFILL_LINES_PER_RUN) {
-      // Put it back as-is; backfilled_at is unchanged so it stays
-      // eligible on the next tick.
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, { reconciliation_status: 'backfilling' })
-      continue
-    }
-
-    const backfillResult = await backfillMissingLines(row, missingLines, expectedLines.length)
-    linesBackfilledThisRun += missingLines.length
-
-    if (!backfillResult.ok) {
-      await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-        reconciliation_status: 'mismatch',
-        reconciliation_checked_at: new Date().toISOString(),
-        reconciliation_details: `${details} | second heal attempt failed: ${backfillResult.error}`,
-      })
-      mismatches.push({ agency_number: row.agency_number, agency_name: row.agency_name, datex_order_id: row.datex_order_id, details: `${details} (heal failed: ${backfillResult.error})` })
-      continue
-    }
-
-    await supabasePatch(`/rest/v1/dpi_import_batches?id=eq.${row.id}`, {
-      reconciliation_status: 'backfilling',
-      reconciliation_backfilled_at: new Date().toISOString(),
-      reconciliation_backfill_count: attemptsSoFar + 1,
-      reconciliation_details: `Still short after heal ${attemptsSoFar}; resubmitted ${backfillResult.submittedCount} line(s) (attempt ${attemptsSoFar + 1}). Will re-validate ${POST_HEAL_VALIDATE_AFTER_MINUTES}min from now.${backfillResult.partialWarning ? ' ' + backfillResult.partialWarning : ''}`,
-    })
-    healedAgain += 1
   }
 
   return { checked, verified, healedAgain, stalledBatches, mismatches, facilities: [...facilities] }
