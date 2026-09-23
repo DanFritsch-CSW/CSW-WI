@@ -74,11 +74,14 @@ import { computeAutoDeliveryDate, formatTimeDisplay } from './dpiCalendarUtils.j
 // originally lived as a clickable line right here in each Lane — moved
 // to RouteCalendar.jsx's RouteChip per Dan's feedback that editing should
 // happen where the calendar actually is, not in a disconnected snippet
-// under the lane cards. The line below is now read-only context only.
-// Edits are per-cycle (this month's dpi_routes row, not the template) —
-// this month's actual variance, not a change to next month's default.
-// Editing the annual template itself is a separate, later item (the
-// template editor).
+// under the lane cards. The line below is now read-only context only,
+// labeled "Appt"/"Leave"/"Deliver" to match the calendar chip's editor
+// (relabeled from "Load" to "Appt" per Dan: it's really the appointment
+// time CSW needs the trailer loaded/ready, as distinct from when the
+// carrier's driver actually leaves with it). Edits are per-cycle (this
+// month's dpi_routes row, not the template) — this month's actual
+// variance, not a change to next month's default. Editing the annual
+// template itself is a separate, later item (the template editor).
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
@@ -411,7 +414,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         </div>
         {route && (route.load_day || route.deliver_day || route.depart_day) && (
           <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 2 }}>
-            Load {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
+            Appt {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
             {' · '}Leave {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
             {' · '}Deliver {route.deliver_day || '—'}
           </div>
@@ -485,7 +488,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions. To edit this month's load and leave day/time, click a route in the calendar above.
+        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions. To edit this month's appointment and leave day/time, click a route in the calendar above.
       </div>
     </div>
   )
