@@ -49,21 +49,45 @@ import { WEEKDAY_LABELS, buildMonthGrid, formatTimeDisplay } from './dpiCalendar
 // a route's load/leave day+time used to live in a small clickable text
 // line under Phase2BuildFlag's Lane cards — disconnected from the
 // calendar a person is actually looking at when scheduling. That editor
-// now lives directly on RouteChip instead, which is shared by both the
-// day grid AND the week trays, so every route gets the same edit surface
-// regardless of whether it's been scheduled yet. Clicking a chip expands
-// it in place (day-select + time-input pairs for load and leave, plus
-// Save/Cancel); a chip is deliberately not draggable while expanded, so a
-// click into one of its inputs can't be mistaken for a drag gesture.
-// Saves write straight to that route's dpi_routes row and call
-// onRoutesChanged() to refresh from Supabase, the same pattern assignDate
-// already uses below — RouteCalendar doesn't own route state itself.
-// Cycle-scoped, not the template: this month's actual variance, not a
-// change to next month's default (a template editor is a separate, later
-// item).
+// now lives directly on RouteChip instead, shared by both the day grid
+// AND the week trays, so every route gets the same edit surface
+// regardless of whether it's been scheduled yet.
+//
+// 2026-09-23 (drag/click conflict — real bug, not cosmetic): the first
+// version of this put draggable AND the click-to-edit handler on the SAME
+// div, and the edit panel was rendered as that div's own children,
+// swapped in via isEditing state. A click with even a hair of mouse
+// movement (trivial on a trackpad) is enough for the browser to start a
+// native drag on a draggable element — and if that happens right as
+// React swaps that same element's children out from under it (chip text
+// -> edit form), the browser's drag session gets orphaned: dragend never
+// fires, so the opacity 0.4 set on dragstart (a direct DOM mutation, not
+// React state — see the note above on why) never resets, and the chip is
+// left permanently faded and unresponsive to both clicks and drags.
+// Confirmed live: Dan hit this exact freeze clicking "Route MADISON."
+// Fixed structurally: the draggable element (routeLabel below) and the
+// expandable edit panel are now SIBLINGS, not parent/child — the
+// draggable node's own children never change based on isEditing, so a
+// drag session attached to it is never disrupted by the edit panel
+// appearing or disappearing next to it. onClick also defensively resets
+// opacity to '1' itself, in case a prior session is still stuck in the
+// old broken state from before this fix (a normal page refresh clears it
+// too, since opacity is never persisted anywhere — purely a transient
+// DOM style on that one browser tab).
+//
+// 2026-09-23 (two labeled boxes): per Dan, the single-line "Load"/"Leave"
+// editor didn't make the distinction between the two times clear enough
+// for how this actually works operationally — CSW has an APPOINTMENT
+// time (load_day/load_time: when CSW needs the trailer loaded and ready,
+// e.g. for a drop trailer that then sits overnight) and a separate LEAVE
+// time (depart_day/depart_time: when the carrier's driver actually picks
+// it up and departs CSW, which is what starts the stop-to-stop delivery
+// clock in Phase 5). Re-labeled and boxed accordingly; the underlying
+// dpi_routes columns are unchanged (load_day/load_time, depart_day/
+// depart_time), only the UI labels and layout changed.
 
 const scheduleSelectStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text }
-const scheduleTimeInputStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, width: 88 }
+const scheduleTimeInputStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, width: 92 }
 
 export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
   const draggingRouteIdRef = useRef(null)
@@ -128,72 +152,89 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
   const RouteChip = ({ route }) => {
     const isEditing = editingRouteId === route.id
     return (
-      <div
-        draggable={!isEditing}
-        onDragStart={(e) => {
-          draggingRouteIdRef.current = route.id
-          e.currentTarget.style.opacity = '0.4'
-        }}
-        onDragEnd={(e) => {
-          draggingRouteIdRef.current = null
-          e.currentTarget.style.opacity = '1'
-        }}
-        style={{
-          padding: '4px 8px', borderRadius: 5, background: colors.panelAlt,
-          border: `1px solid ${isEditing ? colors.accent : colors.border}`, fontSize: 12, marginBottom: 4,
-          cursor: isEditing ? 'default' : 'grab', display: 'block',
-        }}
-      >
+      <div style={{ marginBottom: 4 }}>
+        {/* Draggable label — its own children NEVER change based on
+            isEditing, so a drag session attached to this exact node can't
+            be disrupted by the edit panel below appearing/disappearing.
+            This is the fix for the freeze described above. */}
         <div
-          onClick={() => { if (!isEditing) startEditSchedule(route) }}
-          style={{ cursor: isEditing ? 'default' : 'pointer' }}
-          title={isEditing ? undefined : 'Click to edit load/leave day & time'}
+          draggable={!isEditing}
+          onDragStart={(e) => {
+            draggingRouteIdRef.current = route.id
+            e.currentTarget.style.opacity = '0.4'
+          }}
+          onDragEnd={(e) => {
+            draggingRouteIdRef.current = null
+            e.currentTarget.style.opacity = '1'
+          }}
+          onClick={(e) => {
+            e.currentTarget.style.opacity = '1' // defensive: clears a stuck fade from any prior session
+            if (!isEditing) startEditSchedule(route)
+          }}
+          style={{
+            padding: '4px 8px', borderRadius: 5, background: colors.panelAlt,
+            border: `1px solid ${isEditing ? colors.accent : colors.border}`, fontSize: 12,
+            cursor: isEditing ? 'default' : 'pointer',
+          }}
+          title="Click to edit appointment/leave day & time · drag to move to a different day"
         >
           Route {route.route_number}
+          {!isEditing && (route.load_day || route.depart_day || route.load_time || route.depart_time) && (
+            <div style={{ fontSize: 10, color: colors.textFaint, marginTop: 1 }}>
+              {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
+              {' → '}
+              {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
+            </div>
+          )}
         </div>
-        {!isEditing && (route.load_day || route.depart_day || route.load_time || route.depart_time) && (
-          <div style={{ fontSize: 10, color: colors.textFaint, marginTop: 1 }}>
-            {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
-            {' → '}
-            {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
-          </div>
-        )}
+
+        {/* Edit panel — a SIBLING of the draggable label above, never its
+            child, so it can mount/unmount freely without touching the
+            draggable node's own DOM subtree. Not draggable itself. */}
         {isEditing && (
-          <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: 10, color: colors.textFaint, width: 30 }}>Load</span>
-              <select
-                value={editSchedule.load_day}
-                onChange={(e) => setEditSchedule((s) => ({ ...s, load_day: e.target.value }))}
-                style={scheduleSelectStyle}
-              >
-                <option value="">—</option>
-                {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
-              </select>
-              <input
-                type="time"
-                value={editSchedule.load_time}
-                onChange={(e) => setEditSchedule((s) => ({ ...s, load_time: e.target.value }))}
-                style={scheduleTimeInputStyle}
-              />
+          <div style={{ marginTop: 4, padding: 6, borderRadius: 6, border: `1px solid ${colors.accent}`, background: colors.panel, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ border: `1px solid ${colors.border}`, borderRadius: 5, padding: '5px 6px' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: colors.text }}>Appointment Time</div>
+              <div style={{ fontSize: 9, color: colors.textFaint, marginBottom: 4 }}>When CSW loads it</div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <select
+                  value={editSchedule.load_day}
+                  onChange={(e) => setEditSchedule((s) => ({ ...s, load_day: e.target.value }))}
+                  style={scheduleSelectStyle}
+                >
+                  <option value="">—</option>
+                  {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <input
+                  type="time"
+                  value={editSchedule.load_time}
+                  onChange={(e) => setEditSchedule((s) => ({ ...s, load_time: e.target.value }))}
+                  style={scheduleTimeInputStyle}
+                />
+              </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: 10, color: colors.textFaint, width: 30 }}>Leave</span>
-              <select
-                value={editSchedule.depart_day}
-                onChange={(e) => setEditSchedule((s) => ({ ...s, depart_day: e.target.value }))}
-                style={scheduleSelectStyle}
-              >
-                <option value="">—</option>
-                {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
-              </select>
-              <input
-                type="time"
-                value={editSchedule.depart_time}
-                onChange={(e) => setEditSchedule((s) => ({ ...s, depart_time: e.target.value }))}
-                style={scheduleTimeInputStyle}
-              />
+
+            <div style={{ border: `1px solid ${colors.border}`, borderRadius: 5, padding: '5px 6px' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: colors.text }}>Leave Time</div>
+              <div style={{ fontSize: 9, color: colors.textFaint, marginBottom: 4 }}>When the carrier departs CSW — starts the stop-to-stop delivery clock</div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <select
+                  value={editSchedule.depart_day}
+                  onChange={(e) => setEditSchedule((s) => ({ ...s, depart_day: e.target.value }))}
+                  style={scheduleSelectStyle}
+                >
+                  <option value="">—</option>
+                  {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <input
+                  type="time"
+                  value={editSchedule.depart_time}
+                  onChange={(e) => setEditSchedule((s) => ({ ...s, depart_time: e.target.value }))}
+                  style={scheduleTimeInputStyle}
+                />
+              </div>
             </div>
+
             <div style={{ display: 'flex', gap: 8 }}>
               <button
                 onClick={() => saveSchedule(route.id)}
@@ -235,7 +276,7 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
         Delivery dates — {cycle.month_key}
       </div>
       <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 12 }}>
-        Each route starts on its usual week/weekday — drag it to a different day if this month's truck availability calls for it. Click a route to edit its load/leave day & time.
+        Each route starts on its usual week/weekday — drag it to a different day if this month's truck availability calls for it. Click a route to edit its appointment/leave day & time.
       </div>
 
       {unscheduledOther.length > 0 && (
