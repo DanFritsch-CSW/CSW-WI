@@ -6,7 +6,7 @@ import {
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
 import RouteCalendar from './RouteCalendar.jsx'
-import { computeAutoDeliveryDate } from './dpiCalendarUtils.js'
+import { computeAutoDeliveryDate, WEEKDAY_LABELS } from './dpiCalendarUtils.js'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -51,6 +51,31 @@ import { computeAutoDeliveryDate } from './dpiCalendarUtils.js'
 // works for both facilities' differently-shaped real data without a
 // facility-specific special case.
 //
+// 2026-09-23 (load/leave time — data layer): dpi_route_templates and
+// dpi_routes both re-parsed live against production_db. Madison's real
+// delivery weekday has been moved into deliver_day (was NULL — the old
+// load_day text like "Del Date Thur -" actually held it). depart_time
+// used to smash a day-of-week and a time together as free text for
+// Madison (e.g. "Tue PM") with nowhere else to put the day; that's now
+// split into a dedicated depart_day column plus a real `time`-typed
+// depart_time (load_time is likewise now `time`-typed, not text).
+// Deliberately NOT backfilled with a fabricated hour: most source rows
+// only ever recorded a half-day ("AM"/"PM"), never a specific hour — only
+// routes 105, 113 (EC) and MADISON/GRANT/JUNEA/OZAUK (Madison) had a real
+// hour in the source, so those are the only ones pre-filled; everything
+// else shows blank in the picker below for Jen/Dan to fill in for real,
+// rather than this guessing a time that was never actually given.
+// CEMIL is a genuine unresolved gap: its old depart_time was bare "PM"
+// with no day at all, unlike every other Thursday-delivery Madison route
+// (DELLS, FONDY), which explicitly say "Wed PM" — depart_day/depart_time
+// are left null rather than assumed.
+//
+// These edits are per-cycle (they land on this month's dpi_routes row,
+// not on dpi_route_templates), matching Dan's framing: capturing this
+// month's actual load/leave time, not permanently changing next month's
+// default. Editing the annual template itself is a separate, later item
+// (A2 — the template editor).
+//
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
 //     materials/packaging weight lookup. Must be replaced before this phase
@@ -65,14 +90,30 @@ import { computeAutoDeliveryDate } from './dpiCalendarUtils.js'
 //     "+ Add route" takes a free-text code rather than auto-numbering,
 //     since auto-numbering only makes sense for EC's convention.
 
+const scheduleSelectStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text }
+const scheduleTimeInputStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, width: 88 }
+
+// dpi_routes.load_time/depart_time come back from Supabase as "HH:MM:SS"
+// (Postgres `time`). Formats for display; returns null for an unset time
+// so callers can decide how to render "no time recorded" themselves.
+function formatTimeDisplay(t) {
+  if (!t) return null
+  const [h, m] = t.split(':').map(Number)
+  const period = h >= 12 ? 'PM' : 'AM'
+  const h12 = h % 12 === 0 ? 12 : h % 12
+  return `${h12}:${String(m).padStart(2, '0')} ${period}`
+}
+
 export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
-  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, delivery_date, template_week, stops: [agencyNumber,...] }]
+  const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, load_time, depart_day, depart_time, delivery_date, template_week, stops: [agencyNumber,...] }]
   const [unassigned, setUnassigned] = useState([]) // [agencyNumber,...]
   const [loading, setLoading] = useState(true)
   const draggingAgencyRef = useRef(null)
   const [newRouteCode, setNewRouteCode] = useState('')
   const [editingRouteId, setEditingRouteId] = useState(null)
   const [editRouteValue, setEditRouteValue] = useState('')
+  const [editingScheduleRouteId, setEditingScheduleRouteId] = useState(null)
+  const [editSchedule, setEditSchedule] = useState({ load_day: '', load_time: '', depart_day: '', depart_time: '' })
 
   const agencyByNumber = new Map(stagedAgencies.map((a) => [a.agencyNumber, a]))
 
@@ -115,6 +156,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           load_day: template.load_day,
           deliver_day: template.deliver_day,
           load_time: template.load_time,
+          depart_day: template.depart_day,
           depart_time: template.depart_time,
           notes: template.notes,
           template_week: template.template_week,
@@ -175,6 +217,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       load_day: r.load_day,
       deliver_day: r.deliver_day,
       load_time: r.load_time,
+      depart_day: r.depart_day,
       depart_time: r.depart_time,
       delivery_date: r.delivery_date,
       template_week: r.template_week,
@@ -204,7 +247,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       .select()
       .single()
     if (error) { console.error('add route:', error); return }
-    setRoutes((prev) => [...prev, { id: data.id, route_number: data.route_number, load_day: null, deliver_day: null, load_time: null, depart_time: null, stops: [] }])
+    setRoutes((prev) => [...prev, { id: data.id, route_number: data.route_number, load_day: null, deliver_day: null, load_time: null, depart_day: null, depart_time: null, stops: [] }])
     setNewRouteCode('')
   }
 
@@ -224,6 +267,39 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       .update({ route_number: trimmed, updated_at: new Date().toISOString() })
       .eq('id', routeId)
     if (error) console.error('rename route:', error)
+  }
+
+  // Load/leave day+time editing. Cycle-scoped — this writes to THIS
+  // month's dpi_routes row only, never dpi_route_templates, so it's
+  // exactly "fix this month's variance" (Dan's framing) rather than
+  // "change next month's default." A route reset via "Regenerate routes"
+  // re-seeds from the template and loses any edit made here, same as
+  // every other Phase 2 field.
+  const startEditSchedule = (route) => {
+    setEditingScheduleRouteId(route.id)
+    setEditSchedule({
+      load_day: route.load_day || '',
+      load_time: route.load_time ? route.load_time.slice(0, 5) : '',
+      depart_day: route.depart_day || '',
+      depart_time: route.depart_time ? route.depart_time.slice(0, 5) : '',
+    })
+  }
+
+  const saveSchedule = async (routeId) => {
+    const payload = {
+      load_day: editSchedule.load_day || null,
+      load_time: editSchedule.load_time || null,
+      depart_day: editSchedule.depart_day || null,
+      depart_time: editSchedule.depart_time || null,
+    }
+    setRoutes((prev) => prev.map((r) => (r.id === routeId ? { ...r, ...payload } : r)))
+    setEditingScheduleRouteId(null)
+    if (!supabase) return
+    const { error } = await supabase
+      .from('dpi_routes')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', routeId)
+    if (error) console.error('save schedule:', error)
   }
 
   // Moves an agency into targetRouteId (null = Unassigned), persisting the
@@ -284,11 +360,12 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   // orders and staged CSV data from Phase 1. This only clears the derived
   // routes/stops and re-runs seeding against the SAME staged agencies, so
   // Phase 1's work is untouched. Explicitly destructive to anything done
-  // IN Phase 2 so far, though — any manual route renames, agency moves, or
-  // delivery-date drags are lost, hence the confirmation.
+  // IN Phase 2 so far, though — any manual route renames, agency moves,
+  // schedule edits, or delivery-date drags are lost, hence the
+  // confirmation.
   const regenerateRoutes = async () => {
     if (!supabase || !cycle) return
-    if (!window.confirm('Delete all routes for this cycle and rebuild them fresh from the template? Any manual route renames, agency moves, or delivery-date changes made so far will be lost. Imported orders from Phase 1 are not affected.')) {
+    if (!window.confirm('Delete all routes for this cycle and rebuild them fresh from the template? Any manual route renames, agency moves, schedule edits, or delivery-date changes made so far will be lost. Imported orders from Phase 1 are not affected.')) {
       return
     }
     const routeIds = routes.map((r) => r.id)
@@ -377,9 +454,59 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             </div>
           )}
         </div>
-        {route && (route.load_day || route.deliver_day) && (
-          <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 2 }}>
-            {route.load_day || ''}{route.load_day && route.deliver_day ? ' → ' : ''}{route.deliver_day || ''}
+        {route && editingScheduleRouteId === route.id ? (
+          <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 11, color: colors.textFaint, width: 32 }}>Load</span>
+              <select
+                value={editSchedule.load_day}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, load_day: e.target.value }))}
+                style={scheduleSelectStyle}
+              >
+                <option value="">—</option>
+                {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <input
+                type="time"
+                value={editSchedule.load_time}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, load_time: e.target.value }))}
+                style={scheduleTimeInputStyle}
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 11, color: colors.textFaint, width: 32 }}>Leave</span>
+              <select
+                value={editSchedule.depart_day}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, depart_day: e.target.value }))}
+                style={scheduleSelectStyle}
+              >
+                <option value="">—</option>
+                {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <input
+                type="time"
+                value={editSchedule.depart_time}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, depart_time: e.target.value }))}
+                style={scheduleTimeInputStyle}
+              />
+            </div>
+            <button
+              onClick={() => saveSchedule(route.id)}
+              style={{ fontSize: 11, color: colors.accent, background: 'none', border: 'none', cursor: 'pointer', alignSelf: 'flex-start' }}
+            >
+              Save
+            </button>
+          </div>
+        ) : route && (
+          <div
+            style={{ fontSize: 11, color: colors.textFaint, marginTop: 2, cursor: 'pointer' }}
+            onClick={() => startEditSchedule(route)}
+            title="Click to edit load/leave day & time"
+          >
+            Load {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
+            {' · '}Leave {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
+            {' · '}Deliver {route.deliver_day || '—'}
+            <span> ✎</span>
           </div>
         )}
       </div>
@@ -451,7 +578,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions.
+        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions. Click a route's Load/Leave/Deliver line to edit this month's load and leave day/time.
       </div>
     </div>
   )
