@@ -72,6 +72,12 @@ function parseWeekdayIndex(text) {
 // doesn't parse to anything, so a properly-populated deliver_day is
 // never second-guessed or overridden by a route's real load day.
 //
+// 2026-09-23: Madison's deliver_day has since been backfilled for real
+// (see dpi_route_templates/dpi_routes) so the fallback below is now dead
+// code for Madison in practice — left in place as a safety net and
+// because it costs nothing to keep working the same way for both
+// facilities without a special case.
+//
 // Returns a "YYYY-MM-DD" date string, or null if it can't be computed
 // (no template_week, neither field parses to a weekday, or — for a
 // short month — a template_week that doesn't actually have a full
@@ -93,4 +99,17 @@ function computeAutoDeliveryDate(monthKey, templateWeek, deliverDayText, loadDay
   return `${monthKey}-${String(day).padStart(2, '0')}`
 }
 
-export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate }
+// dpi_routes.load_time/depart_time come back from Supabase as "HH:MM:SS"
+// (Postgres `time`). Formats for display as e.g. "6:00 AM"; returns null
+// for an unset time so callers can decide how to render "no time
+// recorded" themselves. Shared by RouteCalendar.jsx (chip subtitle) and
+// Phase2BuildFlag.jsx (Lane header) so the two never drift out of format.
+function formatTimeDisplay(t) {
+  if (!t) return null
+  const [h, m] = t.split(':').map(Number)
+  const period = h >= 12 ? 'PM' : 'AM'
+  const h12 = h % 12 === 0 ? 12 : h % 12
+  return `${h12}:${String(m).padStart(2, '0')} ${period}`
+}
+
+export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay }
