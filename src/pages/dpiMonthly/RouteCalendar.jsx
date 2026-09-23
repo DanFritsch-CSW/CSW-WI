@@ -1,7 +1,7 @@
-import React, { useRef } from 'react'
+import React, { useRef, useState } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { colors, cardStyle } from './dpiMonthlyStyles.js'
-import { WEEKDAY_LABELS, buildMonthGrid } from './dpiCalendarUtils.js'
+import { WEEKDAY_LABELS, buildMonthGrid, formatTimeDisplay } from './dpiCalendarUtils.js'
 
 // Phase 2 — delivery date calendar. Real September 2026 dock appointment
 // data (checked live against MotherDuck 2026-09-06) showed: the WEEK a
@@ -44,9 +44,31 @@ import { WEEKDAY_LABELS, buildMonthGrid } from './dpiCalendarUtils.js'
 // stays in sync with the auto-fill computation above) only assigns week
 // numbers to genuinely full 7-day rows, counted sequentially from the
 // first one — a partial row gets no week-number tray at all.
+//
+// 2026-09-23 (load/leave editing moved here): per Dan's feedback, editing
+// a route's load/leave day+time used to live in a small clickable text
+// line under Phase2BuildFlag's Lane cards — disconnected from the
+// calendar a person is actually looking at when scheduling. That editor
+// now lives directly on RouteChip instead, which is shared by both the
+// day grid AND the week trays, so every route gets the same edit surface
+// regardless of whether it's been scheduled yet. Clicking a chip expands
+// it in place (day-select + time-input pairs for load and leave, plus
+// Save/Cancel); a chip is deliberately not draggable while expanded, so a
+// click into one of its inputs can't be mistaken for a drag gesture.
+// Saves write straight to that route's dpi_routes row and call
+// onRoutesChanged() to refresh from Supabase, the same pattern assignDate
+// already uses below — RouteCalendar doesn't own route state itself.
+// Cycle-scoped, not the template: this month's actual variance, not a
+// change to next month's default (a template editor is a separate, later
+// item).
+
+const scheduleSelectStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text }
+const scheduleTimeInputStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, width: 88 }
 
 export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
   const draggingRouteIdRef = useRef(null)
+  const [editingRouteId, setEditingRouteId] = useState(null)
+  const [editSchedule, setEditSchedule] = useState({ load_day: '', load_time: '', depart_day: '', depart_time: '' })
 
   const weeks = buildMonthGrid(cycle.month_key)
   const [year, month] = cycle.month_key.split('-').map(Number)
@@ -64,6 +86,33 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
     onRoutesChanged()
   }
 
+  const startEditSchedule = (route) => {
+    setEditingRouteId(route.id)
+    setEditSchedule({
+      load_day: route.load_day || '',
+      load_time: route.load_time ? route.load_time.slice(0, 5) : '',
+      depart_day: route.depart_day || '',
+      depart_time: route.depart_time ? route.depart_time.slice(0, 5) : '',
+    })
+  }
+
+  const saveSchedule = async (routeId) => {
+    const payload = {
+      load_day: editSchedule.load_day || null,
+      load_time: editSchedule.load_time || null,
+      depart_day: editSchedule.depart_day || null,
+      depart_time: editSchedule.depart_time || null,
+    }
+    setEditingRouteId(null)
+    if (!supabase) return
+    const { error } = await supabase
+      .from('dpi_routes')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', routeId)
+    if (error) { console.error('save schedule:', error); return }
+    onRoutesChanged()
+  }
+
   const unscheduled = routes.filter((r) => !r.delivery_date)
   const unscheduledByWeek = (weekNum) => unscheduled.filter((r) => r.template_week === weekNum)
   const unscheduledOther = unscheduled.filter((r) => r.template_week == null)
@@ -76,26 +125,94 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
     routesByDate.get(day).push(r)
   }
 
-  const RouteChip = ({ route }) => (
-    <div
-      draggable
-      onDragStart={(e) => {
-        draggingRouteIdRef.current = route.id
-        e.currentTarget.style.opacity = '0.4'
-      }}
-      onDragEnd={(e) => {
-        draggingRouteIdRef.current = null
-        e.currentTarget.style.opacity = '1'
-      }}
-      style={{
-        padding: '4px 8px', borderRadius: 5, background: colors.panelAlt,
-        border: `1px solid ${colors.border}`, fontSize: 12, marginBottom: 4,
-        cursor: 'grab', display: 'inline-block',
-      }}
-    >
-      Route {route.route_number}
-    </div>
-  )
+  const RouteChip = ({ route }) => {
+    const isEditing = editingRouteId === route.id
+    return (
+      <div
+        draggable={!isEditing}
+        onDragStart={(e) => {
+          draggingRouteIdRef.current = route.id
+          e.currentTarget.style.opacity = '0.4'
+        }}
+        onDragEnd={(e) => {
+          draggingRouteIdRef.current = null
+          e.currentTarget.style.opacity = '1'
+        }}
+        style={{
+          padding: '4px 8px', borderRadius: 5, background: colors.panelAlt,
+          border: `1px solid ${isEditing ? colors.accent : colors.border}`, fontSize: 12, marginBottom: 4,
+          cursor: isEditing ? 'default' : 'grab', display: 'block',
+        }}
+      >
+        <div
+          onClick={() => { if (!isEditing) startEditSchedule(route) }}
+          style={{ cursor: isEditing ? 'default' : 'pointer' }}
+          title={isEditing ? undefined : 'Click to edit load/leave day & time'}
+        >
+          Route {route.route_number}
+        </div>
+        {!isEditing && (route.load_day || route.depart_day || route.load_time || route.depart_time) && (
+          <div style={{ fontSize: 10, color: colors.textFaint, marginTop: 1 }}>
+            {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
+            {' → '}
+            {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
+          </div>
+        )}
+        {isEditing && (
+          <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 10, color: colors.textFaint, width: 30 }}>Load</span>
+              <select
+                value={editSchedule.load_day}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, load_day: e.target.value }))}
+                style={scheduleSelectStyle}
+              >
+                <option value="">—</option>
+                {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <input
+                type="time"
+                value={editSchedule.load_time}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, load_time: e.target.value }))}
+                style={scheduleTimeInputStyle}
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 10, color: colors.textFaint, width: 30 }}>Leave</span>
+              <select
+                value={editSchedule.depart_day}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, depart_day: e.target.value }))}
+                style={scheduleSelectStyle}
+              >
+                <option value="">—</option>
+                {WEEKDAY_LABELS.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <input
+                type="time"
+                value={editSchedule.depart_time}
+                onChange={(e) => setEditSchedule((s) => ({ ...s, depart_time: e.target.value }))}
+                style={scheduleTimeInputStyle}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={() => saveSchedule(route.id)}
+                style={{ fontSize: 11, color: colors.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                Save
+              </button>
+              <button
+                onClick={() => setEditingRouteId(null)}
+                style={{ fontSize: 11, color: colors.textFaint, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   const WeekTray = ({ label, routesInWeek }) => (
     <div
@@ -118,7 +235,7 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
         Delivery dates — {cycle.month_key}
       </div>
       <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 12 }}>
-        Each route starts on its usual week/weekday — drag it to a different day if this month's truck availability calls for it.
+        Each route starts on its usual week/weekday — drag it to a different day if this month's truck availability calls for it. Click a route to edit its load/leave day & time.
       </div>
 
       {unscheduledOther.length > 0 && (
