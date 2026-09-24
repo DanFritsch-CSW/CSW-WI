@@ -32,7 +32,8 @@
 // Input (POST JSON): {
 //   facility, monthKey,
 //   routes: [{
-//     routeNumber, loadDay, loadDateStr, deliverDay, deliverDateStr,
+//     routeNumber, loadDay, loadDateStr, loadTimeStr,
+//     deliverDay, deliverDateStr, departDay, departTimeStr,
 //     highlight,       // first pipe-segment of the route's notes, or null
 //     restNotes,       // remaining pipe-segments, as an array of strings
 //     stops: [{ time, agencyNumber, agencyName, city, grossWeight, totalCases, travelTime }],
@@ -106,12 +107,26 @@ class RouteSheetPdf {
     this.text(MARGIN + 45, y, String(route.routeNumber || ''), { size: 13, bold: true })
     y += 20
 
-    this.text(MARGIN, y, `Load Date - ${route.loadDay || '—'}`, { size: 10, bold: true })
-    if (route.loadDateStr) this.text(MARGIN + 150, y - 3, route.loadDateStr, { size: 7, color: rgb(0.4, 0.4, 0.45) })
+    this.text(MARGIN, y, `Load Date - ${route.loadDay || '—'}${route.loadTimeStr ? ' ' + route.loadTimeStr : ''}`, { size: 10, bold: true })
+    if (route.loadDateStr) this.text(MARGIN + 190, y - 3, route.loadDateStr, { size: 7, color: rgb(0.4, 0.4, 0.45) })
     y += 15
 
+    // 2026-09-24 FIX: this line didn't exist at all — the PDF was built
+    // before Appointment/Leave times existed as a real, edited feature,
+    // against a reference sheet that only had Load/Deliver Date.
+    // Confirmed live: Dan set an Appt/Leave time on a route and the
+    // printed PDF still showed nothing for it. No derived calendar date
+    // here (unlike Load/Deliver) — depart_day isn't guaranteed to fall
+    // before deliver_day within the short window computeLoadDateStr
+    // assumes, so a day label + time is shown without risking a date
+    // computed in the wrong direction.
+    if (route.departDay || route.departTimeStr) {
+      this.text(MARGIN, y, `Leave Date - ${route.departDay || '—'}${route.departTimeStr ? ' ' + route.departTimeStr : ''}`, { size: 10, bold: true })
+      y += 15
+    }
+
     this.text(MARGIN, y, `Deliver Date - ${route.deliverDay || '—'}`, { size: 10, bold: true })
-    if (route.deliverDateStr) this.text(MARGIN + 150, y - 3, route.deliverDateStr, { size: 7, color: rgb(0.4, 0.4, 0.45) })
+    if (route.deliverDateStr) this.text(MARGIN + 190, y - 3, route.deliverDateStr, { size: 7, color: rgb(0.4, 0.4, 0.45) })
     y += 6
 
     // Highlighted routing note (e.g. "Load 1st Mon PM") — yellow
