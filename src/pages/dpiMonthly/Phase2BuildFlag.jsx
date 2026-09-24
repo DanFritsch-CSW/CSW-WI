@@ -141,16 +141,23 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 // later if OSRM's public server proves unreliable, contained to that one
 // function).
 //
-// Manual reorder (A4) — 2026-09-24 FIX: the first version detected a
-// reorder by adding onDragOver/onDrop directly to AgencyTile (drop one
-// tile onto another within the same lane). That broke ordinary cross-lane
-// dragging outright — confirmed live, tiles just stuck faded and stopped
-// moving between routes at all. Reverted AgencyTile to its known-good
-// pre-A4 shape; reordering now happens via an explicit numbered-stop
-// badge plus up/down buttons on each tile instead, which can't interfere
-// with the drag surface at all since it doesn't touch drag events, and
-// also directly answers Dan's separate feedback that stop order wasn't
-// visible/intuitive to begin with.
+// Manual reorder (A4) — 2026-09-24 FIX (two passes): the first version
+// detected a reorder by adding onDragOver/onDrop directly to AgencyTile
+// (drop one tile onto another within the same lane). That broke ordinary
+// cross-lane dragging outright — confirmed live, tiles just stuck faded
+// and stopped moving between routes at all. Removing onDragOver/onDrop
+// alone did NOT fully fix it — confirmed live a second time, dragging was
+// still broken on a completely fresh tile after that first fix shipped.
+// The actual remaining cause: the up/down <button> elements were still
+// nested INSIDE the draggable div as children. Nested interactive/
+// focusable elements inside a draggable="true" container are a
+// well-documented cross-browser problem — they can break native drag
+// initiation for the WHOLE element, not just clicks landing on the
+// button. Fixed for real by making the draggable card and the button
+// column SIBLINGS, not parent/child (same separation pattern that fixed
+// the RouteChip freeze earlier today) — the draggable div now contains
+// only plain text, zero interactive children, identical in shape to the
+// original pre-A4 AgencyTile.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
@@ -783,33 +790,29 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   // visible/intuitive in the first place — a small number next to each
   // stop is a more discoverable fix than a hidden drag gesture would ever
   // have been anyway.
+  // 2026-09-24 FIX #2 (still broken after the first fix): removing
+  // onDragOver/onDrop from this div wasn't enough — the up/down <button>
+  // elements were still nested INSIDE the draggable div as children.
+  // Nested interactive/focusable elements (buttons, inputs, links) inside
+  // a draggable="true" container are a well-documented cross-browser
+  // problem: they can break native drag-initiation for the WHOLE element,
+  // not just clicks landing on the button itself. Confirmed live: Dan
+  // still couldn't drag a completely fresh tile after the first fix
+  // shipped. Restructured so the draggable card and the button column are
+  // SIBLINGS, not parent/child — same separation pattern that fixed the
+  // RouteChip freeze earlier today. The draggable div now contains ONLY
+  // plain text (zero interactive children), identical in shape to the
+  // original pre-A4 AgencyTile.
   const AgencyTile = ({ agencyNumber, sequenceNumber, onMoveUp, onMoveDown }) => {
     const agency = agencyByNumber.get(agencyNumber)
     if (!agency) return null
     return (
-      <div
-        draggable
-        onDragStart={(e) => {
-          draggingAgencyRef.current = agencyNumber
-          e.currentTarget.style.opacity = '0.4' // direct DOM write, not React state — avoids a mid-drag
-        }}                                       // re-render that was breaking the native drag session
-        onDragEnd={(e) => {
-          draggingAgencyRef.current = null
-          e.currentTarget.style.opacity = '1'
-        }}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
-          border: `1px solid ${colors.border}`, fontSize: 13, marginBottom: 6,
-          cursor: 'grab',
-        }}
-      >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         {sequenceNumber != null && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, flexShrink: 0 }}>
             <button
-              draggable={false}
               disabled={!onMoveUp}
-              onClick={(e) => { e.stopPropagation(); onMoveUp?.() }}
+              onClick={onMoveUp || undefined}
               title="Move earlier in the route"
               style={{ fontSize: 9, lineHeight: 1, padding: '2px 4px', border: 'none', background: 'none', color: onMoveUp ? colors.accent : colors.border, cursor: onMoveUp ? 'pointer' : 'default' }}
             >
@@ -817,9 +820,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             </button>
             <div style={{ fontSize: 11, fontWeight: 700, color: colors.textMuted, minWidth: 14, textAlign: 'center' }}>{sequenceNumber}</div>
             <button
-              draggable={false}
               disabled={!onMoveDown}
-              onClick={(e) => { e.stopPropagation(); onMoveDown?.() }}
+              onClick={onMoveDown || undefined}
               title="Move later in the route"
               style={{ fontSize: 9, lineHeight: 1, padding: '2px 4px', border: 'none', background: 'none', color: onMoveDown ? colors.accent : colors.border, cursor: onMoveDown ? 'pointer' : 'default' }}
             >
@@ -827,7 +829,23 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             </button>
           </div>
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          draggable
+          onDragStart={(e) => {
+            draggingAgencyRef.current = agencyNumber
+            e.currentTarget.style.opacity = '0.4' // direct DOM write, not React state — avoids a mid-drag
+          }}                                       // re-render that was breaking the native drag session
+          onDragEnd={(e) => {
+            draggingAgencyRef.current = null
+            e.currentTarget.style.opacity = '1'
+          }}
+          style={{
+            flex: 1, minWidth: 0,
+            padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
+            border: `1px solid ${colors.border}`, fontSize: 13,
+            cursor: 'grab',
+          }}
+        >
           <div style={{ color: colors.text }}>{agency.firstName}</div>
           <div style={{ fontSize: 11, color: colors.textFaint }}>
             #{agency.agencyNumber} · {agency.city} · {agencyTotalCases(agency)} cases
