@@ -112,4 +112,40 @@ function formatTimeDisplay(t) {
   return `${h12}:${String(m).padStart(2, '0')} ${period}`
 }
 
-export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay }
+// 2026-09-24 (A1 — carrier route sheet PDF): date helpers below support
+// printing an actual calendar date next to each route's Load/Deliver day
+// label, matching the printed route-sheet format Dan shared (e.g. "Load
+// Date - Mon 10/5", "Deliver Date - Tue 10/6"). dpi_routes only stores one
+// real calendar date (delivery_date) — load_day is a weekday LABEL, not
+// its own date — so the load date is derived from delivery_date and the
+// weekday gap between load_day and deliver_day. Every real route in this
+// system has load on or before deliver within the same short window
+// (same day, or up to a few days earlier), so a simple mod-7 weekday
+// difference is sufficient; there is no case of load falling in a
+// different week than deliver.
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+
+// "YYYY-MM-DD" -> "M/D", for direct display (e.g. the Deliver Date column).
+function formatDateShort(dateStr) {
+  if (!dateStr) return ''
+  const [, m, d] = dateStr.split('-').map(Number)
+  return `${m}/${d}`
+}
+
+// Derives the Load Date's "M/D" string from the route's real deliver date
+// plus both weekday labels. E.g. deliverDateStr="2026-10-06" (a Tuesday),
+// deliverDayLabel="Tue", loadDayLabel="Mon" -> "10/5". Returns '' if any
+// input is missing/unrecognized rather than guessing.
+function computeLoadDateStr(deliverDateStr, deliverDayLabel, loadDayLabel) {
+  if (!deliverDateStr || !deliverDayLabel || !loadDayLabel) return ''
+  const deliverIdx = WEEKDAY_INDEX[deliverDayLabel]
+  const loadIdx = WEEKDAY_INDEX[loadDayLabel]
+  if (deliverIdx == null || loadIdx == null) return ''
+  const diffDays = (deliverIdx - loadIdx + 7) % 7
+  const [y, m, d] = deliverDateStr.split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  date.setDate(date.getDate() - diffDays)
+  return `${date.getMonth() + 1}/${date.getDate()}`
+}
+
+export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr }
