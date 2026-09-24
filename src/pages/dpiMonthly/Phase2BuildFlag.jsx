@@ -6,7 +6,7 @@ import {
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
 import RouteCalendar from './RouteCalendar.jsx'
-import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr } from './dpiCalendarUtils.js'
+import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr, parseTimeToMinutes, formatMinutesToClock, formatTravelMinutes } from './dpiCalendarUtils.js'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -115,6 +115,40 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 // PDF. See netlify/functions/dpi-carrier-route-sheet-pdf.cjs and
 // printCarrierPdf below.
 //
+// 2026-09-24 (A4/A5/A6/A11 — stop sequencing, travel time, buffer,
+// delivery windows): a route's stop-by-stop ETA chain — travel_minutes/
+// travel_time, delivery_window_start/end on dpi_route_stops — is
+// recalculated by recalcRouteETA whenever a route's stop LIST or ORDER
+// changes: an agency moved onto/off/within a route (moveAgency,
+// reorderStopWithinRoute below). It is deliberately NOT recalculated on
+// initial template seeding — a freshly seeded route keeps the template's
+// own static values exactly as before, matching "recalc only on reorder/
+// add/drop" per Dan. The chain is anchored to the route's depart_time
+// (Leave Time, RouteCalendar.jsx) — a route with no leave time set yet is
+// left alone; recalc has nothing to anchor to.
+//
+// Chain, per stop in sequence: arrival = running clock + travel time from
+// the previous point (CSW itself for the first stop; addresses geocoded
+// via the existing dpi-geocode function, same US Census Geocoder
+// RouteMap.jsx already uses, cached to dpi_route_stops.latitude/longitude
+// the same way) -> delivery_window_start = arrival, delivery_window_end
+// = arrival + 60min (fixed width per Dan — the template's own windows
+// vary 30/60min with no visible rule, so a new stop needs SOME default)
+// -> +15min buffer (A6, dwell/unload time) before continuing to the next
+// leg. Travel time itself comes from the new dpi-route-travel-times.cjs
+// (OSRM's public demo server, no API key — Dan's choice, matching the
+// existing free-Census-Geocoder precedent; may move to OpenRouteService
+// later if OSRM's public server proves unreliable, contained to that one
+// function).
+//
+// Manual reorder (A4) is a SEPARATE drag surface from the existing
+// inter-lane move: dropping one AgencyTile directly onto ANOTHER tile
+// within the same lane reorders within that route (reorderStopWithinRoute);
+// dropping onto empty lane space or a tile in a DIFFERENT lane still moves
+// the agency between routes exactly as before. AgencyTile checks whether
+// the dragged agency is already on the target lane's route to decide
+// which behavior applies.
+//
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
 //     like the Labor Planning roster board — adequate for a test click-
@@ -125,6 +159,20 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 //     numeric (105, 109...) — route_number is stored as text to fit both;
 //     "+ Add route" takes a free-text code rather than auto-numbering,
 //     since auto-numbering only makes sense for EC's convention.
+
+// 2026-09-24 (A5/A6/A11): CSW's own facility addresses — the anchor point
+// for the first leg of every route's travel-time chain. Verified against
+// three independent sources (FleetOwner, a public-warehousing directory,
+// a company listing) before use, since an error here silently skews
+// every single stop's arrival time on the route, not just the first.
+// Geocoded via the existing dpi-geocode function (same US Census
+// Geocoder every agency stop already uses), not hardcoded coordinates —
+// one geocoding source of truth for every point on the map, and one
+// fewer number to have gotten wrong by hand.
+const FACILITY_ADDRESSES = {
+  Madison: '4309 Cottage Grove Rd, Madison, WI 53716',
+  'Eau Claire': '2650 Fortune Dr, Eau Claire, WI 54703',
+}
 
 export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, load_time, depart_day, depart_time, delivery_date, template_week, stops: [agencyNumber,...] }]
@@ -137,6 +185,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const [weightMap, setWeightMap] = useState({}) // lookupCode -> { materialId, netWeight, grossWeight }
   const [weightsUnresolvedCount, setWeightsUnresolvedCount] = useState(0)
   const [printingPdf, setPrintingPdf] = useState(false)
+  const [recalculatingRouteIds, setRecalculatingRouteIds] = useState(new Set())
+  const facilityCoordsRef = useRef(null) // { lat, lon } once geocoded — never changes within a session
 
   const agencyByNumber = new Map(stagedAgencies.map((a) => [a.agencyNumber, a]))
 
@@ -337,6 +387,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     const agency = agencyByNumber.get(agencyNumber)
     if (!agency) return
 
+    const sourceRoute = routes.find((r) => r.stops.includes(agencyNumber))
+
     setUnassigned((prev) => prev.filter((n) => n !== agencyNumber))
     setRoutes((prev) => prev.map((r) => ({ ...r, stops: r.stops.filter((n) => n !== agencyNumber) })))
     if (targetRouteId == null) {
@@ -358,9 +410,21 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     }
 
     if (targetRouteId != null) {
+      // 2026-09-24 (A4 fix): sequence used to be hardcoded to 0 for every
+      // manually-added stop — harmless as long as nothing depended on
+      // ordering, but A4/A5/A6/A11's ETA chain needs a real stop order.
+      // Appends to the end of the target route's current stop list.
+      const { data: existingStops } = await supabase
+        .from('dpi_route_stops')
+        .select('sequence')
+        .eq('route_id', targetRouteId)
+        .order('sequence', { ascending: false })
+        .limit(1)
+      const nextSequence = (existingStops?.[0]?.sequence || 0) + 1
+
       const { error } = await supabase.from('dpi_route_stops').insert({
         route_id: targetRouteId,
-        sequence: 0,
+        sequence: nextSequence,
         agency_number: agency.agencyNumber,
         agency_name: agency.agencyName,
         city: agency.city,
@@ -369,6 +433,13 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       })
       if (error) console.error('insert stop:', error)
     }
+
+    // A5/A6/A11: adding/removing a stop shifts every downstream travel
+    // time and delivery window on whichever route(s) it touched. Not
+    // awaited — the drag interaction itself shouldn't feel blocked by a
+    // network round trip to OSRM.
+    if (sourceRoute) recalcRouteETA(sourceRoute.id)
+    if (targetRouteId != null) recalcRouteETA(targetRouteId)
   }
 
   const routeTotals = (route) => {
@@ -415,6 +486,159 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     await loadRoutes() // finds zero routes, re-seeds from template, reloads
   }
 
+  // Shared geocoding helper (A5/A6/A11) — same endpoint and address-
+  // building convention RouteMap.jsx already uses for agency stops, so a
+  // stop geocoded here and one geocoded via the map end up identical.
+  const geocodeAddress = async (address) => {
+    try {
+      const res = await fetch('/.netlify/functions/dpi-geocode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address }),
+      })
+      const data = await res.json()
+      return data?.lat != null && data?.lon != null ? { lat: data.lat, lon: data.lon } : null
+    } catch (err) {
+      console.error('geocode failed:', address, err.message)
+      return null
+    }
+  }
+
+  // Geocodes CSW's own facility address once per session (cached in a
+  // ref, not state — this never needs to trigger a re-render on its own).
+  const getFacilityCoords = async () => {
+    if (facilityCoordsRef.current) return facilityCoordsRef.current
+    const address = FACILITY_ADDRESSES[cycle.facility]
+    if (!address) { console.error('no facility address configured for', cycle.facility); return null }
+    const coords = await geocodeAddress(address)
+    facilityCoordsRef.current = coords
+    return coords
+  }
+
+  // A5/A6/A11 — recalculates one route's full stop-by-stop ETA chain:
+  // travel_minutes/travel_time and delivery_window_start/end on every
+  // dpi_route_stops row for this route. Called after any change to a
+  // route's stop list or order (moveAgency, reorderStopWithinRoute) —
+  // never on initial template seeding, which keeps the template's own
+  // static values untouched. If the route has no depart_time set yet
+  // (RouteCalendar.jsx's Leave Time), there's nothing to anchor the
+  // chain to, so this is a no-op — existing values are left exactly as
+  // they were rather than guessed at.
+  const recalcRouteETA = async (routeId) => {
+    if (!supabase) return
+    const route = routes.find((r) => r.id === routeId)
+    if (!route || !route.depart_time || !route.depart_day) return
+
+    setRecalculatingRouteIds((prev) => new Set(prev).add(routeId))
+    try {
+      const { data: stopRows, error } = await supabase
+        .from('dpi_route_stops')
+        .select('*')
+        .eq('route_id', routeId)
+        .order('sequence')
+      if (error) { console.error('recalc ETA: load stops:', error); return }
+      if (!stopRows || stopRows.length === 0) return
+
+      // Geocode any stop still missing coordinates — same address-
+      // building logic RouteMap.jsx uses, persisted the same way so a
+      // stop only ever needs geocoding once across the whole app.
+      const stopsWithCoords = await Promise.all(stopRows.map(async (s) => {
+        if (s.latitude != null && s.longitude != null) return s
+        const agency = agencyByNumber.get(s.agency_number)
+        const addressParts = agency ? [agency.line1, agency.city, agency.state, agency.postalCode] : [s.city]
+        const address = addressParts.filter(Boolean).join(', ')
+        if (!address) return s
+        const coords = await geocodeAddress(address)
+        if (!coords) return s
+        await supabase.from('dpi_route_stops').update({ latitude: coords.lat, longitude: coords.lon }).eq('id', s.id)
+        return { ...s, latitude: coords.lat, longitude: coords.lon }
+      }))
+
+      const facilityCoords = await getFacilityCoords()
+      if (!facilityCoords) { console.error('recalc ETA: could not geocode facility address for', cycle.facility); return }
+
+      const geocodedStops = stopsWithCoords.filter((s) => s.latitude != null && s.longitude != null)
+      if (geocodedStops.length === 0) { console.error('recalc ETA: no stops on route', routeId, 'have coordinates'); return }
+      if (geocodedStops.length < stopsWithCoords.length) {
+        console.error(`recalc ETA: ${stopsWithCoords.length - geocodedStops.length} stop(s) on route ${routeId} couldn't be geocoded — their times were left unchanged`)
+      }
+
+      const points = [facilityCoords, ...geocodedStops.map((s) => ({ lat: s.latitude, lon: s.longitude }))]
+      const res = await fetch('/.netlify/functions/dpi-route-travel-times', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points }),
+      })
+      const data = await res.json()
+      if (!data.legMinutes) { console.error('recalc ETA: travel time lookup failed for route', routeId, ':', data.error); return }
+
+      // Chain: depart_time anchors the clock. Each stop's window is fixed
+      // [arrival, arrival+60min] per Dan; a 15-min buffer (A6, dwell/
+      // unload time) is added after each stop before the next leg.
+      let currentMinutes = parseTimeToMinutes(route.depart_time)
+      const updates = geocodedStops.map((stop, i) => {
+        currentMinutes += data.legMinutes[i]
+        const update = {
+          id: stop.id,
+          travel_minutes: data.legMinutes[i],
+          travel_time: formatTravelMinutes(data.legMinutes[i]),
+          delivery_window_start: formatMinutesToClock(currentMinutes),
+          delivery_window_end: formatMinutesToClock(currentMinutes + 60),
+        }
+        currentMinutes += 15
+        return update
+      })
+
+      for (const u of updates) {
+        const { error: updErr } = await supabase
+          .from('dpi_route_stops')
+          .update({
+            travel_minutes: u.travel_minutes,
+            travel_time: u.travel_time,
+            delivery_window_start: u.delivery_window_start,
+            delivery_window_end: u.delivery_window_end,
+          })
+          .eq('id', u.id)
+        if (updErr) console.error('recalc ETA: save stop', u.id, updErr)
+      }
+    } finally {
+      setRecalculatingRouteIds((prev) => { const next = new Set(prev); next.delete(routeId); return next })
+    }
+  }
+
+  // A4 — manual reorder within a route's stop list. Reassigns sequence
+  // 1..N to match the new order, then recalculates travel times/delivery
+  // windows (A5/A6/A11), since reordering shifts every leg from the moved
+  // point onward. Deliberately a separate path from moveAgency below —
+  // this never touches Unassigned or another route's stops.
+  const reorderStopWithinRoute = async (routeId, draggedAgencyNumber, targetAgencyNumber) => {
+    if (draggedAgencyNumber === targetAgencyNumber) return
+    const route = routes.find((r) => r.id === routeId)
+    if (!route) return
+
+    const stops = [...route.stops]
+    const fromIdx = stops.indexOf(draggedAgencyNumber)
+    const toIdx = stops.indexOf(targetAgencyNumber)
+    if (fromIdx === -1 || toIdx === -1) return
+
+    stops.splice(fromIdx, 1)
+    stops.splice(toIdx, 0, draggedAgencyNumber)
+
+    setRoutes((prev) => prev.map((r) => (r.id === routeId ? { ...r, stops } : r)))
+
+    if (!supabase) return
+    for (let i = 0; i < stops.length; i++) {
+      const { error } = await supabase
+        .from('dpi_route_stops')
+        .update({ sequence: i + 1 })
+        .eq('route_id', routeId)
+        .eq('agency_number', stops[i])
+      if (error) console.error('reorder: save sequence for', stops[i], error)
+    }
+
+    recalcRouteETA(routeId)
+  }
+
   // Carrier route sheet PDF (A1). Fetches a fresh copy of every stop
   // (full rows, not just the agency-number list `route.stops` keeps for
   // drag-and-drop) so the PDF has sequence/delivery window/travel time —
@@ -447,7 +671,14 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             const agency = agencyByNumber.get(s.agency_number)
             const weight = agency ? agencyTotalWeight(agency, weightMap).weight : Number(s.gross_weight) || 0
             return {
-              time: s.delivery_window_start || '',
+              // Template-seeded, never-recalculated stops still carry the
+              // template's original combined range as one string in
+              // delivery_window_start (e.g. "6:30 AM - 7:00 AM") with
+              // delivery_window_end left null. A recalculated stop (A5/
+              // A6/A11) has genuinely separate start/end clock times —
+              // combine them here so the PDF's Time column reads the same
+              // either way.
+              time: s.delivery_window_end ? `${s.delivery_window_start} - ${s.delivery_window_end}` : (s.delivery_window_start || ''),
               agencyNumber: s.agency_number,
               agencyName: s.agency_name,
               city: s.city,
@@ -515,7 +746,15 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     onAdvance()
   }
 
-  const AgencyTile = ({ agencyNumber }) => {
+  // 2026-09-24 (A4): AgencyTile now also accepts routeId — when set (the
+  // tile sits in a real route lane, not Unassigned), dropping ANOTHER
+  // tile directly onto this one reorders within the route
+  // (reorderStopWithinRoute) IF the dragged agency is already on this
+  // same route; otherwise the drop falls through to the Lane's own
+  // onDrop below for the normal cross-lane move. This is what lets one
+  // drag gesture serve both "reorder within a route" and "move between
+  // routes" depending on exactly where the tile lands.
+  const AgencyTile = ({ agencyNumber, routeId }) => {
     const agency = agencyByNumber.get(agencyNumber)
     if (!agency) return null
     return (
@@ -528,6 +767,20 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         onDragEnd={(e) => {
           draggingAgencyRef.current = null
           e.currentTarget.style.opacity = '1'
+        }}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          const draggedNum = draggingAgencyRef.current
+          if (routeId != null && draggedNum && draggedNum !== agencyNumber) {
+            const currentRoute = routes.find((r) => r.id === routeId)
+            if (currentRoute && currentRoute.stops.includes(draggedNum)) {
+              e.preventDefault()
+              e.stopPropagation() // same-route reorder — don't also fire the Lane's own onDrop
+              reorderStopWithinRoute(routeId, draggedNum, agencyNumber)
+            }
+            // else: dragged from elsewhere — let it bubble to the Lane's
+            // onDrop for a normal cross-lane move (appends to the end)
+          }
         }}
         style={{
           padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
@@ -592,11 +845,16 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             {' · '}Deliver {route.deliver_day || '—'}
           </div>
         )}
+        {route && recalculatingRouteIds.has(route.id) && (
+          <div style={{ fontSize: 11, color: colors.accent, marginTop: 2, fontStyle: 'italic' }}>
+            Recalculating travel times…
+          </div>
+        )}
       </div>
       {agencyNumbers.length === 0 && (
         <div style={{ fontSize: 12, color: colors.textFaint, fontStyle: 'italic' }}>Drop agencies here</div>
       )}
-      {agencyNumbers.map((n) => <AgencyTile key={n} agencyNumber={n} />)}
+      {agencyNumbers.map((n) => <AgencyTile key={n} agencyNumber={n} routeId={route?.id} />)}
     </div>
   )
 
@@ -669,7 +927,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here is real Datex gross weight (material + packaging) pulled live per line item{weightsUnresolvedCount > 0 ? `; ${weightsUnresolvedCount} material code(s) in this cycle weren't found in ${cycle.facility}'s Datex catalog and are using a ${FALLBACK_LBS_PER_CASE} lb/case fallback (routes carrying one are marked *)` : ''}. To edit this month's appointment and leave day/time, click a route in the calendar above.
+        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Drag one agency onto another within the same route to reorder its stops — travel times and delivery windows recalculate automatically (set a Leave Time on the route first, in the calendar above, or there's nothing to anchor the chain to). Weight shown here is real Datex gross weight (material + packaging) pulled live per line item{weightsUnresolvedCount > 0 ? `; ${weightsUnresolvedCount} material code(s) in this cycle weren't found in ${cycle.facility}'s Datex catalog and are using a ${FALLBACK_LBS_PER_CASE} lb/case fallback (routes carrying one are marked *)` : ''}. To edit this month's appointment and leave day/time, click a route in the calendar above.
       </div>
     </div>
   )
