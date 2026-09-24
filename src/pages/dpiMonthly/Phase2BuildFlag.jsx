@@ -141,23 +141,19 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 // later if OSRM's public server proves unreliable, contained to that one
 // function).
 //
-// Manual reorder (A4) — 2026-09-24 FIX (two passes): the first version
+// Manual reorder (A4) — 2026-09-24 FIX (three passes total — see
+// AgencyTile below for the final, actual root cause): the first version
 // detected a reorder by adding onDragOver/onDrop directly to AgencyTile
 // (drop one tile onto another within the same lane). That broke ordinary
 // cross-lane dragging outright — confirmed live, tiles just stuck faded
 // and stopped moving between routes at all. Removing onDragOver/onDrop
 // alone did NOT fully fix it — confirmed live a second time, dragging was
 // still broken on a completely fresh tile after that first fix shipped.
-// The actual remaining cause: the up/down <button> elements were still
-// nested INSIDE the draggable div as children. Nested interactive/
-// focusable elements inside a draggable="true" container are a
-// well-documented cross-browser problem — they can break native drag
-// initiation for the WHOLE element, not just clicks landing on the
-// button. Fixed for real by making the draggable card and the button
-// column SIBLINGS, not parent/child (same separation pattern that fixed
-// the RouteChip freeze earlier today) — the draggable div now contains
-// only plain text, zero interactive children, identical in shape to the
-// original pre-A4 AgencyTile.
+// The up/down <button> elements were still nested INSIDE the draggable
+// div as children (a well-documented cross-browser problem), so that was
+// fixed too by making the draggable card and the button column SIBLINGS.
+// STILL broken after both fixes — see AgencyTile's onDragStart for the
+// actual root cause, confirmed live on Edge/Windows/mouse.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
@@ -776,33 +772,12 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     onAdvance()
   }
 
-  // 2026-09-24 FIX (real regression): the first version of this added
-  // onDragOver/onDrop directly to AgencyTile so dropping one tile onto
-  // another within the same lane could reorder in place. That broke
-  // ordinary cross-lane dragging outright — confirmed live: agencies
-  // stopped moving between routes at all, tiles just stuck at the faded
-  // (opacity 0.4) drag-start state. Reverted to the exact pre-A4 shape
-  // below (draggable/onDragStart/onDragEnd only, no onDragOver/onDrop on
-  // the tile itself) — this is the known-good implementation that was
-  // never broken. A4 (manual reorder) now happens via explicit numbered
-  // stops + up/down buttons instead of drop-onto-a-tile detection, which
-  // also directly answers Dan's separate feedback that stop order wasn't
-  // visible/intuitive in the first place — a small number next to each
-  // stop is a more discoverable fix than a hidden drag gesture would ever
-  // have been anyway.
-  // 2026-09-24 FIX #2 (still broken after the first fix): removing
-  // onDragOver/onDrop from this div wasn't enough — the up/down <button>
-  // elements were still nested INSIDE the draggable div as children.
-  // Nested interactive/focusable elements (buttons, inputs, links) inside
-  // a draggable="true" container are a well-documented cross-browser
-  // problem: they can break native drag-initiation for the WHOLE element,
-  // not just clicks landing on the button itself. Confirmed live: Dan
-  // still couldn't drag a completely fresh tile after the first fix
-  // shipped. Restructured so the draggable card and the button column are
-  // SIBLINGS, not parent/child — same separation pattern that fixed the
-  // RouteChip freeze earlier today. The draggable div now contains ONLY
-  // plain text (zero interactive children), identical in shape to the
-  // original pre-A4 AgencyTile.
+  // 2026-09-24 FIX (the actual real root cause — see AgencyTile's
+  // onDragStart for the full explanation, confirmed live on Edge/Windows/
+  // mouse). Two earlier fixes here addressed real but secondary problems
+  // (onDragOver/onDrop conflicts, then nested buttons inside the
+  // draggable div) — this AgencyTile shape is unchanged from that second
+  // fix; only its onDragStart handler changed.
   const AgencyTile = ({ agencyNumber, sequenceNumber, onMoveUp, onMoveDown }) => {
     const agency = agencyByNumber.get(agencyNumber)
     if (!agency) return null
@@ -833,6 +808,22 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           draggable
           onDragStart={(e) => {
             draggingAgencyRef.current = agencyNumber
+            // 2026-09-24 FIX (the actual real root cause): confirmed live on
+            // Edge/Windows/mouse — every previous fix addressed a real but
+            // secondary problem; this is the one that actually explains
+            // "the whole page stops responding to clicks." Neither this
+            // handler nor RouteChip's ever called
+            // e.dataTransfer.setData(...). Most browsers tolerate a drag
+            // with no data set on it, but Windows-based Chromium browsers
+            // (Edge, Chrome) can be much stricter — without it, the OS-level
+            // drag operation Windows starts on dragstart can fail to
+            // complete or cancel properly, leaving the whole page's mouse
+            // input stuck in "drag mode" exactly as described. Setting real
+            // data (and effectAllowed, which some browsers also expect) is
+            // what tells the browser/OS this is a genuine, well-formed drag
+            // operation it can properly track through to dragend.
+            e.dataTransfer.effectAllowed = 'move'
+            e.dataTransfer.setData('text/plain', agencyNumber)
             e.currentTarget.style.opacity = '0.4' // direct DOM write, not React state — avoids a mid-drag
           }}                                       // re-render that was breaking the native drag session
           onDragEnd={(e) => {
