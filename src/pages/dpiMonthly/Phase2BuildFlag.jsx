@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import {
   colors, cardStyle, buttonPrimary,
-  PLACEHOLDER_LBS_PER_CASE, CAPACITY_LBS_LIMIT, CAPACITY_CASES_LIMIT, agencyTotalCases,
+  FALLBACK_LBS_PER_CASE, CAPACITY_LBS_LIMIT, CAPACITY_CASES_LIMIT, agencyTotalCases, agencyTotalWeight,
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
 import RouteCalendar from './RouteCalendar.jsx'
@@ -83,10 +83,24 @@ import { computeAutoDeliveryDate, formatTimeDisplay } from './dpiCalendarUtils.j
 // variance, not a change to next month's default. Editing the annual
 // template itself is a separate, later item (the template editor).
 //
+// 2026-09-24 (A7 — real weight): capacity flags below now use real Datex
+// gross weight (production_db.silver.datex_slv_materialspackagingslookup,
+// via netlify/functions/dpi-material-weights.cjs), not a flat 25 lb/case
+// placeholder. Jen's original report (her route showed 41,000 lbs in
+// Datex vs 37,575 lbs here) turned out to be a bigger gap than "reading
+// the wrong CSV column" — the CSV's own weight field was never used for
+// order creation at all (see dpiMonthlyParser.js), so this was always a
+// flat placeholder, not a net-vs-gross mixup. Confirmed live: the
+// packaging table's `Weight` column is net (product only), `shipping_weight`
+// is gross (Weight + tare_weight) — the physical trailer-scale number.
+// Weights are fetched once per cycle load, keyed by every distinct
+// materialLookupCode across all staged agencies; any material not (yet)
+// resolved falls back to the placeholder per line and is counted so the
+// capacity display can flag it rather than silently mixing real and
+// placeholder numbers with no signal. See agencyTotalWeight in
+// dpiMonthlyStyles.js for the actual math.
+//
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
-//   - Weight = cases x PLACEHOLDER_LBS_PER_CASE (25 lbs), NOT a real Datex
-//     materials/packaging weight lookup. Must be replaced before this phase
-//     handles real capacity decisions.
 //   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
 //     like the Labor Planning roster board — adequate for a test click-
 //     through, worth revisiting for polish/consistency later.
@@ -105,13 +119,47 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const [newRouteCode, setNewRouteCode] = useState('')
   const [editingRouteId, setEditingRouteId] = useState(null)
   const [editRouteValue, setEditRouteValue] = useState('')
+  const [weightMap, setWeightMap] = useState({}) // lookupCode -> { materialId, netWeight, grossWeight }
+  const [weightsUnresolvedCount, setWeightsUnresolvedCount] = useState(0)
 
   const agencyByNumber = new Map(stagedAgencies.map((a) => [a.agencyNumber, a]))
+
+  // Real gross-weight lookup (A7). Fetches every distinct material code
+  // across all staged agencies in one call, keyed by trimmed lookup_code
+  // (see dpi-material-weights.cjs for why the trim matters — at least one
+  // real Datex lookup_code has a trailing space). Called from loadRoutes
+  // BEFORE the seeding check below, so a first-time seed's dpi_route_stops
+  // gross_weight column gets real weight immediately rather than the
+  // fallback — moveAgency and routeTotals also use whatever's in state by
+  // the time a human can actually interact, which in practice is always
+  // after this initial fetch completes.
+  const fetchWeights = useCallback(async () => {
+    const codes = [...new Set(stagedAgencies.flatMap((a) => (a.lines || []).map((l) => String(l.materialLookupCode || '').trim())).filter(Boolean))]
+    if (codes.length === 0) return {}
+    try {
+      const res = await fetch('/.netlify/functions/dpi-material-weights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ facility: cycle.facility, lookupCodes: codes }),
+      })
+      if (!res.ok) { console.error('dpi-material-weights failed:', res.status, await res.text().catch(() => '')); return {} }
+      const data = await res.json()
+      if (data.unresolved?.length > 0) {
+        console.error(`[dpi-material-weights] ${data.unresolved.length} material(s) not found in ${cycle.facility}'s Datex catalog:`, data.unresolved)
+      }
+      setWeightMap(data.weights || {})
+      setWeightsUnresolvedCount(data.unresolved?.length || 0)
+      return data.weights || {}
+    } catch (err) {
+      console.error('dpi-material-weights fetch error:', err)
+      return {}
+    }
+  }, [cycle, stagedAgencies])
 
   // Seeds dpi_routes/dpi_route_stops from the master template, matched
   // against this cycle's actual staged agencies. Only runs once, when a
   // cycle first reaches Phase 2 with no routes yet.
-  const seedFromTemplate = useCallback(async () => {
+  const seedFromTemplate = useCallback(async (weights) => {
     const { data: templates, error: tErr } = await supabase
       .from('dpi_route_templates')
       .select('*, dpi_route_template_stops(*)')
@@ -159,6 +207,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
 
       const stopRows = matchingStops.map((s, i) => {
         const agency = agencyByNumber.get(s.agency_number)
+        const { weight } = agency ? agencyTotalWeight(agency, weights) : { weight: null }
         return {
           route_id: newRoute.id,
           sequence: i + 1,
@@ -168,7 +217,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           delivery_window_start: s.delivery_window,
           travel_time: s.travel_time,
           total_cases: agency ? agencyTotalCases(agency) : null,
-          gross_weight: agency ? agencyTotalCases(agency) * PLACEHOLDER_LBS_PER_CASE : null,
+          gross_weight: weight,
         }
       })
       const { error: stopsErr } = await supabase.from('dpi_route_stops').insert(stopRows)
@@ -188,11 +237,16 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       .order('route_number')
     if (routesErr) console.error('load dpi_routes:', routesErr)
 
-    // First time Phase 2 is opened for this cycle — seed from the template.
+    // First time Phase 2 is opened for this cycle — fetch real weights,
+    // then seed from the template (so the initial dpi_route_stops
+    // gross_weight write uses real weight, not the fallback).
     if ((routeRows || []).length === 0) {
-      await seedFromTemplate()
+      const weights = await fetchWeights()
+      await seedFromTemplate(weights)
       const reload = await supabase.from('dpi_routes').select('*').eq('cycle_id', cycle.id).order('route_number')
       routeRows = reload.data
+    } else {
+      fetchWeights() // not awaited — routes already exist, so this only refreshes the live capacity flag
     }
 
     const { data: stopRows, error: stopsErr } = await supabase
@@ -221,7 +275,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     setRoutes(routesWithStops)
     setUnassigned(unassignedNumbers)
     setLoading(false)
-  }, [cycle, stagedAgencies, seedFromTemplate])
+  }, [cycle, stagedAgencies, seedFromTemplate, fetchWeights])
 
   useEffect(() => { loadRoutes() }, [loadRoutes])
 
@@ -294,7 +348,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         agency_name: agency.agencyName,
         city: agency.city,
         total_cases: agencyTotalCases(agency),
-        gross_weight: agencyTotalCases(agency) * PLACEHOLDER_LBS_PER_CASE,
+        gross_weight: agencyTotalWeight(agency, weightMap).weight,
       })
       if (error) console.error('insert stop:', error)
     }
@@ -302,8 +356,16 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
 
   const routeTotals = (route) => {
     const cases = route.stops.reduce((sum, n) => sum + agencyTotalCases(agencyByNumber.get(n) || { lines: [] }), 0)
-    const weight = cases * PLACEHOLDER_LBS_PER_CASE
-    return { cases, weight, overCapacity: weight > CAPACITY_LBS_LIMIT || cases > CAPACITY_CASES_LIMIT }
+    let weight = 0
+    let unresolvedLines = 0
+    for (const n of route.stops) {
+      const agency = agencyByNumber.get(n)
+      if (!agency) continue
+      const result = agencyTotalWeight(agency, weightMap)
+      weight += result.weight
+      unresolvedLines += result.unresolvedLines
+    }
+    return { cases, weight, unresolvedLines, overCapacity: weight > CAPACITY_LBS_LIMIT || cases > CAPACITY_CASES_LIMIT }
   }
 
   const allRoutesScheduled = routes.length > 0 && routes.every((r) => r.delivery_date)
@@ -406,9 +468,13 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             </div>
           )}
           {totals && (
-            <div style={{ fontSize: 11, color: totals.overCapacity ? colors.danger : colors.textFaint }}>
-              {totals.cases} cases / {totals.weight.toLocaleString()} lb
+            <div
+              style={{ fontSize: 11, color: totals.overCapacity ? colors.danger : colors.textFaint }}
+              title={totals.unresolvedLines > 0 ? `${totals.unresolvedLines} line item(s) on this route used a fallback weight — material not found in Datex's catalog` : undefined}
+            >
+              {totals.cases} cases / {Math.round(totals.weight).toLocaleString()} lb
               {totals.overCapacity && ' ⚠'}
+              {totals.unresolvedLines > 0 && ' *'}
             </div>
           )}
         </div>
@@ -488,7 +554,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here uses a placeholder {PLACEHOLDER_LBS_PER_CASE} lb/case — not a real Datex material weight lookup. Fine for this test run, not for real capacity decisions. To edit this month's appointment and leave day/time, click a route in the calendar above.
+        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Weight shown here is real Datex gross weight (material + packaging) pulled live per line item{weightsUnresolvedCount > 0 ? `; ${weightsUnresolvedCount} material code(s) in this cycle weren't found in ${cycle.facility}'s Datex catalog and are using a ${FALLBACK_LBS_PER_CASE} lb/case fallback (routes carrying one are marked *)` : ''}. To edit this month's appointment and leave day/time, click a route in the calendar above.
       </div>
     </div>
   )
