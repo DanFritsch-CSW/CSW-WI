@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase.js'
-import { colors, cardStyle, buttonPrimary, buttonSuccess, PLACEHOLDER_LBS_PER_CASE } from './dpiMonthlyStyles.js'
+import { colors, cardStyle, buttonPrimary, buttonSuccess } from './dpiMonthlyStyles.js'
 
 // Phase 5 — Final push. Route sheet preview (matches the printed
 // driver/carrier document format Dan shared) -> one carrier send -> final
@@ -12,7 +12,20 @@ import { colors, cardStyle, buttonPrimary, buttonSuccess, PLACEHOLDER_LBS_PER_CA
 // SIMULATE-ONLY: no PDF is generated, no Front send happens, no FootPrint
 // API call is made. Each step just stamps a flag in
 // dpi_monthly_cycles.phase_data so the UI can walk through the sequence.
-
+//
+// 2026-09-24 FIX (broke the production build): this used to import
+// PLACEHOLDER_LBS_PER_CASE from dpiMonthlyStyles.js and recompute route
+// weight as cases * placeholder — that export was removed the same day as
+// part of A7 (real Datex gross weight), and a Vite production build hard-
+// fails on an import of a named export that no longer exists (unlike dev
+// mode, which can tolerate it long enough not to notice locally). This
+// component doesn't have access to agency line items to redo the real
+// per-material calculation itself (dpi_route_stops only carries
+// aggregates), but it doesn't need to: A7 already writes real weight onto
+// dpi_route_stops.gross_weight (both at template-seed time and whenever
+// Phase2BuildFlag.jsx's moveAgency touches a stop), so the route sheet
+// here just sums that column directly — real weight, no placeholder
+// import needed at all.
 export default function Phase5FinalPush({ cycle, onCycleComplete }) {
   const [routes, setRoutes] = useState([])
   const [loading, setLoading] = useState(true)
@@ -83,11 +96,11 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
           </div>
           {routes.map((route) => {
             const cases = route.stops.reduce((sum, s) => sum + (Number(s.total_cases) || 0), 0)
-            const weight = cases * PLACEHOLDER_LBS_PER_CASE
+            const weight = route.stops.reduce((sum, s) => sum + (Number(s.gross_weight) || 0), 0)
             return (
               <div key={route.id} style={{ marginBottom: 16 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: colors.accent, marginBottom: 6 }}>
-                  Route {route.route_number} — {cases} cases / {weight.toLocaleString()} lb
+                  Route {route.route_number} — {cases} cases / {Math.round(weight).toLocaleString()} lb
                 </div>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                   <tbody>
