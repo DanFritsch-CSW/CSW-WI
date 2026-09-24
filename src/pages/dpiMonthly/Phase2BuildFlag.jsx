@@ -141,13 +141,16 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 // later if OSRM's public server proves unreliable, contained to that one
 // function).
 //
-// Manual reorder (A4) is a SEPARATE drag surface from the existing
-// inter-lane move: dropping one AgencyTile directly onto ANOTHER tile
-// within the same lane reorders within that route (reorderStopWithinRoute);
-// dropping onto empty lane space or a tile in a DIFFERENT lane still moves
-// the agency between routes exactly as before. AgencyTile checks whether
-// the dragged agency is already on the target lane's route to decide
-// which behavior applies.
+// Manual reorder (A4) — 2026-09-24 FIX: the first version detected a
+// reorder by adding onDragOver/onDrop directly to AgencyTile (drop one
+// tile onto another within the same lane). That broke ordinary cross-lane
+// dragging outright — confirmed live, tiles just stuck faded and stopped
+// moving between routes at all. Reverted AgencyTile to its known-good
+// pre-A4 shape; reordering now happens via an explicit numbered-stop
+// badge plus up/down buttons on each tile instead, which can't interfere
+// with the drag surface at all since it doesn't touch drag events, and
+// also directly answers Dan's separate feedback that stop order wasn't
+// visible/intuitive to begin with.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
@@ -701,10 +704,30 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
 
           return {
             routeNumber: route.route_number,
+            // 2026-09-24 FIX: this payload never actually included the
+            // real Appointment/Leave TIMES at all, or a Leave line — it
+            // predates load_time/depart_day/depart_time existing as a
+            // real, edited feature (built against the original reference
+            // sheet, which only had Load/Deliver Date). Confirmed live:
+            // Dan set an Appt/Leave time on a route and the printed PDF
+            // still only showed bare day labels with no times and no
+            // Leave line at all. loadTimeStr/departTimeStr are formatted
+            // client-side (formatTimeDisplay, already imported here) so
+            // the PDF function itself stays free of time-parsing logic.
             loadDay: route.load_day,
             loadDateStr: computeLoadDateStr(route.delivery_date, route.deliver_day, route.load_day),
+            loadTimeStr: formatTimeDisplay(route.load_time),
             deliverDay: route.deliver_day,
             deliverDateStr: formatDateShort(route.delivery_date),
+            // No derived calendar date for Leave: depart_day isn't always
+            // guaranteed to fall before deliver_day within the short
+            // window computeLoadDateStr assumes (a route can have its
+            // leave day manually set to something unusual while testing,
+            // e.g. after the deliver day) — showing the day label + time
+            // without a possibly-wrong derived date is safer than a
+            // calendar date computed in the wrong direction.
+            departDay: route.depart_day,
+            departTimeStr: formatTimeDisplay(route.depart_time),
             highlight: notesParts[0] || null,
             restNotes: notesParts.slice(1),
             stops: stopPayload,
@@ -746,15 +769,21 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     onAdvance()
   }
 
-  // 2026-09-24 (A4): AgencyTile now also accepts routeId — when set (the
-  // tile sits in a real route lane, not Unassigned), dropping ANOTHER
-  // tile directly onto this one reorders within the route
-  // (reorderStopWithinRoute) IF the dragged agency is already on this
-  // same route; otherwise the drop falls through to the Lane's own
-  // onDrop below for the normal cross-lane move. This is what lets one
-  // drag gesture serve both "reorder within a route" and "move between
-  // routes" depending on exactly where the tile lands.
-  const AgencyTile = ({ agencyNumber, routeId }) => {
+  // 2026-09-24 FIX (real regression): the first version of this added
+  // onDragOver/onDrop directly to AgencyTile so dropping one tile onto
+  // another within the same lane could reorder in place. That broke
+  // ordinary cross-lane dragging outright — confirmed live: agencies
+  // stopped moving between routes at all, tiles just stuck at the faded
+  // (opacity 0.4) drag-start state. Reverted to the exact pre-A4 shape
+  // below (draggable/onDragStart/onDragEnd only, no onDragOver/onDrop on
+  // the tile itself) — this is the known-good implementation that was
+  // never broken. A4 (manual reorder) now happens via explicit numbered
+  // stops + up/down buttons instead of drop-onto-a-tile detection, which
+  // also directly answers Dan's separate feedback that stop order wasn't
+  // visible/intuitive in the first place — a small number next to each
+  // stop is a more discoverable fix than a hidden drag gesture would ever
+  // have been anyway.
+  const AgencyTile = ({ agencyNumber, sequenceNumber, onMoveUp, onMoveDown }) => {
     const agency = agencyByNumber.get(agencyNumber)
     if (!agency) return null
     return (
@@ -768,29 +797,41 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           draggingAgencyRef.current = null
           e.currentTarget.style.opacity = '1'
         }}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          const draggedNum = draggingAgencyRef.current
-          if (routeId != null && draggedNum && draggedNum !== agencyNumber) {
-            const currentRoute = routes.find((r) => r.id === routeId)
-            if (currentRoute && currentRoute.stops.includes(draggedNum)) {
-              e.preventDefault()
-              e.stopPropagation() // same-route reorder — don't also fire the Lane's own onDrop
-              reorderStopWithinRoute(routeId, draggedNum, agencyNumber)
-            }
-            // else: dragged from elsewhere — let it bubble to the Lane's
-            // onDrop for a normal cross-lane move (appends to the end)
-          }
-        }}
         style={{
+          display: 'flex', alignItems: 'center', gap: 8,
           padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
           border: `1px solid ${colors.border}`, fontSize: 13, marginBottom: 6,
           cursor: 'grab',
         }}
       >
-        <div style={{ color: colors.text }}>{agency.firstName}</div>
-        <div style={{ fontSize: 11, color: colors.textFaint }}>
-          #{agency.agencyNumber} · {agency.city} · {agencyTotalCases(agency)} cases
+        {sequenceNumber != null && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <button
+              draggable={false}
+              disabled={!onMoveUp}
+              onClick={(e) => { e.stopPropagation(); onMoveUp?.() }}
+              title="Move earlier in the route"
+              style={{ fontSize: 9, lineHeight: 1, padding: '2px 4px', border: 'none', background: 'none', color: onMoveUp ? colors.accent : colors.border, cursor: onMoveUp ? 'pointer' : 'default' }}
+            >
+              ▲
+            </button>
+            <div style={{ fontSize: 11, fontWeight: 700, color: colors.textMuted, minWidth: 14, textAlign: 'center' }}>{sequenceNumber}</div>
+            <button
+              draggable={false}
+              disabled={!onMoveDown}
+              onClick={(e) => { e.stopPropagation(); onMoveDown?.() }}
+              title="Move later in the route"
+              style={{ fontSize: 9, lineHeight: 1, padding: '2px 4px', border: 'none', background: 'none', color: onMoveDown ? colors.accent : colors.border, cursor: onMoveDown ? 'pointer' : 'default' }}
+            >
+              ▼
+            </button>
+          </div>
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: colors.text }}>{agency.firstName}</div>
+          <div style={{ fontSize: 11, color: colors.textFaint }}>
+            #{agency.agencyNumber} · {agency.city} · {agencyTotalCases(agency)} cases
+          </div>
         </div>
       </div>
     )
@@ -854,7 +895,15 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       {agencyNumbers.length === 0 && (
         <div style={{ fontSize: 12, color: colors.textFaint, fontStyle: 'italic' }}>Drop agencies here</div>
       )}
-      {agencyNumbers.map((n) => <AgencyTile key={n} agencyNumber={n} routeId={route?.id} />)}
+      {agencyNumbers.map((n, idx) => (
+        <AgencyTile
+          key={n}
+          agencyNumber={n}
+          sequenceNumber={route ? idx + 1 : null}
+          onMoveUp={route && idx > 0 ? () => reorderStopWithinRoute(route.id, n, agencyNumbers[idx - 1]) : null}
+          onMoveDown={route && idx < agencyNumbers.length - 1 ? () => reorderStopWithinRoute(route.id, n, agencyNumbers[idx + 1]) : null}
+        />
+      ))}
     </div>
   )
 
@@ -927,7 +976,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       </div>
 
       <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 16 }}>
-        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Drag one agency onto another within the same route to reorder its stops — travel times and delivery windows recalculate automatically (set a Leave Time on the route first, in the calendar above, or there's nothing to anchor the chain to). Weight shown here is real Datex gross weight (material + packaging) pulled live per line item{weightsUnresolvedCount > 0 ? `; ${weightsUnresolvedCount} material code(s) in this cycle weren't found in ${cycle.facility}'s Datex catalog and are using a ${FALLBACK_LBS_PER_CASE} lb/case fallback (routes carrying one are marked *)` : ''}. To edit this month's appointment and leave day/time, click a route in the calendar above.
+        Routes seeded from the master template (last month's assignments), pre-filled onto their usual week/weekday — new agencies not in the template land in Unassigned, and any route needing a different date this month can be dragged. Each stop's number shows its order in the route — use the ▲▼ buttons to reorder; travel times and delivery windows recalculate automatically (set a Leave Time on the route first, in the calendar above, or there's nothing to anchor the chain to). Weight shown here is real Datex gross weight (material + packaging) pulled live per line item{weightsUnresolvedCount > 0 ? `; ${weightsUnresolvedCount} material code(s) in this cycle weren't found in ${cycle.facility}'s Datex catalog and are using a ${FALLBACK_LBS_PER_CASE} lb/case fallback (routes carrying one are marked *)` : ''}. To edit this month's appointment and leave day/time, click a route in the calendar above.
       </div>
     </div>
   )
