@@ -85,6 +85,14 @@ import { WEEKDAY_LABELS, buildMonthGrid, formatTimeDisplay } from './dpiCalendar
 // clock in Phase 5). Re-labeled and boxed accordingly; the underlying
 // dpi_routes columns are unchanged (load_day/load_time, depart_day/
 // depart_time), only the UI labels and layout changed.
+//
+// 2026-09-24 FIX: same root cause confirmed live for Phase2BuildFlag.jsx's
+// AgencyTile (Edge/Windows/mouse — the whole page's mouse input got stuck
+// after clicking a tile, not just that tile). Neither this handler nor
+// AgencyTile's ever called e.dataTransfer.setData(...); Windows-based
+// Chromium browsers can leave the OS-level drag operation stuck without
+// it. Fixed proactively here too, same pattern, since this chip uses the
+// identical native-DnD approach.
 
 const scheduleSelectStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text }
 const scheduleTimeInputStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, width: 92 }
@@ -161,6 +169,15 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
           draggable={!isEditing}
           onDragStart={(e) => {
             draggingRouteIdRef.current = route.id
+            // 2026-09-24 FIX: same root cause confirmed live for
+            // Phase2BuildFlag.jsx's AgencyTile (see that file's onDragStart
+            // comment) — never calling e.dataTransfer.setData(...) can leave
+            // Windows-based Chromium browsers (Edge, Chrome) with a stuck
+            // OS-level drag operation that locks the whole page's mouse
+            // input. Fixed proactively here too, same pattern, since this
+            // chip uses the identical native-DnD approach.
+            e.dataTransfer.effectAllowed = 'move'
+            e.dataTransfer.setData('text/plain', String(route.id))
             e.currentTarget.style.opacity = '0.4'
           }}
           onDragEnd={(e) => {
