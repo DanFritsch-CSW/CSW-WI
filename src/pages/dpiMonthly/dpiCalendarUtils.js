@@ -148,4 +148,48 @@ function computeLoadDateStr(deliverDateStr, deliverDayLabel, loadDayLabel) {
   return `${date.getMonth() + 1}/${date.getDate()}`
 }
 
-export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr }
+// 2026-09-24 (A5/A6/A11 — stop ETA chain): a route's delivery windows and
+// travel times are computed as a running clock, anchored to the route's
+// depart_time (when the truck leaves CSW — see RouteCalendar.jsx's "Leave
+// Time," distinct from the appointment/load time). Kept as plain
+// minutes-since-midnight arithmetic rather than Date objects — a route
+// never spans midnight in this system, so there's no calendar-day
+// bookkeeping to get right, just clock time.
+
+// "HH:MM:SS" (Postgres `time`, same shape formatTimeDisplay already
+// parses) -> minutes since midnight. Returns null if unparseable, so a
+// route with no leave time set yet can be detected and skipped rather
+// than silently anchored to midnight.
+function parseTimeToMinutes(t) {
+  if (!t) return null
+  const [h, m] = t.split(':').map(Number)
+  if (Number.isNaN(h) || Number.isNaN(m)) return null
+  return h * 60 + m
+}
+
+// Minutes since midnight -> "H:MM AM/PM". Wraps defensively into a single
+// 24-hour day (a route chain crossing real midnight would be a data
+// problem worth surfacing some other way, not silently displayed as
+// "26:15" or similar).
+function formatMinutesToClock(totalMinutes) {
+  const wrapped = ((totalMinutes % 1440) + 1440) % 1440
+  const h = Math.floor(wrapped / 60)
+  const m = wrapped % 60
+  const period = h >= 12 ? 'PM' : 'AM'
+  const h12 = h % 12 === 0 ? 12 : h % 12
+  return `${h12}:${String(m).padStart(2, '0')} ${period}`
+}
+
+// Minutes -> "1hr 45 min" / "45 min" / "1hr", matching the exact format
+// already present in this app's real template travel_time data (e.g.
+// "1hr 45 min", "20 min", "1hr" — see dpi_route_templates), so a
+// recalculated value reads identically to a template-seeded one.
+function formatTravelMinutes(totalMinutes) {
+  const h = Math.floor(totalMinutes / 60)
+  const m = totalMinutes % 60
+  if (h === 0) return `${m} min`
+  if (m === 0) return `${h}hr`
+  return `${h}hr ${m} min`
+}
+
+export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr, parseTimeToMinutes, formatMinutesToClock, formatTravelMinutes }
