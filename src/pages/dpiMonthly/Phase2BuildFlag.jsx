@@ -6,7 +6,7 @@ import {
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
 import RouteCalendar from './RouteCalendar.jsx'
-import { computeAutoDeliveryDate, formatTimeDisplay } from './dpiCalendarUtils.js'
+import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr } from './dpiCalendarUtils.js'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -100,6 +100,21 @@ import { computeAutoDeliveryDate, formatTimeDisplay } from './dpiCalendarUtils.j
 // placeholder numbers with no signal. See agencyTotalWeight in
 // dpiMonthlyStyles.js for the actual math.
 //
+// 2026-09-24 (A1 — carrier confirmation): per Jen, carrier confirmation
+// needs to happen BEFORE agency comms (carriers move stops; confirming
+// with them first avoids re-scheduling every agency a second time when a
+// stop shifts). Per Dan, built directly into this Route Build stage
+// rather than as a separate approval phase/screen: "Print carrier route
+// sheets" below generates one PDF, one page per scheduled route, matching
+// the exact layout of a real printed route sheet Dan shared — that PDF IS
+// the carrier-confirmation artifact. Workflow: build/schedule routes here
+// -> print/save the PDF -> send it to the carrier outside the app -> any
+// requested edits come back here (rename, re-drag a date, move an agency)
+// -> regenerate and re-send if needed -> once confirmed, continue to
+// Phase 4 as normal. No in-app Front send yet — this only renders the
+// PDF. See netlify/functions/dpi-carrier-route-sheet-pdf.cjs and
+// printCarrierPdf below.
+//
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
 //   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
 //     like the Labor Planning roster board — adequate for a test click-
@@ -121,6 +136,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const [editRouteValue, setEditRouteValue] = useState('')
   const [weightMap, setWeightMap] = useState({}) // lookupCode -> { materialId, netWeight, grossWeight }
   const [weightsUnresolvedCount, setWeightsUnresolvedCount] = useState(0)
+  const [printingPdf, setPrintingPdf] = useState(false)
 
   const agencyByNumber = new Map(stagedAgencies.map((a) => [a.agencyNumber, a]))
 
@@ -266,6 +282,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       depart_time: r.depart_time,
       delivery_date: r.delivery_date,
       template_week: r.template_week,
+      notes: r.notes,
       stops: (stopRows || []).filter((s) => s.route_id === r.id).map((s) => s.agency_number),
     }))
 
@@ -396,6 +413,96 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       if (routesDelErr) { console.error('regenerate routes: delete routes:', routesDelErr); return }
     }
     await loadRoutes() // finds zero routes, re-seeds from template, reloads
+  }
+
+  // Carrier route sheet PDF (A1). Fetches a fresh copy of every stop
+  // (full rows, not just the agency-number list `route.stops` keeps for
+  // drag-and-drop) so the PDF has sequence/delivery window/travel time —
+  // deliberately a separate query rather than restructuring `route.stops`
+  // itself, to avoid touching the drag logic that already depends on its
+  // current agency-number-array shape. Weight is recomputed live from
+  // weightMap (same real Datex numbers as the on-screen capacity flags),
+  // not read back from the stored dpi_route_stops.gross_weight column,
+  // which can be stale for any route seeded before A7 shipped. Only
+  // scheduled routes (a real delivery_date) are included — an unscheduled
+  // route has no Load/Deliver date to print yet.
+  const printCarrierPdf = async () => {
+    if (!supabase || routes.length === 0) return
+    setPrintingPdf(true)
+    try {
+      const routeIds = routes.map((r) => r.id)
+      const { data: stopRows, error } = await supabase
+        .from('dpi_route_stops')
+        .select('*')
+        .in('route_id', routeIds)
+        .order('sequence')
+      if (error) { console.error('load stops for carrier PDF:', error); alert('Could not load route stops for the PDF — check console.'); return }
+
+      const payloadRoutes = routes
+        .filter((r) => r.delivery_date)
+        .sort((a, b) => a.route_number.localeCompare(b.route_number, undefined, { numeric: true }))
+        .map((route) => {
+          const stops = (stopRows || []).filter((s) => s.route_id === route.id)
+          const stopPayload = stops.map((s) => {
+            const agency = agencyByNumber.get(s.agency_number)
+            const weight = agency ? agencyTotalWeight(agency, weightMap).weight : Number(s.gross_weight) || 0
+            return {
+              time: s.delivery_window_start || '',
+              agencyNumber: s.agency_number,
+              agencyName: s.agency_name,
+              city: s.city,
+              grossWeight: weight,
+              totalCases: Number(s.total_cases) || 0,
+              travelTime: s.travel_time || '',
+            }
+          })
+          const totalWeight = stopPayload.reduce((sum, s) => sum + s.grossWeight, 0)
+          const totalCases = stopPayload.reduce((sum, s) => sum + s.totalCases, 0)
+
+          // Route notes are one pipe-delimited field (e.g. "Load 1st Mon PM |
+          // Eau Claire can be a return reload | Mon or Tue Del ok") — the
+          // first segment is the routing-timing note that gets the yellow
+          // highlight on the printed sheet; the rest print as plain notes
+          // below it. There's no dedicated per-stop notes column, so a
+          // note like "if over 40,000 lbs move to route X's last stop"
+          // lives here at the route level, not attached to a specific stop.
+          const notesParts = (route.notes || '').split('|').map((p) => p.trim()).filter(Boolean)
+
+          return {
+            routeNumber: route.route_number,
+            loadDay: route.load_day,
+            loadDateStr: computeLoadDateStr(route.delivery_date, route.deliver_day, route.load_day),
+            deliverDay: route.deliver_day,
+            deliverDateStr: formatDateShort(route.delivery_date),
+            highlight: notesParts[0] || null,
+            restNotes: notesParts.slice(1),
+            stops: stopPayload,
+            totalWeight,
+            totalCases,
+          }
+        })
+
+      if (payloadRoutes.length === 0) { alert('No scheduled routes yet — assign delivery dates in the calendar above before printing.'); return }
+
+      const res = await fetch('/.netlify/functions/dpi-carrier-route-sheet-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ facility: cycle.facility, monthKey: cycle.month_key, routes: payloadRoutes }),
+      })
+      if (!res.ok) { console.error('carrier PDF generation failed:', res.status, await res.text().catch(() => '')); alert('PDF generation failed — check console.'); return }
+
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `DPI-${cycle.facility.replace(/\s+/g, '')}-${cycle.month_key}-carrier-routes.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } finally {
+      setPrintingPdf(false)
+    }
   }
 
   const advance = async () => {
@@ -533,6 +640,14 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.warning}`, background: 'transparent', color: colors.warning, cursor: 'pointer' }}
         >
           ↺ Regenerate routes
+        </button>
+        <button
+          onClick={printCarrierPdf}
+          disabled={printingPdf}
+          title="Generate one PDF, one page per scheduled route — this is the carrier confirmation artifact (A1): print/save it, send it to the carrier, make any requested edits back here, then continue to Agency Comms"
+          style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.accent}`, background: 'transparent', color: colors.accent, cursor: printingPdf ? 'default' : 'pointer', opacity: printingPdf ? 0.5 : 1 }}
+        >
+          {printingPdf ? 'Generating PDF…' : '🖨 Print carrier route sheets'}
         </button>
       </div>
 
