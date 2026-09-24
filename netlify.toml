@@ -283,6 +283,13 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# DPI Monthly material weight lookup (A7 fix) -- read-only sibling of
+# lib/dpi-monthly-shared.cjs's real Datex push path, same duckdb
+# dependency pattern as the other MotherDuck-backed functions above.
+[functions."dpi-material-weights"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 # Nightly B2E sync -- SPLIT 2026-08-11 into -run.cjs (scheduled) +
 # -test.cjs (manual, no schedule) after Dan/Dean suspected the 5am cron
 # wasn't seeding future days as expected (CAL's weekly digest showed a
