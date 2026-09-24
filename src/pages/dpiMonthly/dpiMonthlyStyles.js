@@ -40,16 +40,49 @@ export const buttonSuccess = {
   background: colors.success, color: '#fff', fontWeight: 600, cursor: 'pointer',
 }
 
-// Placeholder per-case weight (lbs) used for Phase 2 capacity flags. This is
-// a KNOWN SIMPLIFICATION — real weight should come from Datex materials +
-// packaging lookup (silver.datex_slv_materialspackagingslookup.Weight), not
-// a flat constant. Fine for a simulate-only test run; must be replaced
-// before Phase 2 handles real capacity decisions.
-export const PLACEHOLDER_LBS_PER_CASE = 25
+// Fallback per-case weight (lbs), used ONLY for line items whose material
+// isn't in the live weight map yet — either dpi-material-weights.cjs
+// hasn't returned yet, or (rare) the material genuinely isn't in this
+// facility's Datex catalog. Real weight for everything else comes from
+// agencyTotalWeight below. FIXED 2026-09-24 (A7): this constant used to be
+// the ONLY weight source for every line, always — that's what produced
+// Jen's original report (her route showed 41,000 lbs in Datex vs 37,575
+// lbs here), and it was also worse than her report implied: this wasn't
+// "reading the wrong CSV column," the CSV's own weight column was never
+// used for order creation at all (see dpiMonthlyParser.js's header). Real
+// weight now comes from production_db.silver.datex_slv_materialspackagingslookup
+// via netlify/functions/dpi-material-weights.cjs, confirmed live to be
+// off from real gross weight by roughly the same margin as Jen's report.
+export const FALLBACK_LBS_PER_CASE = 25
 
 export const CAPACITY_LBS_LIMIT = 40000
 export const CAPACITY_CASES_LIMIT = 1700
 
 export function agencyTotalCases(agency) {
   return (agency.lines || []).reduce((sum, l) => sum + (Number(l.quantity) || 0), 0)
+}
+
+// Real gross weight (Datex shipping_weight = Weight + tare_weight — the
+// physical trailer-scale number, not net product weight) for one agency,
+// summed line-by-line from weightMap (keyed by trimmed materialLookupCode,
+// see dpi-material-weights.cjs). Falls back to FALLBACK_LBS_PER_CASE per
+// line for any material not yet in weightMap, and reports how many lines
+// that happened for — callers should surface that count rather than
+// silently blending real and placeholder numbers with no signal that a
+// route's total isn't fully real yet.
+export function agencyTotalWeight(agency, weightMap) {
+  let weight = 0
+  let unresolvedLines = 0
+  for (const line of (agency.lines || [])) {
+    const qty = Number(line.quantity) || 0
+    const code = String(line.materialLookupCode || '').trim()
+    const entry = weightMap ? weightMap[code] : null
+    if (entry) {
+      weight += qty * entry.grossWeight
+    } else {
+      weight += qty * FALLBACK_LBS_PER_CASE
+      unresolvedLines += 1
+    }
+  }
+  return { weight, unresolvedLines }
 }
