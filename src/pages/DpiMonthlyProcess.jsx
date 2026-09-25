@@ -6,6 +6,7 @@ import { colors, cardStyle } from './dpiMonthly/dpiMonthlyStyles.js'
 import Phase2BuildFlag from './dpiMonthly/Phase2BuildFlag.jsx'
 import Phase4AgencyComms from './dpiMonthly/Phase4AgencyComms.jsx'
 import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
+import TemplateEditor from './dpiMonthly/TemplateEditor.jsx'
 
 // DPI Monthly Process — full pipeline, hidden route (/dpimonthly, see
 // src/App.jsx) — not linked from any nav.
@@ -46,6 +47,16 @@ import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
 // cycle only advances if every row succeeded or was simulated; any failure
 // blocks advance and shows a clear, visible failure banner with a retry
 // action, instead of a silent per-row ⚠ tooltip nobody has reason to hover.
+//
+// 2026-09-25 (A2 — route template editor): a new top-level view toggle
+// (Monthly Cycle | Route Templates) alongside the existing Facility
+// toggle. TemplateEditor.jsx edits dpi_route_templates/
+// dpi_route_template_stops directly — the master annual pattern every
+// cycle is seeded from — never a specific cycle's dpi_routes/
+// dpi_route_stops. This is a standing configuration screen, not a phase
+// of the monthly pipeline, so it sits beside the phase pipeline rather
+// than as a 5th phase pill; PhasePills, the phase body, and "Reset test
+// cycle" are all cycle-specific and hidden while viewing templates.
 
 // 2026-09-18: renamed Phase 1 and 2 for clarity per Dan, and dropped
 // Phase 3 from this stepper display entirely — it was ALREADY never
@@ -193,6 +204,7 @@ function lastDayOfMonth(monthKey) {
 }
 
 export default function DpiMonthlyProcess() {
+  const [view, setView] = useState('cycle') // 'cycle' | 'templates'
   const [facility, setFacility] = useState('Eau Claire')
   const [loading, setLoading] = useState(true)
   const [stage, setStage] = useState('empty') // empty | parsed | pushing | done | push_failed (Phase 1 only)
@@ -477,7 +489,25 @@ export default function DpiMonthlyProcess() {
       <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>DPI Monthly Process</div>
       <div style={{ fontSize: 13, color: colors.textFaint, marginBottom: 20 }}>Eau Claire &amp; Madison monthly school-district delivery cycle</div>
 
-      <PhasePills currentPhase={currentPhase} />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        {[{ key: 'cycle', label: 'Monthly Cycle' }, { key: 'templates', label: 'Route Templates' }].map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => setView(key)}
+            style={{
+              fontSize: 13, padding: '6px 14px', borderRadius: 6,
+              border: `1px solid ${view === key ? colors.accent : colors.border}`,
+              background: view === key ? colors.accentBg : colors.panel,
+              color: view === key ? colors.accent : colors.textMuted,
+              cursor: 'pointer',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'cycle' && <PhasePills currentPhase={currentPhase} />}
 
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
@@ -501,7 +531,7 @@ export default function DpiMonthlyProcess() {
             ))}
           </div>
         </div>
-        {cycle && (
+        {view === 'cycle' && cycle && (
           <button
             onClick={resetTestCycle}
             style={{
@@ -515,6 +545,10 @@ export default function DpiMonthlyProcess() {
         )}
       </div>
 
+      {view === 'templates' && <TemplateEditor facility={facility} />}
+
+      {view === 'cycle' && (
+        <>
       {loading && <div style={{ fontSize: 13, color: colors.textFaint }}>Loading…</div>}
 
       {!loading && !cycle && (
@@ -661,6 +695,8 @@ export default function DpiMonthlyProcess() {
 
       {!loading && cycle && currentPhase === 5 && (
         <Phase5FinalPush cycle={cycle} onCycleComplete={resetToEmpty} />
+      )}
+        </>
       )}
     </div>
   )
