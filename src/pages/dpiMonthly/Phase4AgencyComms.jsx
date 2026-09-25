@@ -3,13 +3,28 @@ import { supabase } from '../../lib/supabase.js'
 import { colors, cardStyle, buttonPrimary } from './dpiMonthlyStyles.js'
 
 // Phase 4 — Agency comms. One simulated "send" per agency (matches the real
-// design: one Front draft per agency, not one per facility), followed by a
-// reschedule-confirmation loop — real volume is 1-2 reschedules/month, so
-// this stays a manual per-row toggle rather than anything automated.
+// design: one Front draft per agency, not one per facility).
 //
 // SIMULATE-ONLY: no real Front drafts/sends happen here. "Send all" just
-// stamps comms_sent_at on every stop; "Mark confirmed" flips
+// stamps comms_sent_at on every stop; the reschedule flag flips
 // confirmation_status locally + in Supabase. No Front API calls at all.
+//
+// 2026-09-25 FIX (A12): the original design required clicking "Mark
+// confirmed" on every single agency before Phase 5 unlocked — Dan's own
+// words: "unbearable" and "stupid," not viable at 70 orders. Per Dan,
+// real volume is maybe 1-2 reschedule requests a month; everything else
+// needs zero action after sending. The old design had that backwards —
+// it demanded an action for the common no-change case and only rewarded
+// silence for the rare exception. Flipped: "Continue to Phase 5" is now
+// available as soon as comms are sent, full stop — no per-agency gate at
+// all. The per-row control changed from "Mark confirmed" (an action
+// required for every agency) to "Flag reschedule requested" (an action
+// only taken for the rare agency that actually asks for a change) —
+// visible on the row, but purely informational; it has never blocked
+// advancing and still doesn't. Reuses the existing confirmation_status
+// column/values rather than adding a new one — 'confirmed' now carries
+// the meaning "reschedule requested," which reads a little oddly in the
+// column name but avoids a migration for what's just a UI framing change.
 
 export default function Phase4AgencyComms({ cycle, onAdvance }) {
   const [stops, setStops] = useState([])
@@ -54,7 +69,10 @@ export default function Phase4AgencyComms({ cycle, onAdvance }) {
     if (error) console.error('send all comms:', error)
   }
 
-  const toggleConfirmed = async (stopId, current) => {
+  // 2026-09-25 (A12): renamed from toggleConfirmed. Purely informational
+  // now — flips a visible flag for the rare agency that actually requests
+  // a reschedule after comms go out. Never gates advancing to Phase 5.
+  const toggleRescheduleFlag = async (stopId, current) => {
     const next = current === 'confirmed' ? 'pending' : 'confirmed'
     setStops((prev) => prev.map((s) => (s.id === stopId ? { ...s, confirmation_status: next } : s)))
     if (!supabase) return
@@ -62,11 +80,11 @@ export default function Phase4AgencyComms({ cycle, onAdvance }) {
       .from('dpi_route_stops')
       .update({ confirmation_status: next, updated_at: new Date().toISOString() })
       .eq('id', stopId)
-    if (error) console.error('toggle confirmed:', error)
+    if (error) console.error('toggle reschedule flag:', error)
   }
 
   const allSent = stops.length > 0 && stops.every((s) => s.comms_sent_at)
-  const allConfirmed = stops.length > 0 && stops.every((s) => s.confirmation_status === 'confirmed')
+  const rescheduleCount = stops.filter((s) => s.confirmation_status === 'confirmed').length
 
   const advance = async () => {
     if (!supabase || !cycle) return
@@ -87,7 +105,7 @@ export default function Phase4AgencyComms({ cycle, onAdvance }) {
   return (
     <div>
       <div style={{ ...cardStyle, padding: 0, overflow: 'hidden', marginBottom: 16 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 140px 140px', padding: '10px 16px', fontSize: 12, color: colors.textFaint, borderBottom: `1px solid ${colors.border}` }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 140px 160px', padding: '10px 16px', fontSize: 12, color: colors.textFaint, borderBottom: `1px solid ${colors.border}` }}>
           <div>Route</div>
           <div>Agency</div>
           <div>Cases</div>
@@ -95,7 +113,7 @@ export default function Phase4AgencyComms({ cycle, onAdvance }) {
           <div>Reschedule</div>
         </div>
         {stops.map((s) => (
-          <div key={s.id} style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 140px 140px', padding: '11px 16px', fontSize: 13, borderBottom: `1px solid ${colors.border}`, alignItems: 'center' }}>
+          <div key={s.id} style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 140px 160px', padding: '11px 16px', fontSize: 13, borderBottom: `1px solid ${colors.border}`, alignItems: 'center' }}>
             <div style={{ color: colors.textFaint }}>{s.route_number}</div>
             <div>{s.agency_name}</div>
             <div style={{ color: colors.textMuted }}>{s.total_cases ?? '—'}</div>
@@ -104,18 +122,19 @@ export default function Phase4AgencyComms({ cycle, onAdvance }) {
             </div>
             <div>
               <button
-                onClick={() => toggleConfirmed(s.id, s.confirmation_status)}
+                onClick={() => toggleRescheduleFlag(s.id, s.confirmation_status)}
                 disabled={!s.comms_sent_at}
+                title="Only click this if the agency actually asked to reschedule — everything else needs no action"
                 style={{
                   fontSize: 12, padding: '4px 10px', borderRadius: 5,
-                  border: `1px solid ${s.confirmation_status === 'confirmed' ? colors.success : colors.border}`,
-                  background: s.confirmation_status === 'confirmed' ? colors.successBg : 'transparent',
-                  color: s.confirmation_status === 'confirmed' ? colors.success : colors.textMuted,
+                  border: `1px solid ${s.confirmation_status === 'confirmed' ? colors.warning : colors.border}`,
+                  background: s.confirmation_status === 'confirmed' ? colors.warningBg : 'transparent',
+                  color: s.confirmation_status === 'confirmed' ? colors.warning : colors.textFaint,
                   cursor: s.comms_sent_at ? 'pointer' : 'default',
                   opacity: s.comms_sent_at ? 1 : 0.4,
                 }}
               >
-                {s.confirmation_status === 'confirmed' ? 'Confirmed' : 'Mark confirmed'}
+                {s.confirmation_status === 'confirmed' ? 'Reschedule requested' : 'Flag reschedule'}
               </button>
             </div>
           </div>
@@ -129,12 +148,12 @@ export default function Phase4AgencyComms({ cycle, onAdvance }) {
           </button>
         )}
         {allSent && (
-          <button onClick={advance} disabled={!allConfirmed} style={{ ...buttonPrimary, opacity: allConfirmed ? 1 : 0.4, cursor: allConfirmed ? 'pointer' : 'default' }}>
+          <button onClick={advance} style={buttonPrimary}>
             Continue to Phase 5 — Final push
           </button>
         )}
         <span style={{ fontSize: 12, color: colors.textFaint }}>
-          {allSent && !allConfirmed && `${stops.filter((s) => s.confirmation_status !== 'confirmed').length} agenc${stops.filter((s) => s.confirmation_status !== 'confirmed').length === 1 ? 'y' : 'ies'} still awaiting confirmation.`}
+          {allSent && rescheduleCount > 0 && `${rescheduleCount} agenc${rescheduleCount === 1 ? 'y has' : 'ies have'} requested a reschedule — handle before or after continuing, your call.`}
         </span>
       </div>
     </div>
