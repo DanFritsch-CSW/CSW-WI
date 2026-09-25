@@ -192,4 +192,19 @@ function formatTravelMinutes(totalMinutes) {
   return `${h}hr ${m} min`
 }
 
-export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr, parseTimeToMinutes, formatMinutesToClock, formatTravelMinutes }
+// 2026-09-25 FIX: confirmed live on a printed route sheet (CEMIL) — stop
+// windows overlapped (6:30-7:30 AM, then 7:00-8:00 AM) because that
+// route's stops still carried their original template-seeded times,
+// never run through the real chain (recalc only fires on reorder/add/
+// drop — this route had never been touched). Per Dan: every arrival time
+// should always be computed as [the previous stop's own rounded time] +
+// [travel time to here], then rounded itself to the nearest quarter hour
+// — never an independently-anchored window. Rounding the running clock at
+// each step (not just the displayed value) means "the previous stop's
+// time" that the NEXT leg builds on is always the same round number a
+// human would actually reference, not a raw, unrounded intermediate.
+function roundToNearest15(totalMinutes) {
+  return Math.round(totalMinutes / 15) * 15
+}
+
+export { WEEKDAY_LABELS, buildMonthGrid, parseWeekdayIndex, computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr, parseTimeToMinutes, formatMinutesToClock, formatTravelMinutes, roundToNearest15 }
