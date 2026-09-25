@@ -9,7 +9,7 @@ import {
 } from './dpiMonthlyStyles.js'
 import RouteMap from './RouteMap.jsx'
 import RouteCalendar from './RouteCalendar.jsx'
-import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr, parseTimeToMinutes, formatMinutesToClock, formatTravelMinutes } from './dpiCalendarUtils.js'
+import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoadDateStr, parseTimeToMinutes, formatMinutesToClock, formatTravelMinutes, roundToNearest15 } from './dpiCalendarUtils.js'
 
 // Phase 2 — Build & flag. Route board seeded from the real master route
 // template (dpi_route_templates/dpi_route_template_stops — parsed
@@ -592,12 +592,20 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       const data = await res.json()
       if (!data.legMinutes) { console.error('recalc ETA: travel time lookup failed for route', routeId, ':', data.error); return }
 
-      // Chain: depart_time anchors the clock. Each stop's window is fixed
-      // [arrival, arrival+60min] per Dan; a 15-min buffer (A6, dwell/
-      // unload time) is added after each stop before the next leg.
+      // Chain: depart_time anchors the clock. Each stop's arrival is
+      // rounded to the nearest quarter hour (2026-09-25, per Dan — a
+      // printed route sheet showed overlapping windows because a route's
+      // stops still carried stale, never-recalculated template values;
+      // rounding is now non-negotiable, applied to the running clock
+      // itself so the NEXT leg always builds on the same round number a
+      // human would reference, not a raw intermediate). Window is fixed
+      // [rounded arrival, rounded arrival + 60min] per Dan; a 15-min
+      // buffer (A6, dwell/unload time) is added after each stop before
+      // the next leg.
       let currentMinutes = parseTimeToMinutes(route.depart_time)
       const updates = geocodedStops.map((stop, i) => {
         currentMinutes += data.legMinutes[i]
+        currentMinutes = roundToNearest15(currentMinutes)
         const update = {
           id: stop.id,
           travel_minutes: data.legMinutes[i],
@@ -670,10 +678,25 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   // which can be stale for any route seeded before A7 shipped. Only
   // scheduled routes (a real delivery_date) are included — an unscheduled
   // route has no Load/Deliver date to print yet.
+  //
+  // 2026-09-25 FIX: confirmed live on a printed sheet (CEMIL) — stop
+  // windows overlapped (6:30-7:30 AM, then 7:00-8:00 AM). Root cause:
+  // recalcRouteETA only ever fires on reorder/add/drop, so a route
+  // nobody had manually touched since template-seeding still carried its
+  // original template values — which were never computed by a proper
+  // sequential chain in the first place. Printing should never expose
+  // that gap: every scheduled route with a Leave Time set is now
+  // recalculated fresh, right before the stops are fetched for the PDF,
+  // so the printed sheet always reflects the real chained-and-rounded
+  // times regardless of whether that route happened to be reordered this
+  // session.
   const printCarrierPdf = async () => {
     if (!supabase || routes.length === 0) return
     setPrintingPdf(true)
     try {
+      const schedulableRoutes = routes.filter((r) => r.delivery_date && r.depart_time && r.depart_day)
+      await Promise.all(schedulableRoutes.map((r) => recalcRouteETA(r.id)))
+
       const routeIds = routes.map((r) => r.id)
       const { data: stopRows, error } = await supabase
         .from('dpi_route_stops')
