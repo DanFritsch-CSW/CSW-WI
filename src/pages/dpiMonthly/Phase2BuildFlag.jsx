@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../../lib/supabase.js'
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, useDroppable, DragOverlay } from '@dnd-kit/core'
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import {
   colors, cardStyle, buttonPrimary,
   FALLBACK_LBS_PER_CASE, CAPACITY_LBS_LIMIT, CAPACITY_CASES_LIMIT, agencyTotalCases, agencyTotalWeight,
@@ -141,24 +144,34 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 // later if OSRM's public server proves unreliable, contained to that one
 // function).
 //
-// Manual reorder (A4) — 2026-09-24 FIX (three passes total — see
-// AgencyTile below for the final, actual root cause): the first version
-// detected a reorder by adding onDragOver/onDrop directly to AgencyTile
-// (drop one tile onto another within the same lane). That broke ordinary
-// cross-lane dragging outright — confirmed live, tiles just stuck faded
-// and stopped moving between routes at all. Removing onDragOver/onDrop
-// alone did NOT fully fix it — confirmed live a second time, dragging was
-// still broken on a completely fresh tile after that first fix shipped.
-// The up/down <button> elements were still nested INSIDE the draggable
-// div as children (a well-documented cross-browser problem), so that was
-// fixed too by making the draggable card and the button column SIBLINGS.
-// STILL broken after both fixes — see AgencyTile's onDragStart for the
-// actual root cause, confirmed live on Edge/Windows/mouse.
+// Manual reorder (A4) / drag mechanism — 2026-09-24/25, four passes total:
+// the first three all patched the native HTML5 Drag-and-Drop API
+// (removing onDragOver/onDrop conflicts, un-nesting buttons from the
+// draggable div, adding dataTransfer.setData) and each genuinely fixed a
+// real bug — but dragging was STILL broken afterward, confirmed live via
+// a screen recording: on Edge/Windows/mouse, clicking a tile enters a
+// native OS-level drag that never resolves — the tile stays faded and the
+// whole page ignores clicks for the rest of the session, fixed only by a
+// full page reload. That's a browser/OS-level native-DnD reliability
+// problem, not a fixable code bug in this app's HTML5 DnD handlers.
+//
+// Fixed for real by dropping native HTML5 DnD entirely and switching to
+// @dnd-kit — already the proven, working drag library for this exact
+// kind of interaction elsewhere in this app (the Labor Planning roster
+// board, RosterBoard.jsx/EmployeeTile.jsx). dnd-kit drives drag purely
+// through pointer events (pointerdown/pointermove/pointerup), never
+// touching the browser's native OS-level drag machinery at all — so the
+// whole class of stuck-drag bugs chased across the last three fixes
+// cannot occur by construction, not just by patching around it again.
+// AgencyTile is now sortable via useSortable; each Lane (including
+// Unassigned) is a useDroppable target; the whole board is wrapped in one
+// DndContext with a PointerSensor (5px activation distance, matching
+// RosterBoard's own sensor config) and a DragOverlay showing the tile
+// following the cursor. moveAgency and reorderStopWithinRoute (the actual
+// persistence logic) are unchanged — only how a drag gesture gets
+// translated into a call to one of them has changed.
 //
 // SIMULATE-ONLY SIMPLIFICATIONS (flagged, not hidden):
-//   - Drag-and-drop uses native HTML5 DnD (draggable/onDrop), not @dnd-kit
-//     like the Labor Planning roster board — adequate for a test click-
-//     through, worth revisiting for polish/consistency later.
 //   - Travel time and cubage/bulk capacity are out of scope entirely, per
 //     the original Phase 2 design discussion.
 //   - Madison route codes are named (MADISON, OSHKO, DODGE...), EC's are
@@ -184,7 +197,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
   const [routes, setRoutes] = useState([]) // [{ id, route_number, load_day, deliver_day, load_time, depart_day, depart_time, delivery_date, template_week, stops: [agencyNumber,...] }]
   const [unassigned, setUnassigned] = useState([]) // [agencyNumber,...]
   const [loading, setLoading] = useState(true)
-  const draggingAgencyRef = useRef(null)
+  const [activeDragId, setActiveDragId] = useState(null) // agencyNumber currently being dragged, for DragOverlay
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } })) // matches RosterBoard.jsx's own config
   const [newRouteCode, setNewRouteCode] = useState('')
   const [editingRouteId, setEditingRouteId] = useState(null)
   const [editRouteValue, setEditRouteValue] = useState('')
@@ -772,20 +786,85 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     onAdvance()
   }
 
-  // 2026-09-24 FIX (the actual real root cause — see AgencyTile's
-  // onDragStart for the full explanation, confirmed live on Edge/Windows/
-  // mouse). Two earlier fixes here addressed real but secondary problems
-  // (onDragOver/onDrop conflicts, then nested buttons inside the
-  // draggable div) — this AgencyTile shape is unchanged from that second
-  // fix; only its onDragStart handler changed.
-  const AgencyTile = ({ agencyNumber, sequenceNumber, onMoveUp, onMoveDown }) => {
-    const agency = agencyByNumber.get(agencyNumber)
+  const UNASSIGNED_LANE_ID = 'unassigned' // sentinel distinct from any numeric route.id
+
+  // Looked up fresh each render: agencyNumber -> the lane it currently sits
+  // in (UNASSIGNED_LANE_ID or a route.id). Used by handleDragEnd to figure
+  // out where a drop landed and whether it's a same-lane reorder or a
+  // cross-lane move, without needing dnd-kit's `over` target to already
+  // know that itself.
+  const agencyToLaneId = new Map()
+  for (const n of unassigned) agencyToLaneId.set(n, UNASSIGNED_LANE_ID)
+  for (const route of routes) for (const n of route.stops) agencyToLaneId.set(n, route.id)
+
+  const handleDragStart = ({ active }) => setActiveDragId(active.id)
+
+  // dnd-kit's `over.id` is either a lane's own droppable id (dropped on
+  // empty space in that lane) or another agency's id (dropped directly
+  // onto a tile) — never a synthetic "position" the way some dnd-kit
+  // examples set up. Same-lane tile-on-tile -> reorder; anything else that
+  // resolves to a different lane -> the existing cross-lane move.
+  const handleDragEnd = ({ active, over }) => {
+    setActiveDragId(null)
+    if (!over) return
+    const agencyNumber = active.id
+    const overId = over.id
+    if (agencyNumber === overId) return
+
+    const currentLaneId = agencyToLaneId.get(agencyNumber)
+    const overIsLane = overId === UNASSIGNED_LANE_ID || routes.some((r) => r.id === overId)
+
+    if (overIsLane) {
+      if (overId === currentLaneId) return // dropped back into its own empty lane space — no-op
+      moveAgency(agencyNumber, overId === UNASSIGNED_LANE_ID ? null : overId)
+      return
+    }
+
+    const destLaneId = agencyToLaneId.get(overId)
+    if (destLaneId == null) return
+    if (destLaneId === currentLaneId) {
+      reorderStopWithinRoute(currentLaneId, agencyNumber, overId)
+    } else {
+      moveAgency(agencyNumber, destLaneId === UNASSIGNED_LANE_ID ? null : destLaneId)
+    }
+  }
+
+  // Plain, hook-free visual — used both inside the real sortable tile
+  // below and directly by DragOverlay. Kept separate from useSortable
+  // entirely (rather than a "disabled"/"overlay" flag on one component)
+  // so the floating overlay copy can never register a second useSortable
+  // instance under the same agencyNumber while the real one is mid-drag —
+  // an unnecessary risk for a purely visual floating copy to take on.
+  const AgencyTileCard = ({ agency, floating = false }) => (
+    <div
+      style={{
+        padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
+        border: `1px solid ${colors.border}`, fontSize: 13,
+        cursor: floating ? 'grabbing' : 'grab',
+        boxShadow: floating ? '0 4px 12px rgba(0,0,0,0.15)' : 'none',
+      }}
+    >
+      <div style={{ color: colors.text }}>{agency.firstName}</div>
+      <div style={{ fontSize: 11, color: colors.textFaint }}>
+        #{agency.agencyNumber} · {agency.city} · {agencyTotalCases(agency)} cases
+      </div>
+    </div>
+  )
+
+  // 2026-09-25 FIX (real root cause, after three native-HTML5-DnD patches
+  // that each fixed something real but never resolved the underlying
+  // issue — see the top-of-file comment): AgencyTile is now sortable via
+  // dnd-kit's useSortable, driven by pointer events, not the browser's
+  // native OS-level drag.
+  const AgencyTile = ({ agencyNumber, agency, sequenceNumber, onMoveUp, onMoveDown }) => {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: agencyNumber })
     if (!agency) return null
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         {sequenceNumber != null && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, flexShrink: 0 }}>
             <button
+              onPointerDown={(e) => e.stopPropagation()} // keep this click from being swallowed as a drag-handle press
               disabled={!onMoveUp}
               onClick={onMoveUp || undefined}
               title="Move earlier in the route"
@@ -795,6 +874,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
             </button>
             <div style={{ fontSize: 11, fontWeight: 700, color: colors.textMuted, minWidth: 14, textAlign: 'center' }}>{sequenceNumber}</div>
             <button
+              onPointerDown={(e) => e.stopPropagation()}
               disabled={!onMoveDown}
               onClick={onMoveDown || undefined}
               title="Move later in the route"
@@ -805,116 +885,95 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           </div>
         )}
         <div
-          draggable
-          onDragStart={(e) => {
-            draggingAgencyRef.current = agencyNumber
-            // 2026-09-24 FIX (the actual real root cause): confirmed live on
-            // Edge/Windows/mouse — every previous fix addressed a real but
-            // secondary problem; this is the one that actually explains
-            // "the whole page stops responding to clicks." Neither this
-            // handler nor RouteChip's ever called
-            // e.dataTransfer.setData(...). Most browsers tolerate a drag
-            // with no data set on it, but Windows-based Chromium browsers
-            // (Edge, Chrome) can be much stricter — without it, the OS-level
-            // drag operation Windows starts on dragstart can fail to
-            // complete or cancel properly, leaving the whole page's mouse
-            // input stuck in "drag mode" exactly as described. Setting real
-            // data (and effectAllowed, which some browsers also expect) is
-            // what tells the browser/OS this is a genuine, well-formed drag
-            // operation it can properly track through to dragend.
-            e.dataTransfer.effectAllowed = 'move'
-            e.dataTransfer.setData('text/plain', agencyNumber)
-            e.currentTarget.style.opacity = '0.4' // direct DOM write, not React state — avoids a mid-drag
-          }}                                       // re-render that was breaking the native drag session
-          onDragEnd={(e) => {
-            draggingAgencyRef.current = null
-            e.currentTarget.style.opacity = '1'
-          }}
-          style={{
-            flex: 1, minWidth: 0,
-            padding: '8px 10px', borderRadius: 6, background: colors.panelAlt,
-            border: `1px solid ${colors.border}`, fontSize: 13,
-            cursor: 'grab',
-          }}
+          ref={setNodeRef}
+          style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1, flex: 1, minWidth: 0 }}
+          {...attributes}
+          {...listeners}
         >
-          <div style={{ color: colors.text }}>{agency.firstName}</div>
-          <div style={{ fontSize: 11, color: colors.textFaint }}>
-            #{agency.agencyNumber} · {agency.city} · {agencyTotalCases(agency)} cases
-          </div>
+          <AgencyTileCard agency={agency} />
         </div>
       </div>
     )
   }
 
-  const Lane = ({ route, title, agencyNumbers, onDropHere, totals }) => (
-    <div
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => { e.preventDefault(); if (draggingAgencyRef.current) onDropHere(draggingAgencyRef.current) }}
-      style={{
-        ...cardStyle, minWidth: 220, minHeight: 160, flex: '0 0 auto',
-        border: `1px solid ${totals?.overCapacity ? colors.danger : colors.border}`,
-      }}
-    >
-      <div style={{ marginBottom: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          {editingRouteId === route?.id ? (
-            <div style={{ display: 'flex', gap: 4 }}>
-              <input
-                autoFocus
-                value={editRouteValue}
-                onChange={(e) => setEditRouteValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') saveRouteRename(route.id) }}
-                style={{ fontSize: 13, padding: '2px 6px', borderRadius: 4, border: `1px solid ${colors.accent}`, background: colors.bg, color: colors.text, width: 90 }}
-              />
-              <button onClick={() => saveRouteRename(route.id)} style={{ fontSize: 11, color: colors.accent, background: 'none', border: 'none', cursor: 'pointer' }}>Save</button>
-            </div>
-          ) : (
-            <div
-              style={{ fontSize: 13, fontWeight: 600, color: colors.text, cursor: route ? 'pointer' : 'default' }}
-              onClick={() => route && startEditRoute(route)}
-              title={route ? 'Click to rename' : undefined}
-            >
-              {title} {route && <span style={{ color: colors.textFaint, fontSize: 11 }}>✎</span>}
+  // Lane is now a dnd-kit droppable target (useDroppable) instead of a
+  // plain div with native onDragOver/onDrop. `laneId` is UNASSIGNED_LANE_ID
+  // for the Unassigned lane or a route.id for every other lane — this IS
+  // the id handleDragEnd checks `over.id` against.
+  const Lane = ({ laneId, route, title, agencyNumbers, totals }) => {
+    const { setNodeRef, isOver } = useDroppable({ id: laneId })
+    return (
+      <div
+        ref={setNodeRef}
+        style={{
+          ...cardStyle, minWidth: 220, minHeight: 160, flex: '0 0 auto',
+          border: `1px solid ${totals?.overCapacity ? colors.danger : (isOver ? colors.accent : colors.border)}`,
+        }}
+      >
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            {editingRouteId === route?.id ? (
+              <div style={{ display: 'flex', gap: 4 }}>
+                <input
+                  autoFocus
+                  value={editRouteValue}
+                  onChange={(e) => setEditRouteValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') saveRouteRename(route.id) }}
+                  style={{ fontSize: 13, padding: '2px 6px', borderRadius: 4, border: `1px solid ${colors.accent}`, background: colors.bg, color: colors.text, width: 90 }}
+                />
+                <button onClick={() => saveRouteRename(route.id)} style={{ fontSize: 11, color: colors.accent, background: 'none', border: 'none', cursor: 'pointer' }}>Save</button>
+              </div>
+            ) : (
+              <div
+                style={{ fontSize: 13, fontWeight: 600, color: colors.text, cursor: route ? 'pointer' : 'default' }}
+                onClick={() => route && startEditRoute(route)}
+                title={route ? 'Click to rename' : undefined}
+              >
+                {title} {route && <span style={{ color: colors.textFaint, fontSize: 11 }}>✎</span>}
+              </div>
+            )}
+            {totals && (
+              <div
+                style={{ fontSize: 11, color: totals.overCapacity ? colors.danger : colors.textFaint }}
+                title={totals.unresolvedLines > 0 ? `${totals.unresolvedLines} line item(s) on this route used a fallback weight — material not found in Datex's catalog` : undefined}
+              >
+                {totals.cases} cases / {Math.round(totals.weight).toLocaleString()} lb
+                {totals.overCapacity && ' ⚠'}
+                {totals.unresolvedLines > 0 && ' *'}
+              </div>
+            )}
+          </div>
+          {route && (route.load_day || route.deliver_day || route.depart_day) && (
+            <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 2 }}>
+              Appt {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
+              {' · '}Leave {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
+              {' · '}Deliver {route.deliver_day || '—'}
             </div>
           )}
-          {totals && (
-            <div
-              style={{ fontSize: 11, color: totals.overCapacity ? colors.danger : colors.textFaint }}
-              title={totals.unresolvedLines > 0 ? `${totals.unresolvedLines} line item(s) on this route used a fallback weight — material not found in Datex's catalog` : undefined}
-            >
-              {totals.cases} cases / {Math.round(totals.weight).toLocaleString()} lb
-              {totals.overCapacity && ' ⚠'}
-              {totals.unresolvedLines > 0 && ' *'}
+          {route && recalculatingRouteIds.has(route.id) && (
+            <div style={{ fontSize: 11, color: colors.accent, marginTop: 2, fontStyle: 'italic' }}>
+              Recalculating travel times…
             </div>
           )}
         </div>
-        {route && (route.load_day || route.deliver_day || route.depart_day) && (
-          <div style={{ fontSize: 11, color: colors.textFaint, marginTop: 2 }}>
-            Appt {route.load_day || '—'}{route.load_time ? ` ${formatTimeDisplay(route.load_time)}` : ''}
-            {' · '}Leave {route.depart_day || '—'}{route.depart_time ? ` ${formatTimeDisplay(route.depart_time)}` : ''}
-            {' · '}Deliver {route.deliver_day || '—'}
-          </div>
+        {agencyNumbers.length === 0 && (
+          <div style={{ fontSize: 12, color: colors.textFaint, fontStyle: 'italic' }}>Drop agencies here</div>
         )}
-        {route && recalculatingRouteIds.has(route.id) && (
-          <div style={{ fontSize: 11, color: colors.accent, marginTop: 2, fontStyle: 'italic' }}>
-            Recalculating travel times…
-          </div>
-        )}
+        <SortableContext items={agencyNumbers} strategy={verticalListSortingStrategy}>
+          {agencyNumbers.map((n, idx) => (
+            <AgencyTile
+              key={n}
+              agencyNumber={n}
+              agency={agencyByNumber.get(n)}
+              sequenceNumber={route ? idx + 1 : null}
+              onMoveUp={route && idx > 0 ? () => reorderStopWithinRoute(route.id, n, agencyNumbers[idx - 1]) : null}
+              onMoveDown={route && idx < agencyNumbers.length - 1 ? () => reorderStopWithinRoute(route.id, n, agencyNumbers[idx + 1]) : null}
+            />
+          ))}
+        </SortableContext>
       </div>
-      {agencyNumbers.length === 0 && (
-        <div style={{ fontSize: 12, color: colors.textFaint, fontStyle: 'italic' }}>Drop agencies here</div>
-      )}
-      {agencyNumbers.map((n, idx) => (
-        <AgencyTile
-          key={n}
-          agencyNumber={n}
-          sequenceNumber={route ? idx + 1 : null}
-          onMoveUp={route && idx > 0 ? () => reorderStopWithinRoute(route.id, n, agencyNumbers[idx - 1]) : null}
-          onMoveDown={route && idx < agencyNumbers.length - 1 ? () => reorderStopWithinRoute(route.id, n, agencyNumbers[idx + 1]) : null}
-        />
-      ))}
-    </div>
-  )
+    )
+  }
 
   if (loading) return <div style={{ fontSize: 13, color: colors.textFaint }}>Loading routes…</div>
 
@@ -922,19 +981,24 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
     <div>
       <RouteCalendar cycle={cycle} routes={routes} onRoutesChanged={loadRoutes} />
 
-      <div style={{ display: 'flex', gap: 12, marginBottom: 16, overflowX: 'auto', paddingBottom: 8 }}>
-        <Lane title="Unassigned" agencyNumbers={unassigned} onDropHere={(n) => moveAgency(n, null)} />
-        {routes.map((route) => (
-          <Lane
-            key={route.id}
-            route={route}
-            title={`Route ${route.route_number}`}
-            agencyNumbers={route.stops}
-            onDropHere={(n) => moveAgency(n, route.id)}
-            totals={routeTotals(route)}
-          />
-        ))}
-      </div>
+      <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16, overflowX: 'auto', paddingBottom: 8 }}>
+          <Lane laneId={UNASSIGNED_LANE_ID} title="Unassigned" agencyNumbers={unassigned} />
+          {routes.map((route) => (
+            <Lane
+              key={route.id}
+              laneId={route.id}
+              route={route}
+              title={`Route ${route.route_number}`}
+              agencyNumbers={route.stops}
+              totals={routeTotals(route)}
+            />
+          ))}
+        </div>
+        <DragOverlay>
+          {activeDragId && agencyByNumber.get(activeDragId) ? <AgencyTileCard agency={agencyByNumber.get(activeDragId)} floating /> : null}
+        </DragOverlay>
+      </DndContext>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
         <input
