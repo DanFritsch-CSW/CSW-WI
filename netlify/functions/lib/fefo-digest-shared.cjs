@@ -65,12 +65,34 @@
 // confirmed that's more helpful than the raw list alone. Now automated:
 // buildDigestBody calls generateBiggestIssuesSummary (below) for any
 // project with violations, inserting a short synthesized summary between
-// the violation-count badge and the exhaustive list. Confirmed scope with
-// Dan: SAME-DAY only (no multi-day trend engine — this app has no
+// the violation-count badge and the rest of the message. Confirmed scope
+// with Dan: SAME-DAY only (no multi-day trend engine — this app has no
 // historical-violations table yet) and PER-PROJECT (no combined
-// cross-project Palermo's rollup). The exhaustive list is NOT shortened or
-// replaced — this is purely additive context on top of it. A Claude
-// failure never blocks the digest itself from posting.
+// cross-project Palermo's rollup). A Claude failure never blocks the
+// digest itself from posting.
+//
+// ── Exhaustive per-order lists removed (2026-09-25, Dean's ask) ─────────────
+//
+// Dean, live to Dan: "we don't need to see every single order that has
+// something [flagged] ... just don't give us so much detail, do more of a
+// summary, high level, per item, per lot." Through 2026-09-09 this digest
+// deliberately kept BOTH the lot-grouped Immediate Action Summary AND a
+// full exhaustive order-by-order "Violations:" / "On hold:" / "In
+// receiving:" / "Stale:" listing below it (Dan's explicit call at the
+// time: "keep all the lengthy wording," add the summary as context on
+// top, don't replace it). That combination is what produced a
+// 150+-line message for a project with 59 violations — the Immediate
+// Action Summary alone was fine; the exhaustive listing repeating full
+// verdictCopy() detail for every one of 59 orders (many hitting the same
+// handful of chronic lots) was the actual bulk. Dean's 2026-09-25 ask
+// reverses the "keep the exhaustive list" call: buildDigestBody below now
+// stops after the Immediate Action Summary. The per-order counts (stale/
+// hold/blocked/violation) still show in the header count line, so nothing
+// about scale is lost — just the order-by-order enumeration.
+// verdictCopy/formatViolationForPrompt/formatStuckLineForPrompt are still
+// used to build the Claude prompt and the Immediate Action Summary itself,
+// so they're unchanged; only the standalone per-order sections in
+// buildDigestBody were removed.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -244,13 +266,13 @@ function undatedLotCount(orders) {
 }
 
 // verdictCopy/dateVerb/locSuffix — added 2026-08-06 per Dan's approved
-// mockup (Hill/Sam/Dan FEFO review call): the digest's violation list now
-// includes the same per-line detail the live tab shows, rather than a
-// separate, hand-written summary that could drift from the app's own
-// wording. Ported verbatim from src/lib/fefo.js's verdictCopy/dateVerb —
-// takes a project OBJECT directly (we already have one in scope here)
-// rather than looking one up by id the way the client's dateVerb(projId)
-// does.
+// mockup (Hill/Sam/Dan FEFO review call): the digest's violation detail
+// (used in the Immediate Action Summary's Claude prompt) uses the same
+// per-line wording the live tab shows, rather than a separate, hand-written
+// summary that could drift from the app's own wording. Ported verbatim from
+// src/lib/fefo.js's verdictCopy/dateVerb — takes a project OBJECT directly
+// (we already have one in scope here) rather than looking one up by id the
+// way the client's dateVerb(projId) does.
 function dateVerb(project) {
   if (project?.dateSemantic === 'expiration') return 'expiring'
   if (project?.dateSemantic === 'received')   return 'received'
@@ -338,9 +360,6 @@ function verdictCopy(line, project, asOfDate = new Date()) {
 // engine, which would need a new historical-violations table this app
 // doesn't have yet) and PER-PROJECT (PALVI9/PALMA9/PALDSD9 each keep
 // their own separate summary, not one combined Palermo's-wide rollup).
-// Explicitly does NOT replace the exhaustive violation list below — Dan
-// was clear he wants to "keep all the lengthy wording" and ADD this as
-// context on top, not instead of it.
 //
 // callClaude reuses the exact same env var (ANTHROPIC_API_KEY) and model
 // (claude-sonnet-4-5) as lib/scorecard-draft-shared.cjs's own callClaude —
@@ -397,10 +416,11 @@ function findNearExpiryStuckLines(orders, project, asOfDate) {
   return out
 }
 
-// Formats one violating order for the prompt — same per-line detail
-// (verdictCopy + severity) as the digest's own violation list, so the
-// summary is grounded in exactly what a human reading the digest sees,
-// not a separately-computed view that could disagree.
+// Formats one violating order for the Claude prompt — same per-line detail
+// (verdictCopy + severity) as what a human used to see in the digest's own
+// exhaustive violation list (removed 2026-09-25, see file header), so the
+// AI pattern-summary is still grounded in real per-line detail even though
+// that detail no longer appears verbatim in the digest itself.
 function formatViolationForPrompt(o, project, asOfDate) {
   const out = [`${o.id} — ${o.dest || 'dest unknown'}`]
   for (const line of (o.lines || [])) {
@@ -432,7 +452,9 @@ function formatStuckLineForPrompt({ order, line, days }, project, asOfDate) {
 // sentence PATTERN-level observation (chronic/systemic vs. one-off) —
 // exactly the kind of judgment call an LLM is good at and a deterministic
 // aggregation can't make — with the per-lot specifics handled entirely by
-// this function instead.
+// this function instead. As of 2026-09-25 this list (plus the pattern
+// sentence) IS the entire digest body below the header/count line — see
+// file header.
 //
 // Groups by LOT NUMBER (not by order) across both violating orders and
 // near-expiry stuck lines, since the same lot commonly recurs across many
@@ -545,7 +567,7 @@ ${stuckText}
 
 In exactly 1-2 short sentences, describe the overall PATTERN here for a warehouse operations manager — is this concentrated in a small number of chronic lots/locations that keep recurring across many orders (pointing to a systemic allocation-bypass or WMS rule issue), or is it spread across many one-off cases? Do NOT list individual lot numbers, dates, or order counts — those are shown separately in an exact, itemized list right after this. Just the pattern-level read, in plain direct language.`
   // Never let a Claude failure (rate limit, timeout, bad response) block
-  // the digest itself from posting — the exhaustive list below is the
+  // the digest itself from posting — the lot-action list below is the
   // part that must always go out; this summary is additive context only.
   try {
     return await callClaude(prompt)
@@ -579,6 +601,9 @@ async function buildDigestBody(orders, project, dateObj) {
   const warning = byVerdict.violation.filter(o => orderSeverity(o) === 'warning').length
   const undated = undatedLotCount(orders)
 
+  // Order-level counts (violations/stale/hold/blocked) all still show
+  // here even though the per-order enumeration below them was removed
+  // 2026-09-25 — this is the only place those counts live now.
   const summaryParts = []
   if (byVerdict.stale.length) summaryParts.push(`${byVerdict.stale.length} stale`)
   if (byVerdict.hold.length) summaryParts.push(`${byVerdict.hold.length} on hold`)
@@ -600,19 +625,14 @@ async function buildDigestBody(orders, project, dateObj) {
   lines.push('')
 
   // Immediate Action Summary (was "Biggest issues today", renamed
-  // 2026-09-08 to match Hill's own terminology). Sits between the badge
-  // and the exhaustive list below on purpose: quick synthesis first for
-  // someone skimming, full detail still right there for anyone who wants
-  // to dig in — the exhaustive list is NOT replaced or shortened by this.
-  //
-  // Restructured 2026-09-09 per Dan's feedback: the old AI-written prose
-  // packed every lot's counts/dates into dense paragraphs that were hard
-  // to scan and risked the model mis-stating a number. Now: one short
-  // AI-written PATTERN sentence (chronic/systemic vs. one-off — genuine
-  // LLM judgment call), followed by a deterministic, code-computed list
-  // (aggregateLotActions/formatLotActionLine above) — one block per
-  // distinct lot, exact order counts, sorted soonest-to-expire first, zero
-  // hallucination risk on the numbers someone acts on in Datex.
+  // 2026-09-08 to match Hill's own terminology). As of 2026-09-25 (Dean's
+  // ask, see file header) this is the LAST section of the digest body —
+  // the exhaustive per-order "Violations:"/"On hold:"/"In receiving:"/
+  // "Stale:" listings that used to follow it were removed. One short
+  // AI-written PATTERN sentence (chronic/systemic vs. one-off), followed
+  // by a deterministic, code-computed list (aggregateLotActions/
+  // formatLotActionLine above) — one block per distinct lot, exact order
+  // counts, sorted soonest-to-expire first.
   const nearExpiryStuck = findNearExpiryStuckLines(orders, project, dateObj)
   if (byVerdict.violation.length > 0 || nearExpiryStuck.length > 0) {
     const summary = await generateBiggestIssuesSummary(byVerdict.violation, nearExpiryStuck, project, dateObj)
@@ -627,39 +647,6 @@ async function buildDigestBody(orders, project, dateObj) {
     }
   }
 
-  if (byVerdict.violation.length) {
-    lines.push(project.closedOrders ? 'Shipped out of FEFO order:' : 'Violations:')
-    lines.push('')
-    for (const o of byVerdict.violation) {
-      lines.push(`• ${o.id} — ${o.dest || 'dest unknown'}${o.appt && o.appt !== '—' ? ` — appt ${o.appt}` : ''}`)
-      // Per-line detail (added 2026-08-06, Dan's approved mockup) — same
-      // wording as the live tab's OrderCard/SkuLineRow, so Front and the
-      // app never disagree. Only the actually-violating lines on this
-      // order get a detail line; a multi-SKU order with one bad line
-      // doesn't repeat detail for its clean lines.
-      for (const line of (o.lines || [])) {
-        if (lineVerdict(line) !== 'violation') continue
-        const sev = lineSeverity(line)
-        lines.push(`  ${line.code}${line.desc ? ' ' + line.desc : ''}: ${verdictCopy(line, project, dateObj)}${sev ? ` (${sev.toUpperCase()})` : ''}`)
-      }
-      lines.push('')
-    }
-  }
-  if (byVerdict.hold.length) {
-    lines.push('On hold (older lot correctly skipped):')
-    lines.push('')
-    for (const o of byVerdict.hold) { lines.push(`• ${o.id} — ${o.dest || 'dest unknown'}`); lines.push('') }
-  }
-  if (byVerdict.blocked.length) {
-    lines.push('In receiving / not put away:')
-    lines.push('')
-    for (const o of byVerdict.blocked) { lines.push(`• ${o.id} — ${o.dest || 'dest unknown'}`); lines.push('') }
-  }
-  if (byVerdict.stale.length) {
-    lines.push('Stale (past appointment, still allocated):')
-    lines.push('')
-    for (const o of byVerdict.stale) { lines.push(`• ${o.id} — ${o.dest || 'dest unknown'}`); lines.push('') }
-  }
   if (undated > 0) {
     lines.push(`⚠ ${undated} lot${undated === 1 ? '' : 's'} with no parseable date in this window — verify in Datex.`)
     lines.push('')
