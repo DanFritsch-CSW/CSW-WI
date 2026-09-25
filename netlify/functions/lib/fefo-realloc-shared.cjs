@@ -125,6 +125,17 @@ function orderSeverity(order) {
   return days >= 4 ? 'critical' : 'warning'
 }
 
+// buildAlertBody — regrouped by culprit lot, not by order (2026-09-25, per
+// Dean's Fathom check-in with Dan). Before this change, every newly-
+// violating order got its own bullet, so a single misallocated lot that
+// clipped 5 different orders produced 5 near-identical lines. Dean's ask:
+// one bullet per culprit lot (the newer lot that jumped the queue —
+// line.rem.lot), showing the first affected order for context, with an
+// "also affects N more orders" tail instead of enumerating every one.
+// Grouping key is the REM lot code, not the order or the material —
+// deliberately collapses across materials/lines too, since the thing
+// ops cares about triaging is "this lot got misallocated," not "this
+// line item on this order is 3 days older."
 function buildAlertBody(newlyViolating, project) {
   const lines = []
   lines.push(`⚠ FEFO Lot Reallocation Alert — ${project.name} (${project.code})`)
@@ -133,15 +144,45 @@ function buildAlertBody(newlyViolating, project) {
   lines.push('')
   const divider = '─'.repeat(28)
   lines.push(divider)
-  lines.push(`**${newlyViolating.length} order${newlyViolating.length === 1 ? '' : 's'} newly out of rotation**`)
+
+  // Group violating lines by culprit lot (line.rem.lot) across all newly-
+  // violating orders. A lot with no parsed code (shouldn't happen for a
+  // 'violation' verdict, since that requires a real rem entry) falls back
+  // to '(unknown lot)' rather than being dropped.
+  const orderIndex = new Map(newlyViolating.map((o, i) => [o, i]))
+  const entriesByLot = new Map() // lot -> [{ order, days }]
+  for (const o of newlyViolating) {
+    for (const line of (o.lines || [])) {
+      if (lineVerdict(line) !== 'violation') continue
+      const lot = line.rem?.lot || '(unknown lot)'
+      const days = lineDaysOlder(line)
+      if (!entriesByLot.has(lot)) entriesByLot.set(lot, [])
+      entriesByLot.get(lot).push({ order: o, days })
+    }
+  }
+
+  const lotCount = entriesByLot.size
+  lines.push(`**${lotCount} lot${lotCount === 1 ? '' : 's'} newly out of rotation** (${newlyViolating.length} order${newlyViolating.length === 1 ? '' : 's'} affected)`)
   lines.push(divider)
   lines.push('')
   lines.push('These orders were shipping the oldest available stock as of the last check (~30 min ago) and now are not — a newer lot got allocated in place of older, unallocated, off-hold stock that is still on hand.')
   lines.push('')
-  for (const o of newlyViolating) {
-    const days = orderMaxDaysOlder(o)
-    const sev = orderSeverity(o)
-    lines.push(`• ${o.id} — ${days}d older${sev ? ` (${sev.toUpperCase()})` : ''} — ${o.dest || 'dest unknown'}${o.appt ? ` — appt ${o.appt}` : ''}`)
+
+  for (const [lot, entries] of entriesByLot.entries()) {
+    // Dedupe multiple lines on the same order hitting the same lot down to
+    // one entry per order, keeping the worst (max) days-older for that order.
+    const byOrder = new Map()
+    for (const e of entries) {
+      const existing = byOrder.get(e.order)
+      if (!existing || e.days > existing.days) byOrder.set(e.order, e)
+    }
+    const orderEntries = [...byOrder.values()]
+      .sort((a, b) => orderIndex.get(a.order) - orderIndex.get(b.order))
+    const first = orderEntries[0]
+    const maxDays = Math.max(...orderEntries.map(e => e.days))
+    const sev = maxDays >= 4 ? 'critical' : 'warning'
+    const moreCount = orderEntries.length - 1
+    lines.push(`• Lot ${lot} jumped the queue — ${first.order.id} — ${first.days}d older (${sev.toUpperCase()}) — ${first.order.dest || 'dest unknown'}${first.order.appt ? ` — appt ${first.order.appt}` : ''}${moreCount > 0 ? ` — also affects ${moreCount} more order${moreCount === 1 ? '' : 's'}` : ''}`)
     lines.push('')
   }
   while (lines.length && lines[lines.length - 1] === '') lines.pop()
