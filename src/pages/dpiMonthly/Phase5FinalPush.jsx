@@ -1,35 +1,74 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase.js'
 import { colors, cardStyle, buttonPrimary, buttonSuccess } from './dpiMonthlyStyles.js'
+import { computeLoadDateStr, formatDateShort, formatTimeDisplay } from './dpiCalendarUtils.js'
 
-// Phase 5 — Final push. Route sheet preview (matches the printed
-// driver/carrier document format Dan shared) -> one carrier send -> final
-// Datex appointment push (real build reuses the FootPrint API via
-// datex-push-shared.cjs, same as every other appointment in this app) ->
-// "Start next month" resets the cycle. This is the ONLY place that button
-// belongs — see the 2026-09-06 fix that removed it from Phase 1.
+// Phase 5 — Final push. Real build, shipped 2026-09-25 (A13-A16):
+// route sheet PDF -> send to carrier (Front draft, PDF attached) -> push
+// real Datex load containers + dock appointments, one of each per
+// scheduled route -> "Start next month" resets the cycle. This is the
+// ONLY place that button belongs — see the 2026-09-06 fix that removed it
+// from Phase 1.
 //
-// SIMULATE-ONLY: no PDF is generated, no Front send happens, no FootPrint
-// API call is made. Each step just stamps a flag in
-// dpi_monthly_cycles.phase_data so the UI can walk through the sequence.
+// A13/A14 (route sheet + print): reuses the EXACT SAME
+// dpi-carrier-route-sheet-pdf.cjs endpoint A1 already built for Phase 2's
+// carrier-confirmation PDF — Dan's own Notion notes describe this final
+// sheet as matching "a real printed driver/carrier document," which is
+// exactly what that function already produces. No new PDF code. Uses the
+// STORED total_cases/gross_weight/delivery_window_start+end/travel_time
+// columns directly (unlike Phase 2's live weightMap recompute) — by Phase
+// 5 those columns are settled and this component has no access to
+// stagedAgencies/weightMap anyway.
 //
-// 2026-09-24 FIX (broke the production build): this used to import
-// PLACEHOLDER_LBS_PER_CASE from dpiMonthlyStyles.js and recompute route
-// weight as cases * placeholder — that export was removed the same day as
-// part of A7 (real Datex gross weight), and a Vite production build hard-
-// fails on an import of a named export that no longer exists (unlike dev
-// mode, which can tolerate it long enough not to notice locally). This
-// component doesn't have access to agency line items to redo the real
-// per-material calculation itself (dpi_route_stops only carries
-// aggregates), but it doesn't need to: A7 already writes real weight onto
-// dpi_route_stops.gross_weight (both at template-seed time and whenever
-// Phase2BuildFlag.jsx's moveAgency touches a stop), so the route sheet
-// here just sums that column directly — real weight, no placeholder
-// import needed at all.
+// A15 (send to carrier): a brand-new Front draft (NOT a reply — there's no
+// existing conversation this attaches to), via
+// netlify/functions/dpi-send-carrier-final.cjs, POSTing to Front's
+// POST /channels/{channel_id}/drafts endpoint with the PDF as a multipart
+// attachment. Deliberately a DRAFT, never an auto-send, per this app's
+// standing rule for anything customer/carrier-facing. Recipient is an
+// editable field, pre-filled with Echo Brook's known address for Eau
+// Claire — J&J's Madison contact wasn't confirmed as of this build (Front
+// search came up empty under every name variation tried), so it starts
+// blank there and needs a one-time manual fill until that's sorted out.
+//
+// A16 (real Datex push): one load container + one dock appointment per
+// scheduled ROUTE (one truck departure — not per stop, confirmed with
+// Dan), via netlify/functions/dpi-final-push.cjs. Reuses the EXISTING,
+// already-hardened scheduling-create-load-container.cjs endpoint for the
+// load container step (same ambiguous-timeout tracking already proven out
+// for the Scheduling plugin) and calls pushToDatex directly from
+// datex-push-shared.cjs for the appointment step. Facility config
+// (carrier/owner/project/dock door IDs) confirmed live against
+// production_db.gold.truck_appointments' real DPI outbound history —
+// Madison's dock door is Dan's explicit choice, which differs from what
+// that history actually shows being used (Door 01-, 175 real uses, vs. 4
+// total for the door Dan named, none of them DPI) — see the DPI Monthly
+// Notion page for that discrepancy. Pushed sequentially per route, never
+// in parallel, to avoid hammering the load-container endpoint
+// concurrently. A route already at final_push_status='success' is
+// skipped on a repeat "Push all" click — never re-pushed, since that
+// would create a duplicate Datex appointment.
+//
+// "Start next month" no longer requires a real Datex success on every
+// route to unlock — a dry-run result (no DATEX_CLIENT_ID configured, the
+// current environment) counts too, since otherwise this button could
+// never unlock at all during testing. A genuinely FAILED push still
+// blocks it.
 export default function Phase5FinalPush({ cycle, onCycleComplete }) {
   const [routes, setRoutes] = useState([])
   const [loading, setLoading] = useState(true)
   const [phaseData, setPhaseData] = useState(cycle?.phase_data || {})
+  const [generatingPdf, setGeneratingPdf] = useState(false)
+  const [pdfBase64, setPdfBase64] = useState(null)
+  const [recipientEmail, setRecipientEmail] = useState('')
+  const [sendingCarrier, setSendingCarrier] = useState(false)
+  const [pushingRouteIds, setPushingRouteIds] = useState(new Set())
+  const [routePushResults, setRoutePushResults] = useState({}) // routeId -> { status, error?, appointmentId?, loadContainerId? }
+  const [pushingAll, setPushingAll] = useState(false)
+
+  // Only known carrier contact so far — Echo Brook (EC). J&J's Madison
+  // contact wasn't confirmed as of this build; starts blank there.
+  const RECIPIENT_DEFAULTS = { 'Eau Claire': 'echobrk@yahoo.com', Madison: '' }
 
   const loadRoutes = useCallback(async () => {
     if (!supabase || !cycle) { setLoading(false); return }
@@ -63,6 +102,7 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
   }, [cycle])
 
   useEffect(() => { loadRoutes() }, [loadRoutes])
+  useEffect(() => { setRecipientEmail(RECIPIENT_DEFAULTS[cycle?.facility] || '') }, [cycle?.facility])
 
   const updatePhaseData = async (patch) => {
     const next = { ...phaseData, ...patch }
@@ -74,6 +114,170 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
       .eq('id', cycle.id)
     if (error) console.error('update phase_data:', error)
   }
+
+  // Chunked to avoid a call-stack blowup on String.fromCharCode(...bytes)
+  // for a PDF of any real size.
+  function arrayBufferToBase64(buffer) {
+    let binary = ''
+    const bytes = new Uint8Array(buffer)
+    const chunkSize = 0x8000
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize))
+    }
+    return btoa(binary)
+  }
+
+  // A13/A14 — generates the real final route sheet PDF via the same
+  // endpoint A1 built for Phase 2, downloads it, and keeps a base64 copy
+  // in memory so A15's "Send to carrier" doesn't need to regenerate it.
+  const generateRouteSheetPdf = async () => {
+    setGeneratingPdf(true)
+    try {
+      const payloadRoutes = routes
+        .filter((r) => r.delivery_date)
+        .sort((a, b) => a.route_number.localeCompare(b.route_number, undefined, { numeric: true }))
+        .map((route) => {
+          const stopPayload = route.stops.map((s) => ({
+            time: s.delivery_window_end ? `${s.delivery_window_start} - ${s.delivery_window_end}` : (s.delivery_window_start || ''),
+            agencyNumber: s.agency_number,
+            agencyName: s.agency_name,
+            city: s.city,
+            grossWeight: Number(s.gross_weight) || 0,
+            totalCases: Number(s.total_cases) || 0,
+            travelTime: s.travel_time || '',
+          }))
+          const totalWeight = stopPayload.reduce((sum, s) => sum + s.grossWeight, 0)
+          const totalCases = stopPayload.reduce((sum, s) => sum + s.totalCases, 0)
+          const notesParts = (route.notes || '').split('|').map((p) => p.trim()).filter(Boolean)
+          return {
+            routeNumber: route.route_number,
+            loadDay: route.load_day,
+            loadDateStr: computeLoadDateStr(route.delivery_date, route.deliver_day, route.load_day),
+            loadTimeStr: formatTimeDisplay(route.load_time),
+            deliverDay: route.deliver_day,
+            deliverDateStr: formatDateShort(route.delivery_date),
+            departDay: route.depart_day,
+            departTimeStr: formatTimeDisplay(route.depart_time),
+            highlight: notesParts[0] || null,
+            restNotes: notesParts.slice(1),
+            stops: stopPayload,
+            totalWeight,
+            totalCases,
+          }
+        })
+
+      if (payloadRoutes.length === 0) { alert('No scheduled routes to print.'); return }
+
+      const res = await fetch('/.netlify/functions/dpi-carrier-route-sheet-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ facility: cycle.facility, monthKey: cycle.month_key, routes: payloadRoutes }),
+      })
+      if (!res.ok) { console.error('final route sheet PDF failed:', res.status, await res.text().catch(() => '')); alert('PDF generation failed — check console.'); return }
+
+      const blob = await res.blob()
+      setPdfBase64(arrayBufferToBase64(await blob.arrayBuffer()))
+
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `DPI-${cycle.facility.replace(/\s+/g, '')}-${cycle.month_key}-FINAL-carrier-routes.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+
+      await updatePhaseData({ routeSheetGenerated: true })
+    } finally {
+      setGeneratingPdf(false)
+    }
+  }
+
+  // A15 — new outbound Front draft (never a reply), PDF attached, never
+  // auto-sent.
+  const sendToCarrier = async () => {
+    if (!pdfBase64) { alert('Generate the route sheet first.'); return }
+    if (!recipientEmail.trim()) { alert("Enter the carrier's email address first."); return }
+    setSendingCarrier(true)
+    try {
+      const res = await fetch('/.netlify/functions/dpi-send-carrier-final', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ facility: cycle.facility, monthKey: cycle.month_key, recipientEmail: recipientEmail.trim(), pdfBase64 }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) {
+        console.error('send to carrier failed:', data)
+        alert(`Could not create the carrier draft: ${data.error || 'unknown error'}`)
+        return
+      }
+      await updatePhaseData({ carrierSent: true })
+      alert('Draft created in Front — review and send it from there.')
+    } finally {
+      setSendingCarrier(false)
+    }
+  }
+
+  // A16 — one route's real load container + dock appointment. Refuses
+  // (server-side) to re-push a route already at final_push_status =
+  // 'success', so a repeat click here is always safe.
+  const pushRouteFinal = async (route) => {
+    if (!route.delivery_date || !route.depart_day || !route.depart_time) {
+      setRoutePushResults((prev) => ({ ...prev, [route.id]: { status: 'failed', error: 'Missing delivery date or Leave Time — set it in Route Build before pushing.' } }))
+      return
+    }
+    setPushingRouteIds((prev) => new Set(prev).add(route.id))
+    try {
+      const scheduledArrivalIso = new Date(`${route.delivery_date}T${route.depart_time}`).toISOString()
+      const totalCases = route.stops.reduce((sum, s) => sum + (Number(s.total_cases) || 0), 0)
+      const res = await fetch('/.netlify/functions/dpi-final-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          routeId: route.id,
+          facility: cycle.facility,
+          routeNumber: route.route_number,
+          monthKey: cycle.month_key,
+          scheduledArrivalIso,
+          totalCases,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (data.dry_run) {
+        setRoutePushResults((prev) => ({ ...prev, [route.id]: { status: 'dry_run' } }))
+        return
+      }
+      if (!res.ok || !data.success) {
+        setRoutePushResults((prev) => ({ ...prev, [route.id]: { status: 'failed', error: data.error || 'Unknown error' } }))
+        return
+      }
+      setRoutePushResults((prev) => ({ ...prev, [route.id]: { status: 'success', appointmentId: data.appointmentId, loadContainerId: data.loadContainerId } }))
+    } catch (err) {
+      setRoutePushResults((prev) => ({ ...prev, [route.id]: { status: 'failed', error: err.message } }))
+    } finally {
+      setPushingRouteIds((prev) => { const next = new Set(prev); next.delete(route.id); return next })
+    }
+  }
+
+  const scheduledRoutes = routes.filter((r) => r.delivery_date)
+
+  const pushAllFinal = async () => {
+    setPushingAll(true)
+    try {
+      for (const route of scheduledRoutes) {
+        if (route.final_push_status === 'success') continue // already pushed for real — never re-push
+        await pushRouteFinal(route) // sequential, not parallel — avoid hammering the load-container endpoint concurrently
+      }
+      await loadRoutes() // refresh final_push_status/datex ids from the DB
+    } finally {
+      setPushingAll(false)
+    }
+  }
+
+  const allPushed = scheduledRoutes.length > 0 && scheduledRoutes.every((r) => {
+    const local = routePushResults[r.id]?.status
+    return r.final_push_status === 'success' || local === 'success' || local === 'dry_run'
+  })
 
   const startNextMonth = async () => {
     if (!supabase || !cycle) return
@@ -92,15 +296,30 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
       {phaseData.routeSheetGenerated && (
         <div style={{ ...cardStyle, marginBottom: 16 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
-            Route sheet — {cycle.facility}, {cycle.month_key}
+            Route sheet generated — {cycle.facility}, {cycle.month_key}
           </div>
-          {routes.map((route) => {
+          <div style={{ fontSize: 12, color: colors.textFaint, marginBottom: 12 }}>
+            Downloaded to your browser. Regenerate any time — the send-to-carrier step below always uses the most recently generated copy.
+          </div>
+          {routes.filter((r) => r.delivery_date).map((route) => {
             const cases = route.stops.reduce((sum, s) => sum + (Number(s.total_cases) || 0), 0)
             const weight = route.stops.reduce((sum, s) => sum + (Number(s.gross_weight) || 0), 0)
+            const pushResult = routePushResults[route.id]
+            const isPushing = pushingRouteIds.has(route.id)
             return (
               <div key={route.id} style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: colors.accent, marginBottom: 6 }}>
-                  Route {route.route_number} — {cases} cases / {Math.round(weight).toLocaleString()} lb
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: colors.accent }}>
+                    Route {route.route_number} — {cases} cases / {Math.round(weight).toLocaleString()} lb
+                  </div>
+                  <div style={{ fontSize: 11 }}>
+                    {route.final_push_status === 'success' && <span style={{ color: colors.success }}>✓ Pushed — appointment {route.datex_appointment_id ?? '(no ID returned)'}</span>}
+                    {route.final_push_status === 'ambiguous' && <span style={{ color: colors.warning }} title={route.final_push_error}>⚠ Ambiguous — verify in Datex</span>}
+                    {!route.final_push_status && pushResult?.status === 'success' && <span style={{ color: colors.success }}>✓ Pushed — appointment {pushResult.appointmentId ?? '(no ID returned)'}</span>}
+                    {pushResult?.status === 'dry_run' && <span style={{ color: colors.textFaint }}>Dry run (no Datex credentials configured)</span>}
+                    {pushResult?.status === 'failed' && <span style={{ color: colors.danger }} title={pushResult.error}>✗ Failed</span>}
+                    {isPushing && <span style={{ color: colors.accent, fontStyle: 'italic' }}>Pushing…</span>}
+                  </div>
                 </div>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                   <tbody>
@@ -109,8 +328,8 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
                         <td style={{ padding: '6px 4px', color: colors.text }}>{s.agency_name}</td>
                         <td style={{ padding: '6px 4px', color: colors.textMuted }}>{s.city}</td>
                         <td style={{ padding: '6px 4px', color: colors.textMuted }}>{s.total_cases} cases</td>
-                        <td style={{ padding: '6px 4px', color: s.confirmation_status === 'confirmed' ? colors.success : colors.warning }}>
-                          {s.confirmation_status === 'confirmed' ? 'Confirmed' : 'Pending'}
+                        <td style={{ padding: '6px 4px', color: s.confirmation_status === 'confirmed' ? colors.warning : colors.textFaint }}>
+                          {s.confirmation_status === 'confirmed' ? 'Reschedule requested' : ''}
                         </td>
                       </tr>
                     ))}
@@ -122,23 +341,34 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
         {!phaseData.routeSheetGenerated && (
-          <button onClick={() => updatePhaseData({ routeSheetGenerated: true })} style={buttonPrimary}>
-            Generate route sheet (simulated)
+          <button onClick={generateRouteSheetPdf} disabled={generatingPdf} style={{ ...buttonPrimary, opacity: generatingPdf ? 0.5 : 1 }}>
+            {generatingPdf ? 'Generating…' : 'Generate route sheet'}
           </button>
         )}
         {phaseData.routeSheetGenerated && !phaseData.carrierSent && (
-          <button onClick={() => updatePhaseData({ carrierSent: true })} style={buttonPrimary}>
-            Send to carrier (simulated)
+          <>
+            <button onClick={generateRouteSheetPdf} disabled={generatingPdf} style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: `1px solid ${colors.border}`, background: 'transparent', color: colors.textMuted, cursor: 'pointer' }}>
+              {generatingPdf ? 'Regenerating…' : '↺ Regenerate route sheet'}
+            </button>
+            <input
+              value={recipientEmail}
+              onChange={(e) => setRecipientEmail(e.target.value)}
+              placeholder="Carrier email address"
+              style={{ fontSize: 13, padding: '7px 10px', borderRadius: 6, border: `1px solid ${colors.borderStrong}`, background: colors.bg, color: colors.text, minWidth: 220 }}
+            />
+            <button onClick={sendToCarrier} disabled={sendingCarrier || !pdfBase64} style={{ ...buttonPrimary, opacity: sendingCarrier || !pdfBase64 ? 0.5 : 1 }}>
+              {sendingCarrier ? 'Creating draft…' : 'Send to carrier'}
+            </button>
+          </>
+        )}
+        {phaseData.carrierSent && !allPushed && (
+          <button onClick={pushAllFinal} disabled={pushingAll} style={{ ...buttonPrimary, opacity: pushingAll ? 0.5 : 1 }}>
+            {pushingAll ? 'Pushing to Datex…' : 'Push final appointments to Datex'}
           </button>
         )}
-        {phaseData.carrierSent && !phaseData.finalPushed && (
-          <button onClick={() => updatePhaseData({ finalPushed: true })} style={buttonPrimary}>
-            Push final appointments to Datex (simulated)
-          </button>
-        )}
-        {phaseData.finalPushed && (
+        {phaseData.carrierSent && allPushed && (
           <button onClick={startNextMonth} style={buttonSuccess}>
             Start next month
           </button>
@@ -146,13 +376,13 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
       </div>
 
       {phaseData.carrierSent && (
-        <div style={{ fontSize: 12, color: colors.textFaint, marginTop: 12 }}>
-          Carrier sent (simulated) — real build sends one Front message to Echobrook (EC) or J&J (Madison), once, after reschedules settle.
+        <div style={{ fontSize: 12, color: colors.textFaint, marginBottom: 4 }}>
+          Carrier draft created in Front — review and send it from there before or after pushing to Datex.
         </div>
       )}
-      {phaseData.finalPushed && (
-        <div style={{ fontSize: 12, color: colors.textFaint, marginTop: 4 }}>
-          Final push (simulated) — real build calls the FootPrint API (datex-push-shared.cjs), same appointment endpoint the Scheduling Plugin already uses.
+      {phaseData.carrierSent && !allPushed && (
+        <div style={{ fontSize: 12, color: colors.textFaint }}>
+          One load container + one dock appointment is created per route. A route already pushed successfully is skipped on a repeat click — never re-pushed.
         </div>
       )}
     </div>
