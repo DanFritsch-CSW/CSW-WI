@@ -3,11 +3,16 @@ import { supabase } from '../../lib/supabase.js'
 import { colors, cardStyle, buttonPrimary, buttonSuccess } from './dpiMonthlyStyles.js'
 import { computeLoadDateStr, formatDateShort, formatTimeDisplay } from './dpiCalendarUtils.js'
 
-// Phase 5 — Final push. Real build, shipped 2026-09-25 (A13-A16):
+// Phase 5 — Appointment confirmation. Real build, shipped 2026-09-25
+// (A13-A16), renamed 2026-09-28 per Dan (JW<>DF DPI Monthly Build call):
 // send to carrier (Front draft, PDF attached) -> push real Datex load
 // containers + dock appointments, one of each per scheduled route ->
 // "Start next month" resets the cycle. This is the ONLY place that
 // button belongs — see the 2026-09-06 fix that removed it from Phase 1.
+// Named "Appointment confirmation" rather than around "send to carrier"
+// — that's one step within this phase, not what the phase as a whole is
+// for; the phase's real purpose is confirming and finalizing the CSW/
+// carrier dock appointments before they go into Datex for real.
 //
 // A13/A14 (route sheet PDF): reuses the EXACT SAME
 // dpi-carrier-route-sheet-pdf.cjs endpoint A1 already built for Phase 2's
@@ -137,19 +142,45 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
   // with no decision attached to it, since the document is the same one
   // already generated in Route Build.
   const buildRouteSheetPdfBase64 = async () => {
+    // 2026-09-28 (driver contact): same resolution rule as Phase 2's
+    // printCarrierPdf — Delivery Primary contact, falling back to
+    // Alternate if that's empty.
+    const { data: contactRows, error: contactsErr } = await supabase
+      .from('dpi_agency_contacts')
+      .select('*')
+      .eq('facility', cycle.facility)
+    if (contactsErr) console.error('load agency contacts for final route sheet:', contactsErr)
+    const contactByAgency = new Map((contactRows || []).map((c) => [c.agency_number, c]))
+    const resolveContact = (agencyNumber) => {
+      const c = contactByAgency.get(agencyNumber)
+      if (!c) return { contactName: null, contactPhone: null }
+      const name = (c.delivery_first_name || c.delivery_last_name)
+        ? `${c.delivery_first_name || ''} ${c.delivery_last_name || ''}`.trim()
+        : (c.alt_first_name || c.alt_last_name) ? `${c.alt_first_name || ''} ${c.alt_last_name || ''}`.trim() : null
+      const phoneRaw = c.delivery_phone || c.alt_phone
+      const ext = c.delivery_phone ? c.delivery_ext : c.alt_ext
+      const phone = phoneRaw ? `${phoneRaw}${ext ? ` x${ext}` : ''}` : null
+      return { contactName: name, contactPhone: phone }
+    }
+
     const payloadRoutes = routes
       .filter((r) => r.delivery_date)
       .sort((a, b) => a.route_number.localeCompare(b.route_number, undefined, { numeric: true }))
       .map((route) => {
-        const stopPayload = route.stops.map((s) => ({
-          time: s.delivery_window_end ? `${s.delivery_window_start} - ${s.delivery_window_end}` : (s.delivery_window_start || ''),
-          agencyNumber: s.agency_number,
-          agencyName: s.agency_name,
-          city: s.city,
-          grossWeight: Number(s.gross_weight) || 0,
-          totalCases: Number(s.total_cases) || 0,
-          travelTime: s.travel_time || '',
-        }))
+        const stopPayload = route.stops.map((s) => {
+          const { contactName, contactPhone } = resolveContact(s.agency_number)
+          return {
+            time: s.delivery_window_end ? `${s.delivery_window_start} - ${s.delivery_window_end}` : (s.delivery_window_start || ''),
+            agencyNumber: s.agency_number,
+            agencyName: s.agency_name,
+            city: s.city,
+            grossWeight: Number(s.gross_weight) || 0,
+            totalCases: Number(s.total_cases) || 0,
+            travelTime: s.travel_time || '',
+            contactName,
+            contactPhone,
+          }
+        })
         const totalWeight = stopPayload.reduce((sum, s) => sum + s.grossWeight, 0)
         const totalCases = stopPayload.reduce((sum, s) => sum + s.totalCases, 0)
         const notesParts = (route.notes || '').split('|').map((p) => p.trim()).filter(Boolean)
@@ -298,7 +329,7 @@ export default function Phase5FinalPush({ cycle, onCycleComplete }) {
     <div>
       <div style={{ ...cardStyle, marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
-          Final route sheet — {cycle.facility}, {cycle.month_key}
+          Appointment confirmation — {cycle.facility}, {cycle.month_key}
         </div>
         {scheduledRoutes.length === 0 && (
           <div style={{ fontSize: 13, color: colors.textFaint, fontStyle: 'italic' }}>No scheduled routes yet — go back to Route Build first.</div>
