@@ -36,7 +36,7 @@
 //     deliverDay, deliverDateStr, departDay, departTimeStr,
 //     highlight,       // first pipe-segment of the route's notes, or null
 //     restNotes,       // remaining pipe-segments, as an array of strings
-//     stops: [{ time, agencyNumber, agencyName, city, grossWeight, totalCases, travelTime }],
+//     stops: [{ time, agencyNumber, agencyName, city, grossWeight, totalCases, travelTime, contactName?, contactPhone? }],
 //     totalWeight, totalCases,
 //   }, ...]
 // }
@@ -49,6 +49,14 @@
 // documents. Caught and fixed a real column-spacing bug (Gross Weight/
 // Total Cases/Travel Time ran together with no visible gap) on first
 // render.
+//
+// 2026-09-28 (driver contact, from the JW<>DF DPI Monthly Build call): a
+// per-stop driver contact (name + phone) prints as a faint second line
+// under the Agency name — no dedicated column, since the table already
+// runs full-width on a portrait letter page. Caller (Phase2BuildFlag.jsx/
+// Phase5FinalPush.jsx) resolves this from dpi_agency_contacts: Delivery
+// Primary contact, falling back to Alternate if that's empty. A new/
+// substitute driver has someone to call at that specific stop.
 
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib')
 
@@ -165,7 +173,12 @@ class RouteSheetPdf {
     this.hr(y)
     y += 12
 
-    // Stop rows
+    // Stop rows. Row height is dynamic: a base 15pt, +9pt when a driver
+    // contact line is present underneath the agency name (2026-09-28, per
+    // Dan/Jen — a driver, especially a new one, needs someone to call at
+    // that stop; no dedicated column exists for this, so it prints as a
+    // faint second line under the Agency cell rather than widening the
+    // already-full-width table).
     for (const stop of route.stops || []) {
       for (const col of COLS) {
         let val = stop[col.key]
@@ -173,7 +186,13 @@ class RouteSheetPdf {
         if (col.key === 'totalCases') val = fmtInt(val)
         this.text(col.x, y, val ?? '', { size: 8, align: col.align, width: col.width })
       }
-      y += 15
+      const contactCol = COLS.find((c) => c.key === 'agencyName')
+      const hasContact = stop.contactName || stop.contactPhone
+      if (hasContact) {
+        const contactLine = [stop.contactName, stop.contactPhone].filter(Boolean).join(' · ')
+        this.text(contactCol.x, y + 9, contactLine, { size: 7, color: rgb(0.45, 0.45, 0.5) })
+      }
+      y += hasContact ? 21 : 15
       if (y > PAGE_H - MARGIN - 40) {
         // Overflow safety net: a route with an unusually long stop list
         // spills onto a fresh page rather than running off the bottom.
