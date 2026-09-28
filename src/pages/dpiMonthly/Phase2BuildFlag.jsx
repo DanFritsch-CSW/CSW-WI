@@ -717,6 +717,27 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
         .order('sequence')
       if (error) { console.error('load stops for carrier PDF:', error); alert('Could not load route stops for the PDF — check console.'); return }
 
+      // 2026-09-28 (driver contact): Delivery Primary contact, falling
+      // back to Alternate if that's empty — same resolution rule used
+      // for agency comms recipients' phone equivalent, per Dan/Jen.
+      const { data: contactRows, error: contactsErr } = await supabase
+        .from('dpi_agency_contacts')
+        .select('*')
+        .eq('facility', cycle.facility)
+      if (contactsErr) console.error('load agency contacts for carrier PDF:', contactsErr)
+      const contactByAgency = new Map((contactRows || []).map((c) => [c.agency_number, c]))
+      const resolveContact = (agencyNumber) => {
+        const c = contactByAgency.get(agencyNumber)
+        if (!c) return { contactName: null, contactPhone: null }
+        const name = (c.delivery_first_name || c.delivery_last_name)
+          ? `${c.delivery_first_name || ''} ${c.delivery_last_name || ''}`.trim()
+          : (c.alt_first_name || c.alt_last_name) ? `${c.alt_first_name || ''} ${c.alt_last_name || ''}`.trim() : null
+        const phoneRaw = c.delivery_phone || c.alt_phone
+        const ext = c.delivery_phone ? c.delivery_ext : c.alt_ext
+        const phone = phoneRaw ? `${phoneRaw}${ext ? ` x${ext}` : ''}` : null
+        return { contactName: name, contactPhone: phone }
+      }
+
       const payloadRoutes = routes
         .filter((r) => r.delivery_date)
         .sort((a, b) => a.route_number.localeCompare(b.route_number, undefined, { numeric: true }))
@@ -725,6 +746,7 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
           const stopPayload = stops.map((s) => {
             const agency = agencyByNumber.get(s.agency_number)
             const weight = agency ? agencyTotalWeight(agency, weightMap).weight : Number(s.gross_weight) || 0
+            const { contactName, contactPhone } = resolveContact(s.agency_number)
             return {
               // Template-seeded, never-recalculated stops still carry the
               // template's original combined range as one string in
@@ -740,6 +762,8 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
               grossWeight: weight,
               totalCases: Number(s.total_cases) || 0,
               travelTime: s.travel_time || '',
+              contactName,
+              contactPhone,
             }
           })
           const totalWeight = stopPayload.reduce((sum, s) => sum + s.grossWeight, 0)
