@@ -7,6 +7,7 @@ import Phase2BuildFlag from './dpiMonthly/Phase2BuildFlag.jsx'
 import Phase4AgencyComms from './dpiMonthly/Phase4AgencyComms.jsx'
 import Phase5FinalPush from './dpiMonthly/Phase5FinalPush.jsx'
 import TemplateEditor from './dpiMonthly/TemplateEditor.jsx'
+import AgencyContactList from './dpiMonthly/AgencyContactList.jsx'
 
 // DPI Monthly Process — full pipeline, hidden route (/dpimonthly, see
 // src/App.jsx) — not linked from any nav.
@@ -57,6 +58,11 @@ import TemplateEditor from './dpiMonthly/TemplateEditor.jsx'
 // of the monthly pipeline, so it sits beside the phase pipeline rather
 // than as a 5th phase pill; PhasePills, the phase body, and "Reset test
 // cycle" are all cycle-specific and hidden while viewing templates.
+//
+// 2026-09-28 (Agency Contacts): a third view alongside Monthly Cycle and
+// Route Templates, same posture (standing config, not a phase) —
+// AgencyContactList.jsx, the real recipient/phone-contact source for
+// Phase 4's agency comms and Phase 5's route sheet.
 
 // 2026-09-18: renamed Phase 1 and 2 for clarity per Dan, and dropped
 // Phase 3 from this stepper display entirely — it was ALREADY never
@@ -204,7 +210,7 @@ function lastDayOfMonth(monthKey) {
 }
 
 export default function DpiMonthlyProcess() {
-  const [view, setView] = useState('cycle') // 'cycle' | 'templates'
+  const [view, setView] = useState('cycle') // 'cycle' | 'templates' | 'contacts'
   const [facility, setFacility] = useState('Eau Claire')
   const [loading, setLoading] = useState(true)
   const [stage, setStage] = useState('empty') // empty | parsed | pushing | done | push_failed (Phase 1 only)
@@ -490,7 +496,7 @@ export default function DpiMonthlyProcess() {
       <div style={{ fontSize: 13, color: colors.textFaint, marginBottom: 20 }}>Eau Claire &amp; Madison monthly school-district delivery cycle</div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        {[{ key: 'cycle', label: 'Monthly Cycle' }, { key: 'templates', label: 'Route Templates' }].map(({ key, label }) => (
+        {[{ key: 'cycle', label: 'Monthly Cycle' }, { key: 'templates', label: 'Route Templates' }, { key: 'contacts', label: 'Agency Contacts' }].map(({ key, label }) => (
           <button
             key={key}
             onClick={() => setView(key)}
@@ -546,6 +552,8 @@ export default function DpiMonthlyProcess() {
       </div>
 
       {view === 'templates' && <TemplateEditor facility={facility} />}
+
+      {view === 'contacts' && <AgencyContactList facility={facility} />}
 
       {view === 'cycle' && (
         <>
