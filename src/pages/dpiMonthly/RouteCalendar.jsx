@@ -1,4 +1,5 @@
-import React, { useRef, useState } from 'react'
+import React, { useState } from 'react'
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, useDraggable, useDroppable, DragOverlay } from '@dnd-kit/core'
 import { supabase } from '../../lib/supabase.js'
 import { colors, cardStyle } from './dpiMonthlyStyles.js'
 import { WEEKDAY_LABELS, buildMonthGrid, formatTimeDisplay } from './dpiCalendarUtils.js'
@@ -86,19 +87,40 @@ import { WEEKDAY_LABELS, buildMonthGrid, formatTimeDisplay } from './dpiCalendar
 // dpi_routes columns are unchanged (load_day/load_time, depart_day/
 // depart_time), only the UI labels and layout changed.
 //
-// 2026-09-24 FIX: same root cause confirmed live for Phase2BuildFlag.jsx's
-// AgencyTile (Edge/Windows/mouse — the whole page's mouse input got stuck
-// after clicking a tile, not just that tile). Neither this handler nor
-// AgencyTile's ever called e.dataTransfer.setData(...); Windows-based
-// Chromium browsers can leave the OS-level drag operation stuck without
-// it. Fixed proactively here too, same pattern, since this chip uses the
-// identical native-DnD approach.
+// 2026-09-28 FIX: confirmed live on the JW<>DF DPI Monthly Build call —
+// dragging a route chip to a different day (or back to a week tray) still
+// didn't work. Everything above this note was patching the same native
+// HTML5 Drag-and-Drop API that Phase2BuildFlag.jsx's AgencyTile went
+// through four rounds of fixes for before the real fix turned out to be
+// dropping native HTML5 DnD entirely — this calendar never got that same
+// migration, so it kept the same underlying unreliability. Migrated to
+// @dnd-kit here too, matching AgencyTile exactly: each RouteChip is a
+// useDraggable, each day cell and week tray is a useDroppable, the whole
+// grid is wrapped in one DndContext with a PointerSensor (5px activation
+// distance). Dragging drives through pointer events, never the browser's
+// native OS-level drag machinery, so the same class of bug can't occur
+// here either. draggingRouteIdRef and the manual dataTransfer/opacity
+// handling are gone — dnd-kit tracks the active drag itself. The click-
+// to-edit / drag conflict this file's own 2026-09-23 fix addressed is
+// also resolved differently now: PointerSensor's activation distance
+// means a plain click (under 5px of movement) never starts a drag at
+// all, so onClick and the drag listeners can safely sit on the same
+// element — the sibling-split between the draggable label and the edit
+// panel is kept anyway since it's harmless and still a clean separation.
+
+const draggableChipStyle = (isDragging, isEditing) => ({
+  padding: '4px 8px', borderRadius: 5, background: colors.panelAlt,
+  border: `1px solid ${isEditing ? colors.accent : colors.border}`, fontSize: 12,
+  cursor: isEditing ? 'default' : 'grab',
+  opacity: isDragging ? 0.4 : 1,
+})
 
 const scheduleSelectStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text }
 const scheduleTimeInputStyle = { fontSize: 11, padding: '2px 4px', borderRadius: 4, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, width: 92 }
 
 export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
-  const draggingRouteIdRef = useRef(null)
+  const [activeDragId, setActiveDragId] = useState(null) // route.id currently being dragged, for DragOverlay
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } })) // matches AgencyTile's own config
   const [editingRouteId, setEditingRouteId] = useState(null)
   const [editSchedule, setEditSchedule] = useState({ load_day: '', load_time: '', depart_day: '', depart_time: '' })
 
@@ -116,6 +138,24 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
       .eq('id', routeId)
     if (error) { console.error('assign delivery date:', error); return }
     onRoutesChanged()
+  }
+
+  // Droppable ids: 'day-N' for a real calendar day, 'tray-<weekNumber>' or
+  // 'tray-other' for an unscheduled-routes tray. Draggable ids are just
+  // the route's own id (a number), never colliding with a droppable id
+  // (always a prefixed string).
+  const handleDragStart = ({ active }) => setActiveDragId(active.id)
+
+  const handleDragEnd = ({ active, over }) => {
+    setActiveDragId(null)
+    if (!over) return
+    const routeId = active.id
+    const overId = String(over.id)
+    if (overId.startsWith('day-')) {
+      assignDate(routeId, Number(overId.slice(4)))
+    } else if (overId.startsWith('tray-')) {
+      assignDate(routeId, null) // back to unscheduled
+    }
   }
 
   const startEditSchedule = (route) => {
@@ -159,40 +199,21 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
 
   const RouteChip = ({ route }) => {
     const isEditing = editingRouteId === route.id
+    const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: route.id, disabled: isEditing })
     return (
       <div style={{ marginBottom: 4 }}>
         {/* Draggable label — its own children NEVER change based on
             isEditing, so a drag session attached to this exact node can't
             be disrupted by the edit panel below appearing/disappearing.
-            This is the fix for the freeze described above. */}
+            Kept as a sibling split even though dnd-kit's activation
+            distance already prevents a plain click from starting a drag —
+            harmless belt-and-suspenders. */}
         <div
-          draggable={!isEditing}
-          onDragStart={(e) => {
-            draggingRouteIdRef.current = route.id
-            // 2026-09-24 FIX: same root cause confirmed live for
-            // Phase2BuildFlag.jsx's AgencyTile (see that file's onDragStart
-            // comment) — never calling e.dataTransfer.setData(...) can leave
-            // Windows-based Chromium browsers (Edge, Chrome) with a stuck
-            // OS-level drag operation that locks the whole page's mouse
-            // input. Fixed proactively here too, same pattern, since this
-            // chip uses the identical native-DnD approach.
-            e.dataTransfer.effectAllowed = 'move'
-            e.dataTransfer.setData('text/plain', String(route.id))
-            e.currentTarget.style.opacity = '0.4'
-          }}
-          onDragEnd={(e) => {
-            draggingRouteIdRef.current = null
-            e.currentTarget.style.opacity = '1'
-          }}
-          onClick={(e) => {
-            e.currentTarget.style.opacity = '1' // defensive: clears a stuck fade from any prior session
-            if (!isEditing) startEditSchedule(route)
-          }}
-          style={{
-            padding: '4px 8px', borderRadius: 5, background: colors.panelAlt,
-            border: `1px solid ${isEditing ? colors.accent : colors.border}`, fontSize: 12,
-            cursor: isEditing ? 'default' : 'pointer',
-          }}
+          ref={setNodeRef}
+          {...attributes}
+          {...listeners}
+          onClick={() => { if (!isEditing) startEditSchedule(route) }}
+          style={draggableChipStyle(isDragging, isEditing)}
           title="Click to edit appointment/leave day & time · drag to move to a different day"
         >
           Route {route.route_number}
@@ -272,20 +293,38 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
     )
   }
 
-  const WeekTray = ({ label, routesInWeek }) => (
-    <div
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => { e.preventDefault(); if (draggingRouteIdRef.current) assignDate(draggingRouteIdRef.current, null) }}
-      style={{
-        padding: 8, border: `1px dashed ${colors.borderStrong}`, borderRadius: 6,
-        minHeight: 56, display: 'flex', flexDirection: 'column', gap: 2,
-      }}
-    >
-      <div style={{ fontSize: 10, color: colors.textFaint, marginBottom: 2 }}>{label}</div>
-      {routesInWeek.length === 0 && <div style={{ fontSize: 11, color: colors.textFaint, fontStyle: 'italic' }}>—</div>}
-      {routesInWeek.map((r) => <RouteChip key={r.id} route={r} />)}
-    </div>
-  )
+  const WeekTray = ({ label, weekKey, routesInWeek }) => {
+    const { setNodeRef, isOver } = useDroppable({ id: `tray-${weekKey}` })
+    return (
+      <div
+        ref={setNodeRef}
+        style={{
+          padding: 8, border: `1px dashed ${isOver ? colors.accent : colors.borderStrong}`, borderRadius: 6,
+          minHeight: 56, display: 'flex', flexDirection: 'column', gap: 2,
+        }}
+      >
+        <div style={{ fontSize: 10, color: colors.textFaint, marginBottom: 2 }}>{label}</div>
+        {routesInWeek.length === 0 && <div style={{ fontSize: 11, color: colors.textFaint, fontStyle: 'italic' }}>—</div>}
+        {routesInWeek.map((r) => <RouteChip key={r.id} route={r} />)}
+      </div>
+    )
+  }
+
+  const DayCell = ({ day, children }) => {
+    const { setNodeRef, isOver } = useDroppable({ id: `day-${day || 'none'}`, disabled: !day })
+    return (
+      <div
+        ref={setNodeRef}
+        style={{
+          minHeight: 64, borderRadius: 6, padding: 4,
+          background: day ? colors.panelAlt : 'transparent',
+          border: day ? `1px solid ${isOver ? colors.accent : colors.border}` : 'none',
+        }}
+      >
+        {children}
+      </div>
+    )
+  }
 
   return (
     <div style={{ ...cardStyle, marginBottom: 16 }}>
@@ -296,49 +335,52 @@ export default function RouteCalendar({ cycle, routes, onRoutesChanged }) {
         Each route starts on its usual week/weekday — drag it to a different day if this month's truck availability calls for it. Click a route to edit its appointment/leave day & time.
       </div>
 
-      {unscheduledOther.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          <WeekTray label="Other / no usual week" routesInWeek={unscheduledOther} />
+      <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        {unscheduledOther.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <WeekTray label="Other / no usual week" weekKey="other" routesInWeek={unscheduledOther} />
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: '150px repeat(7, 1fr)', gap: 4 }}>
+          <div />
+          {WEEKDAY_LABELS.map((label) => (
+            <div key={label} style={{ fontSize: 11, color: colors.textFaint, textAlign: 'center', padding: '4px 0' }}>{label}</div>
+          ))}
+
+          {weeks.map(({ days, weekNumber }, weekIdx) => (
+            <React.Fragment key={weekIdx}>
+              {weekNumber != null ? (
+                <WeekTray label={`Week ${weekNumber} usually`} weekKey={weekNumber} routesInWeek={unscheduledByWeek(weekNumber)} />
+              ) : (
+                <div style={{ fontSize: 10, color: colors.textFaint, padding: 8, fontStyle: 'italic' }}>
+                  Partial week — carries over from an adjacent month
+                </div>
+              )}
+              {days.map((day, i) => (
+                <DayCell key={i} day={day}>
+                  {day && (
+                    <>
+                      <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 4 }}>{day}</div>
+                      {(routesByDate.get(day) || []).map((r) => <RouteChip key={r.id} route={r} />)}
+                    </>
+                  )}
+                </DayCell>
+              ))}
+            </React.Fragment>
+          ))}
         </div>
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: '150px repeat(7, 1fr)', gap: 4 }}>
-        <div />
-        {WEEKDAY_LABELS.map((label) => (
-          <div key={label} style={{ fontSize: 11, color: colors.textFaint, textAlign: 'center', padding: '4px 0' }}>{label}</div>
-        ))}
-
-        {weeks.map(({ days, weekNumber }, weekIdx) => (
-          <React.Fragment key={weekIdx}>
-            {weekNumber != null ? (
-              <WeekTray label={`Week ${weekNumber} usually`} routesInWeek={unscheduledByWeek(weekNumber)} />
-            ) : (
-              <div style={{ fontSize: 10, color: colors.textFaint, padding: 8, fontStyle: 'italic' }}>
-                Partial week — carries over from an adjacent month
+        <DragOverlay>
+          {activeDragId ? (() => {
+            const activeRoute = routes.find((r) => r.id === activeDragId)
+            return activeRoute ? (
+              <div style={draggableChipStyle(false, false)}>
+                Route {activeRoute.route_number}
               </div>
-            )}
-            {days.map((day, i) => (
-              <div
-                key={i}
-                onDragOver={(e) => { if (day) e.preventDefault() }}
-                onDrop={(e) => { e.preventDefault(); if (draggingRouteIdRef.current && day) assignDate(draggingRouteIdRef.current, day) }}
-                style={{
-                  minHeight: 64, borderRadius: 6, padding: 4,
-                  background: day ? colors.panelAlt : 'transparent',
-                  border: day ? `1px solid ${colors.border}` : 'none',
-                }}
-              >
-                {day && (
-                  <>
-                    <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 4 }}>{day}</div>
-                    {(routesByDate.get(day) || []).map((r) => <RouteChip key={r.id} route={r} />)}
-                  </>
-                )}
-              </div>
-            ))}
-          </React.Fragment>
-        ))}
-      </div>
+            ) : null
+          })() : null}
+        </DragOverlay>
+      </DndContext>
     </div>
   )
 }
