@@ -74,11 +74,15 @@ import AgencyContactList from './dpiMonthly/AgencyContactList.jsx'
 // — genuinely non-contiguous) still match correctly after removing the
 // entry, rather than the remaining labels silently shifting onto the
 // wrong numbers.
+//
+// 2026-09-28: Phase 5's label renamed "Push final" -> "Appointment
+// confirmation" per Dan (JW<>DF DPI Monthly Build call) — see
+// Phase5FinalPush.jsx's own header comment for the full reasoning.
 const PHASES = [
   { number: 1, label: 'Order Import Process' },
   { number: 2, label: 'Route Build and Assign Days' },
   { number: 4, label: 'Agency comms' },
-  { number: 5, label: 'Push final' },
+  { number: 5, label: 'Appointment confirmation' },
 ]
 
 function PhasePills({ currentPhase }) {
