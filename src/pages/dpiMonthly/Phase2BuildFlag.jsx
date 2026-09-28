@@ -135,11 +135,13 @@ import { computeAutoDeliveryDate, formatTimeDisplay, formatDateShort, computeLoa
 // via the existing dpi-geocode function, same US Census Geocoder
 // RouteMap.jsx already uses, cached to dpi_route_stops.latitude/longitude
 // the same way) -> delivery_window_start = arrival, delivery_window_end
-// = arrival + 30min (2026-09-25 — Dan's original 60min default overlapped
-// nearly every neighboring stop on a tightly-packed route like CEMIL,
-// confirmed live on a printed sheet; 30min is the fix, per Dan; the
-// template's own windows vary 30/60min with no visible rule, so a new
-// stop still needs SOME default)
+// = arrival + 60min. Briefly tried 30min (2026-09-25) as a guess at what
+// looked like an overlap bug on a printed CEMIL sheet, but it was really
+// just this same 60min width doing what it's supposed to on a
+// tightly-packed route — Jen clarified directly (JW<>DF DPI Monthly Build
+// call, 2026-09-28) that a full 1-hour arrival window for every stop is
+// the real, deliberate business rule: it's the leeway she quotes
+// agencies, and anything shorter draws complaints. Reverted to 60min.
 // -> +15min buffer (A6, dwell/unload time) before continuing to the next
 // leg. Travel time itself comes from the new dpi-route-travel-times.cjs
 // (OSRM's public demo server, no API key — Dan's choice, matching the
@@ -602,18 +604,16 @@ export default function Phase2BuildFlag({ cycle, stagedAgencies, onAdvance }) {
       // rounding is now non-negotiable, applied to the running clock
       // itself so the NEXT leg always builds on the same round number a
       // human would reference, not a raw intermediate). Window width is
-      // 30min (2026-09-25 — a 60min default overlapped nearly every
-      // neighboring stop once real rounded arrivals were shown on a
-      // tightly-packed route like CEMIL, confirmed live on a printed
-      // sheet; per Dan, 30min is the fix). Two rounded arrivals less than
-      // 30min apart will still show a sliver of overlap — genuinely rare
-      // on a normal route, since a 15-min buffer plus any real travel
-      // time between two DIFFERENT physical addresses is almost always
-      // ≥30min once rounded; CEMIL's Divine Mercy stop (3min from the
-      // previous stop) is the one real exception seen so far. A 15-min
-      // buffer (A6, dwell/unload time) is added after each stop before
-      // the next leg.
-      const DELIVERY_WINDOW_MINUTES = 30
+      // 60min — reverted 2026-09-28 per Jen (JW<>DF DPI Monthly Build
+      // call): the brief 30min experiment (2026-09-25) was a guess at
+      // what Dan's printed-sheet complaint actually meant; Jen clarified
+      // directly that a full 1-hour arrival window for every stop is the
+      // real, deliberate business rule — it's the leeway she quotes
+      // agencies, and giving carriers less than that draws complaints.
+      // The rounding fix itself (above) was correct and unrelated; this
+      // is purely the window WIDTH going back to what it always should
+      // have been.
+      const DELIVERY_WINDOW_MINUTES = 60
       let currentMinutes = parseTimeToMinutes(route.depart_time)
       const updates = geocodedStops.map((stop, i) => {
         currentMinutes += data.legMinutes[i]
