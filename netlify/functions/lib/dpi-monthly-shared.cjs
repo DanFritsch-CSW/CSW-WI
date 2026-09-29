@@ -421,6 +421,28 @@ async function createAgencyOrder(facility, agency, materialMap) {
   // (see FACILITIES comment above for the exact carrier_id disambiguation
   // — several near-identical carrier names exist in Datex for both J&J
   // and Echo Brook, so these are NOT safe to re-derive by name lookup).
+  //
+  // 2026-09-29 (billing_address): per Dan, billing_address should always
+  // exactly mirror shipping_address for every DPI order — Datex uses this
+  // pairing internally to generate the pick slip and BOL address block,
+  // not to route an actual invoice to a different payer. Confirmed via
+  // the real create_outbound_order API schema that billing_address is a
+  // full sibling object to shipping_address (identical field set).
+  // Checked MotherDuck's datex_slv_orderaddresses across all 2,413+ real
+  // DPI orders first, before assuming — only one order (193947) had ever
+  // gotten a Bill To (type_id 1) record at all, and it was entirely
+  // blank, so there was no real precedent to infer a different behavior
+  // from; Dan's direction here is the actual answer, not a guess.
+  const shippingAddress = {
+    name: agency.firstName,
+    first_name: agency.firstName,
+    line1: agency.line1 || null,
+    city: agency.city || null,
+    state: agency.state || null,
+    postal_code: agency.postalCode || null,
+    country: 'US',
+  }
+
   const orderResult = await smartUpPost('/api/create_outbound_order', {
     project_id: cfg.project_id,
     warehouse_id: cfg.warehouse_id,
@@ -430,15 +452,8 @@ async function createAgencyOrder(facility, agency, materialMap) {
     vendor_reference: agency.lookupCode,
     expected_date: agency.expectedDate,
     carrier_id: cfg.carrier_id,
-    shipping_address: {
-      name: agency.firstName,
-      first_name: agency.firstName,
-      line1: agency.line1 || null,
-      city: agency.city || null,
-      state: agency.state || null,
-      postal_code: agency.postalCode || null,
-      country: 'US',
-    },
+    shipping_address: shippingAddress,
+    billing_address: shippingAddress,
   })
 
   if (!orderResult.ok) {
