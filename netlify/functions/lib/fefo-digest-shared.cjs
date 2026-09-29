@@ -493,13 +493,17 @@ function aggregateLotActions(violatingOrders, nearExpiryStuck, project, asOfDate
       byLot.set(lot, {
         lot, code: line.code, desc: line.desc, location: line.rem.location || '',
         date: line.rem.date, orderIds: new Set(), maxSeverity: null, maxDaysOlder: 0,
-        isViolation: false, isStuck: false, holdType: null,
+        isViolation: false, isStuck: false, holdType: null, stuckKind: null,
       })
     }
     const entry = byLot.get(lot)
     entry.orderIds.add(o.id)
     entry.isStuck = true
     entry.holdType = entry.holdType || line.rem.holdType || null
+    // 2026-09-29 (PVI FEFO call): 'on hold' is only for non-active status
+    // (inactive / hold / QA hold). A lot in receiving is a different state.
+    if (lineVerdict(line) === 'hold') entry.stuckKind = 'hold'
+    else if (!entry.stuckKind) entry.stuckKind = 'blocked'
   }
 
   const list = [...byLot.values()].map(e => ({
@@ -529,6 +533,38 @@ function aggregateLotActions(violatingOrders, nearExpiryStuck, project, asOfDate
   return list
 }
 
+// fetchLatestNotes / formatNoteLine — added 2026-09-29 (PVI FEFO call with
+// Sam Vega + Dean). Pulls the most recent live PVI At Risk note
+// (pvi_shelf_notes) for each lot in the digest and shows it under that
+// lot's block. Match key is item (materials.lookup_code) + lot_code
+// (vendorlots.lookup_code) — pvi_shelf_notes has no project column, and the
+// same item+lot commonly sits in both PALVI9 and PALDSD9 (replen transfers),
+// so a note is intentionally shared across projects. No note = nothing
+// printed (Dan's call: no "no note" label, blank means blank).
+async function fetchLatestNotes(pairs) {
+  const out = new Map()
+  const lots = [...new Set(pairs.map(p => p.lot).filter(Boolean))]
+  if (!lots.length) return out
+  try {
+    const inList = lots.map(l => `"${String(l).replace(/"/g, '')}"`).join(',')
+    const rows = await sbFetch(`pvi_shelf_notes?select=item,lot_code,note,author,created_at&deleted_at=is.null&lot_code=in.(${encodeURIComponent(inList)})&order=created_at.desc`)
+    for (const r of rows || []) {
+      const key = `${r.item}|${r.lot_code}`
+      if (!out.has(key)) out.set(key, r) // rows arrive newest-first
+    }
+  } catch (e) {
+    console.error('fetchLatestNotes failed (digest continues without notes):', e.message)
+  }
+  return out
+}
+
+function formatNoteLine(n) {
+  const d = n.created_at ? new Date(n.created_at).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' }) : ''
+  const who = [n.author, d].filter(Boolean).join(' ')
+  const text = String(n.note || '').replace(/\s+/g, ' ').trim()
+  return `${text}${who ? ` — ${who}` : ''}`
+}
+
 function formatLotActionLine(entry, project) {
   const verb = dateVerb(project)
   const shelf = entry.shelfLifeDays != null
@@ -538,9 +574,14 @@ function formatLotActionLine(entry, project) {
   parts.push(shelf || `${verb} ${entry.date}`)
   parts.push(`${entry.orderCount} order${entry.orderCount === 1 ? '' : 's'}`)
   if (entry.isViolation && entry.maxSeverity) parts.push(entry.maxSeverity.toUpperCase())
-  if (entry.isStuck && !entry.isViolation) parts.push(`ON ${entry.holdType || 'HOLD'} — NEAR EXPIRY`)
+  if (entry.isStuck && !entry.isViolation) {
+    parts.push(entry.stuckKind === 'hold'
+      ? `ON ${String(entry.holdType || 'HOLD').toUpperCase()} — NEAR EXPIRY`
+      : 'IN RECEIVING — NOT YET PUT AWAY — NEAR EXPIRY')
+  }
   const icon = entry.isViolation ? '⚠' : '⏸'
-  return `${icon} Lot ${entry.lot} — ${entry.code}${entry.desc ? ' ' + entry.desc : ''}\n   ${parts.join(' · ')}`
+  const noteLine = entry.latestNote ? `\n   📝 ${formatNoteLine(entry.latestNote)}` : ''
+  return `${icon} Lot ${entry.lot} — ${entry.code}${entry.desc ? ' ' + entry.desc : ''}\n   ${parts.join(' · ')}${noteLine}`
 }
 
 async function generateBiggestIssuesSummary(violatingOrders, nearExpiryStuck, project, asOfDate) {
@@ -637,6 +678,12 @@ async function buildDigestBody(orders, project, dateObj) {
   if (byVerdict.violation.length > 0 || nearExpiryStuck.length > 0) {
     const summary = await generateBiggestIssuesSummary(byVerdict.violation, nearExpiryStuck, project, dateObj)
     const lotActions = aggregateLotActions(byVerdict.violation, nearExpiryStuck, project, dateObj)
+    // PVI At Risk notes are Palermo's-only — don't let an item+lot collision
+    // pull a Palermo's note onto another customer's digest.
+    if (['palvi9', 'palma9', 'paldsd9'].includes(project.id)) {
+      const noteMap = await fetchLatestNotes(lotActions.map(e => ({ item: e.code, lot: e.lot })))
+      for (const e of lotActions) e.latestNote = noteMap.get(`${e.code}|${e.lot}`) || null
+    }
     if (summary || lotActions.length) {
       lines.push('**Immediate Action Summary:**')
       if (summary) { lines.push(summary.trim()); lines.push('') }
