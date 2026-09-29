@@ -11,6 +11,7 @@ import {
   undatedLotsInView,
   fefoOrderList, fetchLiveFefoOrdersBatch,
 } from '../../lib/fefo.js'
+import { LotSearchBar, LotRibbon, filterOrdersByQuery } from './FefoLotTools.jsx'
 
 // FEFO Rotation tab — always live from Datex, batched.
 //
@@ -29,6 +30,7 @@ export default function FefoRotationTab() {
   const [day, setDay] = useState(0)
   const [proj, setProj] = useState('all')
   const [openOrders, setOpenOrders] = useState(() => new Set())
+  const [lotQuery, setLotQuery] = useState('') // lot/item/order search (list-only filter) — see FefoLotTools.jsx
 
   const [liveResult, setLiveResult] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -175,6 +177,8 @@ export default function FefoRotationTab() {
     })
   }
 
+  const searched = useMemo(() => filterOrdersByQuery(visible, lotQuery), [visible, lotQuery])
+
   const banners     = useMemo(() => bannerCounts(visible),    [visible])
   const kpis        = useMemo(() => kpiRow(visible),          [visible])
   const rollup      = useMemo(() => rollupByProject(visible), [visible])
@@ -212,8 +216,9 @@ export default function FefoRotationTab() {
       {proj === 'all' && visible.length > 0 && (
         <ProjectRollup rollup={rollup} onProjClick={setProj} />
       )}
+      <LotSearchBar value={lotQuery} onChange={setLotQuery} shown={searched.length} total={visible.length} />
       <OrdersList
-        orders={visible}
+        orders={searched}
         openOrders={openOrders}
         onToggle={toggleOrder}
         showProjectChip={proj === 'all'}
@@ -799,6 +804,8 @@ function OrderCard({ order, open, onToggle, showProjectChip, onRefetch }) {
         <VerdictPill verdict={verdict} />
       </button>
 
+      <LotRibbon order={order} onRefetch={onRefetch} Dismiss={DismissAction} />
+
       {open && (
         <div style={{
           padding: '12px 14px 14px',
@@ -921,7 +928,7 @@ function SkuLineRow({ line, projId, onRefetch }) {
 // and calls onDone() so the parent re-fetches. The next fetch will drop
 // this lot from REM candidates, so the row either resolves to clean or
 // falls to the next-oldest lot.
-function DismissAction({ projectId, lotLookupCode, materialCode, onDone }) {
+function DismissAction({ projectId, lotLookupCode, materialCode, onDone, compact = false }) {
   const [open, setOpen] = useState(false)
   const [days, setDays] = useState(7)
   const [reason, setReason] = useState('')
@@ -968,7 +975,7 @@ function DismissAction({ projectId, lotLookupCode, materialCode, onDone }) {
 
   if (!open) {
     return (
-      <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+      <div style={{ marginTop: compact ? 0 : 8, display: 'flex', justifyContent: 'flex-end' }}>
         <button
           type="button"
           onClick={() => setOpen(true)}
