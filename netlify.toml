@@ -255,6 +255,12 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# CAL Pick Location Lot Check backend (PALDSD9) -- added 2026-09-29, mirror of
+# motherduck-wr-pick-check above (same duckdb bundling requirement).
+[functions."motherduck-cal-pick-check"]
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."motherduck-wr-cases"]
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
@@ -399,6 +405,16 @@
 # reason and pattern as above (fixes 403 -- see
 # lib/wr-pickcheck-digest-shared.cjs).
 [functions."wr-pickcheck-digest-test"]
+  timeout = 26
+
+# CAL Pick Location Lot Check digest (PALDSD9) -- added 2026-09-29, same
+# run/test split as the WR pair above (scheduled tick vs. manual test; see
+# lib/cal-pickcheck-digest-shared.cjs).
+[functions."cal-pickcheck-digest-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+[functions."cal-pickcheck-digest-test"]
   timeout = 26
 
 # Madison Dock Counts backend -- added 2026-07-30. Still used by the
