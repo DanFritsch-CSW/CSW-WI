@@ -13,6 +13,7 @@ import DpiPickline from '../components/DpiPickline.jsx'
 import F8OpenPositions from '../components/F8OpenPositions.jsx'
 import WrCasesToPick from '../components/WrCasesToPick.jsx'
 import WrPickCheck from '../components/WrPickCheck.jsx'
+import CalPickCheck from '../components/CalPickCheck.jsx'
 import WrSecondaryRepl from '../components/WrSecondaryRepl.jsx'
 import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 import {
@@ -55,6 +56,13 @@ const WR_TABS = [
   { id: 'warehouse', label: 'Warehouse' }, { id: 'pickline', label: 'Pickline' },
   { id: 'cases', label: 'Cases To Pick' }, { id: 'pickcheck', label: 'Pick Location Lot Check' },
   { id: 'secondary', label: 'Secondary Replenishments' },
+]
+// Caledonia-only sub-tab row (added 2026-09-29) — sits above the existing
+// All / 1-2 Side / 3.5 Side lane filter (which stays inside 'Warehouse').
+// "Pick Location Lot Check" is the PALDSD9 mirror of WR's tab of the same
+// name (see components/CalPickCheck.jsx). Daily view only, same as MAD_TABS.
+const CAL_TABS = [
+  { id: 'warehouse', label: 'Warehouse' }, { id: 'pickcheck', label: 'Pick Location Lot Check' },
 ]
 // Madison-only sub-tab row (added 2026-07-12) — sits below the global
 // Daily/Weekly toggle, same pattern as WR_TABS above. "Pre-Pick Status"
@@ -227,6 +235,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
 
   const [sideTab, setSideTab] = useState('all')
   const [wrTab, setWrTab]     = useState('warehouse')
+  const [calTab, setCalTab]   = useState('warehouse')
   const [madTab, setMadTab]   = useState('ops')
   const [weeklySubTab, setWeeklySubTab] = useState('customer')
 
@@ -243,7 +252,7 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
   // WR's non-warehouse tabs and MAD's Pre-Pick Status tab). Gating on this
   // keeps a stale rosterBusy reading from permanently blocking date
   // navigation on those sub-views.
-  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isMad && (madTab === 'prepick' || madTab === 'putaways' || madTab === 'dpi_pickline' || madTab === 'f8_open'))
+  const rosterBoardVisible = isDaily && (!isWr || wrTab === 'warehouse') && !(isCal2 && calTab === 'pickcheck') && !(isMad && (madTab === 'prepick' || madTab === 'putaways' || madTab === 'dpi_pickline' || madTab === 'f8_open'))
 
   useEffect(() => {
     onBusyChange?.(phasesBusy || (rosterBoardVisible && rosterBusy))
@@ -1205,6 +1214,25 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         {wrTab === 'cases' && <WrCasesToPick planDate={planDate} />}
         {wrTab === 'pickcheck' && <WrPickCheck />}
         {wrTab === 'secondary' && <WrSecondaryRepl />}
+      </div>
+    )
+  }
+
+  if (isCal2) {
+    return (
+      <div>
+        {isDaily && (
+          <div className="cal2-tab-row">
+            {CAL_TABS.map(t => (
+              <button key={t.id} data-side={t.id}
+                className={`cal2-tab${calTab === t.id ? ' active' : ''}`}
+                onClick={() => setCalTab(t.id)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {isDaily && calTab === 'pickcheck' ? <CalPickCheck /> : warehouseContent}
       </div>
     )
   }
