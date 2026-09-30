@@ -12,25 +12,31 @@
 // front_teammates before seeding). Per Dan's explicit ask: "I want this to
 // be a 'NEW' discussion thread — that is only sent to me."
 //
-// Settings row: reuses prepick_notify_settings (facility='dan',
-// dashboard_type='footprint_variance') — no schema change, same composite-
-// key-supports-arbitrary-dashboard_types convention as every other digest.
-// front_conversation_id stays unused/null for this row (inert column, same
-// pattern as discussion_comment/author_teammate_id/from_channel_id being
-// inert for most other rows in that table). last_sent_date dedupes against
-// the CONTENT date (today, Central) same as every other digest, so the
-// */15 tick can't create two threads in the same day's matching bucket.
+// Multi-facility as of 2026-09-30 (Dan, 2026-09-30) — Wisconsin Rapids added
+// alongside Madison, each with its OWN schedule and its OWN Front thread
+// (Dan's explicit call: don't combine). Settings rows: reuses
+// prepick_notify_settings (facility='dan', dashboard_type=
+// 'footprint_variance_<facilityId>' — one row per tracked facility, same
+// "one dashboard_type per variant under a shared owner row" convention
+// FEFO's per-project rows use, see fefo-digest-shared.cjs). No schema
+// change, front_conversation_id stays unused/null for these rows, same as
+// other inert-column cases elsewhere in that table. last_sent_date dedupes
+// against the CONTENT date (today, Central) same as every other digest, so
+// the */15 tick can't create two threads in the same day's matching bucket
+// — tracked per-row, so MAD and WR firing at different times/days doesn't
+// interfere with each other.
 //
 // Active LPs: self-contained port of fetchActiveInventory (src/lib/omni.js),
-// scoped to Madison only — proxies through this site's own omni-query
-// function (${process.env.URL}/.netlify/functions/omni-query) rather than
+// generalized 2026-09-30 to take a warehouse name (was Madison-only) —
+// proxies through this site's own omni-query function
+// (${process.env.URL}/.netlify/functions/omni-query) rather than
 // duplicating the GraphQL-over-HTTP plumbing, per this project's documented
 // "Netlify function → Omni direct API calls can return empty rows" lesson
 // (omni-query.cjs already has the Arrow parsing / retry / timeout-injection
 // logic; a second function should ride on top of it, not reimplement it).
 //
 // Projected Footprint + tracked-project list: dan_footprint_targets
-// (Supabase), same table the /dan frontend reads/writes.
+// (Supabase), same table the /dan frontend reads/writes, scoped per facility.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -41,7 +47,24 @@ const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
 const VIEW_LP = 'silver__datex_slv_licenseplates'
 const VIEW_LP_WH = 'silver__datex_slv_warehouses'
 const VIEW_LP_PROJ = 'silver__datex_slv_projects'
-const MAD_WAREHOUSE = 'CSW-Madison'
+
+// Which facilities this digest supports, and what each needs: the Omni
+// warehouse-name filter (matches CSW_WAREHOUSE in src/lib/omni.js), the
+// human label used in the Front subject/body, and the dashboard_type this
+// facility's settings row lives under. Add a row here (matching a row in
+// Dan.jsx's FACILITIES array) to extend to another facility — no other
+// changes needed in this file.
+const FACILITY_CONFIG = {
+  mad: { warehouse: 'CSW-Madison', label: 'Madison', dashboardType: 'footprint_variance_mad' },
+  wr: { warehouse: 'CSW-Wisconsin Rapids', label: 'Wisconsin Rapids', dashboardType: 'footprint_variance_wr' },
+}
+
+// Reverse lookup used by the scheduled tick, which iterates settings rows
+// by dashboard_type (see dan-footprint-digest-run.cjs) rather than knowing
+// facility ids up front — same shape as FEFO's PROJECT_BY_DASHBOARD_TYPE.
+const FACILITY_BY_DASHBOARD_TYPE = new Map(
+  Object.entries(FACILITY_CONFIG).map(([id, cfg]) => [cfg.dashboardType, { id, ...cfg }])
+)
 
 const CSW_NAME_SUFFIXES = [
   ' - CSW-Madison', ' - CSW-Franksville', ' - CSW-Kenosha',
@@ -120,9 +143,12 @@ async function omniQueryViaProxy(query) {
 }
 
 // Self-contained port of fetchActiveInventory (src/lib/omni.js), scoped to
-// Madison only. Same paginated 5x500-row query, same archived=false +
-// warehouse-name-contains filter.
-async function fetchMadActiveInventory() {
+// one warehouse. Same paginated 5x500-row query, same archived=false +
+// warehouse-name-contains filter. Generalized 2026-09-30 from a
+// Madison-only fetchMadActiveInventory — warehouseName is the Omni
+// CSW_WAREHOUSE value for the target facility (e.g. 'CSW-Madison',
+// 'CSW-Wisconsin Rapids').
+async function fetchFacilityActiveInventory(warehouseName) {
   const PAGE_SIZE = 500
   const MAX_PAGES = 5
   const allRows = []
@@ -136,7 +162,7 @@ async function fetchMadActiveInventory() {
       ],
       filters: {
         [`${VIEW_LP}.archived`]: { type: 'boolean', is_negative: true, treat_nulls_as_false: false },
-        [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [MAD_WAREHOUSE], is_negative: false, case_insensitive: true },
+        [`${VIEW_LP_WH}.warehouse_name`]: { kind: 'CONTAINS', type: 'string', values: [warehouseName], is_negative: false, case_insensitive: true },
       },
       sorts: [{ column_name: `${VIEW_LP}.lookup_code_count_distinct`, sort_descending: true }],
       limit: PAGE_SIZE,
@@ -174,22 +200,28 @@ function buildDiscussionBody(rows) {
   return lines.join('\n').trimEnd()
 }
 
-function subjectFor(dateObj) {
+function subjectFor(dateObj, facilityLabel) {
   const m = dateObj.getUTCMonth() + 1
   const d = dateObj.getUTCDate()
   const y = dateObj.getUTCFullYear()
-  return `Madison Footprint / Projected ${m}/${d}/${y}`
+  return `${facilityLabel} Footprint / Projected ${m}/${d}/${y}`
 }
 
 // Creates the new Front discussion + (on the scheduled path) stamps
 // last_sent_date. Shared by both the scheduled tick and the manual test —
 // isManualTest skips the last_sent_date write so repeated test clicks in
 // the same day always fire (same convention as postDigest in every other
-// *-digest-shared.cjs in this app).
-async function createFootprintThread({ isManualTest }) {
+// *-digest-shared.cjs in this app). facility (default 'mad' for back-compat
+// with any caller not yet passing it explicitly) selects which
+// FACILITY_CONFIG entry — and therefore which warehouse, which
+// dan_footprint_targets rows, and which settings row — this run applies to.
+async function createFootprintThread({ isManualTest, facility = 'mad' }) {
   if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase env not configured')
   if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
   if (!SITE_URL) throw new Error('Site URL (process.env.URL/DEPLOY_URL) not available')
+
+  const cfg = FACILITY_CONFIG[facility]
+  if (!cfg) throw new Error(`Unknown facility '${facility}' — expected one of: ${Object.keys(FACILITY_CONFIG).join(', ')}`)
 
   const recipients = await sbFetch(
     `notification_recipients?list_name=eq.dan_footprint_variance&active=eq.true&front_teammate_id=not.is.null&select=front_teammate_id`
@@ -199,12 +231,12 @@ async function createFootprintThread({ isManualTest }) {
   }
 
   const [targets, liveLps] = await Promise.all([
-    sbFetch(`dan_footprint_targets?facility=eq.mad&select=project_name,projected_footprint&order=project_name.asc`),
-    fetchMadActiveInventory(),
+    sbFetch(`dan_footprint_targets?facility=eq.${facility}&select=project_name,projected_footprint&order=project_name.asc`),
+    fetchFacilityActiveInventory(cfg.warehouse),
   ])
 
   if (!targets || !targets.length) {
-    return { ok: false, reason: 'no tracked projects in dan_footprint_targets' }
+    return { ok: false, reason: `no tracked projects in dan_footprint_targets for facility='${facility}'` }
   }
 
   const rows = targets.map(t => ({
@@ -215,7 +247,7 @@ async function createFootprintThread({ isManualTest }) {
 
   const dateObj = centralTodayDateObj()
   const date = centralTodayISO()
-  const subject = subjectFor(dateObj)
+  const subject = subjectFor(dateObj, cfg.label)
   const body = buildDiscussionBody(rows)
 
   const res = await fetch('https://api2.frontapp.com/conversations', {
@@ -236,14 +268,15 @@ async function createFootprintThread({ isManualTest }) {
   }
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.dan&dashboard_type=eq.footprint_variance`, { last_sent_date: date })
+    await sbPatch(`prepick_notify_settings?facility=eq.dan&dashboard_type=eq.${cfg.dashboardType}`, { last_sent_date: date })
   }
 
-  return { ok: true, date, subject, conversationId: json.id, rowCount: rows.length }
+  return { ok: true, facility, date, subject, conversationId: json.id, rowCount: rows.length }
 }
 
 module.exports = {
   SUPABASE_URL, SUPABASE_KEY, FRONT_TOKEN, SITE_URL,
+  FACILITY_CONFIG, FACILITY_BY_DASHBOARD_TYPE,
   sbFetch, sbPatch,
   centralTodayISO, centralTodayDateObj, isNotifyTimeMatch,
   createFootprintThread,
