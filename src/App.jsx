@@ -24,7 +24,10 @@ const APP_MODE = import.meta.env.VITE_APP_MODE || 'csw'
 // /dan (added 2026-09-07) — Dan's private personal automations area. Same
 // posture as /dpimonthly: no password gate, no TopNav, reached only by
 // knowing the URL. First module: Madison footprint variance tracker.
-const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly', '/dan']
+//
+// /lens (added 2026-10-08) — Customer Lens context editor + test bench. Same
+// unlisted, no-gate posture as /dan (Dan's call).
+const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly', '/dan', '/lens']
 
 const LaborPlanning      = lazy(() => import('./pages/LaborPlanning.jsx'))
 const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
@@ -43,6 +46,7 @@ const SchedulingDashboard = lazy(() => import('./pages/scheduling/SchedulingDash
 const PluginView         = lazy(() => import('./pages/scheduling/PluginView.jsx'))
 const DpiMonthlyProcess  = lazy(() => import('./pages/DpiMonthlyProcess.jsx'))
 const Dan                = lazy(() => import('./pages/Dan.jsx'))
+const Lens               = lazy(() => import('./pages/Lens.jsx'))
 
 function PageLoading() {
   return (
@@ -123,6 +127,7 @@ function AppShell() {
             <Route path="/scheduling/plugin"     element={<PluginView />}        />
             <Route path="/dpimonthly"            element={<DpiMonthlyProcess />} />
             <Route path="/dan"                   element={<Dan />}                />
+            <Route path="/lens"                  element={<Lens />}               />
           </Routes>
         </Suspense>
       </PageErrorBoundary>
