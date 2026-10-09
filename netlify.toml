@@ -556,6 +556,24 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# CMM Empty Trailer daily email -- added 2026-10-09 per Dean/Hill's ask
+# (cnv_1clwbnkk) to automate the long-running manual "CSW/CMM/PALERMOS
+# Trailers" thread. No duckdb/native-module dependency -- this calls
+# Supabase REST + the Front API directly (no MotherDuck query at all; see
+# lib/cmm-empty-trailer-email-shared.cjs for why), so no
+# external_node_modules/included_files entry needed, unlike CMM Outbound
+# Appts above.
+[functions."cmm-empty-trailer-email-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# CMM Empty Trailer daily email MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as every other *-digest-test.cjs in
+# this app -- see lib/cmm-empty-trailer-email-shared.cjs). NOT a dry run --
+# really sends a live email to whatever TO/CC recipients are configured.
+[functions."cmm-empty-trailer-email-test"]
+  timeout = 26
+
 # Customer Shortage Report EMAIL draft creation -- added 2026-09-01,
 # MOVED same day from an earlier "Daily Discussion Email" version per
 # Dan's follow-up: "I would've thought they would live within the
