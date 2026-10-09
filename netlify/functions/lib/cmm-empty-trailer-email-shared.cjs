@@ -21,8 +21,14 @@
 // front_channels table, send time/days, active toggle, Create Now test
 // button) MINUS the draft-only fields -- no author_teammate_id (Front's
 // /messages endpoint takes sender_name, a plain display string, not an
-// author to create a draft under) and no discussion_comment/internal-
-// follower layer (there's no draft to attach internal-only commentary to).
+// author to create a draft under) and no discussion_comment (there's no
+// draft to attach internal-only commentary to). It DOES keep the internal
+// discussion PEOPLE picker (added 2026-10-09, same evening as the initial
+// build, per Dan) -- people added as conversation followers on the sent
+// thread without being a TO/CC recipient of the email itself, same
+// notification_recipients + frontAddFollowers mechanism as CMM Outbound
+// Appts, just applied to the conversation the live send created instead of
+// a draft. list_name is `cmm_empty_trailer_<facility>`.
 // Three columns were added to prepick_notify_settings instead: sender_name,
 // email_subject_template, email_body_template -- all three scoped to
 // dashboard_type='cmm_empty_trailer', nullable/unused by other dashboard
@@ -118,6 +124,18 @@ function conversationIdFromMessageResponse(msg) {
   return m ? m[1] : null
 }
 
+// Same call as cmm-outbound-draft-shared.cjs's frontAddFollowers -- adds
+// internal teammates as conversation followers without putting them in
+// TO/CC (so they see the thread, not a copy of the email itself).
+async function frontAddFollowers(conversationId, teammateIds) {
+  const res = await fetch(`https://api2.frontapp.com/conversations/${conversationId}/followers`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${FRONT_TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ teammate_ids: teammateIds }),
+  })
+  if (!res.ok) { const t = await res.text(); throw Object.assign(new Error('Front add-followers failed'), { detail: t }) }
+}
+
 async function runDigest({ isManualTest }) {
   if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase env not configured')
   if (!FRONT_TOKEN) throw new Error('FRONT_API_TOKEN not set')
@@ -148,11 +166,13 @@ async function runDigest({ isManualTest }) {
     }
   }
 
-  const emailRows = await sbFetch(
-    `cmm_empty_trailer_email_recipients?facility=eq.${FACILITY}&active=eq.true&select=email,role`
-  )
+  const [emailRows, discussionRows] = await Promise.all([
+    sbFetch(`cmm_empty_trailer_email_recipients?facility=eq.${FACILITY}&active=eq.true&select=email,role`),
+    sbFetch(`notification_recipients?list_name=eq.cmm_empty_trailer_${FACILITY}&active=eq.true&select=front_teammate_id`),
+  ])
   const to = (emailRows || []).filter(r => r.role === 'to').map(r => r.email)
   const cc = (emailRows || []).filter(r => r.role === 'cc').map(r => r.email)
+  const discussionTeammateIds = (discussionRows || []).map(r => r.front_teammate_id).filter(Boolean)
 
   if (to.length === 0) {
     return { ok: false, reason: 'No active TO recipients configured in Settings > CMM Empty Trailer' }
@@ -171,13 +191,17 @@ async function runDigest({ isManualTest }) {
   })
   const conversationId = conversationIdFromMessageResponse(sent)
 
+  if (conversationId && discussionTeammateIds.length) {
+    await frontAddFollowers(conversationId, discussionTeammateIds)
+  }
+
   if (!isManualTest) {
     await sbPatch(`prepick_notify_settings?facility=eq.${FACILITY}&dashboard_type=eq.${DASHBOARD_TYPE}`, { last_sent_date: date })
   }
 
   return {
     ok: true, date, subject, conversationId, messageId: sent?.id,
-    toCount: to.length, ccCount: cc.length,
+    toCount: to.length, ccCount: cc.length, followerCount: discussionTeammateIds.length,
     channelId: settings.from_channel_id || DEFAULT_FRONT_CHANNEL_ID,
   }
 }
