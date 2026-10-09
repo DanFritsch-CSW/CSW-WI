@@ -1,17 +1,24 @@
 // CMM Empty Trailer (Caledonia) — Settings helpers.
 //
 // Sibling to cmmOutbound.js, same split-module reasoning (keep
-// supabase.js from growing further). Three concepts here, simpler than
-// CMM Outbound Appts because this sends a live email directly (no
-// draft/author/internal-discussion layer — see
-// netlify/functions/lib/cmm-empty-trailer-email-shared.cjs for why):
+// supabase.js from growing further). Simpler than CMM Outbound Appts
+// because this sends a live email directly (no draft/author layer — see
+// netlify/functions/lib/cmm-empty-trailer-email-shared.cjs for why), but
+// DOES keep an internal discussion PEOPLE picker (added 2026-10-09, same
+// evening as the initial build):
 //   1. Settings row (prepick_notify_settings, facility='cal',
 //      dashboard_type='cmm_empty_trailer') — send time/days/active +
 //      sender_name/email_subject_template/email_body_template +
 //      from_channel_id (which Front address it sends from).
 //   2. Email recipients (cmm_empty_trailer_email_recipients) — TO/CC,
 //      own table, independent of cmm_outbound_email_recipients.
-//   3. Front channels (front_channels) — reuses fetchFrontChannels /
+//   3. Discussion recipients (notification_recipients,
+//      list_name='cmm_empty_trailer_<facility>') — internal Front
+//      teammates added as conversation followers on the sent thread,
+//      WITHOUT being a TO/CC recipient of the email itself. Same
+//      list_name convention and upsert-then-prune pattern as
+//      cmm_outbound_<facility> in cmmOutbound.js.
+//   4. Front channels (front_channels) — reuses fetchFrontChannels /
 //      triggerFrontChannelsSync from cmmOutbound.js directly; that sync
 //      is channel-agnostic, not CMM-Outbound-specific.
 
@@ -97,6 +104,54 @@ export async function saveCmmEmptyTrailerEmailRecipients(toEmails, ccEmails) {
       .delete()
       .in('id', removeIds)
     if (delErr) { console.error('saveCmmEmptyTrailerEmailRecipients delete:', delErr); throw delErr }
+  }
+}
+
+// ─── Discussion recipients (internal Front teammates, followers-only) ────
+
+export async function fetchCmmEmptyTrailerDiscussionRecipients() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('notification_recipients')
+    .select('*')
+    .eq('list_name', `cmm_empty_trailer_${FACILITY}`)
+    .order('name')
+  if (error) { console.error('fetchCmmEmptyTrailerDiscussionRecipients:', error); return [] }
+  return data ?? []
+}
+
+// saveCmmEmptyTrailerDiscussionRecipients — same upsert-then-prune pattern
+// as saveCmmOutboundDiscussionRecipients.
+export async function saveCmmEmptyTrailerDiscussionRecipients(chosenTeammates) {
+  if (!supabase) return
+  const listName = `cmm_empty_trailer_${FACILITY}`
+  const rows = (chosenTeammates ?? []).map(t => ({
+    list_name: listName,
+    name: [t.first_name, t.last_name].filter(Boolean).join(' ') || t.email,
+    email: t.email,
+    front_teammate_id: t.teammate_id,
+    active: true,
+    updated_at: new Date().toISOString(),
+  }))
+  if (rows.length) {
+    const { error: upErr } = await supabase
+      .from('notification_recipients')
+      .upsert(rows, { onConflict: 'list_name,email', ignoreDuplicates: false })
+    if (upErr) { console.error('saveCmmEmptyTrailerDiscussionRecipients upsert:', upErr); throw upErr }
+  }
+  const { data: existing, error: fetchErr } = await supabase
+    .from('notification_recipients')
+    .select('id, email')
+    .eq('list_name', listName)
+  if (fetchErr) { console.error('saveCmmEmptyTrailerDiscussionRecipients fetch:', fetchErr); throw fetchErr }
+  const keepEmails = new Set(rows.map(r => r.email))
+  const removeIds = (existing ?? []).filter(r => !keepEmails.has(r.email)).map(r => r.id)
+  if (removeIds.length) {
+    const { error: delErr } = await supabase
+      .from('notification_recipients')
+      .delete()
+      .in('id', removeIds)
+    if (delErr) { console.error('saveCmmEmptyTrailerDiscussionRecipients delete:', delErr); throw delErr }
   }
 }
 
