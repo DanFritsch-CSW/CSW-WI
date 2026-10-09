@@ -19,6 +19,7 @@ import {
 import {
   fetchCmmEmptyTrailerSettings, upsertCmmEmptyTrailerSettings,
   fetchCmmEmptyTrailerEmailRecipients, saveCmmEmptyTrailerEmailRecipients,
+  fetchCmmEmptyTrailerDiscussionRecipients, saveCmmEmptyTrailerDiscussionRecipients,
   triggerCmmEmptyTrailerTest,
 } from '../lib/cmmEmptyTrailer.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
@@ -1086,21 +1087,29 @@ function CmmOutboundApptsEditor() {
 // automate the long-running manual "CSW/CMM/PALERMOS Trailers" thread —
 // Dan's explicit call: "Auto create and Send an EMAIL not discussion
 // thread." No Draft Author / internal-discussion-comment fields here
-// (no draft exists to own or annotate) — instead a Sender Name (plain
-// display string Front shows as the From name) plus editable Subject/
-// Body templates, since there's no structured "empty trailer" data
-// source to build the content from (confirmed live against MotherDuck:
-// no such dock_appointment_type_name value exists — "empty" only shows
-// up as free text in truck_appointments.Notes). The email is a
+// (no draft exists to own or annotate). It DOES keep the internal
+// discussion PEOPLE picker (added same evening, per Dan) — teammates
+// added as conversation followers on the sent thread without being a
+// TO/CC recipient of the email itself, same notification_recipients +
+// frontAddFollowers mechanism as CMM Outbound Appts, just applied to the
+// conversation the live send created. Also has a Sender Name (plain
+// display string Front shows as the From name, since the /messages
+// endpoint takes a string, not an author to create a draft under) plus
+// editable Subject/Body templates, since there's no structured "empty
+// trailer" data source to build the content from (confirmed live against
+// MotherDuck: no such dock_appointment_type_name value exists — "empty"
+// only shows up as free text in truck_appointments.Notes). The email is a
 // content-free kickoff; the 1st shift supervisor still replies with the
 // real door/trailer status, same as today's fully-manual thread.
 
 function CmmEmptyTrailerEditor() {
   const [settings, setSettings]   = useState(null)
+  const [teammates, setTeammates] = useState([])
   const [channels, setChannels]   = useState([])
   const [syncingChannels, setSyncingChannels] = useState(false)
   const [toEmails, setToEmails]   = useState([])
   const [ccEmails, setCcEmails]   = useState([])
+  const [selectedDiscussion, setSelectedDiscussion] = useState(new Set())
   const [senderName, setSenderName] = useState('CSW Operations')
   const [subjectTemplate, setSubjectTemplate] = useState('CSW/CMM/PALERMOS Trailers — {date}')
   const [bodyTemplate, setBodyTemplate] = useState('<p>Starting today\u2019s trailer thread \u2014 please reply with current door / trailer status.</p>')
@@ -1117,16 +1126,20 @@ function CmmEmptyTrailerEditor() {
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      const [s, chans, emails] = await Promise.all([
+      const [s, tms, chans, emails, discussion] = await Promise.all([
         fetchCmmEmptyTrailerSettings(),
+        fetchFrontTeammates(),
         fetchFrontChannels(),
         fetchCmmEmptyTrailerEmailRecipients(),
+        fetchCmmEmptyTrailerDiscussionRecipients(),
       ])
       if (cancelled) return
       setSettings(s)
+      setTeammates(tms)
       setChannels(chans)
       setToEmails((emails.to || []).map(r => r.email))
       setCcEmails((emails.cc || []).map(r => r.email))
+      setSelectedDiscussion(new Set(discussion.filter(r => r.front_teammate_id).map(r => r.front_teammate_id)))
       if (s) {
         setNotifyHour(s.notify_hour ?? 5)
         setNotifyMinute(s.notify_minute ?? 0)
@@ -1144,6 +1157,15 @@ function CmmEmptyTrailerEditor() {
 
   function toggleDay(day) {
     setNotifyDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
+  }
+
+  function toggleTeammate(teammateId) {
+    setSelectedDiscussion(prev => {
+      const next = new Set(prev)
+      if (next.has(teammateId)) next.delete(teammateId)
+      else next.add(teammateId)
+      return next
+    })
   }
 
   async function handleSyncChannels() {
@@ -1166,6 +1188,9 @@ function CmmEmptyTrailerEditor() {
         fromChannelId: channelId || null,
       }),
       saveCmmEmptyTrailerEmailRecipients(toEmails, ccEmails),
+      saveCmmEmptyTrailerDiscussionRecipients(
+        teammates.filter(t => selectedDiscussion.has(t.teammate_id))
+      ),
     ])
   }
 
@@ -1192,7 +1217,7 @@ function CmmEmptyTrailerEditor() {
       const res = await triggerCmmEmptyTrailerTest()
       if (res?.success) {
         setTestState('ok')
-        setTestDetail(`Email sent: "${res.subject}" — ${res.toCount} TO / ${res.ccCount} CC.`)
+        setTestDetail(`Email sent: "${res.subject}" — ${res.toCount} TO / ${res.ccCount} CC, ${res.followerCount} follower(s).`)
       } else {
         setTestState('error')
         setTestDetail(res?.reason || 'No result returned.')
@@ -1302,7 +1327,7 @@ function CmmEmptyTrailerEditor() {
         />
       </div>
 
-      <div style={{ marginBottom: 8 }}>
+      <div style={{ marginBottom: 16 }}>
         <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
           Body template (HTML, <code>{'{date}'}</code> supported)
         </div>
@@ -1313,6 +1338,34 @@ function CmmEmptyTrailerEditor() {
           className="est-drops-select"
           style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
         />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Internal discussion people (added as conversation followers on the sent thread, NOT in TO/CC — {teammates.length} available)
+        </div>
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 6,
+          maxHeight: 260, overflowY: 'auto', padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+        }}>
+          {teammates.map(t => {
+            const label = [t.first_name, t.last_name].filter(Boolean).join(' ') || t.email
+            const checked = selectedDiscussion.has(t.teammate_id)
+            return (
+              <label
+                key={t.teammate_id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', borderRadius: 3,
+                  fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer',
+                  background: checked ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
+                }}
+              >
+                <input type="checkbox" checked={checked} onChange={() => toggleTeammate(t.teammate_id)} />
+                <span>{label}</span>
+              </label>
+            )
+          })}
+        </div>
       </div>
 
       <div className="settings-card-footer" style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
