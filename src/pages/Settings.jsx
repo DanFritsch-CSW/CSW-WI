@@ -16,6 +16,11 @@ import {
   fetchCmmOutboundDiscussionRecipients, saveCmmOutboundDiscussionRecipients,
   fetchFrontChannels, triggerFrontChannelsSync,
 } from '../lib/cmmOutbound.js'
+import {
+  fetchCmmEmptyTrailerSettings, upsertCmmEmptyTrailerSettings,
+  fetchCmmEmptyTrailerEmailRecipients, saveCmmEmptyTrailerEmailRecipients,
+  triggerCmmEmptyTrailerTest,
+} from '../lib/cmmEmptyTrailer.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import { fetchCronHealth } from '../lib/cronHealth.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
@@ -30,6 +35,7 @@ const TABS = [
   { id: 'pvi',         label: 'PVI Accounts' },
   { id: 'discussions', label: 'Daily Discussions' },
   { id: 'cmmOutbound', label: 'CMM Outbound Appts' },
+  { id: 'cmmEmptyTrailer', label: 'CMM Empty Trailer' },
   { id: 'b2eSync',     label: 'B2E Sync Health' },
 ]
 
@@ -1069,6 +1075,268 @@ function CmmOutboundApptsEditor() {
   )
 }
 
+// ── CMM Empty Trailer (Caledonia) ───────────────────────────
+//
+// Sibling to CMM Outbound Appts above, same UI shape (TO/CC recipients,
+// From-channel picker, send time/days, active toggle, Create Now test
+// button) but a deliberately different mechanism underneath: this sends
+// a LIVE email immediately via Front's /messages endpoint (see
+// netlify/functions/lib/cmm-empty-trailer-email-shared.cjs), not a draft
+// for review. Added 2026-10-09 per Dean/Hill's ask (cnv_1clwbnkk) to
+// automate the long-running manual "CSW/CMM/PALERMOS Trailers" thread —
+// Dan's explicit call: "Auto create and Send an EMAIL not discussion
+// thread." No Draft Author / internal-discussion-comment fields here
+// (no draft exists to own or annotate) — instead a Sender Name (plain
+// display string Front shows as the From name) plus editable Subject/
+// Body templates, since there's no structured "empty trailer" data
+// source to build the content from (confirmed live against MotherDuck:
+// no such dock_appointment_type_name value exists — "empty" only shows
+// up as free text in truck_appointments.Notes). The email is a
+// content-free kickoff; the 1st shift supervisor still replies with the
+// real door/trailer status, same as today's fully-manual thread.
+
+function CmmEmptyTrailerEditor() {
+  const [settings, setSettings]   = useState(null)
+  const [channels, setChannels]   = useState([])
+  const [syncingChannels, setSyncingChannels] = useState(false)
+  const [toEmails, setToEmails]   = useState([])
+  const [ccEmails, setCcEmails]   = useState([])
+  const [senderName, setSenderName] = useState('CSW Operations')
+  const [subjectTemplate, setSubjectTemplate] = useState('CSW/CMM/PALERMOS Trailers — {date}')
+  const [bodyTemplate, setBodyTemplate] = useState('<p>Starting today\u2019s trailer thread \u2014 please reply with current door / trailer status.</p>')
+  const [channelId, setChannelId] = useState('')
+  const [notifyHour, setNotifyHour] = useState(5)
+  const [notifyMinute, setNotifyMinute] = useState(0)
+  const [notifyDays, setNotifyDays] = useState([1, 2, 3, 4, 5, 6, 7])
+  const [active, setActive]       = useState(false)
+  const [loading, setLoading]     = useState(true)
+  const [saveState, setSave]      = useState(null)
+  const [testState, setTestState] = useState(null)
+  const [testDetail, setTestDetail] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const [s, chans, emails] = await Promise.all([
+        fetchCmmEmptyTrailerSettings(),
+        fetchFrontChannels(),
+        fetchCmmEmptyTrailerEmailRecipients(),
+      ])
+      if (cancelled) return
+      setSettings(s)
+      setChannels(chans)
+      setToEmails((emails.to || []).map(r => r.email))
+      setCcEmails((emails.cc || []).map(r => r.email))
+      if (s) {
+        setNotifyHour(s.notify_hour ?? 5)
+        setNotifyMinute(s.notify_minute ?? 0)
+        setNotifyDays(s.notify_days ?? [1, 2, 3, 4, 5, 6, 7])
+        setActive(!!s.active)
+        setSenderName(s.sender_name ?? 'CSW Operations')
+        setSubjectTemplate(s.email_subject_template ?? 'CSW/CMM/PALERMOS Trailers — {date}')
+        setBodyTemplate(s.email_body_template ?? '<p>Starting today\u2019s trailer thread \u2014 please reply with current door / trailer status.</p>')
+        setChannelId(s.from_channel_id ?? '')
+      }
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  function toggleDay(day) {
+    setNotifyDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
+  }
+
+  async function handleSyncChannels() {
+    setSyncingChannels(true)
+    try {
+      await triggerFrontChannelsSync()
+      setChannels(await fetchFrontChannels())
+    } catch (err) {
+      alert(`Failed to sync channels: ${err.message}`)
+    } finally {
+      setSyncingChannels(false)
+    }
+  }
+
+  async function persist() {
+    await Promise.all([
+      upsertCmmEmptyTrailerSettings({
+        notifyHour, notifyMinute, notifyDays, active,
+        senderName, emailSubjectTemplate: subjectTemplate, emailBodyTemplate: bodyTemplate,
+        fromChannelId: channelId || null,
+      }),
+      saveCmmEmptyTrailerEmailRecipients(toEmails, ccEmails),
+    ])
+  }
+
+  async function handleSave() {
+    setSave('saving')
+    try {
+      await persist()
+      setSave('ok')
+      setTimeout(() => setSave(null), 2500)
+    } catch (err) {
+      setSave('error')
+      setTimeout(() => setSave(null), 3000)
+    }
+  }
+
+  async function handleTest() {
+    setTestState('running')
+    setTestDetail(null)
+    try {
+      // Save current state first — same reasoning as the other editors'
+      // handleTest: a freshly-edited field that hasn't been saved yet would
+      // otherwise send with stale recipients/content.
+      await persist()
+      const res = await triggerCmmEmptyTrailerTest()
+      if (res?.success) {
+        setTestState('ok')
+        setTestDetail(`Email sent: "${res.subject}" — ${res.toCount} TO / ${res.ccCount} CC.`)
+      } else {
+        setTestState('error')
+        setTestDetail(res?.reason || 'No result returned.')
+      }
+    } catch (err) {
+      setTestState('error')
+      setTestDetail(err.message)
+    }
+    setTimeout(() => { setTestState(null); setTestDetail(null) }, 8000)
+  }
+
+  if (loading) {
+    return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>Loading…</div>
+  }
+
+  const DAY_LABELS = [['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6], ['Sun', 7]]
+
+  return (
+    <div className="cmm-empty-trailer-editor">
+      <p className="settings-page-sub" style={{ marginBottom: 16 }}>
+        Automatically <strong>sends a live email</strong> (no review step) kicking off the daily
+        CSW/CMM/Palermo's trailer-status thread at Caledonia. There's no structured "empty trailer" data to
+        pull from — this just starts the thread; the 1st shift supervisor replies with the real door/trailer
+        status, same as today. Currently configured for Caledonia only.
+      </p>
+
+      <div className="break-schedule-controls" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+          <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />
+          Auto-send daily
+        </label>
+        <div className="break-schedule-warehouse">
+          <span className="break-schedule-warehouse-label">Send time (CT)</span>
+          <select className="est-drops-select" value={notifyHour} onChange={e => setNotifyHour(Number(e.target.value))}>
+            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{h}:00</option>)}
+          </select>
+          <select className="est-drops-select" value={notifyMinute} onChange={e => setNotifyMinute(Number(e.target.value))}>
+            {[0, 15, 30, 45].map(m => <option key={m} value={m}>:{String(m).padStart(2, '0')}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+        {DAY_LABELS.map(([label, day]) => (
+          <button
+            key={day}
+            onClick={() => toggleDay(day)}
+            className="settings-save-btn"
+            style={{
+              padding: '4px 10px', fontSize: 11,
+              background: notifyDays.includes(day) ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <EmailListEditor label="TO (external + internal — receives the email)" emails={toEmails} onChange={setToEmails} />
+      <EmailListEditor label="CC (external + internal — receives the email)" emails={ccEmails} onChange={setCcEmails} />
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          From (Front channel — the address the email actually sends from)
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select className="est-drops-select" value={channelId} onChange={e => setChannelId(e.target.value)} style={{ minWidth: 280 }}>
+            <option value="">— CSW Main (default) —</option>
+            {channels.map(c => (
+              <option key={c.channel_id} value={c.channel_id}>
+                {c.name}{c.address ? ` <${c.address}>` : ''}
+              </option>
+            ))}
+          </select>
+          <button className="settings-save-btn" onClick={handleSyncChannels} disabled={syncingChannels}>
+            {syncingChannels ? 'Syncing…' : 'Sync channels now'}
+          </button>
+        </div>
+        <p className="settings-page-sub" style={{ marginTop: 4, fontSize: 10 }}>
+          {channels.length} channel(s) available (synced nightly, or click "Sync channels now" for an immediate refresh).
+        </p>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Sender name (shown as the From name — Front's direct-send API uses a display name here, not a teammate)
+        </div>
+        <input
+          type="text"
+          value={senderName}
+          onChange={e => setSenderName(e.target.value)}
+          className="est-drops-select"
+          style={{ width: 280 }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Subject template (<code>{'{date}'}</code> is replaced with e.g. "Friday 10/10/2026")
+        </div>
+        <input
+          type="text"
+          value={subjectTemplate}
+          onChange={e => setSubjectTemplate(e.target.value)}
+          className="est-drops-select"
+          style={{ width: '100%' }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Body template (HTML, <code>{'{date}'}</code> supported)
+        </div>
+        <textarea
+          value={bodyTemplate}
+          onChange={e => setBodyTemplate(e.target.value)}
+          rows={3}
+          className="est-drops-select"
+          style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+        />
+      </div>
+
+      <div className="settings-card-footer" style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
+          {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
+        </button>
+        <button className="settings-save-btn" onClick={handleTest} disabled={testState === 'running' || toEmails.length === 0}>
+          {testState === 'running' ? 'Sending…' : testState === 'ok' ? 'Sent ✓' : testState === 'error' ? 'Failed' : 'Send Now (test — real email!)'}
+        </button>
+        {testDetail && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: testState === 'error' ? '#e05a5a' : 'var(--text-dim)' }}>
+            {testDetail}
+          </span>
+        )}
+      </div>
+      {toEmails.length === 0 && (
+        <p className="settings-page-sub" style={{ marginTop: 8, fontStyle: 'italic' }}>
+          Add at least one TO recipient above to enable the test button.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── B2E Sync Health ──────────────────────────────────────────
 //
 // Added 2026-08-11 alongside the nightly-b2e-sync shared/run/test split.
@@ -1081,7 +1349,7 @@ function CmmOutboundApptsEditor() {
 //   2. A log of the last several runs (scheduled AND manual) from the new
 //      cron_health table, including the diagnostic fields
 //      (b2eDatesAfterDedup / maxSeededDate / expectedMaxDate) that answer
-//      "did this run actually reach the full 21-day forward window."
+//      "did this run actually reach the full 21-day forward window.
 
 function formatCronHealthTime(iso) {
   if (!iso) return '—'
@@ -1369,6 +1637,16 @@ export default function Settings() {
             <p className="settings-page-sub">Creates a Front email draft (not sent) of tomorrow's open CMM/Palermo's outbound appointments at Caledonia, for review before sending.</p>
           </div>
           <CmmOutboundApptsEditor />
+        </>
+      )}
+
+      {activeTab === 'cmmEmptyTrailer' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">CMM Empty Trailer</h2>
+            <p className="settings-page-sub">Auto-sends (no review step) the daily CSW/CMM/Palermo's trailer-status kickoff email at Caledonia.</p>
+          </div>
+          <CmmEmptyTrailerEditor />
         </>
       )}
 
