@@ -31,19 +31,30 @@
  * scheduling-order-search.cjs (HOME=/tmp, md:production_db, LOAD
  * motherduck) -- with zero dependency on Omni or its filter schema.
  *
- * FIXED 2026-10-10 (same day, second pass) -- the first MotherDuck-based
- * version still failed, this time on insert: "duplicate key value
- * violates unique constraint scheduling_carriers_pkey". Confirmed live:
- * scheduling_carriers' primary key is carrier_name (not carrier_id), and
- * Datex's real carrier master has 19,129 rows but only 18,547 DISTINCT
- * names -- 582 names have more than one carrier_id in Datex (duplicate/
- * re-added entries). Since this table exists purely for name-based
- * matching (exact and fuzzy), and two rows sharing an identical name are
- * indistinguishable to a matcher anyway, duplicates are now resolved in
- * SQL by keeping the one with the most recent activity (highest 6-month
- * appointment_count, carrier_id as a deterministic final tiebreaker) --
- * not a workaround, just the correct choice for a name->id lookup table
- * where the name itself is the real key.
+ * FIXED 2026-10-10 (second pass) -- the first MotherDuck-based version
+ * still failed on insert: "duplicate key value violates unique
+ * constraint scheduling_carriers_pkey". Confirmed live: scheduling_carriers'
+ * primary key is carrier_name (not carrier_id), and Datex's real carrier
+ * master has 19,129 rows but only 18,547 DISTINCT raw names -- 582 names
+ * have more than one carrier_id in Datex (duplicate/re-added entries).
+ * Deduped in SQL, keeping the most recently active carrier_id per name
+ * (highest 6-month appointment_count, carrier_id as a deterministic
+ * tiebreaker) -- the correct choice for a name->id lookup table where two
+ * rows sharing an identical name are indistinguishable to any matcher.
+ *
+ * FIXED 2026-10-10 (third pass, same day) -- STILL failed with the exact
+ * same pkey error after the dedup above. Real bug: the SQL dedup
+ * partitioned by the RAW carrier_name, but the JS mapping step below
+ * applies .trim() to each name AFTER that dedup already ran. Confirmed
+ * live: of the 18,547 raw-distinct names, only 18,502 are distinct once
+ * trimmed -- 45 pairs differ only by leading/trailing whitespace, passed
+ * the raw-name dedup as two separate "distinct" rows, then collided the
+ * moment both got trimmed to the identical string on the way into
+ * Supabase. Fixed by trimming carrier_name INSIDE the SQL, before the
+ * ROW_NUMBER partition, so the dedup key is identical to the value that
+ * actually gets inserted -- not fixable by deduping harder downstream,
+ * since the mismatch was between two different "which string counts as
+ * the name" definitions in two different places.
  *
  * appointment_count is still populated, as a sort-hint only (never a
  * cutoff -- a carrier with 0 recent appointments still gets synced), via
@@ -66,9 +77,15 @@ async function queryCarriersFromMotherDuck() {
       GROUP BY carrier_id
     ),
     carriers_with_counts AS (
+      -- carrier_name is TRIMMED here, at the source -- everything
+      -- downstream (dedup partition key, final SELECT, and the JS layer)
+      -- now agrees on exactly what string counts as "the name". See the
+      -- 2026-10-10 third-pass header note for why this matters: a dedup
+      -- on the untrimmed value doesn't protect against two names that
+      -- only collide after trimming.
       SELECT
         c.carrier_id,
-        c.carrier_name,
+        trim(c.carrier_name) AS carrier_name,
         COALESCE(rc.cnt, 0) AS appointment_count
       FROM production_db.silver.datex_slv_carriers c
       LEFT JOIN recent_counts rc ON rc.carrier_id = c.carrier_id
@@ -77,9 +94,8 @@ async function queryCarriersFromMotherDuck() {
         AND (c.parquet_record_operation_type IS NULL OR c.parquet_record_operation_type != 'D')
     ),
     deduped AS (
-      -- scheduling_carriers' primary key is carrier_name, and 582 names
-      -- have more than one carrier_id in the real Datex master (see
-      -- header note). Keep the most recently active one per name.
+      -- scheduling_carriers' primary key is carrier_name. Keep the most
+      -- recently active carrier_id per (now-trimmed) name.
       SELECT *, ROW_NUMBER() OVER (
         PARTITION BY carrier_name
         ORDER BY appointment_count DESC, carrier_id ASC
@@ -114,6 +130,8 @@ async function queryCarriersFromMotherDuck() {
       .filter((r) => r.carrier_id != null && r.carrier_name)
       .map((r) => ({
         carrier_id: Number(r.carrier_id),
+        // Already trimmed in SQL -- .trim() here is just a harmless
+        // no-op safety net, not load-bearing anymore.
         carrier_name: String(r.carrier_name).trim(),
         appointment_count: Number(r.appointment_count) || 0,
       }))
