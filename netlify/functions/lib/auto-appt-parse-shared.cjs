@@ -154,6 +154,23 @@
 // auto_appt_attempts at all, same as any other non-matching sender) so
 // it's left purely to scheduling_agent. Real Sam/Daren senders don't need
 // this check — their own address already proves identity.
+//
+// FIELD-BACKFILL ADDED 2026-10-10 (same day, Dan's first live test
+// surfaced this): Dan's "grading, not creating" redesign earlier today
+// left a real gap — scheduling_agent's own generic extraction has no idea
+// Warehouse/Type/Owner/Project/Dock Door/Carrier are structurally
+// constant for these two senders, and no idea the 3-hour lead-time rule
+// exists at all. Dan's first real test (cnv_1cm5cxg4) came back with Type
+// "Inbound" (should always be Outbound), Project/Owner/Dock Door/Carrier
+// blank, and the raw "needed by" time used directly as the arrival time —
+// completely skipping the lead-time adjustment, since that logic only
+// ever lived in this file and this file stopped creating anything.
+// backfillAgentSubmission() now PATCHes all of that straight onto
+// scheduling_agent's own submission as soon as it's found, independent of
+// whether the order lookup below succeeds. See its own header note for
+// the full reasoning and a known gap (the Front confirmation comment
+// scheduling_agent posts on arrival isn't corrected by this — only the
+// underlying Supabase row).
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -166,6 +183,19 @@ const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuc
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
 const APPT_TYPE = 'Outbound' // every observed order from either sender is an Outbound Sales Order in Datex
 const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by"/stated time -- confirmed with Dan for BOTH senders' formats
+
+// Structurally constant for every Sam/Daren email -- never stated in the
+// body, always the same regardless of which PO is referenced. Confirmed
+// 2026-10-10 via live MotherDuck query (owner/project) and Dan's real
+// example (cnv_1cm5cxg4, order 471161 -- dock door and carrier read
+// directly off that submission). See backfillAgentSubmission's header
+// note for why these are asserted here instead of left to extraction.
+const PALERMO_PROJECT_NAME = 'Palermos CALEDONIA materials bulk'
+const PALERMO_PROJECT_DATEX_ID = 8
+const PALERMO_OWNER_DATEX_ID = 704
+const PALERMO_DOCK_DOOR = 'OUTBOUND PALERMO'
+const PALERMO_CARRIER_NAME = 'CMM'
+const PALERMO_CARRIER_DATEX_ID = 8170 // confirmed via scheduling_carriers: 7,194 historical appointments -- clearly the real one, not the near-zero "ZZ-CMM" placeholder variants in the same table
 
 const WATERMARK_SETTINGS_KEY = 'auto_appt_scan_watermark'
 const WATERMARK_LOOKBACK_HOURS = 24 // first-ever run default -- see header note
@@ -183,7 +213,7 @@ const DAREN_PEET_PATTERN = /\bTO_(\d{5,7})\s+Print\s+Transfer\s+Status\s+(\d{1,2
 const ELIGIBLE_SENDER_PATTERNS = [
   { sender: 's.rohde@palermospizza.com', pattern: SAM_ROHDE_PATTERN, style: 'needed_ampm' },
   { sender: 'da.peet@palermospizza.com', pattern: DAREN_PEET_PATTERN, style: 'raw_24h' },
-  // Dan's own test address -- added 2026-10-10 so he can resend old real
+  // Dan's own test address -- added 2026-10-10 so he can resend real
   // Sam/Daren emails verbatim to generate shadow-validation test runs
   // without waiting on live customer traffic. Matches EITHER format
   // (style: 'either'), since he may copy either sender's wording. Counts
@@ -603,6 +633,64 @@ async function findAgentSubmission(conversationId) {
   return rows?.[0] || null
 }
 
+// Dan's rule, 2026-10-10: Warehouse, Type, Owner, Project, Dock Door and
+// Carrier are structurally CONSTANT for every Sam/Daren email -- never
+// stated in the body, always the same regardless of which PO is
+// referenced. The lead-time-adjusted Arrival time is also fully
+// deterministic once the email is correctly parsed (resolveDatesFromParts
+// already does the -3hr math reliably). scheduling_agent's own generic
+// extraction has no way to know any of this: Dan's first live test
+// (cnv_1cm5cxg4) came back with Type "Inbound" (wrong), Project/Owner/
+// Dock Door/Carrier blank, and the raw "needed by" time used AS the
+// arrival time -- the 3-hour lead-time rule never applied at all, because
+// that rule only ever lived in this file, and this file stopped writing
+// anything once it became a grader instead of a creator (see the earlier
+// 2026-10-10 architecture-change header note). This function takes all of
+// that back over on scheduling_agent's own submission, independent of
+// whether the Datex order lookup below succeeds -- none of these fields
+// depend on that. Only touches a submission still at 'pending' (the
+// PATCH's own WHERE clause is the real guard, not just this status read)
+// so it never overwrites something a CSR has already started working on.
+//
+// KNOWN GAP: scheduling_agent's Front confirmation comment (posted the
+// moment the email arrives) will still show its own wrong first guess --
+// this function runs on the next 15-minute tick after that, and only
+// corrects the Supabase row, not the already-posted comment. A CSR
+// reading the thread before opening the Scheduling tab could see stale
+// info for a few minutes. Not fixed here; flagged for Dan to decide if
+// it's worth moving this logic into scheduling-agent-webhook itself for
+// immediate consistency.
+async function backfillAgentSubmission(submission, { reference, scheduledArrival }) {
+  if (submission.status !== 'pending') {
+    log('backfillAgentSubmission: submission', submission.id, 'no longer pending (', submission.status, ') -- not touching it')
+    return
+  }
+  const fields = {
+    warehouse: CAL_WAREHOUSE,
+    type: APPT_TYPE,
+    owner: PALERMO_OWNER_NAME,
+    owner_datex_id: PALERMO_OWNER_DATEX_ID,
+    project: PALERMO_PROJECT_NAME,
+    project_datex_id: PALERMO_PROJECT_DATEX_ID,
+    scheduled_dock_door: PALERMO_DOCK_DOOR,
+    carrier: PALERMO_CARRIER_NAME,
+    carrier_datex_id: PALERMO_CARRIER_DATEX_ID,
+    scheduled_arrival: scheduledArrival,
+    reference_number: reference,
+    appointment_lookup_code: `(${PALERMO_ABBR}) - ${reference}`,
+  }
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/submissions?id=eq.${encodeURIComponent(submission.id)}&status=eq.pending`,
+    { method: 'PATCH', headers: sbHeaders({ Prefer: 'return=minimal' }), body: JSON.stringify(fields) }
+  )
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    console.error('[auto-appt-parse] backfillAgentSubmission FAILED', res.status, text.slice(0, 300))
+  } else {
+    log('backfillAgentSubmission OK', submission.id)
+  }
+}
+
 const PALERMO_ABBR = 'PVI'
 
 function formatDisplayDatetime(iso) {
@@ -668,6 +756,21 @@ async function processMessage(message, senderConfig, conversationId) {
   const { reference, neededBy, scheduledArrival } = parsed
   log('processMessage: parsed', reference, neededBy, '->', scheduledArrival)
 
+  // Find and take over scheduling_agent's own submission FIRST, before the
+  // order lookup below -- none of Warehouse/Type/Owner/Project/Dock Door/
+  // Carrier/Arrival depend on confirming the order exists. See
+  // backfillAgentSubmission's header note.
+  const agentSubmission = await findAgentSubmission(conversationId)
+  if (!agentSubmission) {
+    log('processMessage: agent_missing', reference, conversationId)
+    await logAttempt({
+      front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
+      matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'agent_missing',
+    })
+    return { messageId, outcome: 'agent_missing', reference }
+  }
+  await backfillAgentSubmission(agentSubmission, { reference, scheduledArrival })
+
   let order
   try {
     order = await lookupOrder(reference)
@@ -676,6 +779,7 @@ async function processMessage(message, senderConfig, conversationId) {
     await logAttempt({
       front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
       matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival,
+      agent_submission_id: agentSubmission.id,
       outcome: 'error', error_detail: `Order lookup failed: ${err.message}`,
     })
     return { messageId, outcome: 'error', error: err.message }
@@ -686,6 +790,7 @@ async function processMessage(message, senderConfig, conversationId) {
     await logAttempt({
       front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
       matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'order_not_found',
+      agent_submission_id: agentSubmission.id,
     })
     return { messageId, outcome: 'order_not_found', reference }
   }
@@ -696,28 +801,16 @@ async function processMessage(message, senderConfig, conversationId) {
       front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
       matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'owner_mismatch',
       owner_name: order.owner_name, project_name: order.project_name,
+      agent_submission_id: agentSubmission.id,
     })
     return { messageId, outcome: 'owner_mismatch', reference, foundOwner: order.owner_name }
   }
 
-  const dockDoorRules = await getDockDoorRules()
-  const recommendedDockDoor = findDockDoorRule(CAL_WAREHOUSE, order.project_name, 'Outbound', dockDoorRules)
+  // Dock door is now a hardcoded constant (see PALERMO_DOCK_DOOR) rather
+  // than looked up dynamically -- findDockDoorRule/getDockDoorRules remain
+  // defined/exported below for any future sender that genuinely needs
+  // per-project dock-door resolution, just unused by this pilot now.
   const laborWarning = await checkLabor(CAL_WAREHOUSE, scheduledArrival)
-
-  // Grade scheduling_agent's own submission rather than creating a second,
-  // competing one — see 2026-10-10 header note.
-  const agentSubmission = await findAgentSubmission(conversationId)
-
-  if (!agentSubmission) {
-    log('processMessage: agent_missing', reference, conversationId)
-    await logAttempt({
-      front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
-      matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'agent_missing',
-      owner_name: order.owner_name, project_name: order.project_name,
-      recommended_dock_door: recommendedDockDoor, labor_warning: laborWarning,
-    })
-    return { messageId, outcome: 'agent_missing', reference }
-  }
 
   log('processMessage: shadow_logged', reference, agentSubmission.id)
   await logAttempt({
@@ -725,9 +818,9 @@ async function processMessage(message, senderConfig, conversationId) {
     matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'shadow_logged',
     owner_name: order.owner_name, project_name: order.project_name,
     agent_submission_id: agentSubmission.id,
-    agent_scheduled_arrival: agentSubmission.scheduled_arrival || null,
-    agent_dock_door: agentSubmission.scheduled_dock_door || null,
-    recommended_dock_door: recommendedDockDoor,
+    agent_scheduled_arrival: scheduledArrival,
+    agent_dock_door: PALERMO_DOCK_DOOR,
+    recommended_dock_door: PALERMO_DOCK_DOOR,
     labor_warning: laborWarning,
     match_status: 'pending_outcome',
   })
@@ -767,5 +860,6 @@ module.exports = {
   getDockDoorRules,
   checkLabor,
   findAgentSubmission,
+  backfillAgentSubmission,
   runScan,
 }
