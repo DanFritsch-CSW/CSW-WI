@@ -100,6 +100,7 @@ function formatTimeShort(iso) {
 function senderLabel(sender) {
   if (sender === 's.rohde@palermospizza.com') return 'Sam'
   if (sender === 'da.peet@palermospizza.com') return 'Daren'
+  if (sender === 'd_fritsch21@hotmail.com') return 'Dan (test)'
   return sender || 'this sender'
 }
 

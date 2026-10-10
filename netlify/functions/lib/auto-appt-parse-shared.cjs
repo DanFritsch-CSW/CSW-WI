@@ -165,6 +165,13 @@ const DAREN_PEET_PATTERN = /\bTO_(\d{5,7})\s+Print\s+Transfer\s+Status\s+(\d{1,2
 const ELIGIBLE_SENDER_PATTERNS = [
   { sender: 's.rohde@palermospizza.com', pattern: SAM_ROHDE_PATTERN, style: 'needed_ampm' },
   { sender: 'da.peet@palermospizza.com', pattern: DAREN_PEET_PATTERN, style: 'raw_24h' },
+  // Dan's own test address -- added 2026-10-10 so he can resend old real
+  // Sam/Daren emails verbatim to generate shadow-validation test runs
+  // without waiting on live customer traffic. Matches EITHER format
+  // (style: 'either'), since he may copy either sender's wording. Counts
+  // toward the live confidence tally (Dan's explicit call) -- not
+  // excluded or tracked separately.
+  { sender: 'd_fritsch21@hotmail.com', pattern: null, style: 'either' },
 ]
 
 function log(...args) {
@@ -421,24 +428,29 @@ function resolveDatesFromParts(digits, month, day, hour24) {
 }
 
 function parseBody(text, senderConfig) {
-  if (senderConfig.style === 'needed_ampm') {
+  // 'either' (Dan's test address) tries both formats in turn, since he may
+  // copy either sender's wording verbatim into a test email.
+  if (senderConfig.style === 'needed_ampm' || senderConfig.style === 'either') {
     const match = SAM_ROHDE_PATTERN.exec(text)
-    if (!match) return null
-    const [, digits, monthStr, dayStr, hourStr, ampm] = match
-    let hour24 = parseInt(hourStr, 10) % 12
-    if (ampm.toLowerCase() === 'pm') hour24 += 12
-    return resolveDatesFromParts(digits, parseInt(monthStr, 10), parseInt(dayStr, 10), hour24)
+    if (match) {
+      const [, digits, monthStr, dayStr, hourStr, ampm] = match
+      let hour24 = parseInt(hourStr, 10) % 12
+      if (ampm.toLowerCase() === 'pm') hour24 += 12
+      return resolveDatesFromParts(digits, parseInt(monthStr, 10), parseInt(dayStr, 10), hour24)
+    }
+    if (senderConfig.style === 'needed_ampm') return null
   }
 
-  if (senderConfig.style === 'raw_24h') {
+  if (senderConfig.style === 'raw_24h' || senderConfig.style === 'either') {
     const match = DAREN_PEET_PATTERN.exec(text)
-    if (!match) return null
-    const [, digits, monthStr, dayStr, rawTime] = match
-    const mm = rawTime.slice(-2)
-    const hh = rawTime.length === 3 ? rawTime.slice(0, 1) : rawTime.slice(0, 2)
-    const hour24 = parseInt(hh, 10)
-    if (parseInt(mm, 10) !== 0) return null
-    return resolveDatesFromParts(digits, parseInt(monthStr, 10), parseInt(dayStr, 10), hour24)
+    if (match) {
+      const [, digits, monthStr, dayStr, rawTime] = match
+      const mm = rawTime.slice(-2)
+      const hh = rawTime.length === 3 ? rawTime.slice(0, 1) : rawTime.slice(0, 2)
+      const hour24 = parseInt(hh, 10)
+      if (parseInt(mm, 10) !== 0) return null
+      return resolveDatesFromParts(digits, parseInt(monthStr, 10), parseInt(dayStr, 10), hour24)
+    }
   }
 
   return null
