@@ -36,19 +36,32 @@
 
 # Scheduling plugin carrier list sync -- added 2026-08-19 per Kay's
 # long-standing "carriers disappearing" feedback (cnv_1ayy4w9g). Weekly is
-# plenty -- new carriers in Datex don't need same-day visibility, and this
-# replaces the old live-on-every-load Omni query entirely. Monday 8am UTC
-# (~3am Central), well outside business hours. See
-# lib/carriers-sync-shared.cjs for the full root-cause writeup.
+# plenty -- new carriers in Datex don't need same-day visibility. Monday
+# 8am UTC (~3am Central), well outside business hours.
+#
+# FIXED 2026-10-10: this had been failing on every single run since it
+# was added -- zero rows ever written to scheduling_carriers, not stale
+# data -- due to a malformed Omni filter that killed the whole sync every
+# time (see lib/carriers-sync-shared.cjs's header for the full root-cause
+# writeup, confirmed from live Netlify logs). Rewritten to query
+# MotherDuck's real carrier master table
+# (production_db.silver.datex_slv_carriers, 19,129 rows) directly instead
+# of going through Omni at all, so it now needs the standard duckdb
+# native-module bundling like every other MotherDuck-backed function in
+# this file.
 [functions."carriers-sync-run"]
   schedule = "0 8 * * 1"
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # Manual test -- no schedule, so this can be POSTed directly to refresh
 # the list immediately instead of waiting for Monday. NOT a dry run -- it
-# really replaces scheduling_carriers' contents with a fresh Omni pull.
+# really replaces scheduling_carriers' contents with a fresh MotherDuck pull.
 [functions."carriers-sync-test"]
   timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
 # Order Search, Phase 1 -- added 2026-08-21 per Dan/Kay's 2026-08-20
 # meeting, wired into the plugin's tab switcher 2026-08-22. Plain
