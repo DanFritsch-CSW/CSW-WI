@@ -673,6 +673,15 @@ export default function PluginView() {
   const submitGuardRef = useRef(false)
   const sessionRef = useRef(0)
   const pollingIntervalRef = useRef(null)
+  // FIXED 2026-10-10 — see getSubmissions' conversationId effect below for
+  // the full story. notFoundPollRef drives a bounded retry when the
+  // initial fetch finds no submission yet (scheduling_agent's pipeline is
+  // still in flight); userEditedWhileNotFoundRef stops that retry the
+  // moment a CSR starts manually typing, so a late-arriving agent
+  // submission never silently overwrites someone's in-progress manual
+  // entry.
+  const notFoundPollRef = useRef(null)
+  const userEditedWhileNotFoundRef = useRef(false)
   // Order Search Phase 2 stale-ref fix (2026-08-24) — declared here
   // (not down by handleOrderFound) so the conversation-switch effect
   // below can reset it. See handleOrderFound's own comment for the full
@@ -726,6 +735,10 @@ export default function PluginView() {
         clearInterval(pollingIntervalRef.current)
         pollingIntervalRef.current = null
       }
+      if (notFoundPollRef.current) {
+        clearInterval(notFoundPollRef.current)
+        notFoundPollRef.current = null
+      }
       setMultiDrafts([])
       setMultiShared({ warehouse: '', type: '', owner: '', project: '' })
       setMultiDockDoors([])
@@ -762,6 +775,10 @@ export default function PluginView() {
       clearInterval(pollingIntervalRef.current)
       pollingIntervalRef.current = null
     }
+    if (notFoundPollRef.current) {
+      clearInterval(notFoundPollRef.current)
+      notFoundPollRef.current = null
+    }
     setMultiDrafts([])
     setMultiShared({ warehouse: '', type: '', owner: '', project: '' })
     setMultiDockDoors([])
@@ -780,43 +797,19 @@ export default function PluginView() {
     // handleOrderFound's comment above for the full story.
     autoFilledOrderIdRef.current = null
 
+    userEditedWhileNotFoundRef.current = false
+
     getSubmissions({ front_conversation_id: conversationId }, controller.signal)
       .then((data) => {
         if (sessionRef.current !== token) return
         if (data.length === 0) {
           setNotFound(true)
           setDraft(buildEmptyDraft(lookups.warehouses, lookups.types))
+          // See startNotFoundPoll's own header note — scheduling_agent's
+          // pipeline may simply not have finished writing yet.
+          startNotFoundPoll(token, controller.signal)
         } else {
-          const sub = data[0]
-          setSubmission(sub)
-          setDraft(buildDraft(sub))
-          setPluginView('appointment')
-
-          if (sub.status === 'processing') {
-            setDatexProcessing(true)
-            startPolling(sub.id)
-          }
-
-          const warehouse = normalizeWarehouse(sub.warehouse || '')
-          setMultiShared({ warehouse, type: sub.type || '', owner: sub.owner || '', project: sub.project || '' })
-          if (warehouse) fetchMultiDockDoors(warehouse)
-
-          const refNums = sub.reference_number ? sub.reference_number.split(',').map((r) => r.trim()).filter(Boolean) : []
-
-          if (refNums.length > 1) {
-            const dateOnly = (sub.scheduled_arrival || '').slice(0, 10)
-            setMultiDrafts(
-              refNums.map((po) => {
-                const slot = { ...buildEmptySlot(), reference_number: po, scheduled_arrival: dateOnly }
-                if (sub.project && po) {
-                  const abbr = findAbbreviation(sub.project, abbreviations)
-                  const prefix = abbr ? `(${abbr})` : sub.project
-                  slot.appointment_lookup_code = `${prefix} - ${po}`
-                }
-                return slot
-              })
-            )
-          }
+          applyFoundSubmission(data[0])
         }
       })
       .catch((err) => {
@@ -824,17 +817,108 @@ export default function PluginView() {
         if (sessionRef.current !== token) return
         setNotFound(true)
         setDraft(buildEmptyDraft(lookups.warehouses, lookups.types))
+        startNotFoundPoll(token, controller.signal)
       })
       .finally(() => {
         if (sessionRef.current !== token) return
         setLoadingRecord(false)
       })
 
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      if (notFoundPollRef.current) {
+        clearInterval(notFoundPollRef.current)
+        notFoundPollRef.current = null
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId])
 
+  // Applies a found submission to all the derived state the Single APPT
+  // tab needs — extracted from the conversationId effect's inline branch
+  // 2026-10-10 so the SAME logic can run from either the initial fetch or
+  // the not-found poll below (see that poll's own header note for why it
+  // exists). Keeping this as one function means a submission that
+  // appears a few seconds late behaves identically to one that was there
+  // from the start.
+  function applyFoundSubmission(sub) {
+    setSubmission(sub)
+    setDraft(buildDraft(sub))
+    setPluginView('appointment')
+    setNotFound(false)
+
+    if (sub.status === 'processing') {
+      setDatexProcessing(true)
+      startPolling(sub.id)
+    }
+
+    const warehouse = normalizeWarehouse(sub.warehouse || '')
+    setMultiShared({ warehouse, type: sub.type || '', owner: sub.owner || '', project: sub.project || '' })
+    if (warehouse) fetchMultiDockDoors(warehouse)
+
+    const refNums = sub.reference_number ? sub.reference_number.split(',').map((r) => r.trim()).filter(Boolean) : []
+    if (refNums.length > 1) {
+      const dateOnly = (sub.scheduled_arrival || '').slice(0, 10)
+      setMultiDrafts(
+        refNums.map((po) => {
+          const slot = { ...buildEmptySlot(), reference_number: po, scheduled_arrival: dateOnly }
+          if (sub.project && po) {
+            const abbr = findAbbreviation(sub.project, abbreviations)
+            const prefix = abbr ? `(${abbr})` : sub.project
+            slot.appointment_lookup_code = `${prefix} - ${po}`
+          }
+          return slot
+        })
+      )
+    }
+  }
+
+  // FIXED 2026-10-10 — the initial getSubmissions fetch below used to be
+  // the ONLY check: if scheduling_agent's own pipeline (MCP read_conversation
+  // + Claude extraction + carrier lookup + Supabase write + MCP add_comment,
+  // easily several seconds end to end) hadn't finished yet, the panel
+  // showed "No submission found for this conversation" and simply stayed
+  // that way forever — nothing ever re-checked. A real test (cnv_1cm5ec2c,
+  // TO471159) confirmed this directly: the submission existed in Supabase,
+  // correctly linked by front_conversation_id, timestamped the same minute
+  // as the panel load, yet the panel never saw it. This bounded poll picks
+  // up a submission that appears shortly after the initial miss, without
+  // ever clobbering a CSR who's already started typing a manual entry
+  // (userEditedWhileNotFoundRef, set in handleFieldChange, stops the poll
+  // immediately). 60s / 3s interval comfortably covers the agent's
+  // pipeline with room to spare; past that, manual entry is still right
+  // there as it always was.
+  function startNotFoundPoll(token, signal) {
+    if (notFoundPollRef.current) clearInterval(notFoundPollRef.current)
+    const startTime = Date.now()
+    const POLL_WINDOW_MS = 60_000
+    notFoundPollRef.current = setInterval(async () => {
+      if (sessionRef.current !== token || signal.aborted || userEditedWhileNotFoundRef.current) {
+        clearInterval(notFoundPollRef.current)
+        notFoundPollRef.current = null
+        return
+      }
+      if (Date.now() - startTime > POLL_WINDOW_MS) {
+        clearInterval(notFoundPollRef.current)
+        notFoundPollRef.current = null
+        return
+      }
+      try {
+        const data = await getSubmissions({ front_conversation_id: conversationIdRef.current }, signal)
+        if (sessionRef.current !== token || signal.aborted || userEditedWhileNotFoundRef.current) return
+        if (data.length > 0) {
+          clearInterval(notFoundPollRef.current)
+          notFoundPollRef.current = null
+          applyFoundSubmission(data[0])
+        }
+      } catch {
+        /* keep polling -- same best-effort pattern as startPolling/startLcPolling */
+      }
+    }, 3000)
+  }
+
   const handleFieldChange = (key, value) => {
+    userEditedWhileNotFoundRef.current = true
     setSaved(false)
     setSaveError(null)
     setDraft((prev) => {
