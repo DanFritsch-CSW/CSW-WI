@@ -7,7 +7,7 @@
  * Handles the actual Datex API push after scheduling-approve-submission.cjs
  * has done the fast synchronous prep work (edits saved, status set to
  * 'processing'). Netlify returns 202 Accepted to the caller immediately;
- * this function then runs in the background — up to 15 minutes, though the
+ * this function then runs in the background -- up to 15 minutes, though the
  * real Datex push completes in 1-3 seconds.
  *
  * The Plugin polls scheduling-get-submissions every 2s after triggering this
@@ -15,14 +15,30 @@
  * datex_appointment_id) or 'failed'.
  *
  * Filename suffix -background.cjs is required by Netlify to get this
- * fire-and-forget 202 behavior — do not rename.
+ * fire-and-forget 202 behavior -- do not rename.
+ *
+ * UPDATED 2026-10-10 -- the customer/carrier-facing reply (draft or send)
+ * now goes through scheduling-agent-reply (a Supabase Edge Function using
+ * Front's MCP create_draft/send_message tools via the scheduling_agent's
+ * existing OAuth credentials), not front-draft-shared.cjs's raw REST API.
+ * That file maintains its own channel-resolution (WAREHOUSE_MAP fallback)
+ * and reply-all recipient union logic -- a 2026-08-20 fix already tried
+ * resolving the channel from the conversation's own inbound message first,
+ * but replies were still occasionally landing as a brand-new thread for
+ * outside carriers instead of a real reply (Dan's report). Front's own
+ * create_draft tool, called with no channelId/to/cc/bcc, replies on the
+ * conversation's actual channel to the actual reply-all recipients
+ * natively -- Front resolves both internally instead of us reimplementing
+ * it. createFrontErrorNote (internal-only note, not customer-facing, not
+ * the reported bug) is unchanged and is now also the fallback if the new
+ * path itself fails, so a failure is never silent.
  *
  * POST /.netlify/functions/scheduling-push-to-datex-background
  * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean }
  */
 
 const { pushToDatex } = require('./lib/datex-push-shared.cjs')
-const { createFrontDraft, sendFrontEmail, createFrontComment, createFrontErrorNote } = require('./lib/front-draft-shared.cjs')
+const { createFrontErrorNote } = require('./lib/front-draft-shared.cjs')
 
 const SUPABASE_URL =
   process.env.VITE_SUPABASE_URL ||
@@ -36,6 +52,11 @@ const SUPABASE_KEY =
   ''
 
 const FRONT_API_KEY = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
+
+// New as of 2026-10-10 -- the Supabase Edge Function that posts the
+// customer/carrier reply via Front's MCP instead of the raw REST API.
+const SCHEDULING_AGENT_REPLY_URL = process.env.SCHEDULING_AGENT_REPLY_URL || ''
+const SCHEDULING_REPLY_SERVICE_SECRET = process.env.SCHEDULING_REPLY_SERVICE_SECRET || ''
 
 function supabaseHeaders(extra) {
   return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) }
@@ -54,6 +75,25 @@ async function updateRecord(id, fields) {
     headers: supabaseHeaders(),
     body: JSON.stringify(fields),
   }).catch((err) => console.error('[scheduling-push-to-datex-background] update failed:', err.message))
+}
+
+// Posts the customer/carrier confirmation reply via scheduling-agent-reply
+// (Front MCP create_draft + optional send_message). Returns { ok: true, ... }
+// or throws on failure so the caller can fall back to an internal error note.
+async function postCustomerReply(record, { sendImmediately, template }) {
+  if (!SCHEDULING_AGENT_REPLY_URL || !SCHEDULING_REPLY_SERVICE_SECRET) {
+    throw new Error('SCHEDULING_AGENT_REPLY_URL / SCHEDULING_REPLY_SERVICE_SECRET not configured')
+  }
+  const res = await fetch(SCHEDULING_AGENT_REPLY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-service-secret': SCHEDULING_REPLY_SERVICE_SECRET },
+    body: JSON.stringify({ conversationId: record.front_conversation_id, records: [record], template, sendImmediately: !!sendImmediately }),
+  })
+  const text = await res.text()
+  let data
+  try { data = JSON.parse(text) } catch { data = { raw: text } }
+  if (!res.ok || !data?.ok) throw new Error(`scheduling-agent-reply -> ${res.status}: ${JSON.stringify(data).slice(0, 300)}`)
+  return data
 }
 
 exports.handler = async (event) => {
@@ -87,13 +127,13 @@ async function _run({ id, source, draft_template, send_email }) {
   const record = await fetchRecord(id)
   if (!record) {
     console.error('[scheduling-push-to-datex-background] Record not found:', id)
-    await updateRecord(id, { status: 'failed', datex_error: 'Record not found — Supabase fetch error' })
+    await updateRecord(id, { status: 'failed', datex_error: 'Record not found -- Supabase fetch error' })
     return
   }
 
   // Push to Datex with up to 3 attempts on clearly-transient failures.
   // Attempts are SKIPPED when the prior result was ambiguous (a network
-  // timeout where Datex may have already committed the appointment) —
+  // timeout where Datex may have already committed the appointment) --
   // retrying an ambiguous result would create duplicate appointments.
   let datexResult
   const MAX_ATTEMPTS = 3
@@ -101,7 +141,7 @@ async function _run({ id, source, draft_template, send_email }) {
     if (attempt > 1) {
       const check = await fetchRecord(id)
       if (check?.datex_appointment_id != null || check?.status === 'approved') {
-        console.warn(`[scheduling-push-to-datex-background] Already approved before attempt ${attempt} — skipping retry to prevent duplicate`)
+        console.warn(`[scheduling-push-to-datex-background] Already approved before attempt ${attempt} -- skipping retry to prevent duplicate`)
         datexResult = { success: true, datex_appointment_id: check.datex_appointment_id }
         break
       }
@@ -119,7 +159,7 @@ async function _run({ id, source, draft_template, send_email }) {
 
     if (datexResult.success) break
     if (datexResult.ambiguous) {
-      console.warn('[scheduling-push-to-datex-background] Ambiguous result (timeout) — not retrying to prevent duplicate appointment')
+      console.warn('[scheduling-push-to-datex-background] Ambiguous result (timeout) -- not retrying to prevent duplicate appointment')
       break
     }
     if (attempt < MAX_ATTEMPTS) {
@@ -130,15 +170,20 @@ async function _run({ id, source, draft_template, send_email }) {
   // Ambiguous timeout: surface as a warning, not a hard failure. Appointment
   // was likely created; CSR should verify in Datex.
   if (!datexResult.success && datexResult.ambiguous) {
-    const warnMsg = datexResult.error || 'Datex request timed out — appointment may have been created. Verify in Datex before re-approving.'
+    const warnMsg = datexResult.error || 'Datex request timed out -- appointment may have been created. Verify in Datex before re-approving.'
     console.warn('[scheduling-push-to-datex-background] Marking approved with warning (ambiguous timeout):', warnMsg)
     await updateRecord(id, { status: 'approved', datex_pushed_at: new Date().toISOString(), datex_error: warnMsg })
-    if (source === 'plugin' && record.front_conversation_id && FRONT_API_KEY) {
+    if (source === 'plugin' && record.front_conversation_id) {
       const recordForDraft = { ...record, status: 'approved', datex_error: warnMsg }
       try {
-        await createFrontDraft(recordForDraft, FRONT_API_KEY, draft_template)
+        // Ambiguous timeout always drafts (never auto-sends) regardless of
+        // send_email -- same as the prior REST version's behavior here.
+        await postCustomerReply(recordForDraft, { sendImmediately: false, template: draft_template })
       } catch (draftErr) {
-        console.warn('[scheduling-push-to-datex-background] Draft after ambiguous timeout failed:', draftErr.message)
+        console.warn('[scheduling-push-to-datex-background] Reply after ambiguous timeout failed:', draftErr.message)
+        if (FRONT_API_KEY) {
+          try { await createFrontErrorNote(record, FRONT_API_KEY, `Confirmation reply failed: ${draftErr.message}`) } catch (_) { /* ignore */ }
+        }
       }
     }
     return
@@ -165,33 +210,25 @@ async function _run({ id, source, draft_template, send_email }) {
 
   await updateRecord(id, approveFields)
 
-  // Create Front draft reply (or send immediately) when triggered from the plugin
-  if (source === 'plugin' && record.front_conversation_id && FRONT_API_KEY) {
+  // Post the confirmation reply (draft or send) when triggered from the plugin.
+  // On failure, fall back to an internal error note -- never silent, and never
+  // back to the old raw-REST draft/send/comment chain (that's the mechanism
+  // we're moving away from).
+  if (source === 'plugin' && record.front_conversation_id) {
     const recordForDraft = { ...record, ...approveFields }
-    if (send_email) {
-      try {
-        await sendFrontEmail(recordForDraft, FRONT_API_KEY, draft_template)
-      } catch (sendErr) {
-        console.warn('[scheduling-push-to-datex-background] Auto-send failed, falling back to draft:', sendErr.message)
+    try {
+      await postCustomerReply(recordForDraft, { sendImmediately: !!send_email, template: draft_template })
+    } catch (replyErr) {
+      console.error('[scheduling-push-to-datex-background] Confirmation reply failed:', replyErr.message)
+      if (FRONT_API_KEY) {
         try {
-          await createFrontDraft(recordForDraft, FRONT_API_KEY, draft_template)
-        } catch (draftErr) {
-          console.error('[scheduling-push-to-datex-background] Draft fallback also failed:', draftErr.message)
-        }
-      }
-    } else {
-      try {
-        await createFrontDraft(recordForDraft, FRONT_API_KEY, draft_template)
-      } catch (draftErr) {
-        console.warn('[scheduling-push-to-datex-background] Draft failed, trying comment:', draftErr.message)
-        try {
-          await createFrontComment(recordForDraft, FRONT_API_KEY, draft_template)
-        } catch (commentErr) {
-          console.error('[scheduling-push-to-datex-background] Comment also failed:', commentErr.message)
+          await createFrontErrorNote(record, FRONT_API_KEY, `Appointment pushed to Datex ok, but the confirmation reply failed: ${replyErr.message}. Please reply manually.`)
+        } catch (noteErr) {
+          console.error('[scheduling-push-to-datex-background] Fallback error note also failed:', noteErr.message)
         }
       }
     }
   }
 
-  console.log(`[scheduling-push-to-datex-background] Done — id=${id} appt=${datexResult.datex_appointment_id ?? 'none'}`)
+  console.log(`[scheduling-push-to-datex-background] Done -- id=${id} appt=${datexResult.datex_appointment_id ?? 'none'}`)
 }
