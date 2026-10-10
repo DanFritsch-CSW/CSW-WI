@@ -31,6 +31,20 @@
  * scheduling-order-search.cjs (HOME=/tmp, md:production_db, LOAD
  * motherduck) -- with zero dependency on Omni or its filter schema.
  *
+ * FIXED 2026-10-10 (same day, second pass) -- the first MotherDuck-based
+ * version still failed, this time on insert: "duplicate key value
+ * violates unique constraint scheduling_carriers_pkey". Confirmed live:
+ * scheduling_carriers' primary key is carrier_name (not carrier_id), and
+ * Datex's real carrier master has 19,129 rows but only 18,547 DISTINCT
+ * names -- 582 names have more than one carrier_id in Datex (duplicate/
+ * re-added entries). Since this table exists purely for name-based
+ * matching (exact and fuzzy), and two rows sharing an identical name are
+ * indistinguishable to a matcher anyway, duplicates are now resolved in
+ * SQL by keeping the one with the most recent activity (highest 6-month
+ * appointment_count, carrier_id as a deterministic final tiebreaker) --
+ * not a workaround, just the correct choice for a name->id lookup table
+ * where the name itself is the real key.
+ *
  * appointment_count is still populated, as a sort-hint only (never a
  * cutoff -- a carrier with 0 recent appointments still gets synced), via
  * a single join to production_db.gold.truck_appointments' last 6 months,
@@ -50,16 +64,31 @@ async function queryCarriersFromMotherDuck() {
       FROM production_db.gold.truck_appointments
       WHERE scheduled_arrival >= (CURRENT_DATE - INTERVAL 6 MONTH)
       GROUP BY carrier_id
+    ),
+    carriers_with_counts AS (
+      SELECT
+        c.carrier_id,
+        c.carrier_name,
+        COALESCE(rc.cnt, 0) AS appointment_count
+      FROM production_db.silver.datex_slv_carriers c
+      LEFT JOIN recent_counts rc ON rc.carrier_id = c.carrier_id
+      WHERE c.carrier_name IS NOT NULL
+        AND trim(c.carrier_name) != ''
+        AND (c.parquet_record_operation_type IS NULL OR c.parquet_record_operation_type != 'D')
+    ),
+    deduped AS (
+      -- scheduling_carriers' primary key is carrier_name, and 582 names
+      -- have more than one carrier_id in the real Datex master (see
+      -- header note). Keep the most recently active one per name.
+      SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY carrier_name
+        ORDER BY appointment_count DESC, carrier_id ASC
+      ) AS rn
+      FROM carriers_with_counts
     )
-    SELECT
-      c.carrier_id,
-      c.carrier_name,
-      COALESCE(rc.cnt, 0) AS appointment_count
-    FROM production_db.silver.datex_slv_carriers c
-    LEFT JOIN recent_counts rc ON rc.carrier_id = c.carrier_id
-    WHERE c.carrier_name IS NOT NULL
-      AND trim(c.carrier_name) != ''
-      AND (c.parquet_record_operation_type IS NULL OR c.parquet_record_operation_type != 'D')
+    SELECT carrier_id, carrier_name, appointment_count
+    FROM deduped
+    WHERE rn = 1
   `
 
   // Netlify Functions requires HOME=/tmp for the duckdb native module to
