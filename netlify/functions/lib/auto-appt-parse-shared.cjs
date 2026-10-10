@@ -96,6 +96,46 @@
 // for eligibility checking could plausibly exceed Netlify's 26s timeout,
 // and advancing the watermark too early (right after listing, before
 // checking) would risk silently losing a real message if that happened.
+//
+// MAJOR REDESIGN 2026-10-10 — Phase 1/2 of building toward full
+// no-human-intervention automation for these two senders:
+//
+// BUG FOUND: this function's own order lookup had been silently failing
+// on literally every message since the 2026-09-05 redesign — 444 attempts
+// logged in auto_appt_attempts, 0 ever matched a real order. Root cause:
+// resolveDatesFromParts() built `reference = "TO" + digits` and that
+// prefixed string was fed straight into lookupOrder's exact-match SQL,
+// but Datex stores these references WITHOUT the "TO" prefix (confirmed
+// directly against production_db.silver.datex_slv_orders — e.g. email
+// "TO470534" / Datex owner_reference "470534"). Every order Sam Rohde and
+// Daren Peet had ever referenced genuinely existed; this function was
+// just never going to find it. Fixed by using the bare digits everywhere.
+//
+// ARCHITECTURE CHANGE: now that scheduling_agent (see
+// scheduling-agent-webhook, the Front External AI Agent built 2026-10-10)
+// fires on every inbound message to the CAL Appointments inbox regardless
+// of sender, it was ALREADY creating its own pending submission for every
+// Sam Rohde / Daren Peet email in parallel with this function's own
+// createPendingSubmission() call — two competing submissions per email.
+// This function no longer creates a submission at all. Instead it finds
+// scheduling_agent's own submission (via findAgentSubmission, matched on
+// front_conversation_id) and GRADES it: runs the same independently-
+// computed order lookup / dock-door-rule / labor-check this function
+// always did, logs the comparison to auto_appt_attempts (new columns:
+// agent_submission_id, agent_scheduled_arrival, agent_dock_door,
+// recommended_dock_door, match_status, actual_*, compared_at), and waits.
+// scheduling-push-to-datex-background.cjs fills in the actual_* columns
+// and sets match_status once a CSR actually approves that submission —
+// that comparison (what the agent would have auto-pushed vs. what a human
+// approved) is the real-world evidence Dan wants before flipping Sam
+// Rohde + Daren Peet to live auto-push with no human review at all. Target
+// per Dan: 99%+ confidence, meaning effectively zero mismatches across a
+// large enough sample (not a quick clean streak) before going live. See
+// Dan's "Sam Rohde automation" / "Palermo's full automation" notes.
+//
+// createPendingSubmission() is retired (left unused below, not deleted,
+// in case this needs to revert) — this function's job now is validation
+// and grading, not creation.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -360,7 +400,10 @@ function fmtLocal(d) {
 }
 
 function resolveDatesFromParts(digits, month, day, hour24) {
-  const reference = `TO${digits}`
+  // FIXED 2026-10-10: Datex stores this reference WITHOUT a "TO" prefix
+  // (see header note). Bare digits match both lookupOrder's SQL and the
+  // CSR's own order-search box.
+  const reference = digits
   const now = new Date()
   let year = now.getFullYear()
   let neededByDate = new Date(year, month - 1, day, hour24, 0, 0)
@@ -487,6 +530,25 @@ async function checkLabor(warehouse, scheduledArrival) {
   }
 }
 
+// Finds scheduling_agent's own submission for this conversation, so this
+// function can grade it instead of creating a competing one. One
+// submission per conversation is the expectation (scheduling_agent's
+// Front rule fires only on a conversation's first inbound message).
+async function findAgentSubmission(conversationId) {
+  if (!conversationId) return null
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/submissions?front_conversation_id=eq.${encodeURIComponent(conversationId)}&select=id,scheduled_arrival,scheduled_dock_door,status,reference_number,project,owner&limit=1`,
+    { headers: sbHeaders() }
+  )
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    console.error('[auto-appt-parse] findAgentSubmission FAILED', res.status, text.slice(0, 300))
+    return null
+  }
+  const rows = await res.json()
+  return rows?.[0] || null
+}
+
 const PALERMO_ABBR = 'PVI'
 
 function formatDisplayDatetime(iso) {
@@ -585,34 +647,38 @@ async function processMessage(message, senderConfig, conversationId) {
   }
 
   const dockDoorRules = await getDockDoorRules()
-  const dockDoor = findDockDoorRule(CAL_WAREHOUSE, order.project_name, 'Outbound', dockDoorRules)
+  const recommendedDockDoor = findDockDoorRule(CAL_WAREHOUSE, order.project_name, 'Outbound', dockDoorRules)
   const laborWarning = await checkLabor(CAL_WAREHOUSE, scheduledArrival)
 
-  let submission
-  try {
-    submission = await createPendingSubmission({
-      conversationId, project: order.project_name, dockDoor, reference, neededBy, scheduledArrival, senderLabel: senderHandle,
-    })
-  } catch (err) {
-    console.error('[auto-appt-parse] createPendingSubmission threw:', err.message)
+  // Grade scheduling_agent's own submission rather than creating a second,
+  // competing one — see 2026-10-10 header note.
+  const agentSubmission = await findAgentSubmission(conversationId)
+
+  if (!agentSubmission) {
+    log('processMessage: agent_missing', reference, conversationId)
     await logAttempt({
       front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
-      matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'error',
+      matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'agent_missing',
       owner_name: order.owner_name, project_name: order.project_name,
-      error_detail: `Submission creation failed: ${err.message}`,
+      recommended_dock_door: recommendedDockDoor, labor_warning: laborWarning,
     })
-    return { messageId, outcome: 'error', error: err.message }
+    return { messageId, outcome: 'agent_missing', reference }
   }
 
-  log('processMessage: pending_created', reference, submission?.id)
+  log('processMessage: shadow_logged', reference, agentSubmission.id)
   await logAttempt({
     front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
-    matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'pending_created',
-    submission_id: submission?.id || null, owner_name: order.owner_name, project_name: order.project_name,
+    matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'shadow_logged',
+    owner_name: order.owner_name, project_name: order.project_name,
+    agent_submission_id: agentSubmission.id,
+    agent_scheduled_arrival: agentSubmission.scheduled_arrival || null,
+    agent_dock_door: agentSubmission.scheduled_dock_door || null,
+    recommended_dock_door: recommendedDockDoor,
     labor_warning: laborWarning,
+    match_status: 'pending_outcome',
   })
 
-  return { messageId, outcome: 'pending_created', reference, submissionId: submission?.id }
+  return { messageId, outcome: 'shadow_logged', reference, agentSubmissionId: agentSubmission.id }
 }
 
 async function runScan() {
@@ -646,6 +712,6 @@ module.exports = {
   findDockDoorRule,
   getDockDoorRules,
   checkLabor,
-  createPendingSubmission,
+  findAgentSubmission,
   runScan,
 }

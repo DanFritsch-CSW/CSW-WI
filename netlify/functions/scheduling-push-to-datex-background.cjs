@@ -96,6 +96,50 @@ async function postCustomerReply(record, { sendImmediately, template }) {
   return data
 }
 
+// Phase 2 of the Sam Rohde / Daren Peet full-automation confidence build
+// (2026-10-10) -- see lib/auto-appt-parse-shared.cjs's header note. If this
+// submission has a pending shadow-validation row in auto_appt_attempts
+// (agent_submission_id = this id, match_status = 'pending_outcome'), fill
+// in what actually happened and grade it against what scheduling_agent
+// originally produced and what the dock-door-rule engine recommended.
+// Deliberately isolated and non-fatal -- a confidence-building side
+// channel, never allowed to affect the real Datex push or customer reply.
+// Runs for every submission; a no-op (no matching row) for the other 4
+// facilities and every other sender, so it's safe to call unconditionally.
+async function compareShadowOutcome(record) {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/auto_appt_attempts?agent_submission_id=eq.${encodeURIComponent(record.id)}&match_status=eq.pending_outcome&select=id,agent_scheduled_arrival,recommended_dock_door`,
+      { headers: supabaseHeaders() }
+    )
+    if (!res.ok) return
+    const rows = await res.json()
+    const shadow = rows?.[0]
+    if (!shadow) return
+
+    const actualArrival = record.scheduled_arrival || null
+    const actualDockDoor = record.scheduled_dock_door || null
+    const arrivalMatches = shadow.agent_scheduled_arrival === actualArrival
+    const dockDoorMatches = !shadow.recommended_dock_door || shadow.recommended_dock_door === actualDockDoor
+    const matchStatus = arrivalMatches && dockDoorMatches ? 'matched' : 'mismatch'
+
+    await fetch(`${SUPABASE_URL}/rest/v1/auto_appt_attempts?id=eq.${encodeURIComponent(shadow.id)}`, {
+      method: 'PATCH',
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        actual_scheduled_arrival: actualArrival,
+        actual_dock_door: actualDockDoor,
+        actual_datex_appointment_id: record.datex_appointment_id ?? null,
+        match_status: matchStatus,
+        compared_at: new Date().toISOString(),
+      }),
+    })
+    console.log('[scheduling-push-to-datex-background] shadow outcome graded:', matchStatus, 'submission', record.id)
+  } catch (err) {
+    console.error('[scheduling-push-to-datex-background] compareShadowOutcome failed (non-fatal):', err.message)
+  }
+}
+
 exports.handler = async (event) => {
   let body
   try {
@@ -209,6 +253,7 @@ async function _run({ id, source, draft_template, send_email }) {
   if (datexResult.warning) approveFields.datex_error = datexResult.warning // inactivity timeout but likely succeeded
 
   await updateRecord(id, approveFields)
+  await compareShadowOutcome({ ...record, ...approveFields })
 
   // Post the confirmation reply (draft or send) when triggered from the plugin.
   // On failure, fall back to an internal error note -- never silent, and never
