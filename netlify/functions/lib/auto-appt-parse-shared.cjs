@@ -136,6 +136,24 @@
 // createPendingSubmission() is retired (left unused below, not deleted,
 // in case this needs to revert) — this function's job now is validation
 // and grading, not creation.
+//
+// TEST ADDRESS ADDED 2026-10-10 (same day): d_fritsch21@hotmail.com,
+// style 'either' — Dan's own address, so he can resend real Sam/Daren
+// emails verbatim to generate shadow-validation test runs without
+// waiting on live customer traffic. Counts toward the live confidence
+// tally (his call, not excluded).
+//
+// SIGNATURE-BOX GATE ADDED 2026-10-10 (same day, Dan's rule): the test
+// address can ALSO be used to test a generic "some other carrier"
+// scenario that scheduling_agent's own generic path should handle
+// normally — this pilot must stay out of the way for those. The signal
+// Dan chose: whether the email carries Sam's or Daren's own signature
+// block (hasPalermoSignature — checks for their names in the stripped
+// body text). Present → treated as a Sam/Daren-style test, full 3-hour
+// lead-time treatment. Absent → skipped entirely here (not logged to
+// auto_appt_attempts at all, same as any other non-matching sender) so
+// it's left purely to scheduling_agent. Real Sam/Daren senders don't need
+// this check — their own address already proves identity.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -358,7 +376,17 @@ async function fetchRecentEligibleMessages() {
       log('conversation', convo.id, 'first message from handle:', fromHandle)
       if (fromHandle) {
         const match = ELIGIBLE_SENDER_PATTERNS.find((p) => p.sender === fromHandle)
-        if (match) eligible.push({ message: firstMessage, senderConfig: match, conversationId: convo.id })
+        if (match) {
+          // Dan's test address: only pull this pilot in when the message
+          // carries Sam's or Daren's signature -- otherwise it's a
+          // generic test of some other carrier and should be invisible
+          // here (see header note on hasPalermoSignature).
+          if (match.sender === 'd_fritsch21@hotmail.com' && !hasPalermoSignature(getMessageText(firstMessage))) {
+            log('conversation', convo.id, 'test address, no Sam/Daren signature -- generic test, skipping pilot')
+            continue
+          }
+          eligible.push({ message: firstMessage, senderConfig: match, conversationId: convo.id })
+        }
       }
     }
 
@@ -390,6 +418,20 @@ async function fetchRecentEligibleMessages() {
 
   log('fetchRecentEligibleMessages: eligible (matched sender on first message) =', eligible.length)
   return eligible
+}
+
+// Dan's test address (d_fritsch21@hotmail.com) sends two kinds of test
+// email: a copy of a real Sam/Daren-style email (should get the 3-hour
+// lead-time treatment, same as the real thing) or a generic test of some
+// OTHER carrier's scenario (should be invisible to this pilot entirely --
+// no shadow grading, no lead-time assumption -- and left for
+// scheduling_agent's own generic path to handle like any other email).
+// Dan's rule, 2026-10-10: the signature block is the signal. Real
+// Sam/Daren senders don't need this check -- their own address already
+// proves identity.
+const PALERMO_SIGNATURE_NAMES = [/sam\s+rohde/i, /daren\s+peet/i]
+function hasPalermoSignature(text) {
+  return PALERMO_SIGNATURE_NAMES.some((re) => re.test(text))
 }
 
 function getMessageText(message) {
