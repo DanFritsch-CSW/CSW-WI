@@ -176,6 +176,24 @@ import {
  *      between Front emails, a ref that only ever got SET and never
  *      CLEARED meant a second, unrelated conversation referencing the
  *      SAME Datex order would silently skip the Notes auto-fill.
+ *
+ * FIXED 2026-10-10 — startPolling/startLcPolling no longer let the CLIENT
+ * declare a Datex push "failed". Real case that exposed this (Testing5 /
+ * On A Roll Trucking, appointment 366847): the old 30-second client
+ * timeout gave up and force-wrote status:'failed' into the submission
+ * directly from the browser, while the real background push
+ * (scheduling-push-to-datex-background.cjs, which allows up to 3 attempts
+ * at up to 60s each plus 2s/4s retry delays -- ~186s worst case) was still
+ * in flight and about to succeed. The backend's own later write happened
+ * to land after and overwrite the bogus 'failed' this time, but the
+ * window it opened is real: a CSR seeing "Failed" at 30s could click
+ * Approve & Push again while the first push was still retrying, risking a
+ * genuine duplicate appointment in Datex. Only the backend now ever writes
+ * a terminal status; the client only displays what it observes, with a
+ * soft informational warning past 200s (comfortably above the backend's
+ * worst case) and a hard stop at 900s (Netlify Background Functions' own
+ * 15-minute ceiling) that still does not assert failure on the backend's
+ * behalf.
  */
 
 function CswBrandHeader() {
@@ -1009,12 +1027,25 @@ export default function PluginView() {
   }
 
   // ── Background Datex push polling ────────────────────────────────────────
+  //
+  // FIXED 2026-10-10 — see this file's header comment for the full story.
+  // The client NEVER writes a terminal 'failed' status itself anymore;
+  // only scheduling-push-to-datex-background.cjs is allowed to do that.
+  // SOFT_TIMEOUT_MS is purely informational (comfortably above the
+  // backend's ~186s worst case: up to 3 attempts, up to 60s each, plus
+  // 2s/4s retry delays). HARD_TIMEOUT_MS matches Netlify Background
+  // Functions' own 15-minute ceiling — past that the backend has
+  // certainly stopped, so polling further is pointless, but even then the
+  // client stops politely rather than asserting an outcome it can't
+  // actually confirm.
   function startPolling(recordId) {
     if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current)
 
     const sessionToken = sessionRef.current
     const startTime = Date.now()
-    const TIMEOUT_MS = 30_000
+    const SOFT_TIMEOUT_MS = 200_000
+    const HARD_TIMEOUT_MS = 900_000
+    let softWarningShown = false
 
     pollingIntervalRef.current = setInterval(async () => {
       if (sessionRef.current !== sessionToken) {
@@ -1022,23 +1053,19 @@ export default function PluginView() {
         pollingIntervalRef.current = null
         return
       }
-      if (Date.now() - startTime > TIMEOUT_MS) {
+      const elapsed = Date.now() - startTime
+      if (elapsed > HARD_TIMEOUT_MS) {
         clearInterval(pollingIntervalRef.current)
         pollingIntervalRef.current = null
         setDatexProcessing(false)
-        const timeoutMsg = 'Timed out waiting for Datex confirmation — verify in Datex and retry if needed.'
-        setApproveWarning(timeoutMsg)
-        try {
-          const data = await getSubmissions({ front_conversation_id: conversationIdRef.current })
-          const rec = data.find((r) => r.id === recordId && r.status === 'processing')
-          if (rec) {
-            await saveSubmission(rec.id, null, { status: 'failed', datex_error: timeoutMsg })
-            setSubmission((prev) => ({ ...prev, status: 'failed', datex_error: timeoutMsg }))
-          }
-        } catch {
-          /* non-fatal */
-        }
+        setApproveWarning(
+          'Still no confirmation after 15 minutes — the background push should have finished by now either way. Check Datex directly before taking any further action here; do not click Approve & Push again without confirming whether an appointment already exists, to avoid creating a duplicate.'
+        )
         return
+      }
+      if (elapsed > SOFT_TIMEOUT_MS && !softWarningShown) {
+        softWarningShown = true
+        setApproveWarning('Still waiting on Datex confirmation — this is taking longer than usual, but the push may still be in progress. Continuing to check automatically.')
       }
       try {
         const data = await getSubmissions({ front_conversation_id: conversationIdRef.current })
@@ -1055,7 +1082,7 @@ export default function PluginView() {
           setDatexProcessing(false)
           setApproved(true)
           if (record.datex_appointment_id != null) setDatexAppointmentId(record.datex_appointment_id)
-          if (record.datex_error) setApproveWarning(record.datex_error)
+          setApproveWarning(record.datex_error || null)
           setSubmission(record)
         } else if (record.status === 'failed') {
           clearInterval(pollingIntervalRef.current)
@@ -1074,29 +1101,29 @@ export default function PluginView() {
     if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current)
     const sessionToken = sessionRef.current
     const startTime = Date.now()
-    const TIMEOUT_MS = 30_000
+    const SOFT_TIMEOUT_MS = 200_000
+    const HARD_TIMEOUT_MS = 900_000
+    let softWarningShown = false
+
     pollingIntervalRef.current = setInterval(async () => {
       if (sessionRef.current !== sessionToken) {
         clearInterval(pollingIntervalRef.current)
         pollingIntervalRef.current = null
         return
       }
-      if (Date.now() - startTime > TIMEOUT_MS) {
+      const elapsed = Date.now() - startTime
+      if (elapsed > HARD_TIMEOUT_MS) {
         clearInterval(pollingIntervalRef.current)
         pollingIntervalRef.current = null
         setDatexProcessing(false)
-        const timeoutMsg = 'Timed out waiting for Datex confirmation — verify in Datex and retry if needed.'
-        setLcApproveWarning(timeoutMsg)
-        try {
-          const data = await getSubmissions({ front_conversation_id: conversationIdRef.current })
-          const rec = data.find((r) => r.id === recordId && r.status === 'processing')
-          if (rec) {
-            await saveSubmission(rec.id, null, { status: 'failed', datex_error: timeoutMsg })
-          }
-        } catch {
-          /* non-fatal */
-        }
+        setLcApproveWarning(
+          'Still no confirmation after 15 minutes — the background push should have finished by now either way. Check Datex directly before taking any further action here; do not retry without confirming whether an appointment already exists, to avoid creating a duplicate.'
+        )
         return
+      }
+      if (elapsed > SOFT_TIMEOUT_MS && !softWarningShown) {
+        softWarningShown = true
+        setLcApproveWarning('Still waiting on Datex confirmation — this is taking longer than usual, but the push may still be in progress. Continuing to check automatically.')
       }
       try {
         const data = await getSubmissions({ front_conversation_id: conversationIdRef.current })
@@ -1115,7 +1142,7 @@ export default function PluginView() {
           setSubmission(record)
           setDraft(buildDraft(record))
           setNotFound(false)
-          if (record.datex_error) setLcApproveWarning(record.datex_error)
+          setLcApproveWarning(record.datex_error || null)
         } else if (record.status === 'failed') {
           clearInterval(pollingIntervalRef.current)
           pollingIntervalRef.current = null
