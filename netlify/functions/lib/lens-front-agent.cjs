@@ -15,7 +15,8 @@
  * Reuses lens-shared.cjs for context assembly, the model call, and run logging
  * (runLensFromText), then re-tags that run row as source='front'.
  *
- * Env: FRONT_AGENT_CLIENT_ID, FRONT_AGENT_CLIENT_SECRET, FRONT_AGENT_TOKEN_URL
+ * Env: FRONT_LENS_AGENT_CLIENT_ID, FRONT_LENS_AGENT_CLIENT_SECRET, FRONT_LENS_AGENT_TOKEN_URL
+ *      (FRONT_AGENT_* names also accepted)
  *      (the "Auth URL" on the agent's Credentials screen), plus the Supabase /
  *      Anthropic vars lens-shared already uses. LENS_ENABLED=false is the kill
  *      switch.
@@ -84,9 +85,13 @@ let cachedToken = null // { token, expiresAt }
 
 async function getAgentToken() {
   if (cachedToken && cachedToken.expiresAt - Date.now() > 60000) return cachedToken.token
-  const { FRONT_AGENT_CLIENT_ID, FRONT_AGENT_CLIENT_SECRET, FRONT_AGENT_TOKEN_URL } = process.env
+  // Accept both naming styles (FRONT_AGENT_* and FRONT_LENS_AGENT_*).
+  const env = process.env
+  const FRONT_AGENT_CLIENT_ID = env.FRONT_LENS_AGENT_CLIENT_ID || env.FRONT_AGENT_CLIENT_ID
+  const FRONT_AGENT_CLIENT_SECRET = env.FRONT_LENS_AGENT_CLIENT_SECRET || env.FRONT_AGENT_CLIENT_SECRET
+  const FRONT_AGENT_TOKEN_URL = env.FRONT_LENS_AGENT_TOKEN_URL || env.FRONT_AGENT_TOKEN_URL
   if (!FRONT_AGENT_CLIENT_ID || !FRONT_AGENT_CLIENT_SECRET || !FRONT_AGENT_TOKEN_URL) {
-    throw new Error('FRONT_AGENT_CLIENT_ID / FRONT_AGENT_CLIENT_SECRET / FRONT_AGENT_TOKEN_URL not configured')
+    throw new Error('FRONT_LENS_AGENT_CLIENT_ID / _CLIENT_SECRET / _TOKEN_URL not configured')
   }
   const res = await fetch(FRONT_AGENT_TOKEN_URL, {
     method: 'POST',

@@ -15,7 +15,7 @@
  * Handles only type === 'mention'. Ignores assign / inbound / unassign so the
  * agent never acts on a conversation it was merely assigned.
  *
- * Env: FRONT_AGENT_SIGNING_SECRET (+ vars used by lib/lens-front-agent.cjs).
+ * Env: FRONT_LENS_AGENT_SIGNING_SECRET (or FRONT_AGENT_SIGNING_SECRET) (+ vars used by lib/lens-front-agent.cjs).
  */
 
 const crypto = require('crypto')
@@ -44,7 +44,7 @@ exports.handler = async (event) => {
       ? Buffer.from(event.body || '', 'base64').toString('utf8')
       : event.body || ''
 
-    if (!verifySignature(rawBody, headers, process.env.FRONT_AGENT_SIGNING_SECRET)) {
+    if (!verifySignature(rawBody, headers, process.env.FRONT_LENS_AGENT_SIGNING_SECRET || process.env.FRONT_AGENT_SIGNING_SECRET)) {
       console.warn('[lens-webhook] signature check failed; ignoring request')
       return { statusCode: 200 }
     }
