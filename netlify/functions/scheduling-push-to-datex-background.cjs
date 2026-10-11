@@ -51,6 +51,14 @@
  * never independently agent-written, only ever computed client-side from
  * Project + Reference #).
  *
+ * UPDATED 2026-10-11 (same day) -- compareAgentFieldAccuracy() now also
+ * carries the submission's sender_email onto the logged row. This is what
+ * makes scheduling-agent-webhook's new "Option A" correction-hint
+ * retrieval possible: that function looks up a sender's history directly
+ * in agent_field_accuracy by sender_email before extracting their next
+ * email, so without this column every lookup for a repeat sender would
+ * always come back empty.
+ *
  * POST /.netlify/functions/scheduling-push-to-datex-background
  * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean }
  */
@@ -203,6 +211,12 @@ async function compareAgentFieldAccuracy(record) {
       submission_id: record.id,
       front_conversation_id: record.front_conversation_id || null,
       warehouse: record.warehouse || null,
+      // Added 2026-10-11 alongside scheduling-agent-webhook's "Option A"
+      // correction-hint retrieval -- that function looks up this exact
+      // sender's history in THIS table before extracting a new email, so
+      // without this column every future lookup for a repeat sender would
+      // come back empty no matter how many times they've emailed before.
+      sender_email: record.sender_email || null,
 
       warehouse_agent: record.agent_warehouse || null,
       warehouse_actual: record.warehouse || null,
