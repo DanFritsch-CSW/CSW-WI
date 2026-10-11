@@ -107,23 +107,44 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
-# Daily review digest for the pilot above -- posts a summary comment to
-# Dan's dedicated Front thread (cnv_1c7dl7mc, confirmed 2026-08-22) once
-# daily rather than the */15 cadence other digests in this app use, since
-# this is a review summary, not a responsiveness-sensitive alert. Only
-# posts when there was at least one attempt in the last 24 hours -- no
-# daily "nothing happened" noise post. 13:00 UTC = 8am Central (7am during
-# DST -- same caveat as every other scheduled function in this app, see
-# nightly-b2e-sync.cjs). Posts to ONE persistent thread, deliberately the
-# opposite of front-daily-discussion-run.cjs's "new discussion every day"
-# pattern -- see lib/auto-appt-review-digest-shared.cjs for why.
+# Daily review digest for the pilot above -- creates a new Front Task
+# assigned to Dan once daily rather than the */15 cadence other digests in
+# this app use, since this is a review summary, not a responsiveness-
+# sensitive alert. Only runs when there was at least one attempt in the
+# last 24 hours -- no daily "nothing happened" noise task. 13:00 UTC = 8am
+# Central (7am during DST -- same caveat as every other scheduled function
+# in this app, see nightly-b2e-sync.cjs). CHANGED 2026-10-11, Dan's
+# explicit request: used to post a comment into one persistent thread
+# (cnv_1c7dl7mc), deliberately the opposite of front-daily-discussion-
+# run.cjs's "new discussion every day" pattern -- now the reverse, a fresh
+# Task each morning -- see lib/auto-appt-review-digest-shared.cjs for the
+# full story.
 [functions."auto-appt-review-digest-run"]
   schedule = "0 13 * * *"
   timeout = 26
 
 # Manual test -- no schedule, so direct POST works. NOT a dry run -- really
-# posts to cnv_1c7dl7mc if there's activity in the window.
+# creates a real Front Task assigned to Dan if there's activity in the
+# window (delivery mechanism changed 2026-10-11 from a comment on
+# cnv_1c7dl7mc to a new Task per Dan's explicit request -- see
+# lib/auto-appt-review-digest-shared.cjs's header note).
 [functions."auto-appt-review-digest-test"]
+  timeout = 26
+
+# Scheduling Agent per-field accuracy digest -- added 2026-10-11, Dan's
+# explicit request. APP-WIDE (every facility, every sender scheduling_agent
+# processes), separate from the Palermo's-only digest above. Same 8am
+# Central send time and Front-Task delivery mechanism; see
+# lib/agent-accuracy-digest-shared.cjs for the full design writeup. No
+# duckdb/native-module dependency -- pure Supabase REST + Front API calls.
+[functions."agent-accuracy-digest-run"]
+  schedule = "0 13 * * *"
+  timeout = 26
+
+# Manual test -- no schedule, so direct POST works. NOT a dry run -- really
+# creates a real Front Task assigned to Dan if any submissions were graded
+# in the last 24 hours.
+[functions."agent-accuracy-digest-test"]
   timeout = 26
 
 # AI Appointment Intake -- added 2026-09-05. Claude-based extraction from
