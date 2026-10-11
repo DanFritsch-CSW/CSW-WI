@@ -2,15 +2,14 @@
 
 // Automated Appointment Creation pilot — daily review digest, added
 // 2026-08-22 per Dan's explicit "single Front discussion thread to post
-// results daily" request. Posts a comment summarizing the last 24 hours
-// of auto_appt_attempts activity to the specific Front conversation Dan
-// created for this (cnv_1c7dl7mc), so it's one continuous thread rather
+// results daily" request. Originally posted a comment summarizing the
+// last 24 hours of auto_appt_attempts activity to Dan's dedicated Front
+// conversation (cnv_1c7dl7mc), so it was one continuous thread rather
 // than a fresh discussion each day (unlike front-daily-discussion-run.cjs,
-// which intentionally creates a NEW discussion per facility per day — this
-// pilot's review log is deliberately the opposite, one persistent thread).
+// which intentionally creates a NEW discussion per facility per day).
 //
-// Only posts when there was at least one attempt in the window — a quiet
-// day (Sam Rohde didn't email) produces no comment at all, rather than a
+// Only runs when there was at least one attempt in the window — a quiet
+// day (Sam Rohde didn't email) produces nothing at all, rather than a
 // daily "nothing happened" noise post.
 //
 // UPDATED 2026-08-23: pending_created rows now show the needed-by ->
@@ -40,23 +39,54 @@
 //    actually watching before flipping these two senders to live
 //    auto-push with no human review (target: 99%+ confidence).
 //
-// FIXED 2026-10-11 (Dan's explicit direction): `order_not_found` used to
-// be its own gating outcome in lib/auto-appt-parse-shared.cjs, which
-// meant a row with no matching Datex order yet NEVER reached
-// shadow_logged and so could never be graded — effectively treating "not
-// in Datex yet" as a stop gap for the whole evaluation. Dan's point: the
-// team schedules the appointment straight from the email regardless of
-// whether the order exists in Datex yet (completely normal timing), and
-// the real grading question is purely whether the agent populated every
-// field correctly — the CSR's own edits before pushing are the signal
-// that matters. The order lookup now runs as pure information: a miss is
-// carried as `order_found: false` on the SAME shadow_logged row instead
-// of blocking it. This digest reflects that — `order_not_found` is no
-// longer a row scheduling_agent's own pipeline can newly produce (kept
-// below only for any residual pre-fix historical rows, same treatment as
-// `pending_created`), and `describeRow`'s shadow_logged branches append a
-// short "order not yet in Datex" courtesy note when `order_found` is
-// false, without excluding the row from the confidence tally in any way.
+// FIXED 2026-10-11 (Dan's explicit direction, order-not-found gating):
+// `order_not_found` used to be its own gating outcome in
+// lib/auto-appt-parse-shared.cjs, which meant a row with no matching
+// Datex order yet NEVER reached shadow_logged and so could never be
+// graded — effectively treating "not in Datex yet" as a stop gap for the
+// whole evaluation. Dan's point: the team schedules the appointment
+// straight from the email regardless of whether the order exists in
+// Datex yet (completely normal timing), and the real grading question is
+// purely whether the agent populated every field correctly — the CSR's
+// own edits before pushing are the signal that matters. The order lookup
+// now runs as pure information: a miss is carried as `order_found: false`
+// on the SAME shadow_logged row instead of blocking it. This digest
+// reflects that — `order_not_found` is no longer a row scheduling_agent's
+// own pipeline can newly produce (kept below only for any residual
+// pre-fix historical rows, same treatment as `pending_created`), and
+// `describeRow`'s shadow_logged branches append a short "order not yet in
+// Datex" courtesy note when `order_found` is false, without excluding the
+// row from the confidence tally in any way.
+//
+// CHANGED 2026-10-11 (Dan's explicit direction, delivery mechanism): a
+// daily Front COMMENT into one long-lived thread (cnv_1c7dl7mc) replaced
+// with a brand-new Front TASK every morning, assigned directly to Dan.
+// Uses Front's native task-conversation support, added to the Core API
+// 2026-06-02 (POST /conversations with type:'task' -- see
+// https://dev.frontapp.com/reference/create-conversation): `teammate_ids`
+// (not `inbox_id` -- the two are mutually exclusive on this endpoint) set
+// to Dan's own teammate ID so the task lands directly in his task list,
+// with no inbox involved, matching how "Dan's dedicated thread" worked
+// before. The task's `subject` is the short date-stamped title (shown in
+// task lists); the full confidence tally + per-row breakdown goes in the
+// task's `description` field (shown immediately when the task is opened,
+// up to 65,535 chars -- comfortably enough), not as a starter comment,
+// since there's no need for a second copy of the same text. Each day is
+// now its own standalone task rather than one entry in a running thread
+// -- history lives in Front's own task list (done/archived tasks) instead
+// of being scrollable in a single conversation. Dan Fritsch's teammate ID
+// (tea_a3e8k) was looked up directly against Front's teammates list
+// before writing this, not guessed. REVIEW_CONVERSATION_ID is retired
+// (left undefined below is fine since nothing references it) -- the old
+// thread itself is untouched and still exists in Front if ever needed.
+//
+// NOTE: this endpoint requires the `conversations:write` scope on
+// FRONT_API_TOKEN, whereas the old comment-based approach only needed
+// `comments:write`. If the token backing FRONT_API_TOKEN/FRONT_API_KEY
+// predates this change and was scoped narrowly, the first live run may
+// 403 until that scope is added in Front's API token settings -- flagged
+// here rather than assumed, since this app has a real history of broken
+// integration calls that were never verified live before being built on.
 //
 // Same run/test split as every other digest in this app.
 
@@ -65,7 +95,10 @@ const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || ''
 const FRONT_API_KEY = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY || ''
 
-const REVIEW_CONVERSATION_ID = 'cnv_1c7dl7mc' // Dan's dedicated review thread, confirmed 2026-08-22
+// Dan Fritsch's Front teammate ID -- confirmed 2026-10-11 via Front's own
+// teammates list (dfritsch@csw-wi.com), not guessed. Used as the sole
+// teammate_ids entry so the daily task lands directly in Dan's task list.
+const DAN_TEAMMATE_ID = 'tea_a3e8k'
 
 // The day the TO-prefix lookup bug was fixed. Everything before this is
 // pre-fix noise (444 attempts, 0 real matches) — the cumulative confidence
@@ -171,9 +204,15 @@ function describeRow(r) {
   }
 }
 
+// Returns { subject, description } for the daily task -- subject is the
+// short date-stamped title shown in task lists, description is the full
+// tally + per-row breakdown shown when the task is opened. Split out of
+// a single joined string (the old comment-body shape) since a Front task
+// has these as two separate fields.
 function buildSummary(attempts, tally) {
   const today = new Date().toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' })
-  const lines = [`Palermo's Auto-Scheduling — ${today}`, '']
+  const subject = `Palermo's Auto-Scheduling — ${today}`
+  const lines = []
 
   if (tally) {
     const pct = tally.compared > 0 ? ((tally.matched / tally.compared) * 100).toFixed(1) : null
@@ -204,7 +243,7 @@ function buildSummary(attempts, tally) {
     lines.push('')
   }
 
-  return lines.join('\n').trim()
+  return { subject, description: lines.join('\n').trim() }
 }
 
 async function postDigest() {
@@ -214,17 +253,23 @@ async function postDigest() {
     return { posted: false, reason: 'no activity in the last 24 hours' }
   }
 
-  const body = buildSummary(attempts, tally)
-  const res = await fetch(`https://api2.frontapp.com/conversations/${REVIEW_CONVERSATION_ID}/comments`, {
+  const { subject, description } = buildSummary(attempts, tally)
+  const res = await fetch('https://api2.frontapp.com/conversations', {
     method: 'POST',
     headers: { Authorization: `Bearer ${FRONT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ body }),
+    body: JSON.stringify({
+      type: 'task',
+      teammate_ids: [DAN_TEAMMATE_ID],
+      subject,
+      description,
+    }),
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`Front comments API -> HTTP ${res.status}: ${text.slice(0, 300)}`)
+    throw new Error(`Front create-conversation (task) API -> HTTP ${res.status}: ${text.slice(0, 300)}`)
   }
-  return { posted: true, count: meaningful.length }
+  const created = await res.json()
+  return { posted: true, count: meaningful.length, taskId: created.id }
 }
 
 module.exports = { postDigest }
