@@ -155,22 +155,25 @@
 // it's left purely to scheduling_agent. Real Sam/Daren senders don't need
 // this check — their own address already proves identity.
 //
-// FIELD-BACKFILL ADDED 2026-10-10 (same day, Dan's first live test
-// surfaced this): Dan's "grading, not creating" redesign earlier today
-// left a real gap — scheduling_agent's own generic extraction has no idea
-// Warehouse/Type/Owner/Project/Dock Door/Carrier are structurally
-// constant for these two senders, and no idea the 3-hour lead-time rule
-// exists at all. Dan's first real test (cnv_1cm5cxg4) came back with Type
-// "Inbound" (should always be Outbound), Project/Owner/Dock Door/Carrier
-// blank, and the raw "needed by" time used directly as the arrival time —
-// completely skipping the lead-time adjustment, since that logic only
-// ever lived in this file and this file stopped creating anything.
-// backfillAgentSubmission() now PATCHes all of that straight onto
-// scheduling_agent's own submission as soon as it's found, independent of
-// whether the order lookup below succeeds. See its own header note for
-// the full reasoning and a known gap (the Front confirmation comment
-// scheduling_agent posts on arrival isn't corrected by this — only the
-// underlying Supabase row).
+// FIELD-BACKFILL ADDED 2026-10-10, MOVED TO WEBHOOK same day: Dan's
+// "grading, not creating" redesign earlier today left a real gap —
+// scheduling_agent's own generic extraction has no idea Warehouse/Type/
+// Owner/Project/Dock Door/Carrier are structurally constant for these two
+// senders, and no idea the 3-hour lead-time rule exists at all.
+// backfillAgentSubmission() (still defined below, exported, UNUSED as of
+// this move) originally PATCHed this correction onto scheduling_agent's
+// submission from this file's own 15-minute cron tick — which worked, but
+// meant a CSR opening the thread before that next tick saw the agent's
+// uncorrected first guess for up to 15 minutes, confirmed live twice
+// (cnv_1cm5cxg4/TO471153, cnv_1cm5f0r8/TO470285 — both still showed Type
+// "Inbound", blank Project/Owner/Dock Door/Carrier, and an un-adjusted
+// arrival time when checked under a minute after the submission was
+// created). Dan asked to fix the lag itself, not just paper over it:
+// scheduling-agent-webhook now applies the identical correction (same
+// hardcoded constants, same regex + lead-time math, kept in sync) at
+// write time, before the write AND before the confirmation comment, so
+// both are right immediately — no cron dependency at all. The function
+// here is left in place, unused, in case this needs reverting.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -769,7 +772,12 @@ async function processMessage(message, senderConfig, conversationId) {
     })
     return { messageId, outcome: 'agent_missing', reference }
   }
-  await backfillAgentSubmission(agentSubmission, { reference, scheduledArrival })
+  // backfillAgentSubmission() is NOT called here anymore -- see 2026-10-10
+  // header note (MOVED TO WEBHOOK). scheduling-agent-webhook now applies
+  // this correction immediately at write time, so by the time this scan
+  // runs, agentSubmission already has the right fields unless a CSR has
+  // since edited it. The function itself is left defined/exported below
+  // in case this needs reverting.
 
   let order
   try {
