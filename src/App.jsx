@@ -27,7 +27,11 @@ const APP_MODE = import.meta.env.VITE_APP_MODE || 'csw'
 //
 // /lens (added 2026-10-08) — Customer Lens context editor + test bench. Same
 // unlisted, no-gate posture as /dan (Dan's call).
-const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly', '/dan', '/lens']
+//
+// /spaceforecast (added 2026-10-10) — per-facility space forecast + what-if
+// planner. Same unlisted, no-gate, no-TopNav posture as /dan and /lens.
+// Separate from Customers > Space Planning (current footprint).
+const NO_TOPNAV_ROUTES = ['/scheduling/plugin', '/dpimonthly', '/dan', '/lens', '/spaceforecast']
 
 const LaborPlanning      = lazy(() => import('./pages/LaborPlanning.jsx'))
 const InventoryReport    = lazy(() => import('./pages/InventoryReport.jsx'))
@@ -47,6 +51,7 @@ const PluginView         = lazy(() => import('./pages/scheduling/PluginView.jsx'
 const DpiMonthlyProcess  = lazy(() => import('./pages/DpiMonthlyProcess.jsx'))
 const Dan                = lazy(() => import('./pages/Dan.jsx'))
 const Lens               = lazy(() => import('./pages/Lens.jsx'))
+const SpaceForecast      = lazy(() => import('./pages/SpaceForecast.jsx'))
 
 function PageLoading() {
   return (
@@ -128,6 +133,7 @@ function AppShell() {
             <Route path="/dpimonthly"            element={<DpiMonthlyProcess />} />
             <Route path="/dan"                   element={<Dan />}                />
             <Route path="/lens"                  element={<Lens />}               />
+            <Route path="/spaceforecast"         element={<SpaceForecast />}      />
           </Routes>
         </Suspense>
       </PageErrorBoundary>
