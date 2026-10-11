@@ -609,17 +609,26 @@ export default function PluginView() {
     if (!draft.project || !draft.reference_number) return
     const abbr = findAbbreviation(draft.project, abbreviations)
     const prefix = abbr ? `(${abbr})` : draft.project
-    // Palermo's CALEDONIA materials bulk outbound appointments are always
-    // manually entered with "RELOAD" between the prefix and the reference
-    // number -- confirmed 2026-10-10 against real Front appointment data
-    // (every existing code for this exact project carries it, e.g.
-    // "(PVI) - RELOAD 471350"). Added here, not just in
-    // scheduling-agent-webhook's write, because this effect recomputes
-    // and overwrites appointment_lookup_code every time a CSR opens the
+    // RELOAD only for Palermo's AUTOMATION-created submissions -- added
+    // 2026-10-10, then NARROWED same day per Dan's explicit follow-up
+    // ("just on the automation path"): the first version keyed this off
+    // the project alone, which also applied it to any CSR manually
+    // entering this same project by hand. intake_source === 'claude' is
+    // only ever set by scheduling-agent-webhook's write (see
+    // writeSingleOrContainerSubmission there); every manual-entry path
+    // here (handleCreate/handleCreateAndApprove/handleLcApprove) never
+    // includes it, so a hand-entered submission's row always has it
+    // null -- this is a real, existing column, not a guess. Read via
+    // submissionRef.current (kept in sync every render, see below) rather
+    // than draft itself, since intake_source isn't an editable field and
+    // so never makes it into buildDraft's output. Still added here rather
+    // than only in the webhook, because this effect recomputes and
+    // overwrites appointment_lookup_code every time a CSR opens the
     // Scheduling tab for a submission -- a server-side-only fix would get
     // silently clobbered the moment someone views the record.
-    const isPalermoReload = draft.project === 'Palermos CALEDONIA materials bulk'
-    const codePrefix = isPalermoReload ? `${prefix} - RELOAD` : `${prefix} -`
+    const isPalermoAutomation =
+      draft.project === 'Palermos CALEDONIA materials bulk' && submissionRef.current?.intake_source === 'claude'
+    const codePrefix = isPalermoAutomation ? `${prefix} - RELOAD` : `${prefix} -`
     setDraft((prev) => ({ ...prev, appointment_lookup_code: `${codePrefix} ${prev.reference_number.trim()}` }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.project, draft.reference_number, abbreviations])
