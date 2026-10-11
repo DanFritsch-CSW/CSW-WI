@@ -40,6 +40,24 @@
 //    actually watching before flipping these two senders to live
 //    auto-push with no human review (target: 99%+ confidence).
 //
+// FIXED 2026-10-11 (Dan's explicit direction): `order_not_found` used to
+// be its own gating outcome in lib/auto-appt-parse-shared.cjs, which
+// meant a row with no matching Datex order yet NEVER reached
+// shadow_logged and so could never be graded — effectively treating "not
+// in Datex yet" as a stop gap for the whole evaluation. Dan's point: the
+// team schedules the appointment straight from the email regardless of
+// whether the order exists in Datex yet (completely normal timing), and
+// the real grading question is purely whether the agent populated every
+// field correctly — the CSR's own edits before pushing are the signal
+// that matters. The order lookup now runs as pure information: a miss is
+// carried as `order_found: false` on the SAME shadow_logged row instead
+// of blocking it. This digest reflects that — `order_not_found` is no
+// longer a row scheduling_agent's own pipeline can newly produce (kept
+// below only for any residual pre-fix historical rows, same treatment as
+// `pending_created`), and `describeRow`'s shadow_logged branches append a
+// short "order not yet in Datex" courtesy note when `order_found` is
+// false, without excluding the row from the confidence tally in any way.
+//
 // Same run/test split as every other digest in this app.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
@@ -57,7 +75,7 @@ const SHADOW_START_DATE = '2026-10-10T00:00:00Z'
 const OUTCOME_LABELS = {
   shadow_logged: '🔎 Validated — waiting on CSR approval to grade',
   agent_missing: '🚨 Validated, but scheduling_agent never created an entry',
-  order_not_found: '⚠️ Order not found in Datex',
+  order_not_found: '⚠️ Order not found in Datex', // retired 2026-10-11 as its own gating outcome -- kept for any residual pre-fix rows
   owner_mismatch: '⚠️ Reference matched, but wrong owner',
   parse_failed: '⚠️ Could not parse email format',
   error: '❌ Error during processing',
@@ -116,8 +134,12 @@ function describeRow(r) {
 
   switch (r.outcome) {
     case 'shadow_logged': {
+      // order_found:false is purely informational (2026-10-11, see header
+      // note) -- it never changes which branch a row falls into below,
+      // only adds a short courtesy note at the end.
+      const orderNote = r.order_found === false ? ' (order not yet in Datex -- not a problem, just FYI)' : ''
       if (r.match_status === 'matched') {
-        return `• ${ref} (${project}) — ${who} asked for ${timing || 'an appointment'}. CSR approved it exactly as predicted. ✅`
+        return `• ${ref} (${project}) — ${who} asked for ${timing || 'an appointment'}. CSR approved it exactly as predicted. ✅${orderNote}`
       }
       if (r.match_status === 'mismatch') {
         const bits = []
@@ -127,14 +149,14 @@ function describeRow(r) {
         if (r.recommended_dock_door && r.recommended_dock_door !== r.actual_dock_door) {
           bits.push(`recommended dock ${r.recommended_dock_door}, CSR used ${r.actual_dock_door || '(none)'}`)
         }
-        return `• ${ref} (${project}) — ⚠️ MISMATCH: ${bits.join('; ') || 'CSR changed something before approving — check the submission'}`
+        return `• ${ref} (${project}) — ⚠️ MISMATCH: ${bits.join('; ') || 'CSR changed something before approving — check the submission'}${orderNote}`
       }
       const laborTxt = r.labor_warning ? ` (${r.labor_warning})` : ''
-      return `• ${ref} (${project}) — ${who} asked for ${timing || 'an appointment'}${laborTxt}. Waiting on CSR approval to grade.`
+      return `• ${ref} (${project}) — ${who} asked for ${timing || 'an appointment'}${laborTxt}. Waiting on CSR approval to grade.${orderNote}`
     }
     case 'agent_missing':
       return `• ${ref} (${project}) — order's real, ${who}'s email parsed fine, but scheduling_agent never created a pending entry for it. Needs a manual look.`
-    case 'order_not_found':
+    case 'order_not_found': // retired 2026-10-11, residual pre-fix rows only -- see header note
       return `• ${ref} — ${who} referenced this, but it's not in Datex yet (likely not entered as an order yet, or a typo).`
     case 'owner_mismatch':
       return `• ${ref} — found in Datex, but under "${r.owner_name}" instead of Palermo's. Probably a coincidental reference-number collision.`
