@@ -609,7 +609,18 @@ export default function PluginView() {
     if (!draft.project || !draft.reference_number) return
     const abbr = findAbbreviation(draft.project, abbreviations)
     const prefix = abbr ? `(${abbr})` : draft.project
-    setDraft((prev) => ({ ...prev, appointment_lookup_code: `${prefix} - ${prev.reference_number.trim()}` }))
+    // Palermo's CALEDONIA materials bulk outbound appointments are always
+    // manually entered with "RELOAD" between the prefix and the reference
+    // number -- confirmed 2026-10-10 against real Front appointment data
+    // (every existing code for this exact project carries it, e.g.
+    // "(PVI) - RELOAD 471350"). Added here, not just in
+    // scheduling-agent-webhook's write, because this effect recomputes
+    // and overwrites appointment_lookup_code every time a CSR opens the
+    // Scheduling tab for a submission -- a server-side-only fix would get
+    // silently clobbered the moment someone views the record.
+    const isPalermoReload = draft.project === 'Palermos CALEDONIA materials bulk'
+    const codePrefix = isPalermoReload ? `${prefix} - RELOAD` : `${prefix} -`
+    setDraft((prev) => ({ ...prev, appointment_lookup_code: `${codePrefix} ${prev.reference_number.trim()}` }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.project, draft.reference_number, abbreviations])
 
