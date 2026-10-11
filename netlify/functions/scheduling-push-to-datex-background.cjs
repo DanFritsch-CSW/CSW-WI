@@ -33,6 +33,24 @@
  * the reported bug) is unchanged and is now also the fallback if the new
  * path itself fails, so a failure is never silent.
  *
+ * ADDED 2026-10-11 (Dan's explicit request) -- app-wide per-field agent
+ * accuracy logging via compareAgentFieldAccuracy(), separate from and
+ * broader than compareShadowOutcome() below (which only ever applies to
+ * the Palermo's pilot's own shadow-grading rows, Sam Rohde/Daren Peet
+ * only). Dan wants a per-field confidence picture -- Warehouse, Type,
+ * Project, Owner, Arrival Date, Arrival Time, Dock Door, Carrier,
+ * Reference #, Notes -- across EVERY submission scheduling_agent creates,
+ * any sender, any facility, so he can prioritize which fields in the
+ * extraction prompt are actually worth fixing. Runs right alongside
+ * compareShadowOutcome, same point in the flow (right after a successful
+ * Datex push, i.e. once the CSR's edits are truly final), reading the
+ * agent_* snapshot columns scheduling-agent-webhook now writes onto
+ * `submissions` at creation time and logging one row per submission into
+ * a new `agent_field_accuracy` table. See that function's own header note
+ * for the Appointment Code exception (no agent_* counterpart -- it's
+ * never independently agent-written, only ever computed client-side from
+ * Project + Reference #).
+ *
  * POST /.netlify/functions/scheduling-push-to-datex-background
  * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean }
  */
@@ -137,6 +155,108 @@ async function compareShadowOutcome(record) {
     console.log('[scheduling-push-to-datex-background] shadow outcome graded:', matchStatus, 'submission', record.id)
   } catch (err) {
     console.error('[scheduling-push-to-datex-background] compareShadowOutcome failed (non-fatal):', err.message)
+  }
+}
+
+// App-wide per-field agent accuracy comparison -- added 2026-10-11, Dan's
+// explicit request. Separate from, and broader than, compareShadowOutcome
+// above (Palermo's-only). Runs for EVERY submission scheduling_agent
+// created (intake_source:'claude'), any sender, any facility. Compares
+// the agent_* snapshot columns scheduling-agent-webhook wrote at creation
+// time against the live columns here, at the moment of a successful Datex
+// push -- i.e. once the CSR's edits are truly final -- and logs one row
+// per submission into agent_field_accuracy with a match flag per field.
+// This is the data the field-accuracy digest aggregates into a per-field
+// confidence percentage. Isolated and non-fatal, same pattern as
+// compareShadowOutcome: never allowed to affect the real Datex push.
+// Only covers submissions created after the 2026-10-11 webhook deploy --
+// older rows have no agent_* snapshot (all null) and would show every
+// field as a false mismatch, so those are skipped entirely here rather
+// than polluting the accuracy numbers; the digest script applies the same
+// skip when reading this table, as a second line of defense.
+// Appointment Code has no agent_* snapshot at all (it's never
+// independently agent-written -- see the webhook's 2026-10-11 header
+// note, it's computed client-side from Project + Reference # alone) and
+// is logged here with lookup_code_agent/lookup_code_match left null; the
+// digest can derive an "agent-would-have-been" code from
+// agent_project + agent_reference_number if that's ever useful, but it's
+// not a distinct signal worth snapshotting separately.
+function splitDateTime(v) {
+  if (!v || typeof v !== 'string' || !v.includes('T')) return { date: v || null, time: null }
+  const [d, t] = v.split('T')
+  return { date: d, time: (t || '').slice(0, 5) }
+}
+function fieldsEqual(a, b) {
+  return (a || null) === (b || null)
+}
+async function compareAgentFieldAccuracy(record) {
+  if (record.intake_source !== 'claude') return
+  // No agent_* snapshot on this row at all (created before the 2026-10-11
+  // webhook deploy) -- every field would show as a false mismatch against
+  // nulls. Skip rather than log garbage into the accuracy numbers.
+  if (!record.agent_warehouse && !record.agent_type && !record.agent_scheduled_arrival) return
+  try {
+    const agentSplit = splitDateTime(record.agent_scheduled_arrival)
+    const actualSplit = splitDateTime(record.scheduled_arrival)
+
+    const row = {
+      submission_id: record.id,
+      front_conversation_id: record.front_conversation_id || null,
+      warehouse: record.warehouse || null,
+
+      warehouse_agent: record.agent_warehouse || null,
+      warehouse_actual: record.warehouse || null,
+      warehouse_match: fieldsEqual(record.agent_warehouse, record.warehouse),
+
+      type_agent: record.agent_type || null,
+      type_actual: record.type || null,
+      type_match: fieldsEqual(record.agent_type, record.type),
+
+      project_agent: record.agent_project || null,
+      project_actual: record.project || null,
+      project_match: fieldsEqual(record.agent_project, record.project),
+
+      owner_agent: record.agent_owner || null,
+      owner_actual: record.owner || null,
+      owner_match: fieldsEqual(record.agent_owner, record.owner),
+
+      arrival_date_agent: agentSplit.date,
+      arrival_date_actual: actualSplit.date,
+      arrival_date_match: fieldsEqual(agentSplit.date, actualSplit.date),
+
+      arrival_time_agent: agentSplit.time,
+      arrival_time_actual: actualSplit.time,
+      arrival_time_match: fieldsEqual(agentSplit.time, actualSplit.time),
+
+      dock_door_agent: record.agent_scheduled_dock_door || null,
+      dock_door_actual: record.scheduled_dock_door || null,
+      dock_door_match: fieldsEqual(record.agent_scheduled_dock_door, record.scheduled_dock_door),
+
+      carrier_agent: record.agent_carrier || null,
+      carrier_actual: record.carrier || null,
+      carrier_match: fieldsEqual(record.agent_carrier, record.carrier),
+
+      reference_agent: record.agent_reference_number || null,
+      reference_actual: record.reference_number || null,
+      reference_match: fieldsEqual(record.agent_reference_number, record.reference_number),
+
+      lookup_code_agent: null,
+      lookup_code_actual: record.appointment_lookup_code || null,
+      lookup_code_match: null,
+
+      notes_agent: record.agent_notes || null,
+      notes_actual: record.notes || null,
+      notes_match: fieldsEqual(record.agent_notes, record.notes),
+    }
+
+    await fetch(`${SUPABASE_URL}/rest/v1/agent_field_accuracy`, {
+      method: 'POST',
+      headers: supabaseHeaders({ Prefer: 'return=minimal' }),
+      body: JSON.stringify(row),
+    })
+    console.log('[scheduling-push-to-datex-background] agent field accuracy logged for submission', record.id)
+  } catch (err) {
+    console.error('[scheduling-push-to-datex-background] compareAgentFieldAccuracy failed (non-fatal):', err.message)
   }
 }
 
@@ -254,6 +374,7 @@ async function _run({ id, source, draft_template, send_email }) {
 
   await updateRecord(id, approveFields)
   await compareShadowOutcome({ ...record, ...approveFields })
+  await compareAgentFieldAccuracy({ ...record, ...approveFields })
 
   // Post the confirmation reply (draft or send) when triggered from the plugin.
   // On failure, fall back to an internal error note -- never silent, and never
