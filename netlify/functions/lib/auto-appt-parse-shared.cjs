@@ -137,6 +137,26 @@
 // in case this needs to revert) — this function's job now is validation
 // and grading, not creation.
 //
+// UNGATED order-not-found from grading, 2026-10-11 (Dan's explicit
+// direction, reacting to the digest's "Order not found in Datex (5)"
+// section): an order-lookup miss used to be a TERMINAL outcome
+// (order_not_found) that stopped the row from ever reaching
+// shadow_logged/match_status:'pending_outcome' — meaning it could never
+// be graded. Dan's point: the order not existing in Datex yet is not a
+// stop gap for the team scheduling the appointment from the email at
+// all — completely normal timing, and irrelevant to the real question,
+// which is purely whether the agent populated every field correctly
+// (the CSR's own edits before pushing are exactly the signal needed to
+// know what the agent still gets wrong). lookupOrder() still runs and
+// still logs a real exception as a genuine 'error' (MotherDuck down,
+// etc.), but a plain miss (order === null) no longer short-circuits:
+// processMessage carries it through as order_found:false (new boolean
+// column on auto_appt_attempts) on the same shadow_logged row, so it's
+// still graded like every other submission. owner_mismatch (order found,
+// but under a different owner) stays gated — a different, rarer signal
+// that a PO number may have coincidentally collided with someone else's
+// order, which Dan didn't ask to change.
+//
 // TEST ADDRESS ADDED 2026-10-10 (same day): d_fritsch21@hotmail.com,
 // style 'either' — Dan's own address, so he can resend real Sam/Daren
 // emails verbatim to generate shadow-validation test runs without
@@ -779,9 +799,27 @@ async function processMessage(message, senderConfig, conversationId) {
   // since edited it. The function itself is left defined/exported below
   // in case this needs reverting.
 
-  let order
+  // Order lookup is now PURELY INFORMATIONAL -- per Dan's explicit
+  // direction 2026-10-11: "order not found" must never gate grading. The
+  // team schedules the appointment straight from the email regardless of
+  // whether the order has actually been entered into Datex yet -- that's
+  // ordinary business timing (the order can land after the email, before
+  // it, whenever), not a reason to withhold the row from the confidence
+  // tally. The real grading question, per Dan, is simply: did every field
+  // the agent populated match what the CSR ultimately approved? That
+  // comparison needs agentSubmission plus a logged row with
+  // match_status:'pending_outcome' -- nothing else. A genuine lookup
+  // ERROR (MotherDuck down, etc., not "no match") still bails below,
+  // since that's an operational failure, not the "not entered yet" case
+  // this change addresses. order_found is now carried as a plain flag on
+  // the same shadow_logged row (new boolean column, added 2026-10-11) so
+  // the digest can still surface it as a courtesy note without excluding
+  // the row from anything.
+  let order = null
+  let orderFound = false
   try {
     order = await lookupOrder(reference)
+    orderFound = !!order
   } catch (err) {
     console.error('[auto-appt-parse] lookupOrder threw:', err.message)
     await logAttempt({
@@ -793,17 +831,13 @@ async function processMessage(message, senderConfig, conversationId) {
     return { messageId, outcome: 'error', error: err.message }
   }
 
-  if (!order) {
-    log('processMessage: order_not_found', reference)
-    await logAttempt({
-      front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
-      matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'order_not_found',
-      agent_submission_id: agentSubmission.id,
-    })
-    return { messageId, outcome: 'order_not_found', reference }
-  }
-
-  if (order.owner_name !== PALERMO_OWNER_NAME) {
+  // Owner mismatch is a DIFFERENT signal from plain not-found -- a real
+  // order WAS found, just under a different owner than Palermo Villa,
+  // Inc. Left gated for now (a coincidental PO-number collision with
+  // another customer's order is worth a human look before grading,
+  // unlike "just not entered yet") -- Dan's instruction was specifically
+  // about order-not-found; revisit if he wants this ungated too.
+  if (order && order.owner_name !== PALERMO_OWNER_NAME) {
     log('processMessage: owner_mismatch', reference, order.owner_name)
     await logAttempt({
       front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
@@ -820,11 +854,12 @@ async function processMessage(message, senderConfig, conversationId) {
   // per-project dock-door resolution, just unused by this pilot now.
   const laborWarning = await checkLabor(CAL_WAREHOUSE, scheduledArrival)
 
-  log('processMessage: shadow_logged', reference, agentSubmission.id)
+  log('processMessage: shadow_logged', reference, agentSubmission.id, 'order_found:', orderFound)
   await logAttempt({
     front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
     matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'shadow_logged',
-    owner_name: order.owner_name, project_name: order.project_name,
+    owner_name: order?.owner_name || null, project_name: order?.project_name || null,
+    order_found: orderFound,
     agent_submission_id: agentSubmission.id,
     agent_scheduled_arrival: scheduledArrival,
     agent_dock_door: PALERMO_DOCK_DOOR,
@@ -833,7 +868,7 @@ async function processMessage(message, senderConfig, conversationId) {
     match_status: 'pending_outcome',
   })
 
-  return { messageId, outcome: 'shadow_logged', reference, agentSubmissionId: agentSubmission.id }
+  return { messageId, outcome: 'shadow_logged', reference, agentSubmissionId: agentSubmission.id, orderFound }
 }
 
 async function runScan() {
