@@ -232,6 +232,25 @@ import {
  * reference -- previously a stale match's data was simply left in place,
  * harmless before this change since nothing downstream read it, but a
  * real gap once the Appointment Code started embedding it).
+ *
+ * ENHANCED 2026-10-12 (same day, Dan's follow-up, River Logistics/O&H
+ * Danish Bakery real test) -- two more changes:
+ *   1. handleOrderFound now ALSO auto-fills Owner/Project directly from a
+ *      CONFIRMED Datex match when the agent's own extraction left them
+ *      blank (the common case -- most first emails never state Owner/
+ *      Project at all). This is ground truth from the order itself, not
+ *      a guess, so it's used unconditionally for Project (nothing else
+ *      auto-fills that field) and for Owner only when a human hasn't
+ *      already explicitly touched it (ownerManuallySetRef). Also
+ *      registers the real pairing into ownerProjectMap/projectOwnerMap
+ *      first, so the pre-existing draft.owner-change effect (which
+ *      clears Project if it's not in that owner's known list, built from
+ *      Omni data that can lag behind live Datex) doesn't immediately
+ *      undo it.
+ *   2. The appointment_lookup_code effect no longer appends Owner
+ *      Reference when it's identical to the reference number already in
+ *      the code (case-insensitive) -- some orders use the same value for
+ *      both, and showing it twice added nothing.
  */
 
 function CswBrandHeader() {
@@ -688,8 +707,18 @@ export default function PluginView() {
     // handleOrderFound/OrderSearchBadge.jsx's 2026-10-12 header note for
     // how it gets cleared the moment a match no longer holds), never
     // guessed -- so a submission with no Datex match yet gets a plain
-    // code exactly as before.
-    const ownerRefSuffix = matchedOwnerReference ? ` (${matchedOwnerReference})` : ''
+    // code exactly as before. FIXED 2026-10-12 (same day, Dan's follow-up
+    // on the real O&H Danish Bakery/River Logistics test): some orders'
+    // Owner Reference and lookup code/vendor reference are the SAME
+    // value -- no point showing it twice. Skip the suffix entirely when
+    // it matches the reference number already in the code (case-
+    // insensitive, since Datex reference fields aren't guaranteed
+    // consistent casing).
+    const refTrimmed = draft.reference_number.trim()
+    const ownerRefSuffix =
+      matchedOwnerReference && matchedOwnerReference.trim().toLowerCase() !== refTrimmed.toLowerCase()
+        ? ` (${matchedOwnerReference})`
+        : ''
     setDraft((prev) => ({ ...prev, appointment_lookup_code: `${codePrefix} ${prev.reference_number.trim()}${ownerRefSuffix}` }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.project, draft.reference_number, abbreviations, matchedOwnerReference])
@@ -1106,6 +1135,49 @@ export default function PluginView() {
     setMatchedOwnerReference(order.ownerReference || null)
     if (autoFilledOrderIdRef.current === order.orderId) return
     autoFilledOrderIdRef.current = order.orderId
+
+    // Owner/Project auto-fill from a CONFIRMED Datex match -- added
+    // 2026-10-12, Dan's explicit request (River Logistics/O&H Danish
+    // Bakery example: the agent left Owner/Project blank -- most first
+    // emails never state them directly -- but OrderSearchBadge's own
+    // independent Datex lookup already knows the real owner/project for
+    // THIS exact order). This is ground truth, not a guess, so it's a
+    // fundamentally stronger signal than anything the extraction prompt
+    // could infer from email text alone -- a much more direct version of
+    // the same idea behind scheduling-agent-webhook's sender correction-
+    // hint retrieval (that one is a probabilistic pattern across past
+    // emails; this is a confirmed fact about this specific order). Only
+    // fills a field that's still genuinely blank, and for Owner only if
+    // a human hasn't already explicitly touched it (ownerManuallySetRef)
+    // -- never overwrites anything already set. Fires once per distinct
+    // matched order, same guard as the Notes auto-fill below.
+    //
+    // Registers this real pairing into ownerProjectMap/projectOwnerMap
+    // (normally built once from Omni's gold__truck_appointments topic,
+    // which can lag or disagree with live Datex -- confirmed earlier
+    // today investigating Kay's project->owner report) BEFORE setting
+    // draft.project: without this, the draft.owner-change effect a few
+    // lines below -- which clears project back to blank if it's not in
+    // that owner's known project list -- could immediately undo this
+    // real, just-confirmed pairing if Omni's cached data hasn't caught up
+    // to it yet.
+    if (order.ownerName && order.projectName) {
+      const ownerKey = order.ownerName.toLowerCase()
+      const projKey = order.projectName.toLowerCase()
+      setOwnerProjectMap((prev) => {
+        const existing = prev[ownerKey] || []
+        if (existing.includes(order.projectName)) return prev
+        return { ...prev, [ownerKey]: [...existing, order.projectName].sort((a, b) => a.localeCompare(b)) }
+      })
+      setProjectOwnerMap((prev) => (prev[projKey] ? prev : { ...prev, [projKey]: order.ownerName }))
+    }
+    setDraft((prev) => {
+      const next = { ...prev }
+      if (order.ownerName && !ownerManuallySetRef.current && !prev.owner) next.owner = order.ownerName
+      if (order.projectName && !prev.project) next.project = order.projectName
+      return next
+    })
+
     if (draftRef.current.notes) return
     const parts = []
     // Owner Reference -- added 2026-10-12, see this function's header
