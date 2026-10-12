@@ -215,6 +215,23 @@ import {
  * handlers below now gate the auto-fill on that instead of on raw
  * truthiness, and the refs reset on every conversation switch alongside
  * autoFilledOrderIdRef.
+ *
+ * ENHANCED 2026-10-12 (same day, Dan's explicit request, Crown Bakeries/
+ * Arrive Logistics example) -- several customers' carriers check in with
+ * TWO different reference numbers: the Datex lookup code/vendor reference
+ * (already in Reference #) AND a separate Owner Reference, a PO-style
+ * number like "PPW126E00001549". scheduling-order-search.cjs already
+ * returned ownerReference, it just was never surfaced anywhere. Now:
+ * OrderSearchBadge shows it in the found badge, handleOrderFound folds it
+ * into the auto-filled Notes, and the appointment_lookup_code effect
+ * appends it in parentheses -- e.g. "(CB) - 8703351 (PPW126E00001549)".
+ * matchedOwnerReference (new state, declared below) tracks this, set only
+ * from a confirmed match and cleared the moment that match no longer
+ * holds (see OrderSearchBadge.jsx's 2026-10-12 header note for how it
+ * now calls onOrderFound(null) on a not-found result or a blank
+ * reference -- previously a stale match's data was simply left in place,
+ * harmless before this change since nothing downstream read it, but a
+ * real gap once the Appointment Code started embedding it).
  */
 
 function CswBrandHeader() {
@@ -365,6 +382,17 @@ export default function PluginView() {
   const [lcDockDoors, setLcDockDoors] = useState([])
   const [lcDockDoorsLoading, setLcDockDoorsLoading] = useState(false)
   const [lcCreatedId, setLcCreatedId] = useState(null)
+
+  // Owner Reference from a confirmed OrderSearchBadge match -- added
+  // 2026-10-12, see handleOrderFound and the appointment_lookup_code
+  // effect below for the full story (Crown Bakeries/Arrive Logistics
+  // example, Dan's explicit request). Only ever set from a REAL Datex
+  // match, never guessed, and cleared the moment that match no longer
+  // holds (OrderSearchBadge now calls onOrderFound(null) on a not-found
+  // result or a blank reference -- see that file's 2026-10-12 header
+  // note) so a stale value from a DIFFERENT order can never silently
+  // linger in a newly-typed Appointment Code.
+  const [matchedOwnerReference, setMatchedOwnerReference] = useState(null)
 
   useEffect(() => {
     async function fetchWithIdsFallback(type, opts = {}) {
@@ -650,9 +678,21 @@ export default function PluginView() {
     const isPalermoAutomation =
       draft.project === 'Palermos CALEDONIA materials bulk' && submissionRef.current?.intake_source === 'claude'
     const codePrefix = isPalermoAutomation ? `${prefix} - RELOAD` : `${prefix} -`
-    setDraft((prev) => ({ ...prev, appointment_lookup_code: `${codePrefix} ${prev.reference_number.trim()}` }))
+    // Owner Reference suffix -- added 2026-10-12 per Dan's explicit
+    // request (Crown Bakeries/Arrive Logistics example): several
+    // customers' carriers check in with TWO different reference numbers
+    // -- the Datex lookup code/vendor reference (already in
+    // reference_number above) AND a separate Owner Reference (a PO-style
+    // number like "PPW126E00001549"). matchedOwnerReference is only ever
+    // set from a CONFIRMED OrderSearchBadge match (see
+    // handleOrderFound/OrderSearchBadge.jsx's 2026-10-12 header note for
+    // how it gets cleared the moment a match no longer holds), never
+    // guessed -- so a submission with no Datex match yet gets a plain
+    // code exactly as before.
+    const ownerRefSuffix = matchedOwnerReference ? ` (${matchedOwnerReference})` : ''
+    setDraft((prev) => ({ ...prev, appointment_lookup_code: `${codePrefix} ${prev.reference_number.trim()}${ownerRefSuffix}` }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft.project, draft.reference_number, abbreviations])
+  }, [draft.project, draft.reference_number, abbreviations, matchedOwnerReference])
 
   useEffect(() => {
     if (!lcDraft.project || !lcDraft.reference_number) return
@@ -825,6 +865,7 @@ export default function PluginView() {
       lcOwnerManuallySetRef.current = false
       multiOwnerManuallySetRef.current = false
       multiSlotOwnerManuallySetRef.current = new Set()
+      setMatchedOwnerReference(null)
       return () => controller.abort()
     }
 
@@ -870,6 +911,7 @@ export default function PluginView() {
     lcOwnerManuallySetRef.current = false
     multiOwnerManuallySetRef.current = false
     multiSlotOwnerManuallySetRef.current = new Set()
+    setMatchedOwnerReference(null)
 
     userEditedWhileNotFoundRef.current = false
 
@@ -1047,10 +1089,29 @@ export default function PluginView() {
     return `${monthName} ${parseInt(d, 10)}, ${y}`
   }
   function handleOrderFound(order) {
+    // ADDED 2026-10-12 (Dan's explicit request) -- OrderSearchBadge now
+    // calls this with null when a previously-confirmed match no longer
+    // holds (reference edited to something that doesn't match, or goes
+    // blank -- see that file's 2026-10-12 header note). Only
+    // matchedOwnerReference needs clearing here; Notes is never touched
+    // on a cleared match -- it only ever gets auto-filled once, below,
+    // same "never clobber" principle as everywhere else in this function.
+    if (!order) {
+      setMatchedOwnerReference(null)
+      return
+    }
+    // Tracked independently of the autoFilledOrderIdRef/Notes guard below
+    // -- the Appointment Code should reflect a confirmed match regardless
+    // of whether Notes already had content when the match was found.
+    setMatchedOwnerReference(order.ownerReference || null)
     if (autoFilledOrderIdRef.current === order.orderId) return
     autoFilledOrderIdRef.current = order.orderId
     if (draftRef.current.notes) return
     const parts = []
+    // Owner Reference -- added 2026-10-12, see this function's header
+    // comment and the appointment_lookup_code effect above for the full
+    // story (Crown Bakeries/Arrive Logistics example).
+    if (order.ownerReference) parts.push(`Owner Reference: ${order.ownerReference}`)
     const shipDate = order.shipExpectedDate || order.shipPickupDate
     if (shipDate) parts.push(`Ship Date: ${formatOrderDate(shipDate)}`)
     if (order.requestedDeliveryDate) parts.push(`Requested Delivery Date: ${formatOrderDate(order.requestedDeliveryDate)}`)
