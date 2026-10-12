@@ -137,16 +137,24 @@
 # assigned to Dan once daily rather than the */15 cadence other digests in
 # this app use, since this is a review summary, not a responsiveness-
 # sensitive alert. Only runs when there was at least one attempt in the
-# last 24 hours -- no daily "nothing happened" noise task. 13:00 UTC = 8am
-# Central (7am during DST -- same caveat as every other scheduled function
-# in this app, see nightly-b2e-sync.cjs). CHANGED 2026-10-11, Dan's
-# explicit request: used to post a comment into one persistent thread
-# (cnv_1c7dl7mc), deliberately the opposite of front-daily-discussion-
-# run.cjs's "new discussion every day" pattern -- now the reverse, a fresh
-# Task each morning -- see lib/auto-appt-review-digest-shared.cjs for the
-# full story.
+# last 24 hours -- no daily "nothing happened" noise task. CHANGED
+# 2026-10-11, Dan's explicit request: used to post a comment into one
+# persistent thread (cnv_1c7dl7mc), deliberately the opposite of front-
+# daily-discussion-run.cjs's "new discussion every day" pattern -- now
+# the reverse, a fresh Task each morning -- see lib/auto-appt-review-
+# digest-shared.cjs for the full story.
+#
+# MOVED 2026-10-12, Dan's explicit request, same day as the agent-
+# accuracy-digest-run change below (both moved together) -- 04:00 UTC =
+# 11pm Central during DST (confirmed live for today's date: 2026-10-12 is
+# within DST, which runs through the first Sunday in November). Once DST
+# ends this will drift one hour EARLIER in local time (10pm Central, not
+# 11pm) until manually re-adjusted -- same caveat as every other scheduled
+# function in this app with a fixed UTC cron against a local send-time
+# intent (see nightly-b2e-sync.cjs for the original writeup of this
+# pattern). Was "0 13 * * *" (8am Central during DST).
 [functions."auto-appt-review-digest-run"]
-  schedule = "0 13 * * *"
+  schedule = "0 4 * * *"
   timeout = 26
 
 # Manual test -- no schedule, so direct POST works. NOT a dry run -- really
@@ -159,12 +167,19 @@
 
 # Scheduling Agent per-field accuracy digest -- added 2026-10-11, Dan's
 # explicit request. APP-WIDE (every facility, every sender scheduling_agent
-# processes), separate from the Palermo's-only digest above. Same 8am
-# Central send time and Front-Task delivery mechanism; see
-# lib/agent-accuracy-digest-shared.cjs for the full design writeup. No
-# duckdb/native-module dependency -- pure Supabase REST + Front API calls.
+# processes), separate from the Palermo's-only digest above. Same
+# Front-Task delivery mechanism; see lib/agent-accuracy-digest-shared.cjs
+# for the full design writeup. No duckdb/native-module dependency -- pure
+# Supabase REST + Front API calls.
+#
+# MOVED 2026-10-12, Dan's explicit request (both this and
+# auto-appt-review-digest-run above moved together, same reasoning) --
+# 04:00 UTC = 11pm Central during DST today; drifts to 10pm Central once
+# DST ends (first Sunday in November) until manually re-adjusted -- see
+# that function's own comment just above for the fuller writeup of this
+# caveat. Was "0 13 * * *" (8am Central during DST).
 [functions."agent-accuracy-digest-run"]
-  schedule = "0 13 * * *"
+  schedule = "0 4 * * *"
   timeout = 26
 
 # Manual test -- no schedule, so direct POST works. NOT a dry run -- really
