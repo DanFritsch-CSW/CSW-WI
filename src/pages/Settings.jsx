@@ -954,19 +954,24 @@ function CmmOutboundApptsEditor() {
       </div>
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        {DAY_LABELS.map(([label, day]) => (
-          <button
-            key={day}
-            onClick={() => toggleDay(day)}
-            className="settings-save-btn"
-            style={{
-              padding: '4px 10px', fontSize: 11,
-              background: notifyDays.includes(day) ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
-            }}
-          >
-            {label}
-          </button>
-        ))}
+        {DAY_LABELS.map(([label, day]) => {
+          const on = notifyDays.includes(day)
+          return (
+            <button
+              key={day}
+              onClick={() => toggleDay(day)}
+              style={{
+                padding: '4px 12px', fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
+                letterSpacing: '0.06em', borderRadius: 'var(--r-md)', cursor: 'pointer',
+                background: on ? 'var(--brand)' : 'var(--bg3)',
+                color: on ? '#000' : 'var(--text-dim)',
+                border: on ? '1px solid var(--brand)' : '1px solid var(--border)',
+              }}
+            >
+              {label}
+            </button>
+          )
+        })}
       </div>
 
       <EmailListEditor label="TO (external — receives the draft)" emails={toEmails} onChange={setToEmails} />
@@ -1261,19 +1266,24 @@ function CmmEmptyTrailerEditor() {
       </div>
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
-        {DAY_LABELS.map(([label, day]) => (
-          <button
-            key={day}
-            onClick={() => toggleDay(day)}
-            className="settings-save-btn"
-            style={{
-              padding: '4px 10px', fontSize: 11,
-              background: notifyDays.includes(day) ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
-            }}
-          >
-            {label}
-          </button>
-        ))}
+        {DAY_LABELS.map(([label, day]) => {
+          const on = notifyDays.includes(day)
+          return (
+            <button
+              key={day}
+              onClick={() => toggleDay(day)}
+              style={{
+                padding: '4px 12px', fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
+                letterSpacing: '0.06em', borderRadius: 'var(--r-md)', cursor: 'pointer',
+                background: on ? 'var(--brand)' : 'var(--bg3)',
+                color: on ? '#000' : 'var(--text-dim)',
+                border: on ? '1px solid var(--brand)' : '1px solid var(--border)',
+              }}
+            >
+              {label}
+            </button>
+          )
+        })}
       </div>
 
       <EmailListEditor label="TO (external + internal — receives the email)" emails={toEmails} onChange={setToEmails} />
