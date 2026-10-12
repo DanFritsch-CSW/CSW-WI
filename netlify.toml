@@ -63,6 +63,32 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Scheduling plugin owner list sync -- added 2026-10-12, Dan's explicit
+# request after a real live test (dpwl@goselect.com, PO 522162) showed
+# scheduling_agent extracting Owner="Palermos" straight from the email's
+# own "VENDOR: Palermos" line -- plausible-looking but not a real Datex
+# owner name (the actual record is "Palermo Villa, Inc.", ID 704). Same
+# fix pattern as carriers-sync above: a Supabase-cached table synced
+# directly from MotherDuck (production_db.bronze.datex_owners, deduped --
+# see lib/owners-sync-shared.cjs), used by scheduling-agent-webhook as the
+# fuzzy-match fallback once its own curated settings.owner_aliases map
+# (seeded with "palermos" -> "Palermo Villa, Inc." from this exact case)
+# doesn't have an entry. 233 real owners, confirmed live before writing
+# this -- weekly is comfortably sufficient, same cadence as carriers.
+[functions."owners-sync-run"]
+  schedule = "0 8 * * 1"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# Manual test -- no schedule, so this can be POSTed directly to refresh
+# the list immediately instead of waiting for Monday. NOT a dry run -- it
+# really replaces scheduling_owners' contents with a fresh MotherDuck pull.
+[functions."owners-sync-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 # Order Search, Phase 1 -- added 2026-08-21 per Dan/Kay's 2026-08-20
 # meeting, wired into the plugin's tab switcher 2026-08-22. Plain
 # read-only POST against production_db.silver.datex_slv_orders (a silver
