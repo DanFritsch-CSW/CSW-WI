@@ -194,6 +194,27 @@ import {
  * worst case) and a hard stop at 900s (Netlify Background Functions' own
  * 15-minute ceiling) that still does not assert failure on the backend's
  * behalf.
+ *
+ * FIXED 2026-10-12 — Kay's report: "Owner is not connecting after
+ * selecting project... it's populating something, but not the right one,
+ * then have to manually select owner." Root cause: Owner/Dock Door became
+ * real agent-extractable fields the day before (2026-10-11, see
+ * scheduling-agent-webhook's header note) -- previously the generic
+ * extraction path never wrote Owner at all, so draft.owner was always
+ * blank on a fresh submission until a human touched it. The project→owner
+ * convenience auto-fill in handleFieldChange (and the equivalent logic in
+ * handleLcFieldChange/handleMultiSharedChange/handleMultiFieldChange)
+ * gated on `!prev.owner` -- truthy meaning "already set, leave it alone".
+ * That check can't tell an AGENT'S GUESS apart from a human's deliberate
+ * choice: once the agent started sometimes writing an Owner guess, that
+ * guess alone was enough to permanently block the auto-fill for the rest
+ * of the session, even after a CSR picked a completely different Project.
+ * Fixed with four new refs (ownerManuallySetRef and its Lc/Multi/
+ * per-slot-Multi equivalents, declared above) that track whether Owner
+ * was ever actually EDITED BY A HUMAN in the current draft -- the four
+ * handlers below now gate the auto-fill on that instead of on raw
+ * truthiness, and the refs reset on every conversation switch alongside
+ * autoFilledOrderIdRef.
  */
 
 function CswBrandHeader() {
@@ -707,6 +728,27 @@ export default function PluginView() {
   // below can reset it. See handleOrderFound's own comment for the full
   // story on why this needs resetting per-conversation.
   const autoFilledOrderIdRef = useRef(null)
+  // FIXED 2026-10-12 — Owner/Dock Door became real agent-extractable
+  // fields as of 2026-10-11 (see scheduling-agent-webhook's header note);
+  // before that the generic extraction path never wrote Owner at all, so
+  // draft.owner was always blank until a human touched it. Now a fresh
+  // submission can arrive with the agent's OWN (possibly wrong) Owner
+  // guess already sitting in draft.owner — and the project→owner
+  // convenience auto-fill below used to gate on `!prev.owner` (truthy =
+  // "already set, don't touch it"), which can't tell an agent GUESS apart
+  // from a human CHOICE. Kay's report (Oct 12): "Owner is not connecting
+  // after selecting project... it's populating something, but not the
+  // right one, then have to manually select owner" — exactly this: the
+  // agent's guess sat there untouched, silently blocking the auto-fill
+  // she was relying on. These four track whether OWNER was ever actually
+  // EDITED BY A HUMAN in the current draft, independent of whether it
+  // currently holds a value — see handleFieldChange/handleLcFieldChange/
+  // handleMultiSharedChange/handleMultiFieldChange below for how they now
+  // gate the auto-fill on this instead of raw truthiness.
+  const ownerManuallySetRef = useRef(false)
+  const lcOwnerManuallySetRef = useRef(false)
+  const multiOwnerManuallySetRef = useRef(false)
+  const multiSlotOwnerManuallySetRef = useRef(new Set())
   draftRef.current = draft
   lcDraftRef.current = lcDraft
   multiDraftsRef.current = multiDrafts
@@ -776,6 +818,13 @@ export default function PluginView() {
       // Order Search Phase 2 stale-ref fix (2026-08-24) — see
       // handleOrderFound's comment above for the full story.
       autoFilledOrderIdRef.current = null
+      // See the owner-manually-set refs' own comment above — reset per
+      // conversation so a flag from a PREVIOUS submission's draft never
+      // carries over and wrongly blocks the auto-fill on a new one.
+      ownerManuallySetRef.current = false
+      lcOwnerManuallySetRef.current = false
+      multiOwnerManuallySetRef.current = false
+      multiSlotOwnerManuallySetRef.current = new Set()
       return () => controller.abort()
     }
 
@@ -816,6 +865,11 @@ export default function PluginView() {
     // Order Search Phase 2 stale-ref fix (2026-08-24) — see
     // handleOrderFound's comment above for the full story.
     autoFilledOrderIdRef.current = null
+    // See the owner-manually-set refs' own comment above.
+    ownerManuallySetRef.current = false
+    lcOwnerManuallySetRef.current = false
+    multiOwnerManuallySetRef.current = false
+    multiSlotOwnerManuallySetRef.current = new Set()
 
     userEditedWhileNotFoundRef.current = false
 
@@ -939,11 +993,12 @@ export default function PluginView() {
 
   const handleFieldChange = (key, value) => {
     userEditedWhileNotFoundRef.current = true
+    if (key === 'owner') ownerManuallySetRef.current = true
     setSaved(false)
     setSaveError(null)
     setDraft((prev) => {
       const next = { ...prev, [key]: value }
-      if (key === 'project' && value && !prev.owner) {
+      if (key === 'project' && value && !ownerManuallySetRef.current) {
         const owner = projectOwnerMapRef.current[value.toLowerCase()]
         if (owner) next.owner = owner
       }
@@ -1037,9 +1092,10 @@ export default function PluginView() {
   }
 
   const handleLcFieldChange = (key, value) => {
+    if (key === 'owner') lcOwnerManuallySetRef.current = true
     setLcDraft((prev) => {
       const next = { ...prev, [key]: value }
-      if (key === 'project' && value && !prev.owner) {
+      if (key === 'project' && value && !lcOwnerManuallySetRef.current) {
         const owner = projectOwnerMapRef.current[value.toLowerCase()]
         if (owner) next.owner = owner
       }
@@ -1291,6 +1347,7 @@ export default function PluginView() {
   }
 
   const handleMultiSharedChange = (key, value) => {
+    if (key === 'owner') multiOwnerManuallySetRef.current = true
     setMultiShared((prev) => {
       const next = { ...prev, [key]: value }
       if (key === 'owner' && next.project) {
@@ -1300,7 +1357,7 @@ export default function PluginView() {
           if (ownerProjects?.length > 0 && !ownerProjects.includes(next.project)) next.project = ''
         }
       }
-      if (key === 'project' && value && !prev.owner) {
+      if (key === 'project' && value && !multiOwnerManuallySetRef.current) {
         const owner = projectOwnerMapRef.current[value.toLowerCase()]
         if (owner) next.owner = owner
       }
@@ -1321,10 +1378,11 @@ export default function PluginView() {
   }
 
   const handleMultiFieldChange = (slotIndex, key, value) => {
+    if (key === 'owner') multiSlotOwnerManuallySetRef.current.add(slotIndex)
     setMultiDrafts((prev) => {
       const next = [...prev]
       const slot = { ...next[slotIndex], [key]: value }
-      if (key === 'project' && value && !slot.owner) {
+      if (key === 'project' && value && !multiSlotOwnerManuallySetRef.current.has(slotIndex)) {
         const owner = projectOwnerMapRef.current[value.toLowerCase()]
         if (owner) slot.owner = owner
       }
