@@ -56,6 +56,20 @@ import { searchOrder } from '../../lib/schedulingApi.js'
 // tool) but is no longer imported or rendered anywhere — dead code, same
 // convention as other superseded files in this app (see netlify.toml's
 // dockcounts-digest-run.cjs note for a prior example of this pattern).
+//
+// UPDATED 2026-10-12 (Dan's explicit request, Crown Bakeries/Arrive
+// Logistics example) — several customers' carriers check in with TWO
+// different reference numbers: the Datex lookup code/vendor reference
+// (already shown as the main match) AND a separate Owner Reference
+// (e.g. a PO-style number like "PPW126E00001549") — scheduling-order-
+// search.cjs already returned ownerReference, it just was never surfaced
+// anywhere. Now shown in the found badge here, AND passed through
+// onOrderFound so PluginView.jsx can fold it into the auto-filled Notes
+// and the Appointment Code (see that file's matchedOwnerReference state
+// and handleOrderFound/the appointment_lookup_code effect). Same pass
+// fixed the stale-match gap above (onOrderFound(null) on not-found/blank)
+// since an owner reference now genuinely needs to be retracted when a
+// match no longer holds, not just left stale and harmless as before.
 
 const DEBOUNCE_MS = 600
 
@@ -85,6 +99,7 @@ export default function OrderSearchBadge({ reference, owner, project, onOrderFou
       // conversation switch (PluginView.jsx clears draft between
       // conversations), so a stale orderId from a PREVIOUS, unrelated
       // conversation never blocks onOrderFound firing for a new one.
+      if (notifiedOrderIdRef.current !== null && onOrderFound) onOrderFound(null)
       notifiedOrderIdRef.current = null
       return
     }
@@ -106,6 +121,21 @@ export default function OrderSearchBadge({ reference, owner, project, onOrderFou
           } else {
             setStatus('notfound')
             setResult(null)
+            // FIXED 2026-10-12 -- previously left notifiedOrderIdRef (and
+            // whatever the parent derived from the last match, e.g.
+            // PluginView.jsx's matchedOwnerReference) untouched here, so
+            // editing a matched reference to something that no longer
+            // matches silently left the PREVIOUS order's data lingering
+            // (a stale owner reference could end up embedded in the
+            // Appointment Code for an order it no longer applies to).
+            // Resetting here also means a later re-match -- even back to
+            // the SAME order as before (e.g. a typo fixed) -- fires
+            // onOrderFound again rather than being silently suppressed by
+            // the dedup check above.
+            if (notifiedOrderIdRef.current !== null) {
+              notifiedOrderIdRef.current = null
+              if (onOrderFound) onOrderFound(null)
+            }
           }
         })
         .catch(() => {
@@ -149,6 +179,7 @@ export default function OrderSearchBadge({ reference, owner, project, onOrderFou
         {result.statusName ? ` (${result.statusName})` : ''}
         {result.backOrder && <span className="ml-1 font-semibold text-amber-700">⚠ Back order</span>}
       </div>
+      {result.ownerReference && <div className="mt-0.5 text-green-700">Owner Reference: {result.ownerReference}</div>}
       {shipDateLabel && <div className="mt-0.5 text-green-700">Ship Date: {shipDateLabel}</div>}
       {deliveryDateLabel && <div className="mt-0.5 text-green-700">Requested Delivery Date: {deliveryDateLabel}</div>}
       {result.notes && <div className="mt-0.5 text-green-700 break-words">Order Notes: {result.notes}</div>}
