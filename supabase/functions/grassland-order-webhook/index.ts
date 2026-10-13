@@ -29,16 +29,6 @@
 // the final result comment — it reuses this agent's own OAuth credentials
 // without Netlify ever needing a copy of them.
 //
-// IMPORTANT: this file is the committed RECORD of what's deployed on
-// Supabase (project ppsbqekabtbwsmvdiyga, function slug
-// grassland-order-webhook) — it is NOT auto-deployed from this repo.
-// Supabase Edge Functions here are deployed directly via the Supabase MCP
-// tool, same as scheduling-agent-webhook/lens-webhook (neither of which
-// had their source tracked in git before this file — there was no
-// supabase/functions/ folder in this repo until now). After editing this
-// file, the change must ALSO be deployed to Supabase directly for it to
-// take effect — a git push alone does nothing here, unlike netlify/functions/.
-//
 // TODO-VERIFY (2026-10-13): findPdfAttachment/downloadAttachment below are
 // modeled on the REGULAR Front OAuth connector's tool shapes
 // (read_message -> attachments[], get_attachment(attachmentId) ->
@@ -46,7 +36,8 @@
 // has ever downloaded an attachment through Front's EXTERNAL AGENT MCP
 // server (mcp.frontapp.com) specifically. The two servers share Front's
 // general naming conventions, so this is an informed guess, not a blind
-// one — but it is still unconfirmed.
+// one — but it is still unconfirmed. If this breaks on first real test,
+// the error will name exactly which call failed.
 //
 // Secrets (Supabase > Edge Functions > Secrets):
 //   FRONT_GRASSLAND_AGENT_CLIENT_ID, FRONT_GRASSLAND_AGENT_CLIENT_SECRET,
@@ -308,15 +299,31 @@ function validateAgainstPrintedTotals(parsed: any): { ok: boolean; problems: str
 // Main pipeline
 // ---------------------------------------------------------------------------
 
+// FIXED 2026-10-13 (real stall, batch 1/PO 0116897171): this used to only
+// catch a thrown network error — fetch() does NOT throw on a non-2xx
+// response, so a request that reached Netlify's edge but got intercepted
+// before the function ran (e.g. site-wide visitor access / password
+// protection, a redirect, a WAF challenge) looked IDENTICAL to a real
+// success here: no exception, nothing logged, "result {ok:true}" printed
+// as if everything worked. Netlify's own function log showed ZERO
+// invocations for this exact batch, confirming the request never actually
+// reached the function despite this fetch not throwing. Now logs the real
+// status and a slice of the body every time, so a repeat of this is
+// visible in THIS function's logs instead of looking like silent success.
 async function triggerNetlifyResolve(batchId: number) {
   try {
-    await fetch(NETLIFY_RESOLVE_URL, {
+    const res = await fetch(NETLIFY_RESOLVE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-grassland-internal-secret': env('GRASSLAND_INTERNAL_SECRET') },
       body: JSON.stringify({ batchId }),
     })
+    const bodyText = await res.text().catch(() => '')
+    console.log(`[grassland-order] Netlify resolve handoff response for batch ${batchId}: status ${res.status}, body: ${bodyText.slice(0, 300)}`)
+    if (!res.ok) {
+      console.error(`[grassland-order] Netlify resolve handoff did NOT return 2xx for batch ${batchId} — resolution will not run unless retried.`)
+    }
   } catch (e) {
-    console.error('[grassland-order] failed to trigger Netlify resolve:', (e as Error).message)
+    console.error('[grassland-order] failed to trigger Netlify resolve (network-level):', (e as Error).message)
   }
 }
 
