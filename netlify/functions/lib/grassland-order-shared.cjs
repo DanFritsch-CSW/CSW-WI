@@ -435,11 +435,26 @@ async function resolveAndPushBatch(batchId) {
   return { ok: pushResult.success, batchId: batch.id, orderId: pushResult.order_id, error: pushResult.error }
 }
 
+// Last-resort safety net (added 2026-10-13, real stall: batch sat at
+// 'parsed' with zero Front-visible signal). Looks the batch back up purely
+// to get its conversation id, marks it 'failed', and posts the given
+// message — used only from the outer catch in
+// grassland-order-resolve-background.cjs when something throws before any
+// of resolveAndPushBatch's own (normal) comment paths get a chance to run.
+async function postFailureComment(batchId, message) {
+  const rows = await sbGet(`grassland_order_batches?id=eq.${batchId}&select=front_conversation_id&limit=1`)
+  const batch = rows && rows[0]
+  if (!batch) return
+  await sbPatch(`grassland_order_batches?id=eq.${batchId}`, { status: 'failed', error_message: message.slice(0, 1000) }).catch(() => {})
+  await postFrontComment(batch.front_conversation_id, message)
+}
+
 module.exports = {
   resolveOrderLines,
   decodePalletNumber,
   buildOrderHeader,
   pushGrasslandOrder,
   resolveAndPushBatch,
+  postFailureComment,
   GRASSLAND_PROJECTS,
 }
