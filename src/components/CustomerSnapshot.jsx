@@ -1,4 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
+import {
+  CSW_WAREHOUSE, DROP_RULES, classifyType, isDrop, normalizeProjectName,
+  omniQuery, GOLD_MODEL_ID, VIEW_APPT,
+} from '../lib/customerActivity.js'
 
 // ── Customer Snapshot ─────────────────────────────────────────
 // Per-customer, per-weekday volume vs. baseline view. Shipping in the Weekly
@@ -37,7 +41,8 @@ import { useState, useEffect, useMemo } from 'react'
 //   We never read appointment_id client-side — it exists purely as a
 //   dedup-breaker.
 //
-// Type taxonomy:
+// Type taxonomy (classification logic lives in ../lib/customerActivity.js,
+// shared with the All Customers weekly rollup — see FacilityWeeklyActivity.jsx):
 //   - Outbound:  dock_appointment_type_name starts with "Outbound"
 //   - Drops:     inbound rows where lookup_code matches the per-customer drop rule
 //                (KEN + CAL only — other facilities don't track drops this way)
@@ -53,80 +58,6 @@ import { useState, useEffect, useMemo } from 'react'
 //   counts reflect what was visible at snapshot generation time; the
 //   footnote on the card surfaces this so consumers aren't confused when
 //   a freshly-scheduled appointment doesn't appear.
-
-const GOLD_MODEL_ID = '33204248-b6db-4630-ae34-11aa94347add'
-const VIEW_APPT = 'gold__truck_appointments'
-
-const CSW_WAREHOUSE = {
-  cal: 'CSW-Franksville',
-  mad: 'CSW-Madison',
-  ken: 'CSW-Kenosha',
-  wr:  'CSW-Wisconsin Rapids',
-  ec:  'CSW-Eau Claire',
-}
-
-const KEN_OMNI_NAME_MAP = new Map([
-  ['FAIR OAKS FARMS', 'Fair Oaks Farms'],
-  ['FAIR OAKS FARMS WEST', 'Fair Oaks Farms'],
-  ['BIRCHWOOD FOODS  KENOSHA', 'Birchwood Foods Kenosha'],
-  ['BOSSB5', 'BossBites'],
-])
-
-const DROP_RULES = {
-  ken: new Map([
-    ['CROWN BAKERIES',                  { method: 'all' }],
-    ['Pretzilla Kenosha',               { method: 'all' }],
-    ['Fair Oaks Farms',                 { method: 'all' }],
-    ['Birchwood Foods Kenosha',         { method: 'all' }],
-    ['BossBites',                       { method: 'all' }],
-    ['RICHELIEU KENOSHA',               { method: 'include', patterns: ['TOP', 'PSH'] }],
-    ['RICHELIEU RAW MATERIALS KENOSHA', { method: 'include', patterns: ['TOP', 'PSH'] }],
-  ]),
-  cal: new Map([
-    ["Palermo's CALEDONIA finished", { method: 'exclude', excludeWhenAll: [['PUR', 'CMM'], ['PUR', 'PETER BROTHERS']] }],
-    ['Palermos CALEDONIA finished',  { method: 'exclude', excludeWhenAll: [['PUR', 'CMM'], ['PUR', 'PETER BROTHERS']] }],
-  ]),
-}
-
-function classifyType(typeName) {
-  const t = (typeName || '').toLowerCase()
-  if (t.startsWith('inbound'))  return 'inbound'
-  if (t.startsWith('outbound')) return 'outbound'
-  return null
-}
-
-function isDrop(facilityId, projectName, lookupCode, type) {
-  if (type !== 'inbound') return false
-  const rule = DROP_RULES[facilityId]?.get(projectName)
-  if (!rule) return false
-  const code = (lookupCode || '').toUpperCase()
-  if (rule.method === 'all') return true
-  if (rule.method === 'include') return rule.patterns.some(p => code.includes(p))
-  if (rule.method === 'exclude') return !rule.excludeWhenAll.some(group => group.every(p => code.includes(p)))
-  return false
-}
-
-function normalizeProjectName(facilityId, rawName) {
-  if (facilityId === 'ken' && KEN_OMNI_NAME_MAP.has(rawName)) {
-    return KEN_OMNI_NAME_MAP.get(rawName)
-  }
-  return rawName
-}
-
-async function omniQuery(query) {
-  const res = await fetch('/.netlify/functions/omni-query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: { version: 5, ...query } }),
-  })
-  if (!res.ok) {
-    let body = {}
-    try { body = await res.json() } catch { /* non-json */ }
-    throw new Error(body.error || `omni-query ${res.status}`)
-  }
-  const { rows } = await res.json()
-  return rows || []
-}
 
 function mondayOf(iso) {
   const d = new Date(iso + 'T00:00:00Z')
