@@ -40,6 +40,17 @@ import { fetchWeekActivity } from '../lib/customerActivity.js'
 // here; if that's wanted later, pull it from customerActivity.js and
 // extend this component rather than duplicating CustomerSnapshot's median
 // logic.
+//
+// Known pattern, not a bug (confirmed against gold.truck_appointments
+// 2026-10-13): KEN/CAL drop-rule customers routinely show Drops only on
+// today's column and little/none on later days in the week, even though
+// Outbound is fully booked out all week. Vendor/inbound trucks for these
+// accounts just aren't scheduled in Datex more than ~a day ahead — see
+// the "Inbound is often not booked ahead" rule in the
+// csw-weekly-appointment-pacing skill, which documents the same lag for
+// gold.truck_appointments generally. This table is reporting what's
+// actually on the books, not a fetch failure; the column fills in as
+// vendors book closer to the date.
 
 export default function FacilityWeeklyActivity({ facilityId, weekDays, planDate, color }) {
   const [byProject, setByProject] = useState(null)
@@ -83,6 +94,9 @@ export default function FacilityWeeklyActivity({ facilityId, weekDays, planDate,
         Every customer at this facility, Mon–Sun, in one table — live scheduled Drops / Inbound / Outbound
         (same classification as Customer Snapshot, including the KEN/CAL drop rules). HOLD appointments
         included, Cancelled excluded. Appointments created in the last hour may lag behind due to Datex sync.
+        Drops/Inbound are vendor-scheduled and often aren't booked more than a day out — a day showing no
+        drops usually means nothing's on the books yet, not that none are coming; Outbound is normally
+        booked for the full week.
       </div>
       {loading ? (
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
