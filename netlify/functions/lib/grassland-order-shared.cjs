@@ -43,16 +43,27 @@
 //      be paired with a reconciliation job (not yet built) before being
 //      trusted unattended.
 //
-// CONFIRMED 2026-10-13 against real order 818983 (PO 0116894180): `lot_id`
-// on create_outbound_order_line works correctly (every line's Lot column
-// in Datex matched what was sent). `license_plate_id` did NOT attach to
-// any line — the License Plate column was empty across all 20 lines
-// despite being sent on every call. The field name/shape for pushing a
-// specific license plate on an outbound order line remains UNCONFIRMED
-// and is a known gap: lines land correctly at the LOT level, not at the
-// specific physical pallet level. Whether that matters operationally
-// (can the floor pick any pallet of the matched lot, or must it be this
-// exact one) is a question for Dan/ops, not something to guess at here.
+// SETTLED 2026-10-13 against the real create_outbound_order_line OpenAPI
+// schema (https://csw-smartup-api.wavelength.host/documentation/, found by
+// Dan): the endpoint's actual parameters are order_id, shipment_id,
+// material_id, expected_quantity, actual_quantity, packaging_id, lot_id,
+// vendor_lot_id, marks, notes — THERE IS NO license_plate_id PARAMETER AT
+// ALL. The earlier guess wasn't a wrong field name, it was a field that
+// doesn't exist here; Datex's API silently ignored it, which is exactly
+// why order 818983's License Plate column came back empty on every line.
+// `lot_id` is confirmed correct (every line's Lot column matched). This
+// means specific-pallet selection is NOT controllable through this
+// endpoint — lines land at the lot level only. If pallet-level control
+// ever matters operationally, it would need a different Datex mechanism
+// (allocation/picking logic, or another endpoint), not a different
+// parameter name here.
+//
+// `vendor_lot_id` IS a real parameter — a Datex-internal integer FK,
+// confirmed to already exist as a column on datex_slv_lots itself (not a
+// field to invent a value for). fetchLotCandidates/
+// fetchAllContentsForLicensePlate now select it directly off the matched
+// lot record and pass that through, giving each line's Grassland lot
+// number real traceability in Datex without guessing an ID.
 //
 // CONFIRMED 2026-10-13 (same order): lookup_code and owner_reference need
 // to be Grassland's own "Sales Order" number (printed only on the "Lot
@@ -200,8 +211,14 @@ function decodePalletNumber(lpLookupCode) {
 async function fetchLotCandidates(storageLots) {
   if (!storageLots.length) return new Map()
   const inList = storageLots.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
+  // vendor_lot_id ADDED 2026-10-13: confirmed via the real create_outbound_order_line
+  // schema that this is a genuine field (a Datex-internal integer FK), and that
+  // datex_slv_lots already carries this column directly on the lot record —
+  // selecting it here means we can pass Datex's own correct vendor-lot
+  // association through to the line push, rather than inventing one.
   const rows = await runMotherDuckQuery(`
     SELECT lot.lookup_code AS storage_lot, lot.lot_id AS lot_id, lot.material_id AS material_id,
+           lot.vendor_lot_id AS vendor_lot_id,
            m.lookup_code AS material_code, m.project_id AS project_id
     FROM production_db.silver.datex_slv_lots lot
     JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
@@ -265,6 +282,7 @@ async function fetchLicensePlatesForLot(lotId) {
 async function fetchAllContentsForLicensePlate(licensePlateId) {
   return runMotherDuckQuery(`
     SELECT lpc.lot_id AS lot_id, lot.lookup_code AS storage_lot, lot.material_id AS material_id,
+           lot.vendor_lot_id AS vendor_lot_id,
            m.lookup_code AS material_code, m.project_id AS project_id, lpc.packaged_amount AS amount
     FROM production_db.silver.datex_slv_licenseplatecontents lpc
     JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
@@ -299,19 +317,20 @@ async function resolveOrderLines(parsed) {
       resolvedLines.push({ ...line, line_status: 'ambiguous' })
       continue
     }
-    const { lot_id, material_id, material_code } = candidates[0]
+    const { lot_id, material_id, material_code, vendor_lot_id } = candidates[0]
     if (!lpCacheByLotId.has(lot_id)) {
       lpCacheByLotId.set(lot_id, await fetchLicensePlatesForLot(lot_id))
     }
     const lp = lpCacheByLotId.get(lot_id).get(Number(line.pallet_tote_number))
     if (!lp) {
-      resolvedLines.push({ ...line, line_status: 'missing_lp', resolved_lot_id: lot_id, resolved_material_id: material_id, resolved_material_code: material_code })
+      resolvedLines.push({ ...line, line_status: 'missing_lp', resolved_lot_id: lot_id, resolved_material_id: material_id, resolved_material_code: material_code, resolved_vendor_lot_id: vendor_lot_id ?? null })
       continue
     }
 
     let finalLotId = lot_id
     let finalMaterialId = material_id
     let finalMaterialCode = material_code
+    let finalVendorLotId = vendor_lot_id ?? null
     let amountMismatch = Number(lp.amount) !== Number(line.item_count)
 
     // ADDED 2026-10-13 — see fetchAllContentsForLicensePlate header note.
@@ -337,6 +356,7 @@ async function resolveOrderLines(parsed) {
         finalLotId = alternates[0].lot_id
         finalMaterialId = alternates[0].material_id
         finalMaterialCode = alternates[0].material_code
+        finalVendorLotId = alternates[0].vendor_lot_id ?? null
         amountMismatch = false
         console.log(`[grassland-order-resolve] split-pallet cross-lot match: LP ${lp.lp_code} line (storage_lot ${line.storage_lot}, grassland_lot ${line.grassland_lot}) actually belongs to Datex lot ${finalLotId} (storage lot ${alternates[0].storage_lot}), not the printed ${line.storage_lot}/${lot_id}.`)
       }
@@ -348,6 +368,7 @@ async function resolveOrderLines(parsed) {
       resolved_lot_id: finalLotId,
       resolved_material_id: finalMaterialId,
       resolved_material_code: finalMaterialCode,
+      resolved_vendor_lot_id: finalVendorLotId,
       resolved_license_plate_id: lp.license_plate_id,
       resolved_license_plate_code: lp.lp_code,
       amount_mismatch: amountMismatch,
@@ -456,7 +477,7 @@ async function pushGrasslandOrder(header, resolvedLines) {
       actual_quantity: line.item_count,
       packaging_id: GRASSLAND_PACKAGING_ID,
       lot_id: line.resolved_lot_id, // CONFIRMED correct 2026-10-13 (order 818983)
-      license_plate_id: line.resolved_license_plate_id, // DISPROVEN 2026-10-13 — see file header note; did not attach on any line of order 818983
+      vendor_lot_id: line.resolved_vendor_lot_id ?? null, // ADDED 2026-10-13 per the real schema — the Datex-internal vendor-lot FK already stored on the matched lot record, NOT a free-text field (see file header note)
     })
     lineResults.push({ line_number: lineNumber, ok: lineResult.ok, status: lineResult.status, raw: lineResult.text.slice(0, 500) })
     if (!lineResult.ok) {
