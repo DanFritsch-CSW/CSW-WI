@@ -43,11 +43,25 @@
 //      be paired with a reconciliation job (not yet built) before being
 //      trusted unattended.
 //
-// TODO-VERIFY: `lot_id`/`license_plate_id` on create_outbound_order_line
-// are a best guess at Datex's snake_case convention, unconfirmed — no
-// existing code in this repo has ever called that endpoint with lot/pallet
-// data. Confirm against MotherDuck after the first real test push before
-// trusting this unattended.
+// CONFIRMED 2026-10-13 against real order 818983 (PO 0116894180): `lot_id`
+// on create_outbound_order_line works correctly (every line's Lot column
+// in Datex matched what was sent). `license_plate_id` did NOT attach to
+// any line — the License Plate column was empty across all 20 lines
+// despite being sent on every call. The field name/shape for pushing a
+// specific license plate on an outbound order line remains UNCONFIRMED
+// and is a known gap: lines land correctly at the LOT level, not at the
+// specific physical pallet level. Whether that matters operationally
+// (can the floor pick any pallet of the matched lot, or must it be this
+// exact one) is a question for Dan/ops, not something to guess at here.
+//
+// CONFIRMED 2026-10-13 (same order): lookup_code and owner_reference need
+// to be Grassland's own "Sales Order" number (printed only on the "Lot
+// Information" PDF, e.g. "1160587"), NOT left blank — a blank lookup_code
+// resulted in a pure Datex-sequential order code (818983) and, it appears,
+// also blank owner/vendor reference fields, though that second part is
+// unconfirmed as directly causal. vendor_reference needs to be the PO
+// number EXACTLY as printed, leading zero included (e.g. "0116894180") —
+// stripping it, as this file used to, is wrong.
 //
 // Env: MOTHERDUCK_TOKEN, DATEX_SMARTUP_* (or generic DATEX_*) via
 //      dpi-monthly-shared.cjs, SUPABASE_URL/KEY, GRASSLAND_INTERNAL_SECRET
@@ -365,14 +379,24 @@ async function resolveOrderLines(parsed) {
 
 // ── Assemble + push the order ───────────────────────────────────────────────
 
+// FIXED 2026-10-13 (real wrong-header-fields, order 818983/PO 0116894180):
+// lookup_code and owner_reference used to be left null, and vendor_reference
+// stripped the PO's leading zero. Confirmed against the real order: this
+// produced a blank order lookup code (Datex fell back to its own
+// sequential number, 818983) and left owner/vendor reference blank too.
+// Dan's correction: lookup_code and owner_reference should both be
+// Grassland's own "Sales Order" number (parsed.sales_order_number — now
+// extracted from the separate Lot Info PDF, see the Edge Function),
+// and vendor_reference should be the PO number exactly as printed,
+// leading zero included — no transform at all.
 function buildOrderHeader(parsed, projectId) {
   return {
     project_id: projectId,
     warehouse_id: MADISON_WAREHOUSE_ID,
     order_class_id: GRASSLAND_ORDER_CLASS_ID,
-    lookup_code: null, // left blank: real GRAFG1 orders show pure Datex-sequential numbers
-    owner_reference: null, // TODO-VERIFY: real orders show this mirroring lookup_code; confirm on first test push
-    vendor_reference: (parsed.po_number || '').replace(/^0+/, ''), // best-guess transform (strip leading zero), unconfirmed
+    lookup_code: parsed.sales_order_number || null,
+    owner_reference: parsed.sales_order_number || null,
+    vendor_reference: parsed.po_number || null,
     carrier_id: GRASSLAND_CARRIER_ID,
     expected_date: parsed.ship_date || null,
     shipping_address: {
@@ -417,8 +441,8 @@ async function pushGrasslandOrder(header, resolvedLines) {
       expected_quantity: line.item_count,
       actual_quantity: line.item_count,
       packaging_id: GRASSLAND_PACKAGING_ID,
-      lot_id: line.resolved_lot_id, // TODO-VERIFY field name
-      license_plate_id: line.resolved_license_plate_id, // TODO-VERIFY field name
+      lot_id: line.resolved_lot_id, // CONFIRMED correct 2026-10-13 (order 818983)
+      license_plate_id: line.resolved_license_plate_id, // DISPROVEN 2026-10-13 — see file header note; did not attach on any line of order 818983
     })
     lineResults.push({ line_number: lineNumber, ok: lineResult.ok, status: lineResult.status, raw: lineResult.text.slice(0, 500) })
     if (!lineResult.ok) {
