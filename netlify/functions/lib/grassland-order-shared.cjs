@@ -51,9 +51,16 @@
 //
 // Env: MOTHERDUCK_TOKEN, DATEX_SMARTUP_* (or generic DATEX_*) via
 //      dpi-monthly-shared.cjs, SUPABASE_URL/KEY, GRASSLAND_INTERNAL_SECRET
-//      (to call back into the grassland-order-reply Edge Function),
-//      GRASSLAND_AGENT_ACTIVE=true to allow real Datex pushes (anything
-//      else, including unset, stays dry-run).
+//      (to call back into the grassland-order-reply Edge Function).
+//      GRASSLAND_AGENT_ACTIVE now DEFAULTS TO ACTIVE (real Datex pushes) —
+//      flipped 2026-10-13 after this site's Netlify Functions hit AWS
+//      Lambda's hard 4KB total-env-var ceiling (shared across EVERY
+//      function on the site), and simply trying to ADD
+//      GRASSLAND_AGENT_ACTIVE=true as a new variable failed the deploy for
+//      the whole site, not just this feature. The var is no longer
+//      required to be set at all for normal (active) operation; only set
+//      GRASSLAND_AGENT_ACTIVE=false if dry-run testing is ever needed
+//      again and there's room in the budget for it.
 
 const { getSmartUpToken, runMotherDuckQuery, isConfigured } = require('./dpi-monthly-shared.cjs')
 
@@ -456,7 +463,16 @@ async function resolveAndPushBatch(batchId) {
   if (batch.status !== 'parsed') return { ok: false, error: `Batch ${batchId} is not in 'parsed' status (currently '${batch.status}') — not re-processing` }
 
   const parsed = batch.raw_extracted
-  const active = process.env.GRASSLAND_AGENT_ACTIVE === 'true'
+  // FLIPPED 2026-10-13: was `=== 'true'` (off unless explicitly turned on).
+  // Netlify Functions on this site share ONE 4KB total env-var budget
+  // across every function (AWS Lambda's hard limit) — simply trying to add
+  // GRASSLAND_AGENT_ACTIVE=true as a new var pushed the site over that
+  // ceiling and failed the deploy for every function, not just this one.
+  // Defaulting to active and requiring an explicit 'false' to opt OUT
+  // means normal (real-push) operation never needs this var to exist at
+  // all; a future dry-run test can still set GRASSLAND_AGENT_ACTIVE=false
+  // if there's budget room for it when that's needed.
+  const active = process.env.GRASSLAND_AGENT_ACTIVE !== 'false'
 
   const resolution = await resolveOrderLines(parsed)
   if (resolution.resolvedLines) await insertLineRows(batch.id, resolution.resolvedLines)
