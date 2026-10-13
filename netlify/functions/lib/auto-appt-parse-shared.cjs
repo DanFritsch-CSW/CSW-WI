@@ -169,8 +169,8 @@
 // normally — this pilot must stay out of the way for those. The signal
 // Dan chose: whether the email carries Sam's or Daren's own signature
 // block (hasPalermoSignature — checks for their names in the stripped
-// body text). Present → treated as a Sam/Daren-style test, full 3-hour
-// lead-time treatment. Absent → skipped entirely here (not logged to
+// body text). Present → treated as a Sam/Daren-style test, full lead-time
+// treatment. Absent → skipped entirely here (not logged to
 // auto_appt_attempts at all, same as any other non-matching sender) so
 // it's left purely to scheduling_agent. Real Sam/Daren senders don't need
 // this check — their own address already proves identity.
@@ -179,7 +179,7 @@
 // "grading, not creating" redesign earlier today left a real gap —
 // scheduling_agent's own generic extraction has no idea Warehouse/Type/
 // Owner/Project/Dock Door/Carrier are structurally constant for these two
-// senders, and no idea the 3-hour lead-time rule exists at all.
+// senders, and no idea the lead-time rule exists at all.
 // backfillAgentSubmission() (still defined below, exported, UNUSED as of
 // this move) originally PATCHed this correction onto scheduling_agent's
 // submission from this file's own 15-minute cron tick — which worked, but
@@ -194,6 +194,16 @@
 // write time, before the write AND before the confirmation comment, so
 // both are right immediately — no cron dependency at all. The function
 // here is left in place, unused, in case this needs reverting.
+//
+// CHANGED 2026-10-13 (Dan's explicit request, cnv_1cmrc15g) -- lead time
+// was 3 hours, confirmed with Dan for both senders' formats on
+// 2026-10-10; now 4 hours. scheduling-agent-webhook's identical
+// PALERMO_LEAD_TIME_HOURS constant was updated in the same change -- this
+// file's independent shadow-grading prediction (resolveDatesFromParts,
+// used to compute parsed_arrival for the confidence-tally comparison)
+// would otherwise silently diverge from what the webhook actually wrote,
+// and start reporting false mismatches against real CSR-approved
+// appointments. Keep both in sync if this changes again.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -205,7 +215,7 @@ const CAL_INBOX_ID = 'inb_aut78' // CAL Appointments inbox -- confirmed 2026-09-
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuck query before writing this, not guessed
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
 const APPT_TYPE = 'Outbound' // every observed order from either sender is an Outbound Sales Order in Datex
-const LEAD_TIME_HOURS = 3 // appointment is scheduled this many hours BEFORE the "needed by"/stated time -- confirmed with Dan for BOTH senders' formats
+const LEAD_TIME_HOURS = 4 // appointment is scheduled this many hours BEFORE the "needed by"/stated time -- was 3, changed 2026-10-13 (Dan's explicit request); keep in sync with scheduling-agent-webhook's PALERMO_LEAD_TIME_HOURS
 
 // Structurally constant for every Sam/Daren email -- never stated in the
 // body, always the same regardless of which PO is referenced. Confirmed
@@ -474,7 +484,7 @@ async function fetchRecentEligibleMessages() {
 }
 
 // Dan's test address (d_fritsch21@hotmail.com) sends two kinds of test
-// email: a copy of a real Sam/Daren-style email (should get the 3-hour
+// email: a copy of a real Sam/Daren-style email (should get the
 // lead-time treatment, same as the real thing) or a generic test of some
 // OTHER carrier's scenario (should be invisible to this pilot entirely --
 // no shadow grading, no lead-time assumption -- and left for
@@ -661,12 +671,12 @@ async function findAgentSubmission(conversationId) {
 // stated in the body, always the same regardless of which PO is
 // referenced. The lead-time-adjusted Arrival time is also fully
 // deterministic once the email is correctly parsed (resolveDatesFromParts
-// already does the -3hr math reliably). scheduling_agent's own generic
-// extraction has no way to know any of this: Dan's first live test
-// (cnv_1cm5cxg4) came back with Type "Inbound" (wrong), Project/Owner/
-// Dock Door/Carrier blank, and the raw "needed by" time used AS the
-// arrival time -- the 3-hour lead-time rule never applied at all, because
-// that rule only ever lived in this file, and this file stopped writing
+// already does the lead-time math reliably). scheduling_agent's own
+// generic extraction has no way to know any of this: Dan's first live
+// test (cnv_1cm5cxg4) came back with Type "Inbound" (wrong), Project/
+// Owner/Dock Door/Carrier blank, and the raw "needed by" time used AS the
+// arrival time -- the lead-time rule never applied at all, because that
+// rule only ever lived in this file, and this file stopped writing
 // anything once it became a grader instead of a creator (see the earlier
 // 2026-10-10 architecture-change header note). This function takes all of
 // that back over on scheduling_agent's own submission, independent of
