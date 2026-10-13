@@ -7,6 +7,7 @@ import RosterBoard from '../components/RosterBoard.jsx'
 import AppointmentList from '../components/AppointmentList.jsx'
 import CustomerSnapshot from '../components/CustomerSnapshot.jsx'
 import WeeklyLaborOverview from '../components/WeeklyLaborOverview.jsx'
+import FacilityWeeklyActivity from '../components/FacilityWeeklyActivity.jsx'
 import PrePickStatus from '../components/PrePickStatus.jsx'
 import JdfPutaways from '../components/JdfPutaways.jsx'
 import DpiPickline from '../components/DpiPickline.jsx'
@@ -78,8 +79,13 @@ const MAD_TABS = [
 // tab-row consts above. "Customer Snapshot" is the pre-existing
 // customer-facing card view; "Labor Overview" is the new labor-hours-
 // delta + reconnected weekly Projects grid.
+// "All Customers" (added 2026-10-13, Dean/Hill ask in cnv_1552i49g) rolls
+// every customer at the facility into one live Drops/Inbound/Outbound
+// table for the whole week — see FacilityWeeklyActivity.jsx for why this
+// is a third tab rather than a change to the other two.
 const WEEKLY_SUB_TABS = [
   { id: 'customer', label: 'Customer Snapshot' }, { id: 'labor', label: 'Labor Overview' },
+  { id: 'activity', label: 'All Customers' },
 ]
 const KEN_STALE_KEYS = new Set(['FAIR OAKS FARMS', 'FAIR OAKS FARMS WEST'])
 
@@ -1115,6 +1121,13 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
           {weeklySubTab === 'customer' ? (
             <CustomerSnapshot
               facilityId={facility.id}
+              planDate={planDate}
+              color={facility.color}
+            />
+          ) : weeklySubTab === 'activity' ? (
+            <FacilityWeeklyActivity
+              facilityId={facility.id}
+              weekDays={weekDays}
               planDate={planDate}
               color={facility.color}
             />
