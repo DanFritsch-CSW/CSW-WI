@@ -22,9 +22,10 @@
  *      DATEX_SMARTUP_*, SUPABASE_*, GRASSLAND_AGENT_ACTIVE).
  */
 
-const { resolveAndPushBatch } = require('./lib/grassland-order-shared.cjs')
+const { resolveAndPushBatch, postFailureComment } = require('./lib/grassland-order-shared.cjs')
 
 exports.handler = async (event) => {
+  let batchId = null
   try {
     const headers = Object.fromEntries(
       Object.entries(event.headers || {}).map(([k, v]) => [k.toLowerCase(), v])
@@ -32,7 +33,11 @@ exports.handler = async (event) => {
     const expected = process.env.GRASSLAND_INTERNAL_SECRET || ''
     const got = headers['x-grassland-internal-secret'] || ''
     if (!expected || got !== expected) {
-      console.warn('[grassland-order-resolve] bad or missing internal secret; ignoring request')
+      // FIXED 2026-10-13 (real stall, cnv_1cmqpvx0/PO 0116897171): this used
+      // to just warn+200 with nothing else — if the secret didn't match
+      // (e.g. Netlify not yet redeployed with GRASSLAND_INTERNAL_SECRET),
+      // the batch sat at 'parsed' forever with zero visible signal anywhere.
+      console.error('[grassland-order-resolve] bad or missing internal secret — GRASSLAND_INTERNAL_SECRET likely not set/redeployed on Netlify yet')
       return { statusCode: 200 }
     }
 
@@ -43,12 +48,25 @@ exports.handler = async (event) => {
       console.warn('[grassland-order-resolve] missing batchId')
       return { statusCode: 200 }
     }
+    batchId = body.batchId
 
-    const result = await resolveAndPushBatch(body.batchId)
+    const result = await resolveAndPushBatch(batchId)
     console.log('[grassland-order-resolve] result', JSON.stringify(result))
     return { statusCode: 200 }
   } catch (e) {
-    console.error('[grassland-order-resolve] error:', e.message)
+    // SAFETY NET (added 2026-10-13, same real stall): resolveAndPushBatch's
+    // own branches all post a Front comment, but a genuinely unexpected
+    // exception (MotherDuck connection drop, a real bug, etc.) used to just
+    // get console.error'd here with no comment ever reaching Front — a
+    // crash and a stuck-forever success looked identical from the thread.
+    // This now always tells the thread SOMETHING happened, even if it
+    // can't say exactly what, as long as we at least know which batch.
+    console.error('[grassland-order-resolve] unhandled error:', e.message)
+    if (batchId) {
+      await postFailureComment(batchId, `Grassland order agent: an unexpected error stopped processing (batch ${batchId}). ${e.message}`).catch((err) => {
+        console.error('[grassland-order-resolve] also failed to post failure comment:', err.message)
+      })
+    }
     return { statusCode: 200 }
   }
 }
