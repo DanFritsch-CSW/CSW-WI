@@ -14,7 +14,7 @@
 //
 // UPDATED 2026-08-23: pending_created rows now show the needed-by ->
 // appointment-time pair explicitly (e.g. "needed 3pm → appt 12pm"), so
-// the 3-hour lead-time adjustment (see lib/auto-appt-parse-shared.cjs) is
+// the lead-time adjustment (see lib/auto-appt-parse-shared.cjs) is
 // visible at a glance in the review rather than hidden inside the
 // submission itself.
 //
@@ -103,12 +103,12 @@
 // Palermo's immediate override (see scheduling-agent-webhook's own header
 // note) force-fills those six fields from hardcoded constants before the
 // write for these senders -- the fields actually worth watching in this
-// view are Arrival Date/Time (the 3-hour lead-time math), Reference #,
-// and Notes, which the override does NOT hardcode. Only covers
-// submissions from 2026-10-11 onward (when agent_field_accuracy's
-// sender_email column and the snapshot mechanism went live) -- same
-// start date as the app-wide digest, not SHADOW_START_DATE above (which
-// is one day earlier and predates this table).
+// view are Arrival Date/Time (the lead-time math), Reference #, and
+// Notes, which the override does NOT hardcode. Only covers submissions
+// from 2026-10-11 onward (when agent_field_accuracy's sender_email
+// column and the snapshot mechanism went live) -- same start date as the
+// app-wide digest, not SHADOW_START_DATE above (which is one day earlier
+// and predates this table).
 //
 // Same run/test split as every other digest in this app.
 
