@@ -156,16 +156,29 @@ function decodePalletNumber(lpLookupCode) {
   return Number.isNaN(n) ? null : n
 }
 
+// FIXED 2026-10-13 (real failure, batch 3/PO 0116894180): these two query
+// functions used to reference bare `bronze.datex_lots` / `bronze.datex_
+// materials` / `bronze.datex_licenseplate*` with no database prefix — this
+// MotherDuck connection does not default to production_db as the current
+// catalog, so the unqualified names never resolved. MotherDuck's own error
+// named the fully-qualified alternatives (production_db.bronze.datex_lots,
+// among two backup-schema copies). Switched to production_db.silver.* at
+// the same time, not just prefixed bronze: silver is the clean/normalized
+// layer confirmed to exist for all four tables needed here
+// (datex_slv_lots, datex_slv_materials, datex_slv_licenseplatecontents,
+// datex_slv_licenseplates), already lowercase snake_case
+// (lot_id, lookup_code, material_id, project_id, license_plate_id,
+// packaged_amount) instead of bronze's raw PascalCase Datex field names.
 async function fetchLotCandidates(storageLots) {
   if (!storageLots.length) return new Map()
   const inList = storageLots.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
   const rows = await runMotherDuckQuery(`
-    SELECT lot.LookupCode AS storage_lot, lot.Id AS lot_id, lot.MaterialId AS material_id,
-           m.LookupCode AS material_code, m.ProjectId AS project_id
-    FROM bronze.datex_lots lot
-    JOIN bronze.datex_materials m ON m.Id = lot.MaterialId
-    WHERE lot.LookupCode IN (${inList})
-      AND m.ProjectId IN (${GRASSLAND_PROJECT_IDS.join(',')})
+    SELECT lot.lookup_code AS storage_lot, lot.lot_id AS lot_id, lot.material_id AS material_id,
+           m.lookup_code AS material_code, m.project_id AS project_id
+    FROM production_db.silver.datex_slv_lots lot
+    JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
+    WHERE lot.lookup_code IN (${inList})
+      AND m.project_id IN (${GRASSLAND_PROJECT_IDS.join(',')})
   `)
   const map = new Map()
   for (const r of rows) {
@@ -193,12 +206,15 @@ function voteOrderProject(storageLots, candidatesByLot) {
   return { projectId, projectCode, conflict: false, noVotes: false }
 }
 
+// See the FIXED note above fetchLotCandidates — same bronze-without-prefix
+// bug, same silver-layer switch (datex_slv_licenseplatecontents.packaged_amount
+// is the direct analog of bronze's PackagedAmount).
 async function fetchLicensePlatesForLot(lotId) {
   const rows = await runMotherDuckQuery(`
-    SELECT lp.Id AS license_plate_id, lp.LookupCode AS lp_code, lpc.PackagedAmount AS amount
-    FROM bronze.datex_licenseplatecontents lpc
-    JOIN bronze.datex_licenseplates lp ON lp.Id = lpc.LicensePlateId
-    WHERE lpc.LotId = ${Number(lotId)}
+    SELECT lp.license_plate_id AS license_plate_id, lp.lookup_code AS lp_code, lpc.packaged_amount AS amount
+    FROM production_db.silver.datex_slv_licenseplatecontents lpc
+    JOIN production_db.silver.datex_slv_licenseplates lp ON lp.license_plate_id = lpc.license_plate_id
+    WHERE lpc.lot_id = ${Number(lotId)}
   `)
   const byPallet = new Map()
   for (const r of rows) {
