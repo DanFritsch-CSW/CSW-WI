@@ -13,9 +13,8 @@
 // and POSTs {batchId} here; resolveAndPushBatch reads that row, does the
 // live Datex resolution, and either pushes the order or flags it.
 //
-// WHY THE RESOLUTION LOGIC BELOW IS NOT A SIMPLE LOOKUP — same three
-// reasons as before, now proven against 4 real release forms and 7 real
-// storage lots:
+// WHY THE RESOLUTION LOGIC BELOW IS NOT A SIMPLE LOOKUP — now proven
+// against 4 real release forms and real storage lots:
 //   1. Grassland's "Item #" is not a stable material key — the same item #
 //      exists as two different materials in two different Madison
 //      projects (GRAFG1 "Cooler" vs GRALA1 "Frozen"). Project is resolved
@@ -25,7 +24,20 @@
 //      real license-plate codes. The crosswalk (decodePalletNumber): take
 //      the LP's LookupCode, drop its last digit, the remaining 3 digits
 //      equal the release form's Pallet/Tote #.
-//   3. create_outbound_order_line is a CONFIRMED UNRELIABLE Datex endpoint
+//   3. A SPLIT PALLET's second lot fraction can live under a DIFFERENT
+//      Datex storage lot than the one printed on the form (confirmed
+//      2026-10-13, PO 0116894180: the form prints both 564951's 53-case
+//      fraction and 564965's 7-case fraction under one "STORAGE LOT:
+//      163441A" header, but Datex actually filed the 564965 fraction
+//      under a separate lot 163441C — same license plate, same material,
+//      same project, different lot_id). fetchAllContentsForLicensePlate +
+//      the fallback search in resolveOrderLines below handles this: when
+//      the line's printed storage lot doesn't produce a matching amount,
+//      it looks for another lot ON THE SAME PHYSICAL LICENSE PLATE whose
+//      amount, project, and material code (cross-checked against the
+//      line's own printed item_number) all agree before accepting it —
+//      never widens the search beyond that one physical LP.
+//   4. create_outbound_order_line is a CONFIRMED UNRELIABLE Datex endpoint
 //      (see dpi-monthly-shared.cjs) — silently drops lines under load.
 //      Every push here writes to grassland_order_batches/_lines and MUST
 //      be paired with a reconciliation job (not yet built) before being
@@ -156,19 +168,14 @@ function decodePalletNumber(lpLookupCode) {
   return Number.isNaN(n) ? null : n
 }
 
-// FIXED 2026-10-13 (real failure, batch 3/PO 0116894180): these two query
-// functions used to reference bare `bronze.datex_lots` / `bronze.datex_
-// materials` / `bronze.datex_licenseplate*` with no database prefix — this
-// MotherDuck connection does not default to production_db as the current
-// catalog, so the unqualified names never resolved. MotherDuck's own error
-// named the fully-qualified alternatives (production_db.bronze.datex_lots,
-// among two backup-schema copies). Switched to production_db.silver.* at
-// the same time, not just prefixed bronze: silver is the clean/normalized
-// layer confirmed to exist for all four tables needed here
-// (datex_slv_lots, datex_slv_materials, datex_slv_licenseplatecontents,
-// datex_slv_licenseplates), already lowercase snake_case
-// (lot_id, lookup_code, material_id, project_id, license_plate_id,
-// packaged_amount) instead of bronze's raw PascalCase Datex field names.
+// FIXED 2026-10-13 (real failure, batch 3/PO 0116894180): these query
+// functions used to reference bare `bronze.X` with no database prefix —
+// this MotherDuck connection does not default to production_db as the
+// current catalog, so the unqualified names never resolved. Switched to
+// fully-qualified production_db.silver.* — the clean/normalized layer,
+// already lowercase snake_case (lot_id, lookup_code, material_id,
+// project_id, license_plate_id, packaged_amount) instead of bronze's raw
+// PascalCase Datex field names.
 async function fetchLotCandidates(storageLots) {
   if (!storageLots.length) return new Map()
   const inList = storageLots.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
@@ -224,6 +231,27 @@ async function fetchLicensePlatesForLot(lotId) {
   return byPallet
 }
 
+// ADDED 2026-10-13 (real false-flag, PO 0116894180, storage lot 163441A
+// pallet 30): a split pallet's second lot fraction can be filed under a
+// DIFFERENT Datex storage lot than the one printed on the release form for
+// that row — Grassland's form groups both fractions under one printed
+// "STORAGE LOT:" header, but Datex gave the second fraction its own lot
+// record (163441C vs the printed 163441A), confirmed same license plate,
+// same material, same project. This pulls every lot/material/amount
+// combination actually present on one physical license plate, so a
+// mismatch there (see resolveOrderLines) can be resolved against reality
+// instead of trusting the form's storage-lot grouping as gospel.
+async function fetchAllContentsForLicensePlate(licensePlateId) {
+  return runMotherDuckQuery(`
+    SELECT lpc.lot_id AS lot_id, lot.lookup_code AS storage_lot, lot.material_id AS material_id,
+           m.lookup_code AS material_code, m.project_id AS project_id, lpc.packaged_amount AS amount
+    FROM production_db.silver.datex_slv_licenseplatecontents lpc
+    JOIN production_db.silver.datex_slv_lots lot ON lot.lot_id = lpc.lot_id
+    JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
+    WHERE lpc.license_plate_id = ${Number(licensePlateId)}
+  `)
+}
+
 async function resolveOrderLines(parsed) {
   const lines = parsed.lines || []
   const distinctStorageLots = [...new Set(lines.map((l) => l.storage_lot))]
@@ -239,6 +267,7 @@ async function resolveOrderLines(parsed) {
   }
 
   const lpCacheByLotId = new Map()
+  const lpContentsCacheByLpId = new Map()
   const resolvedLines = []
   const unresolvedStorageLots = []
 
@@ -258,13 +287,46 @@ async function resolveOrderLines(parsed) {
       resolvedLines.push({ ...line, line_status: 'missing_lp', resolved_lot_id: lot_id, resolved_material_id: material_id, resolved_material_code: material_code })
       continue
     }
-    const amountMismatch = Number(lp.amount) !== Number(line.item_count)
+
+    let finalLotId = lot_id
+    let finalMaterialId = material_id
+    let finalMaterialCode = material_code
+    let amountMismatch = Number(lp.amount) !== Number(line.item_count)
+
+    // ADDED 2026-10-13 — see fetchAllContentsForLicensePlate header note.
+    // Only kicks in on a mismatch, and only accepts an alternate lot when
+    // it's an UNAMBIGUOUS match on the exact same physical license plate:
+    // same project, same material code as THIS line's own printed item
+    // number, and the amount matches exactly. If more than one candidate
+    // ties, or none does, the mismatch stands and the order still gets
+    // flagged for manual review rather than guessing.
+    if (amountMismatch) {
+      if (!lpContentsCacheByLpId.has(lp.license_plate_id)) {
+        lpContentsCacheByLpId.set(lp.license_plate_id, await fetchAllContentsForLicensePlate(lp.license_plate_id))
+      }
+      const allContents = lpContentsCacheByLpId.get(lp.license_plate_id)
+      const wantedItemNumber = String(line.item_number || '').trim()
+      const alternates = allContents.filter((c) =>
+        c.lot_id !== lot_id &&
+        c.project_id === vote.projectId &&
+        String(c.material_code).trim() === wantedItemNumber &&
+        Number(c.amount) === Number(line.item_count)
+      )
+      if (alternates.length === 1) {
+        finalLotId = alternates[0].lot_id
+        finalMaterialId = alternates[0].material_id
+        finalMaterialCode = alternates[0].material_code
+        amountMismatch = false
+        console.log(`[grassland-order-resolve] split-pallet cross-lot match: LP ${lp.lp_code} line (storage_lot ${line.storage_lot}, grassland_lot ${line.grassland_lot}) actually belongs to Datex lot ${finalLotId} (storage lot ${alternates[0].storage_lot}), not the printed ${line.storage_lot}/${lot_id}.`)
+      }
+    }
+
     resolvedLines.push({
       ...line,
       line_status: 'resolved',
-      resolved_lot_id: lot_id,
-      resolved_material_id: material_id,
-      resolved_material_code: material_code,
+      resolved_lot_id: finalLotId,
+      resolved_material_id: finalMaterialId,
+      resolved_material_code: finalMaterialCode,
       resolved_license_plate_id: lp.license_plate_id,
       resolved_license_plate_code: lp.lp_code,
       amount_mismatch: amountMismatch,
