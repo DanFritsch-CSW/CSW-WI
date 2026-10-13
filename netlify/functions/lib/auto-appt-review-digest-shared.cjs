@@ -88,6 +88,28 @@
 // here rather than assumed, since this app has a real history of broken
 // integration calls that were never verified live before being built on.
 //
+// ADDED 2026-10-13 (Dan's explicit request): a per-field confidence
+// breakdown, same shape and same ten tracked fields as the app-wide
+// Scheduling Agent Field Accuracy digest (lib/agent-accuracy-digest-
+// shared.cjs) -- "Warehouse: 114/114 (100.0%)" etc. -- but scoped to just
+// this pilot's three eligible senders (PALERMO_FIELD_SENDERS) instead of
+// every scheduling_agent submission app-wide. Sourced from the SAME
+// agent_field_accuracy table that digest reads (compareAgentFieldAccuracy
+// in scheduling-push-to-datex-background.cjs writes one row there per
+// graded submission, Palermo's included, via the sender_email column). No
+// new table or write path -- this is purely a differently-filtered read
+// of data that was already being collected. Expect Warehouse/Type/Owner/
+// Project/Dock Door/Carrier to read at or near 100% here, since the
+// Palermo's immediate override (see scheduling-agent-webhook's own header
+// note) force-fills those six fields from hardcoded constants before the
+// write for these senders -- the fields actually worth watching in this
+// view are Arrival Date/Time (the 3-hour lead-time math), Reference #,
+// and Notes, which the override does NOT hardcode. Only covers
+// submissions from 2026-10-11 onward (when agent_field_accuracy's
+// sender_email column and the snapshot mechanism went live) -- same
+// start date as the app-wide digest, not SHADOW_START_DATE above (which
+// is one day earlier and predates this table).
+//
 // Same run/test split as every other digest in this app.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
@@ -104,6 +126,38 @@ const DAN_TEAMMATE_ID = 'tea_a3e8k'
 // pre-fix noise (444 attempts, 0 real matches) — the cumulative confidence
 // tally only makes sense starting from here.
 const SHADOW_START_DATE = '2026-10-10T00:00:00Z'
+
+// The ten fields agent_field_accuracy tracks per submission -- identical
+// set and order to lib/agent-accuracy-digest-shared.cjs's FIELD_KEYS, kept
+// in sync deliberately so the two digests read the same way. Appointment
+// Code is left out here (unlike the app-wide digest) to match exactly
+// what Dan asked for -- it has no independent accuracy story (see that
+// file's header note) and would just add noise to a pilot-scoped view.
+const FIELD_KEYS = [
+  { key: 'warehouse', label: 'Warehouse' },
+  { key: 'type', label: 'Type' },
+  { key: 'project', label: 'Project' },
+  { key: 'owner', label: 'Owner' },
+  { key: 'arrival_date', label: 'Arrival Date' },
+  { key: 'arrival_time', label: 'Arrival Time' },
+  { key: 'dock_door', label: 'Dock Door' },
+  { key: 'carrier', label: 'Carrier' },
+  { key: 'reference', label: 'Reference #' },
+  { key: 'notes', label: 'Notes' },
+]
+
+// Same three addresses this pilot already tracks end-to-end (see
+// senderLabel below) -- Sam, Daren, and Dan's own test sends. Dan's
+// explicit 2026-10-10 call that his test runs count toward the live
+// confidence tally rather than being broken out separately applies here
+// too, for consistency with the existing match/mismatch tally.
+const PALERMO_FIELD_SENDERS = ['s.rohde@palermospizza.com', 'da.peet@palermospizza.com', 'd_fritsch21@hotmail.com']
+
+// agent_field_accuracy's sender_email column and snapshot mechanism only
+// exist from 2026-10-11 onward -- see lib/agent-accuracy-digest-shared.cjs's
+// header note. One day later than SHADOW_START_DATE above, which predates
+// this table entirely.
+const FIELD_ACCURACY_START_DATE = '2026-10-11T00:00:00Z'
 
 const OUTCOME_LABELS = {
   shadow_logged: '🔎 Validated — waiting on CSR approval to grade',
@@ -138,6 +192,37 @@ async function fetchConfidenceTally() {
   const mismatch = rows.filter((r) => r.match_status === 'mismatch').length
   const pending = rows.filter((r) => r.match_status === 'pending_outcome').length
   return { matched, mismatch, pending, compared: matched + mismatch }
+}
+
+// Cumulative per-field rows for this pilot's three eligible senders, since
+// agent_field_accuracy started tracking sender_email. See header note.
+async function fetchPalermoFieldAccuracy() {
+  const senderList = PALERMO_FIELD_SENDERS.map((s) => encodeURIComponent(s)).join(',')
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/agent_field_accuracy?sender_email=in.(${senderList})&compared_at=gte.${encodeURIComponent(FIELD_ACCURACY_START_DATE)}&select=*`,
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+  )
+  if (!res.ok) return []
+  return res.json()
+}
+
+function buildFieldTally(rows) {
+  const tally = {}
+  for (const { key } of FIELD_KEYS) tally[key] = { matched: 0, compared: 0 }
+  for (const r of rows) {
+    for (const { key } of FIELD_KEYS) {
+      const matchVal = r[`${key}_match`]
+      if (matchVal === null || matchVal === undefined) continue // field never stated by either side, or not tracked -- not counted as a comparison
+      tally[key].compared++
+      if (matchVal === true) tally[key].matched++
+    }
+  }
+  return tally
+}
+
+function fmtFieldPct(matched, compared) {
+  if (compared === 0) return 'no data yet'
+  return `${matched}/${compared} (${((matched / compared) * 100).toFixed(1)}%)`
 }
 
 function formatTimeShort(iso) {
@@ -209,7 +294,7 @@ function describeRow(r) {
 // tally + per-row breakdown shown when the task is opened. Split out of
 // a single joined string (the old comment-body shape) since a Front task
 // has these as two separate fields.
-function buildSummary(attempts, tally) {
+function buildSummary(attempts, tally, fieldRows) {
   const today = new Date().toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', timeZone: 'America/Chicago' })
   const subject = `Palermo's Auto-Scheduling — ${today}`
   const lines = []
@@ -223,6 +308,16 @@ function buildSummary(attempts, tally) {
     )
     if (tally.mismatch > 0) {
       lines.push(`⚠️ ${tally.mismatch} mismatch${tally.mismatch === 1 ? '' : 'es'} so far — see below for today's, or ask me to pull the full list.`)
+    }
+    lines.push('')
+  }
+
+  if (fieldRows) {
+    const fieldTally = buildFieldTally(fieldRows)
+    lines.push(`Per-field confidence, cumulative since 2026-10-11 (${fieldRows.length} submission${fieldRows.length === 1 ? '' : 's'} graded so far):`)
+    lines.push('')
+    for (const { key, label } of FIELD_KEYS) {
+      lines.push(`- ${label}: ${fmtFieldPct(fieldTally[key].matched, fieldTally[key].compared)}`)
     }
     lines.push('')
   }
@@ -247,13 +342,13 @@ function buildSummary(attempts, tally) {
 }
 
 async function postDigest() {
-  const [attempts, tally] = await Promise.all([fetchWindowAttempts(), fetchConfidenceTally()])
+  const [attempts, tally, fieldRows] = await Promise.all([fetchWindowAttempts(), fetchConfidenceTally(), fetchPalermoFieldAccuracy()])
   const meaningful = attempts.filter((a) => a.outcome !== 'skipped_already_processed')
   if (meaningful.length === 0) {
     return { posted: false, reason: 'no activity in the last 24 hours' }
   }
 
-  const { subject, description } = buildSummary(attempts, tally)
+  const { subject, description } = buildSummary(attempts, tally, fieldRows)
   const res = await fetch('https://api2.frontapp.com/conversations', {
     method: 'POST',
     headers: { Authorization: `Bearer ${FRONT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
