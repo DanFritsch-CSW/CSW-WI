@@ -389,6 +389,19 @@ async function resolveOrderLines(parsed) {
 // extracted from the separate Lot Info PDF, see the Edge Function),
 // and vendor_reference should be the PO number exactly as printed,
 // leading zero included — no transform at all.
+//
+// CONFIRMED 2026-10-13 against this endpoint's actual published OpenAPI
+// docs (https://csw-smartup-api.wavelength.host/documentation/, found by
+// Dan — first real spec seen for this API, everything before this was
+// informed guessing): `vendor_reference` IS the correct field name — same
+// shape as `owner_reference`, right there in the schema. Yet on the real
+// order it still came back blank in the UI despite that. Since the name is
+// now proven right, this is very likely a Datex-side business rule (e.g.
+// "vendor" semantically doesn't apply to a Sales Order class) rather than
+// a code bug, and is NOT worth re-guessing further on live orders. The
+// docs also surfaced a field this file never knew existed: `order_notes` —
+// added below as a reliable second place to carry the PO number,
+// independent of whatever Datex does with vendor_reference.
 function buildOrderHeader(parsed, projectId) {
   return {
     project_id: projectId,
@@ -397,6 +410,7 @@ function buildOrderHeader(parsed, projectId) {
     lookup_code: parsed.sales_order_number || null,
     owner_reference: parsed.sales_order_number || null,
     vendor_reference: parsed.po_number || null,
+    order_notes: parsed.po_number ? `PO ${parsed.po_number}` : null,
     carrier_id: GRASSLAND_CARRIER_ID,
     expected_date: parsed.ship_date || null,
     shipping_address: {
