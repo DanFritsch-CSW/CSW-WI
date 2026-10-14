@@ -7,7 +7,8 @@
 // ROUTING: the customer is determined from the ORIGINAL inbound email's
 // sender domain (confirmed 2026-10-13: Grassland = grassland.com,
 // Richelieu = richelieufoods.com; confirmed 2026-10-14: Pedone Pinsa =
-// pedonepinsa.com) — this is the primary, deterministic signal, checked
+// pedonepinsa.com, Thomas Foods International = thomasfoodsusa.com) —
+// this is the primary, deterministic signal, checked
 // before any AI extraction runs. Each customer's config below (CUSTOMERS)
 // owns its own: which attachment(s) to read per "order" (Grassland: one
 // Release Form + optional Lot Info PDF per mention; Richelieu: EVERY PDF
@@ -395,6 +396,52 @@ function validatePedone(_parsed: any): { ok: boolean; problems: string[] } {
 }
 
 // ---------------------------------------------------------------------------
+// Thomas Foods International: extraction schema (no printed total either)
+// ---------------------------------------------------------------------------
+//
+// ONE PDF = ONE "Fulfillment Authorization" = ONE order, one per email
+// (confirmed 2026-10-14, sender tfiusainventoryauthorization@thomasfoodsusa.com).
+// Like Pedone, this document has no printed grand total anywhere to
+// structurally cross-check against — validateThomasFoods below is a
+// deliberate no-op for the same reason. Unlike Pedone, there IS a real
+// cross-check available on the Netlify side: the PDF states a material
+// code AND a storage lot independently on each line, and the resolved
+// lot's own material in Datex must agree with what's printed — see
+// adapters/thomasfoods.cjs for that logic.
+//
+// The email itself asks CSW to reply with shipping details (carrier etc.)
+// separately — deliberately NOT captured here, same precedent as ignoring
+// Richelieu's email-body logistics text.
+
+const THOMAS_FOODS_PROMPT = `You read a Thomas Foods International "Fulfillment Authorization" PDF (an outbound shipment instruction) and return ONLY a JSON object, no prose, no markdown fences.
+
+Shape:
+{
+  "fulfillment_authorization_number": string,
+  "transfer_order_number": string,
+  "customer_po": string,
+  "ship_date": string,
+  "ship_to": { "name": string, "line1": string, "city": string, "state": string, "zip": string },
+  "lines": [ { "material_code": string, "description": string, "storage_lot": string, "case_count": number } ]
+}
+
+Rules:
+- "fulfillment_authorization_number" is the "#IF..." number printed at the top right of the page.
+- "transfer_order_number" is the number after "Transfer Order #" in the "Sales Order #" column (e.g. "Transfer Order #TO10006606" -> "TO10006606").
+- "customer_po" is the "Customer PO#" column value — this is very often blank; use null when it is, do not invent a value.
+- "ship_to" is the "Ship To" address block (name, street line, city, state, zip) — NOT the "Ship From" block, which is always CSW's own address.
+- "lines" is every row of the item table. The "Item" column is in the form "<description> : <material code>" — split it into "description" and "material_code" (the part after the colon). "storage_lot" is the "Lot" column value exactly as printed (e.g. "PO156366-1"). "case_count" is the "Cases Ordered" column value. Ignore the "Lot Ref", "Pack Date", "Ship Mark", "Box ID", and "General Notes" columns — none of them are needed.
+- Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
+- If any field is illegible or absent, use null for that field rather than guessing.`
+
+function validateThomasFoods(_parsed: any): { ok: boolean; problems: string[] } {
+  // Deliberate no-op — see file section header note above. The real
+  // cross-check (item material code vs. the resolved lot's actual
+  // material) needs MotherDuck and happens in the Netlify adapter.
+  return { ok: true, problems: [] }
+}
+
+// ---------------------------------------------------------------------------
 // Per-customer config — the one thing to extend when adding a new customer
 // ---------------------------------------------------------------------------
 
@@ -507,6 +554,33 @@ const CUSTOMERS: CustomerConfig[] = [
       flag_reason: null,
       line_count: parsed.lines.length,
       total_quantity: (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.case_quantity) || 0), 0),
+      pallet_count: null,
+      raw_extracted: parsed,
+    }),
+  },
+  {
+    code: 'thomasfoods',
+    domains: ['thomasfoodsusa.com'],
+    async buildJobs(pdfs) {
+      if (pdfs.length === 0) return []
+      if (pdfs.length > 1) console.log(`[order-agent:thomasfoods] multiple PDF attachments found on one email — using the first: ${pdfs.map((a) => a.filename).join(', ')}`)
+      return [{ primaryId: pdfs[0].id, secondaryId: null }]
+    },
+    async extract(primaryB64) {
+      return callClaude(THOMAS_FOODS_PROMPT, [primaryB64], 'Extract this Fulfillment Authorization as the JSON object described in your instructions.')
+    },
+    validate: validateThomasFoods,
+    dedupeKey: (parsed) => parsed.transfer_order_number || null,
+    isEmpty: (parsed) => !parsed.transfer_order_number || !Array.isArray(parsed.lines) || parsed.lines.length === 0,
+    ackBody: (parsed) => `Order agent: read ${parsed.transfer_order_number} (${parsed.fulfillment_authorization_number || 'no IF#'}, ${parsed.lines.length} lot line(s)). Checking against current Datex inventory now...`,
+    batchFields: (parsed) => ({
+      customer_code: 'thomasfoods',
+      po_number: parsed.transfer_order_number,
+      ship_date: parsed.ship_date ? new Date(parsed.ship_date).toISOString().slice(0, 10) : null,
+      status: 'parsed',
+      flag_reason: null,
+      line_count: parsed.lines.length,
+      total_quantity: (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.case_count) || 0), 0),
       pallet_count: null,
       raw_extracted: parsed,
     }),
