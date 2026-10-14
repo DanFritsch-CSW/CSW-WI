@@ -63,17 +63,25 @@ const KENOSHA_WAREHOUSE_ID = 5 // CSW-Kenosha
 const PEDONE_ORDER_CLASS_ID = 2 // "SO" Sales Order — same class as Grassland/Richelieu
 const PEDONE_PACKAGING_ID = 3 // "CS" — confirmed fixed across 1,980 real lines, zero exceptions
 
-// Looks up every item number printed on one PDF, scoped to the Pedone
-// project only (no multi-project vote needed — this customer has one
-// project, same as Richelieu).
+// FIXED 2026-10-14 (real failure found via Thomas Foods, same bug class
+// applies here): an exact-string match against lookup_code can silently
+// miss a real material/lot if Datex's own stored value carries stray
+// leading/trailing whitespace — confirmed directly for a real lot on
+// another customer's project, and confirmed broadly: 8 of 3,784 lots
+// across the three projects this agent touches (THOMA5/RICHR5/PEDPI5)
+// have the same issue. TRIM() on both sides of the match (and on the
+// input list) makes this robust regardless of which side has the stray
+// space. Looks up every item number printed on one PDF, scoped to the
+// Pedone project only (no multi-project vote needed — this customer has
+// one project, same as Richelieu).
 async function fetchMaterials(itemNumbers) {
   if (!itemNumbers.length) return new Map()
-  const inList = itemNumbers.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
+  const inList = itemNumbers.map((s) => `'${s.trim().replace(/'/g, "''")}'`).join(',')
   const rows = await runMotherDuckQuery(`
-    SELECT material_id AS material_id, lookup_code AS item_number
+    SELECT material_id AS material_id, TRIM(lookup_code) AS item_number
     FROM production_db.silver.datex_slv_materials
     WHERE project_id = ${PEDONE_PROJECT_ID}
-      AND lookup_code IN (${inList})
+      AND TRIM(lookup_code) IN (${inList})
   `)
   const map = new Map()
   for (const r of rows) map.set(r.item_number, r)
@@ -86,14 +94,14 @@ async function resolveOrderLines(parsed) {
     return { ok: false, flagReason: 'No line items were extracted from this picking document.' }
   }
 
-  const itemNumbers = [...new Set(lines.map((l) => l.item_number))]
+  const itemNumbers = [...new Set(lines.map((l) => (l.item_number || '').trim()))]
   const materialsByItem = await fetchMaterials(itemNumbers)
 
   const resolvedLines = []
   const unresolvedItems = []
 
   for (const line of lines) {
-    const material = materialsByItem.get(line.item_number)
+    const material = materialsByItem.get((line.item_number || '').trim())
     if (!material) {
       unresolvedItems.push(line.item_number)
       resolvedLines.push({ ...line, line_status: 'missing_lp' })
