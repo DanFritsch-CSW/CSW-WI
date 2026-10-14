@@ -6,19 +6,20 @@
 //
 // ROUTING: the customer is determined from the ORIGINAL inbound email's
 // sender domain (confirmed 2026-10-13: Grassland = grassland.com,
-// Richelieu = richelieufoods.com) — this is the primary, deterministic
-// signal, checked before any AI extraction runs. Each customer's config
-// below (CUSTOMERS) owns its own: which attachment(s) to read per
-// "order" (Grassland: one Release Form + optional Lot Info PDF per
-// mention; Richelieu: EVERY PDF on the message, each one its own
-// independent order — confirmed 2026-10-13, Richelieu's daily "CSW TO WL"
-// email carries several Transfer Order PDFs in one message), its
-// extraction prompt/schema, its own pre-Datex structural validation (the
-// one check that needs no external data), and how to build the ack/
-// duplicate/empty messages. Everything downstream of extraction (the
-// MotherDuck resolution, the Datex push) lives in Netlify's
-// order-agent-common.cjs + per-customer adapter, mirroring this file's
-// CUSTOMERS map.
+// Richelieu = richelieufoods.com; confirmed 2026-10-14: Pedone Pinsa =
+// pedonepinsa.com) — this is the primary, deterministic signal, checked
+// before any AI extraction runs. Each customer's config below (CUSTOMERS)
+// owns its own: which attachment(s) to read per "order" (Grassland: one
+// Release Form + optional Lot Info PDF per mention; Richelieu: EVERY PDF
+// on the message, each one its own independent order — confirmed
+// 2026-10-13, Richelieu's daily "CSW TO WL" email carries several Transfer
+// Order PDFs in one message; Pedone: one PDF per email, like Grassland),
+// its extraction prompt/schema, its own pre-Datex structural validation
+// (the one check that needs no external data — Pedone has none, see its
+// section below), and how to build the ack/duplicate/empty messages.
+// Everything downstream of extraction (the MotherDuck resolution, the
+// Datex push) lives in Netlify's order-agent-common.cjs + per-customer
+// adapter, mirroring this file's CUSTOMERS map.
 //
 // WHAT THIS FUNCTION DOES, AND DOES NOT DO: as before — verify the
 // webhook, read the triggering email, find and download the relevant
@@ -348,6 +349,52 @@ function validateRichelieuTotals(parsed: any): { ok: boolean; problems: string[]
 }
 
 // ---------------------------------------------------------------------------
+// Pedone Pinsa: extraction schema (no structural validation possible)
+// ---------------------------------------------------------------------------
+//
+// ONE PDF = ONE "Picking Operations" document = ONE order, one per email
+// (confirmed 2026-10-14 via real thread cnv_1chmcd5g — a teammate flagged
+// it to Dan as "this is how they send them now"). Unlike Grassland or
+// Richelieu, this document prints NO grand total anywhere on the page —
+// there is nothing analogous to "RELEASE SITE TOTALS" or "TOTAL N TOTES"
+// to structurally cross-check extraction against. validatePedone below is
+// a deliberate no-op for that reason; the only real check available for
+// this customer is resolution itself failing on the Netlify side (an item
+// number not matching a real material).
+//
+// The document also carries a "could not be reserved / Check Availability"
+// warning tied to Pedone's own order-management system's reservation
+// status — confirmed with Dan (2026-10-14) this is irrelevant and must be
+// ignored during extraction, same spirit as ignoring Richelieu's email-
+// body logistics data.
+
+const PEDONE_PROMPT = `You read a Pedone Pinsa "Picking Operations" PDF (an outbound shipment pick ticket) and return ONLY a JSON object, no prose, no markdown fences.
+
+Shape:
+{
+  "cust_po": string,
+  "csw_csd_code": string,
+  "scheduled_date": string,
+  "delivery_address": { "name": string, "line1": string, "city": string, "state": string, "zip": string },
+  "lines": [ { "item_number": string, "description": string, "case_quantity": number } ]
+}
+
+Rules:
+- "cust_po" is the "Cust PO" value from the order details row near the top.
+- "csw_csd_code" is the large bold code printed below the addresses, in the form "CSW/CSD/#####".
+- "scheduled_date" is the "Scheduled Date" value from the same order details row.
+- "delivery_address" is the "Delivery Address" block specifically (NOT the "Customer Address" block, even though they are often similar) — name, street line, city, state, zip.
+- "lines" is every row of the item table: the bracketed code is "item_number" (e.g. "[WBF-0712-C]" becomes "WBF-0712-C"), the text after it is "description", and "case_quantity" is the number in the "Case" column. Ignore the "Pallets" column entirely — it is not needed.
+- Ignore any "could not be reserved" / "Check Availability" warning on the page — it is not relevant to extraction.
+- Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
+- If any field is illegible or absent, use null for that field rather than guessing.`
+
+function validatePedone(_parsed: any): { ok: boolean; problems: string[] } {
+  // Deliberate no-op — see file section header note above.
+  return { ok: true, problems: [] }
+}
+
+// ---------------------------------------------------------------------------
 // Per-customer config — the one thing to extend when adding a new customer
 // ---------------------------------------------------------------------------
 
@@ -363,7 +410,8 @@ interface CustomerConfig {
   domains: string[]
   // Reads every PDF on the triggering message and returns one "job" per
   // order to extract + push. Grassland: one job (primary + optional
-  // secondary PDF). Richelieu: one job per PDF, no secondary.
+  // secondary PDF). Richelieu: one job per PDF, no secondary. Pedone: one
+  // job for the first PDF found, no secondary.
   buildJobs(pdfs: Array<{ id: string; filename: string }>, downloadPdf: (id: string) => Promise<string>): Promise<Array<{ primaryId: string; secondaryId: string | null }>>
   extract(primaryB64: string, secondaryB64: string | null): Promise<any>
   validate(parsed: any): { ok: boolean; problems: string[] }
@@ -433,6 +481,33 @@ const CUSTOMERS: CustomerConfig[] = [
       line_count: parsed.lots.length,
       total_quantity: parsed.total_quantity ?? null,
       pallet_count: parsed.printed_total_totes ?? null,
+      raw_extracted: parsed,
+    }),
+  },
+  {
+    code: 'pedone',
+    domains: ['pedonepinsa.com'],
+    async buildJobs(pdfs) {
+      if (pdfs.length === 0) return []
+      if (pdfs.length > 1) console.log(`[order-agent:pedone] multiple PDF attachments found on one email — using the first: ${pdfs.map((a) => a.filename).join(', ')}`)
+      return [{ primaryId: pdfs[0].id, secondaryId: null }]
+    },
+    async extract(primaryB64) {
+      return callClaude(PEDONE_PROMPT, [primaryB64], 'Extract this picking document as the JSON object described in your instructions.')
+    },
+    validate: validatePedone,
+    dedupeKey: (parsed) => parsed.csw_csd_code || null,
+    isEmpty: (parsed) => !parsed.csw_csd_code || !Array.isArray(parsed.lines) || parsed.lines.length === 0,
+    ackBody: (parsed) => `Order agent: read ${parsed.csw_csd_code} (Cust PO ${parsed.cust_po}, ${parsed.lines.length} line(s)). Checking against current Datex inventory now...`,
+    batchFields: (parsed) => ({
+      customer_code: 'pedone',
+      po_number: parsed.csw_csd_code,
+      ship_date: parsed.scheduled_date ? new Date(parsed.scheduled_date).toISOString().slice(0, 10) : null,
+      status: 'parsed',
+      flag_reason: null,
+      line_count: parsed.lines.length,
+      total_quantity: (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.case_quantity) || 0), 0),
+      pallet_count: null,
       raw_extracted: parsed,
     }),
   },
