@@ -52,24 +52,27 @@ const RICHELIEU_PROJECT_ID = 224 // RICHR5 — Richelieu Raw Materials Kenosha
 const KENOSHA_WAREHOUSE_ID = 5 // CSW-Kenosha (Pleasant Prairie)
 const RICHELIEU_ORDER_CLASS_ID = 2 // "SO" Sales Order — same class as Grassland/DPI
 
-// Looks up every lot code printed on one PDF in a single query, scoped to
-// the Richelieu project only (no multi-project vote needed — unlike
-// Grassland, this customer only ever has the one project). Joins straight
-// through to each lot's OWN base-packaging record so the eaches-per-pallet
-// conversion and the packaging_id to push are both pulled from Datex's
-// real data, never hardcoded per SKU.
+// FIXED 2026-10-14 (real failure, Thomas Foods order TO10006606 — same
+// bug class applies here): an exact-string match against lot.lookup_code
+// can silently miss a real lot if Datex's own stored value carries stray
+// leading/trailing whitespace — confirmed directly for one real Thomas
+// Foods lot ("PO156366-1" stored as "PO156366-1 "), and confirmed broadly:
+// 8 of 3,784 lots across the three projects this agent touches
+// (THOMA5/RICHR5/PEDPI5) have the same issue. TRIM() on both sides of the
+// match (and on the input list) makes this robust regardless of which
+// side has the stray space.
 async function fetchLotDetails(lotCodes) {
   if (!lotCodes.length) return new Map()
-  const inList = lotCodes.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
+  const inList = lotCodes.map((s) => `'${s.trim().replace(/'/g, "''")}'`).join(',')
   const rows = await runMotherDuckQuery(`
-    SELECT lot.lookup_code AS lot_code, lot.lot_id AS lot_id, lot.material_id AS material_id,
+    SELECT TRIM(lot.lookup_code) AS lot_code, lot.lot_id AS lot_id, lot.material_id AS material_id,
            lot.vendor_lot_id AS vendor_lot_id, m.lookup_code AS material_code,
            pk.packaging_id AS packaging_id, pk.pallet_tie AS pallet_tie, pk.pallet_high AS pallet_high
     FROM production_db.silver.datex_slv_lots lot
     JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
     JOIN production_db.silver.datex_slv_materialspackagingslookup pk
       ON pk.material_id = lot.material_id AND pk.is_base_packaging = true
-    WHERE lot.lookup_code IN (${inList})
+    WHERE TRIM(lot.lookup_code) IN (${inList})
       AND m.project_id = ${RICHELIEU_PROJECT_ID}
   `)
   const map = new Map()
@@ -86,14 +89,14 @@ async function resolveOrderLines(parsed) {
     return { ok: false, flagReason: 'No lot/tote lines were extracted from this Transfer Order PDF.' }
   }
 
-  const lotCodes = lots.map((l) => l.lot_code)
+  const lotCodes = lots.map((l) => (l.lot_code || '').trim())
   const detailsByLotCode = await fetchLotDetails(lotCodes)
 
   const resolvedLines = []
   const unresolvedLotCodes = []
 
   for (const lotLine of lots) {
-    const candidates = detailsByLotCode.get(lotLine.lot_code) || []
+    const candidates = detailsByLotCode.get((lotLine.lot_code || '').trim()) || []
     if (candidates.length !== 1) {
       unresolvedLotCodes.push(lotLine.lot_code)
       resolvedLines.push({ ...lotLine, line_status: candidates.length === 0 ? 'missing_lp' : 'ambiguous' })
