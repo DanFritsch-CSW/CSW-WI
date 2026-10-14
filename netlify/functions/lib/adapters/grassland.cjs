@@ -56,6 +56,16 @@
 // name is confirmed correct from the schema but still didn't persist on
 // the real order — likely a Datex-side business rule for Sales Orders,
 // not a code bug; order_notes carries the PO number as a reliable backup.
+//
+// FIXED 2026-10-14 (real failure found via Thomas Foods, same bug class
+// applies here): an exact-string match against lot.lookup_code can
+// silently miss a real lot if Datex's own stored value carries stray
+// leading/trailing whitespace — confirmed directly for a real lot on
+// another customer's project, and confirmed broadly: 8 of 3,784 lots
+// across the three other projects this agent touches have the same
+// issue. TRIM() on both sides of the match (and on the input list) in
+// fetchLotCandidates makes this robust regardless of which side has the
+// stray space.
 
 const { runMotherDuckQuery } = require('../order-agent-common.cjs')
 
@@ -80,14 +90,14 @@ function decodePalletNumber(lpLookupCode) {
 
 async function fetchLotCandidates(storageLots) {
   if (!storageLots.length) return new Map()
-  const inList = storageLots.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
+  const inList = storageLots.map((s) => `'${s.trim().replace(/'/g, "''")}'`).join(',')
   const rows = await runMotherDuckQuery(`
-    SELECT lot.lookup_code AS storage_lot, lot.lot_id AS lot_id, lot.material_id AS material_id,
+    SELECT TRIM(lot.lookup_code) AS storage_lot, lot.lot_id AS lot_id, lot.material_id AS material_id,
            lot.vendor_lot_id AS vendor_lot_id,
            m.lookup_code AS material_code, m.project_id AS project_id
     FROM production_db.silver.datex_slv_lots lot
     JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
-    WHERE lot.lookup_code IN (${inList})
+    WHERE TRIM(lot.lookup_code) IN (${inList})
       AND m.project_id IN (${GRASSLAND_PROJECT_IDS.join(',')})
   `)
   const map = new Map()
@@ -145,7 +155,7 @@ async function fetchAllContentsForLicensePlate(licensePlateId) {
 
 async function resolveOrderLines(parsed) {
   const lines = parsed.lines || []
-  const distinctStorageLots = [...new Set(lines.map((l) => l.storage_lot))]
+  const distinctStorageLots = [...new Set(lines.map((l) => (l.storage_lot || '').trim()))]
 
   const candidatesByLot = await fetchLotCandidates(distinctStorageLots)
   const vote = voteOrderProject(distinctStorageLots, candidatesByLot)
@@ -163,7 +173,7 @@ async function resolveOrderLines(parsed) {
   const unresolvedStorageLots = []
 
   for (const line of lines) {
-    const candidates = (candidatesByLot.get(line.storage_lot) || []).filter((c) => c.project_id === vote.projectId)
+    const candidates = (candidatesByLot.get((line.storage_lot || '').trim()) || []).filter((c) => c.project_id === vote.projectId)
     if (candidates.length !== 1) {
       unresolvedStorageLots.push(line.storage_lot)
       resolvedLines.push({ ...line, line_status: 'ambiguous' })
