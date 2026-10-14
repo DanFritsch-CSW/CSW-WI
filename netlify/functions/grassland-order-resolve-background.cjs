@@ -2,7 +2,14 @@
 
 /**
  * Netlify BACKGROUND Function: grassland-order-resolve-background
- * Rewritten 2026-10-13 (replaces the earlier single-runtime design).
+ * UPDATED 2026-10-13: now requires order-agent-common.cjs instead of the
+ * retired grassland-order-shared.cjs — this function's own name/route is
+ * kept as-is (the Edge Function's NETLIFY_RESOLVE_URL hardcodes this path;
+ * renaming the file would mean renaming that URL too and coordinating both
+ * deploys, for a cosmetic-only gain), but what it calls is now the
+ * multi-customer dispatcher: resolveAndPushBatch reads the batch's
+ * customer_code and routes to that customer's adapter (Grassland or
+ * Richelieu) itself. This file doesn't need to know which customer it is.
  *
  * Called by the grassland-order-webhook Supabase Edge Function right after
  * it writes a 'parsed' row to grassland_order_batches — this is the half of
@@ -18,11 +25,11 @@
  * background function in this app.
  *
  * Env: GRASSLAND_INTERNAL_SECRET (+ everything
- *      lib/grassland-order-shared.cjs needs: MOTHERDUCK_TOKEN,
+ *      lib/order-agent-common.cjs needs: MOTHERDUCK_TOKEN,
  *      DATEX_SMARTUP_*, SUPABASE_*, GRASSLAND_AGENT_ACTIVE).
  */
 
-const { resolveAndPushBatch, postFailureComment } = require('./lib/grassland-order-shared.cjs')
+const { resolveAndPushBatch, postFailureComment } = require('./lib/order-agent-common.cjs')
 
 exports.handler = async (event) => {
   let batchId = null
@@ -37,7 +44,7 @@ exports.handler = async (event) => {
       // to just warn+200 with nothing else — if the secret didn't match
       // (e.g. Netlify not yet redeployed with GRASSLAND_INTERNAL_SECRET),
       // the batch sat at 'parsed' forever with zero visible signal anywhere.
-      console.error('[grassland-order-resolve] bad or missing internal secret — GRASSLAND_INTERNAL_SECRET likely not set/redeployed on Netlify yet')
+      console.error('[order-agent-resolve] bad or missing internal secret — GRASSLAND_INTERNAL_SECRET likely not set/redeployed on Netlify yet')
       return { statusCode: 200 }
     }
 
@@ -45,13 +52,13 @@ exports.handler = async (event) => {
     try { body = JSON.parse(event.body || '{}') } catch { return { statusCode: 200 } }
 
     if (!body.batchId) {
-      console.warn('[grassland-order-resolve] missing batchId')
+      console.warn('[order-agent-resolve] missing batchId')
       return { statusCode: 200 }
     }
     batchId = body.batchId
 
     const result = await resolveAndPushBatch(batchId)
-    console.log('[grassland-order-resolve] result', JSON.stringify(result))
+    console.log('[order-agent-resolve] result', JSON.stringify(result))
     return { statusCode: 200 }
   } catch (e) {
     // SAFETY NET (added 2026-10-13, same real stall): resolveAndPushBatch's
@@ -61,10 +68,10 @@ exports.handler = async (event) => {
     // crash and a stuck-forever success looked identical from the thread.
     // This now always tells the thread SOMETHING happened, even if it
     // can't say exactly what, as long as we at least know which batch.
-    console.error('[grassland-order-resolve] unhandled error:', e.message)
+    console.error('[order-agent-resolve] unhandled error:', e.message)
     if (batchId) {
-      await postFailureComment(batchId, `Grassland order agent: an unexpected error stopped processing (batch ${batchId}). ${e.message}`).catch((err) => {
-        console.error('[grassland-order-resolve] also failed to post failure comment:', err.message)
+      await postFailureComment(batchId, `Order agent: an unexpected error stopped processing (batch ${batchId}). ${e.message}`).catch((err) => {
+        console.error('[order-agent-resolve] also failed to post failure comment:', err.message)
       })
     }
     return { statusCode: 200 }
