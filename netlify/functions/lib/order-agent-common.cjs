@@ -260,16 +260,24 @@ async function postFailureComment(batchId, message) {
   await postFrontComment(batch.front_conversation_id, message)
 }
 
-// Adapters register themselves here. Required at the bottom (not the top)
-// to avoid a require() cycle: adapters require this file for sbGet/sbPost/
-// runMotherDuckQuery/smartUpPost, and this file needs the adapters map for
-// resolveAndPushBatch — Node resolves this fine as long as the adapters
-// only use the common exports inside their functions, not at module-load
-// time.
-const ADAPTERS = {
-  grassland: require('./adapters/grassland.cjs'),
-  richelieu: require('./adapters/richelieu.cjs'),
-}
+// FIXED 2026-10-13 (real failure, first Richelieu test: "runMotherDuckQuery
+// is not a function" on every batch): this used to require the adapters
+// BEFORE assigning module.exports, with a comment claiming that was safe
+// "as long as the adapters only use the common exports inside their
+// functions" — that reasoning was wrong. This is a circular require
+// (adapters require this file back for sbGet/runMotherDuckQuery/etc), and
+// Node resolves a circular require to whatever module.exports IS at that
+// exact moment, not whatever it will eventually become. Requiring the
+// adapters first meant their own `const { runMotherDuckQuery } =
+// require(...)` destructured properties off Node's default empty exports
+// object, long before this file's real module.exports existed — breaking
+// every call to runMotherDuckQuery in every adapter, Grassland included
+// (Grassland's own batches would have hit this exact same error the next
+// time one ran; Richelieu's test just happened to be first). Assigning
+// module.exports FIRST, then requiring the adapters afterward, means the
+// object they receive via their circular require already has every real
+// function attached.
+let ADAPTERS = {}
 
 module.exports = {
   sbGet,
@@ -283,5 +291,10 @@ module.exports = {
   insertLineRows,
   resolveAndPushBatch,
   postFailureComment,
-  ADAPTERS,
+  get ADAPTERS() { return ADAPTERS },
+}
+
+ADAPTERS = {
+  grassland: require('./adapters/grassland.cjs'),
+  richelieu: require('./adapters/richelieu.cjs'),
 }
