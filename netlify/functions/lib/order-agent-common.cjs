@@ -298,4 +298,5 @@ ADAPTERS = {
   grassland: require('./adapters/grassland.cjs'),
   richelieu: require('./adapters/richelieu.cjs'),
   pedone: require('./adapters/pedone.cjs'),
+  thomasfoods: require('./adapters/thomasfoods.cjs'),
 }
