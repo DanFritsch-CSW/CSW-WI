@@ -503,24 +503,41 @@ async function runOrderAgentForMention(conversationId: string) {
 
   try {
     const results = await withMcp(async (call) => {
-      // 50 entries of headroom — see prior note: a thread with several
-      // @mention retries or (for Richelieu) logistics replies can exceed
-      // a lower limit and make the original email invisible.
-      const convRaw = await call('read_conversation', { conversationId, limit: 50 })
-      const inboundIds = allInboundMessageIds(convRaw)
-      if (inboundIds.length === 0) throw new Error('No inbound message found in the most recent 50 conversation entries — this thread may have more history than that; a wider fetch or pagination would be needed.')
-
-      // Find the first (newest-first) inbound message that actually has
-      // PDF attachments — the message that triggered this, not just
-      // whichever inbound entry happens to be most recent (a Richelieu
-      // thread can have later inbound replies about driver ETAs etc. with
-      // no attachments at all).
+      // FIXED 2026-10-13 (real failure, Richelieu cnv_1cmu7ff8): a single
+      // 50-entry page isn't enough on a genuinely busy support thread — on
+      // this real conversation, SLA-bot rule actions plus several
+      // logistics reply emails (driver ETAs, appointment changes) plus
+      // this agent's own ack/error comments from testing earlier in the
+      // day pushed the original order email's entry position well past
+      // 50, and the mention came back "no PDF attachment found" despite
+      // the email being right there if you scrolled. Now pages backward
+      // (newest-first, matching Front's own ordering) looking for an
+      // inbound message with PDF attachments, capped at 5 pages (up to
+      // ~250 entries) to avoid a runaway loop on a truly ancient thread —
+      // same cap used elsewhere in this app for conversation pagination.
+      let cursor: string | undefined
       let triggeringMsgRaw: string | null = null
       let pdfs: Array<{ id: string; filename: string }> = []
-      for (const messageId of inboundIds) {
-        const msgRaw = await call('read_message', { messageId })
-        const found = pdfAttachments(msgRaw)
-        if (found.length > 0) { triggeringMsgRaw = msgRaw; pdfs = found; break }
+      const MAX_PAGES = 5
+      for (let page = 0; page < MAX_PAGES && !triggeringMsgRaw; page++) {
+        const convRaw: string = cursor
+          ? await call('read_conversation', { conversationId, limit: 50, cursor })
+          : await call('read_conversation', { conversationId, limit: 50 })
+        const inboundIds = allInboundMessageIds(convRaw)
+        // Find the first (newest-first) inbound message that actually has
+        // PDF attachments — the message that triggered this, not just
+        // whichever inbound entry happens to be most recent (a Richelieu
+        // thread can have later inbound replies about driver ETAs etc.
+        // with no attachments at all).
+        for (const messageId of inboundIds) {
+          const msgRaw = await call('read_message', { messageId })
+          const found = pdfAttachments(msgRaw)
+          if (found.length > 0) { triggeringMsgRaw = msgRaw; pdfs = found; break }
+        }
+        if (triggeringMsgRaw) break
+        const parsedConv = tryJson(convRaw)
+        cursor = parsedConv?.entries?.nextCursor
+        if (!cursor) break
       }
       if (!triggeringMsgRaw) return { noAttachment: true as const }
 
