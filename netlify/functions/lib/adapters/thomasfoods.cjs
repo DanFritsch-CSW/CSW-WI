@@ -68,15 +68,24 @@ const THOMAS_PACKAGING_ID = 3 // "CS" — confirmed fixed across 348 real histor
 // Looks up every storage lot printed on one PDF in a single query, scoped
 // to the Thomas Foods project only (single project, no multi-project vote
 // needed — same simplicity as Richelieu/Pedone).
+// FIXED 2026-10-14 (real failure, order TO10006606): a matching exact-
+// string lookup against lot.lookup_code silently missed a real lot —
+// Datex's own stored value for storage lot "PO156366-1" actually carries
+// a trailing space ("PO156366-1 ", 11 characters), confirmed directly.
+// Checked broadly: 8 of 3,784 lots across the three projects this agent
+// currently touches (THOMA5/RICHR5/PEDPI5) have the same stray leading/
+// trailing whitespace — small, but a real recurring landmine, not a one-
+// off. TRIM() on both sides of the match makes this robust regardless of
+// which side (ours or Datex's) has the stray space.
 async function fetchLotDetails(storageLots) {
   if (!storageLots.length) return new Map()
-  const inList = storageLots.map((s) => `'${s.replace(/'/g, "''")}'`).join(',')
+  const inList = storageLots.map((s) => `'${s.trim().replace(/'/g, "''")}'`).join(',')
   const rows = await runMotherDuckQuery(`
-    SELECT lot.lookup_code AS storage_lot, lot.lot_id AS lot_id, lot.material_id AS material_id,
+    SELECT TRIM(lot.lookup_code) AS storage_lot, lot.lot_id AS lot_id, lot.material_id AS material_id,
            lot.vendor_lot_id AS vendor_lot_id, m.lookup_code AS material_code
     FROM production_db.silver.datex_slv_lots lot
     JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
-    WHERE lot.lookup_code IN (${inList})
+    WHERE TRIM(lot.lookup_code) IN (${inList})
       AND m.project_id = ${THOMAS_PROJECT_ID}
   `)
   const map = new Map()
@@ -90,7 +99,7 @@ async function resolveOrderLines(parsed) {
     return { ok: false, flagReason: 'No lot lines were extracted from this Fulfillment Authorization PDF.' }
   }
 
-  const storageLots = [...new Set(lines.map((l) => l.storage_lot))]
+  const storageLots = [...new Set(lines.map((l) => (l.storage_lot || '').trim()))]
   const detailsByLot = await fetchLotDetails(storageLots)
 
   const resolvedLines = []
@@ -98,12 +107,19 @@ async function resolveOrderLines(parsed) {
   const materialMismatches = []
 
   for (const line of lines) {
-    const details = detailsByLot.get(line.storage_lot)
+    const details = detailsByLot.get((line.storage_lot || '').trim())
     if (!details) {
       unresolvedLots.push(line.storage_lot)
       resolvedLines.push({ ...line, line_status: 'missing_lp' })
       continue
     }
+    // Cross-check: the PDF states the material code independently of the
+    // lot — both should point to the same real material. The resolved
+    // lot's own material is ground truth (same principle as Grassland
+    // trusting a matched license plate's real contents over the form); a
+    // disagreement here means something is genuinely wrong, not just a
+    // formatting quirk, and is worth flagging rather than silently
+    // pushing whichever one "looks more official."
     if (line.material_code && String(line.material_code).trim() !== String(details.material_code).trim()) {
       materialMismatches.push(`${line.storage_lot}: PDF says material ${line.material_code}, but that lot actually belongs to material ${details.material_code} in Datex`)
     }
@@ -145,9 +161,13 @@ function buildOrderHeader(parsed) {
     order_class_id: THOMAS_ORDER_CLASS_ID,
     lookup_code: parsed.transfer_order_number || null,
     owner_reference: parsed.transfer_order_number || null,
+    // UNCONFIRMED — see file header note. Falls back to the TO number
+    // when Customer PO# is blank, which is true of every sample seen so
+    // far; a real order with a populated Customer PO# hasn't been tested
+    // yet to confirm this fallback is actually what Datex should receive.
     vendor_reference: parsed.customer_po || parsed.transfer_order_number || null,
     order_notes: parsed.fulfillment_authorization_number ? `Fulfillment Authorization ${parsed.fulfillment_authorization_number}` : null,
-    carrier_id: null,
+    carrier_id: null, // deliberate — see file header note, not a guess gap
     expected_date: parsed.ship_date || null,
     shipping_address: {
       name: parsed.ship_to?.name || null,
