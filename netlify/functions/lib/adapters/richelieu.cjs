@@ -13,20 +13,34 @@
 // paperwork is titled "Transfer Order" and frames CSW as the "transfer
 // from" site.
 //
-// ONE PDF = ONE ORDER, and — unlike Grassland — there is no per-pallet
-// license-plate matching at all here. Each PDF lists one material and a
-// set of (lot, tote-count) pairs; the Datex-side math is: each physical
-// pallet ("tote", per Dan's framing — one license plate) of a given
-// material holds a FIXED number of eaches, defined on the material's own
-// Datex packaging record (pallet_tie × pallet_high), not something to
-// infer per-shipment. Confirmed 2026-10-13 against 6 real Richelieu SKUs
-// and a dozen real historical orders: every order quantity is an exact
-// integer multiple of its material's pallet_tie × pallet_high, with zero
-// exceptions. So resolution here is: look up each lot code directly
-// (project RICHR5 only — single project, no vote needed like Grassland),
-// multiply its tote count by that material's pallet size, and the sum
-// across all lots on the PDF must equal the PDF's own printed total
-// quantity — the Richelieu equivalent of Grassland's printed-totals check.
+// REWRITTEN 2026-10-16 (real failure, TOP1060598/cnv_1cnvq9as): the
+// original design assumed exactly one item per PDF, with a flat top-level
+// item_number and a single lots[] array. A real order proved that wrong —
+// TOP1060598 has TWO items (R1116537 and R1117692) on one page, each with
+// its own lot block — and the old schema silently kept only the first,
+// dropping the second item's entire $-value from the order with no error
+// at all. The schema is now `items: [{ item_number, description,
+// total_quantity, lots: [...], printed_total_count }]`, one entry per item
+// block actually printed on the page.
+//
+// That same real order also surfaced a second, more fundamental issue:
+// a lot CODE is not unique within the Richelieu project — "16SEP6EF"
+// exists as THREE separate Datex lot records, one each for R1116537,
+// R1117692, and R1117575 (confirmed directly). The PDF disambiguates this
+// correctly by printing each lot block directly under its own item
+// number; resolution now matches on (lot_code, material_code) TOGETHER,
+// never lot_code alone — matching lot_code alone can and did pick an
+// entirely wrong lot/material pairing.
+//
+// ONE PDF = ONE ORDER. There is no per-pallet license-plate matching here
+// (unlike Grassland); the Datex-side math is: each physical pallet
+// ("tote"/"pallet" — Dan's PDFs use both labels interchangeably for the
+// same physical unit, a license plate) of a given material holds a FIXED
+// number of eaches, defined on the material's own Datex packaging record
+// (pallet_tie × pallet_high), not something to infer per-shipment.
+// Confirmed against 6 real Richelieu SKUs and many real historical
+// orders: every order quantity is an exact integer multiple of its
+// material's pallet_tie × pallet_high, with zero exceptions.
 //
 // LOT-LEVEL DETAIL IS A DELIBERATE UPGRADE OVER CURRENT PRACTICE: checked
 // a dozen real past Richelieu TOP orders in Datex — almost all were
@@ -34,6 +48,21 @@
 // vendor_lot_id left null. Dan confirmed (2026-10-13) he wants this agent
 // to push the real per-lot detail every time, not match that historical
 // shortcut.
+//
+// AVAILABILITY SHORTFALLS ARE A FLAG, NOT A FAILURE (Dan's explicit
+// request, 2026-10-16, same real order): TOP1060598's 26AUG6EF lot needed
+// 34 pallets of R1117692 (26,520 eaches) but Datex currently shows only
+// 32 pallets (24,960 eaches) actually on real license plates for that lot
+// — confirmed directly. Unlike an unresolvable lot (a genuine data
+// problem that still blocks the order), a quantity shortfall is a normal
+// warehouse timing situation — more inventory may be in transit, or the
+// order may simply short-ship — so resolution still succeeds and pushes
+// the order at the FULL requested quantity; the shortfall is surfaced as
+// a `warnings` entry that order-agent-common.cjs appends to the success
+// comment, not as a flagReason that blocks the push. If CSW ever wants
+// the pushed quantity capped at what's actually available instead of the
+// requested amount, that's a real policy choice to revisit, not assumed
+// here.
 //
 // NOT YET RESOLVED / left for the first real test push, same spirit as
 // Grassland's iterative confirm-via-real-order approach:
@@ -52,15 +81,14 @@ const RICHELIEU_PROJECT_ID = 224 // RICHR5 — Richelieu Raw Materials Kenosha
 const KENOSHA_WAREHOUSE_ID = 5 // CSW-Kenosha (Pleasant Prairie)
 const RICHELIEU_ORDER_CLASS_ID = 2 // "SO" Sales Order — same class as Grassland/DPI
 
-// FIXED 2026-10-14 (real failure, Thomas Foods order TO10006606 — same
-// bug class applies here): an exact-string match against lot.lookup_code
-// can silently miss a real lot if Datex's own stored value carries stray
-// leading/trailing whitespace — confirmed directly for one real Thomas
-// Foods lot ("PO156366-1" stored as "PO156366-1 "), and confirmed broadly:
-// 8 of 3,784 lots across the three projects this agent touches
-// (THOMA5/RICHR5/PEDPI5) have the same issue. TRIM() on both sides of the
-// match (and on the input list) makes this robust regardless of which
-// side has the stray space.
+// Looks up every lot code printed on one PDF, across every item, in a
+// single query, scoped to the Richelieu project. Returns ALL candidate
+// rows per lot code (not deduped to one) — resolveOrderLines below is
+// responsible for narrowing each lot to the one candidate whose material
+// matches that lot's own item block, since lot codes are confirmed NOT
+// unique across materials within this project (see file header note).
+// TRIM() on both sides guards against the same stray-whitespace issue
+// confirmed on other customers' lot codes (2026-10-14).
 async function fetchLotDetails(lotCodes) {
   if (!lotCodes.length) return new Map()
   const inList = lotCodes.map((s) => `'${s.trim().replace(/'/g, "''")}'`).join(',')
@@ -83,74 +111,115 @@ async function fetchLotDetails(lotCodes) {
   return map
 }
 
+// Real on-hand quantity for a set of resolved lot_ids, summed from actual
+// license plate contents — the same source Grassland's amount-mismatch
+// check reads from. Used only to produce the shortfall warning below;
+// never blocks resolution on its own.
+async function fetchAvailableQuantities(lotIds) {
+  if (!lotIds.length) return new Map()
+  const rows = await runMotherDuckQuery(`
+    SELECT lot_id, SUM(packaged_amount) AS available_qty
+    FROM production_db.silver.datex_slv_licenseplatecontents
+    WHERE lot_id IN (${lotIds.join(',')})
+    GROUP BY lot_id
+  `)
+  const map = new Map()
+  for (const r of rows) map.set(r.lot_id, Number(r.available_qty) || 0)
+  return map
+}
+
 async function resolveOrderLines(parsed) {
-  const lots = parsed.lots || []
-  if (lots.length === 0) {
-    return { ok: false, flagReason: 'No lot/tote lines were extracted from this Transfer Order PDF.' }
+  const items = parsed.items || []
+  if (items.length === 0) {
+    return { ok: false, flagReason: 'No items were extracted from this Transfer Order PDF.' }
   }
 
-  const lotCodes = lots.map((l) => (l.lot_code || '').trim())
-  const detailsByLotCode = await fetchLotDetails(lotCodes)
+  const allLotCodes = [...new Set(items.flatMap((it) => (it.lots || []).map((l) => (l.lot_code || '').trim())))]
+  const detailsByLotCode = await fetchLotDetails(allLotCodes)
 
   const resolvedLines = []
-  const unresolvedLotCodes = []
+  const unresolved = []
+  const totalMismatches = []
 
-  for (const lotLine of lots) {
-    const candidates = detailsByLotCode.get((lotLine.lot_code || '').trim()) || []
-    if (candidates.length !== 1) {
-      unresolvedLotCodes.push(lotLine.lot_code)
-      resolvedLines.push({ ...lotLine, line_status: candidates.length === 0 ? 'missing_lp' : 'ambiguous' })
-      continue
+  for (const item of items) {
+    const lots = item.lots || []
+    const itemResolved = []
+    for (const lotLine of lots) {
+      const lotCode = (lotLine.lot_code || '').trim()
+      const candidates = (detailsByLotCode.get(lotCode) || []).filter(
+        (c) => String(c.material_code).trim() === String(item.item_number || '').trim()
+      )
+      if (candidates.length !== 1) {
+        unresolved.push(`${lotCode} (${item.item_number})`)
+        resolvedLines.push({ ...lotLine, item_number: item.item_number, line_status: candidates.length === 0 ? 'missing_lp' : 'ambiguous' })
+        continue
+      }
+      const { lot_id, material_id, material_code, vendor_lot_id, packaging_id, pallet_tie, pallet_high } = candidates[0]
+      const eachesPerTote = Number(pallet_tie) * Number(pallet_high)
+      const quantity = Number(lotLine.count) * eachesPerTote
+
+      const resolvedLine = {
+        ...lotLine,
+        item_number: item.item_number,
+        line_status: 'resolved',
+        item_count: quantity,
+        resolved_lot_id: lot_id,
+        resolved_material_id: material_id,
+        resolved_material_code: material_code,
+        resolved_vendor_lot_id: vendor_lot_id ?? null,
+        resolved_packaging_id: packaging_id,
+        eaches_per_tote: eachesPerTote,
+      }
+      resolvedLines.push(resolvedLine)
+      itemResolved.push(resolvedLine)
     }
-    const { lot_id, material_id, material_code, vendor_lot_id, packaging_id, pallet_tie, pallet_high } = candidates[0]
-    const eachesPerTote = Number(pallet_tie) * Number(pallet_high)
-    const quantity = Number(lotLine.totes) * eachesPerTote
 
-    resolvedLines.push({
-      ...lotLine,
-      line_status: 'resolved',
-      item_count: quantity,
-      resolved_lot_id: lot_id,
-      resolved_material_id: material_id,
-      resolved_material_code: material_code,
-      resolved_vendor_lot_id: vendor_lot_id ?? null,
-      resolved_packaging_id: packaging_id,
-      eaches_per_tote: eachesPerTote,
-    })
+    // Per-item structural check against this item's own printed total —
+    // a mismatch here means a real extraction/math problem, not a stock
+    // question, and still blocks the push.
+    if (itemResolved.length === lots.length && item.total_quantity != null) {
+      const sum = itemResolved.reduce((s, l) => s + (Number(l.item_count) || 0), 0)
+      if (sum !== Number(item.total_quantity)) {
+        totalMismatches.push(`${item.item_number}: sum of resolved lot quantities ${sum} != printed total ${item.total_quantity}`)
+      }
+    }
   }
 
-  const anyUnresolved = resolvedLines.some((l) => l.line_status !== 'resolved')
-  if (anyUnresolved) {
+  if (unresolved.length > 0) {
     return {
       ok: false,
       resolvedLines,
-      flagReason: `Could not resolve every lot to a specific Datex lot record in project RICHR5 (lot codes: ${[...new Set(unresolvedLotCodes)].join(', ')}).`,
+      flagReason: `Could not resolve every lot to a specific Datex lot record in project RICHR5 (lot code / item pairs: ${[...new Set(unresolved)].join(', ')}).`,
     }
   }
-
-  // Every material line on a Richelieu Transfer Order PDF is the same SKU
-  // (confirmed: one item row per PDF), so a mismatched material_id across
-  // lots would itself indicate a real data problem worth flagging rather
-  // than silently pushing a mixed-material order.
-  const distinctMaterials = new Set(resolvedLines.map((l) => l.resolved_material_id))
-  if (distinctMaterials.size > 1) {
+  if (totalMismatches.length > 0) {
     return {
       ok: false,
       resolvedLines,
-      flagReason: `This PDF's lots resolved to more than one material (${[...distinctMaterials].join(', ')}) — expected exactly one material per Transfer Order.`,
+      flagReason: `Printed-total validation failed: ${totalMismatches.join('; ')}.`,
     }
   }
 
-  const sumQuantity = resolvedLines.reduce((s, l) => s + (Number(l.item_count) || 0), 0)
-  if (parsed.total_quantity != null && sumQuantity !== Number(parsed.total_quantity)) {
-    return {
-      ok: false,
-      resolvedLines,
-      flagReason: `Sum of resolved lot quantities ${sumQuantity} != the PDF's printed total quantity ${parsed.total_quantity}.`,
+  // Availability check — a shortfall is surfaced as a warning, never a
+  // block. See file header note for why (2026-10-16, Dan's explicit call).
+  const lotIds = [...new Set(resolvedLines.map((l) => l.resolved_lot_id))]
+  const availableByLotId = await fetchAvailableQuantities(lotIds)
+  const warnings = []
+  for (const line of resolvedLines) {
+    const available = availableByLotId.get(line.resolved_lot_id) ?? 0
+    if (available < Number(line.item_count)) {
+      const eachesShort = Number(line.item_count) - available
+      const palletsNeeded = Math.round(Number(line.item_count) / line.eaches_per_tote)
+      const palletsAvailable = Math.round(available / line.eaches_per_tote)
+      line.availability_short = true
+      line.available_qty = available
+      warnings.push(
+        `Lot ${line.lot_code} (${line.resolved_material_code}): order needs ${palletsNeeded} pallet(s) (${line.item_count} each) but Datex currently shows only ${palletsAvailable} pallet(s) (${available} each) on real license plates — short by ${eachesShort} each. Pushed at the full requested quantity regardless; flagging for manual follow-up.`
+      )
     }
   }
 
-  return { ok: true, resolvedLines, materialCode: resolvedLines[0].resolved_material_code }
+  return { ok: true, resolvedLines, warnings: warnings.length ? warnings : undefined }
 }
 
 function buildOrderHeader(parsed) {
