@@ -308,4 +308,5 @@ ADAPTERS = {
   richelieu: require('./adapters/richelieu.cjs'),
   pedone: require('./adapters/pedone.cjs'),
   thomasfoods: require('./adapters/thomasfoods.cjs'),
+  echolake: require('./adapters/echolake.cjs'),
 }
