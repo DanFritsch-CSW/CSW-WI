@@ -9,7 +9,9 @@
 //   1. Settings row (prepick_notify_settings, facility='cal',
 //      dashboard_type='cmm_empty_trailer') — send time/days/active +
 //      sender_name/email_subject_template/email_body_template +
-//      from_channel_id (which Front address it sends from).
+//      from_channel_id (which Front address it sends from) +
+//      last_conversation_id/last_ping_at (hourly ping state, read-only
+//      from this UI's perspective — written by the backend, see below).
 //   2. Email recipients (cmm_empty_trailer_email_recipients) — TO/CC,
 //      own table, independent of cmm_outbound_email_recipients.
 //   3. Discussion recipients (notification_recipients,
@@ -21,6 +23,14 @@
 //   4. Front channels (front_channels) — reuses fetchFrontChannels /
 //      triggerFrontChannelsSync from cmmOutbound.js directly; that sync
 //      is channel-agnostic, not CMM-Outbound-specific.
+//
+// Hourly ping (added 2026-10-16) — triggerCmmEmptyTrailerPingTest() below
+// hits the sibling cmm-empty-trailer-ping-test.cjs. There's no save/
+// settings function for the ping itself: it has no fields of its own in
+// this UI, it just reuses the Auto-send daily checkbox above (same
+// `active` column) as its own on/off switch. See
+// netlify/functions/lib/cmm-empty-trailer-ping-shared.cjs for the full
+// design writeup.
 
 import { supabase } from './supabase.js'
 
@@ -33,7 +43,7 @@ export async function fetchCmmEmptyTrailerSettings() {
   if (!supabase) return null
   const { data, error } = await supabase
     .from('prepick_notify_settings')
-    .select('notify_hour, notify_minute, notify_days, active, last_sent_date, sender_name, email_subject_template, email_body_template, from_channel_id')
+    .select('notify_hour, notify_minute, notify_days, active, last_sent_date, sender_name, email_subject_template, email_body_template, from_channel_id, last_conversation_id, last_ping_at')
     .eq('facility', FACILITY)
     .eq('dashboard_type', DASHBOARD_TYPE)
     .maybeSingle()
@@ -155,10 +165,21 @@ export async function saveCmmEmptyTrailerDiscussionRecipients(chosenTeammates) {
   }
 }
 
-// ─── Manual test trigger ──────────────────────────────────────────────────
+// ─── Manual test triggers ───────────────────────────────────────────────
 
 export async function triggerCmmEmptyTrailerTest() {
   const res = await fetch('/.netlify/functions/cmm-empty-trailer-email-test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  const json = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
+  return json
+}
+
+export async function triggerCmmEmptyTrailerPingTest() {
+  const res = await fetch('/.netlify/functions/cmm-empty-trailer-ping-test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
