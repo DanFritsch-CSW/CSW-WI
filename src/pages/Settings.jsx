@@ -20,7 +20,7 @@ import {
   fetchCmmEmptyTrailerSettings, upsertCmmEmptyTrailerSettings,
   fetchCmmEmptyTrailerEmailRecipients, saveCmmEmptyTrailerEmailRecipients,
   fetchCmmEmptyTrailerDiscussionRecipients, saveCmmEmptyTrailerDiscussionRecipients,
-  triggerCmmEmptyTrailerTest,
+  triggerCmmEmptyTrailerTest, triggerCmmEmptyTrailerPingTest,
 } from '../lib/cmmEmptyTrailer.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import { fetchCronHealth } from '../lib/cronHealth.js'
@@ -1106,6 +1106,17 @@ function CmmOutboundApptsEditor() {
 // only shows up as free text in truck_appointments.Notes). The email is a
 // content-free kickoff; the 1st shift supervisor still replies with the
 // real door/trailer status, same as today's fully-manual thread.
+//
+// Hourly ping (added 2026-10-16) — a no-content internal Front comment
+// ("(4am Update)", "(5am Update)", etc.) posted every hour from 4am-10pm
+// CT to whatever conversation last_conversation_id points at, just to
+// bump that thread to the top of the team's Front inbox. Lives in its own
+// backend (netlify/functions/lib/cmm-empty-trailer-ping-shared.cjs +
+// cmm-empty-trailer-ping-run/-test.cjs), gated on the SAME `active` flag
+// as the kickoff email above — no separate toggle in this UI, just a
+// status line (today's conversation ID + last ping time, both read-only
+// here) and its own "Send Ping Now (test)" button, disabled whenever
+// there's no conversation yet today.
 
 function CmmEmptyTrailerEditor() {
   const [settings, setSettings]   = useState(null)
@@ -1127,6 +1138,8 @@ function CmmEmptyTrailerEditor() {
   const [saveState, setSave]      = useState(null)
   const [testState, setTestState] = useState(null)
   const [testDetail, setTestDetail] = useState(null)
+  const [pingTestState, setPingTestState] = useState(null)
+  const [pingTestDetail, setPingTestDetail] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -1234,6 +1247,25 @@ function CmmEmptyTrailerEditor() {
     setTimeout(() => { setTestState(null); setTestDetail(null) }, 8000)
   }
 
+  async function handlePingTest() {
+    setPingTestState('running')
+    setPingTestDetail(null)
+    try {
+      const res = await triggerCmmEmptyTrailerPingTest()
+      if (res?.success) {
+        setPingTestState('ok')
+        setPingTestDetail(`Posted "${res.body}" to the current conversation.`)
+      } else {
+        setPingTestState('error')
+        setPingTestDetail(res?.reason || 'No result returned.')
+      }
+    } catch (err) {
+      setPingTestState('error')
+      setPingTestDetail(err.message)
+    }
+    setTimeout(() => { setPingTestState(null); setPingTestDetail(null) }, 8000)
+  }
+
   if (loading) {
     return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>Loading…</div>
   }
@@ -1247,6 +1279,11 @@ function CmmEmptyTrailerEditor() {
         CSW/CMM/Palermo's trailer-status thread at Caledonia. There's no structured "empty trailer" data to
         pull from — this just starts the thread; the 1st shift supervisor replies with the real door/trailer
         status, same as today. Currently configured for Caledonia only.
+      </p>
+      <p className="settings-page-sub" style={{ marginBottom: 16 }}>
+        While <strong>Auto-send daily</strong> is checked, an hourly "(4am Update)", "(5am Update)", etc.
+        comment is also posted internally to that day's thread every hour from 4am-10pm CT, just to keep it
+        at the top of the Front inbox. Not an email, not visible to Palermo's/CMM, no separate toggle.
       </p>
 
       <div className="break-schedule-controls" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
@@ -1390,6 +1427,27 @@ function CmmEmptyTrailerEditor() {
             {testDetail}
           </span>
         )}
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Hourly ping (4am-10pm CT, internal only — not an email)
+        </div>
+        <p className="settings-page-sub" style={{ marginBottom: 8, fontSize: 10 }}>
+          {settings?.last_conversation_id
+            ? <>Today's thread: <code>{settings.last_conversation_id}</code>{settings.last_ping_at ? ` — last pinged ${new Date(settings.last_ping_at).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })} CT` : ' — not pinged yet'}.</>
+            : "No thread yet today — the kickoff email hasn't sent, so there's nothing to ping."}
+        </p>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="settings-save-btn" onClick={handlePingTest} disabled={pingTestState === 'running' || !settings?.last_conversation_id}>
+            {pingTestState === 'running' ? 'Posting…' : pingTestState === 'ok' ? 'Posted ✓' : pingTestState === 'error' ? 'Failed' : 'Send Ping Now (test)'}
+          </button>
+          {pingTestDetail && (
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: pingTestState === 'error' ? '#e05a5a' : 'var(--text-dim)' }}>
+              {pingTestDetail}
+            </span>
+          )}
+        </div>
       </div>
       {toEmails.length === 0 && (
         <p className="settings-page-sub" style={{ marginTop: 8, fontStyle: 'italic' }}>
@@ -1707,7 +1765,7 @@ export default function Settings() {
         <>
           <div className="settings-page-header">
             <h2 className="settings-page-title">CMM Empty Trailer</h2>
-            <p className="settings-page-sub">Auto-sends (no review step) the daily CSW/CMM/Palermo's trailer-status kickoff email at Caledonia.</p>
+            <p className="settings-page-sub">Auto-sends (no review step) the daily CSW/CMM/Palermo's trailer-status kickoff email at Caledonia, plus an hourly keep-on-top ping.</p>
           </div>
           <CmmEmptyTrailerEditor />
         </>
