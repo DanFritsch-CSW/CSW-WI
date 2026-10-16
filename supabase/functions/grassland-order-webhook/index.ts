@@ -310,6 +310,18 @@ function validateGrasslandTotals(parsed: any): { ok: boolean; problems: string[]
 // the email arrives, keeping the thread's later logistics chatter out of
 // the way — see allInboundMessageIds above for how that's handled if it
 // isn't perfectly early).
+//
+// REWRITTEN 2026-10-16 (real failure, TOP1060598/cnv_1cnvq9as): a real
+// order had TWO item rows on one page (R1116537 and R1117692), each with
+// its own lot block below — the old schema assumed exactly one item per
+// PDF and silently dropped the second entirely, with no error at all.
+// Schema is now `items: [...]`, one entry per item row actually printed,
+// each carrying its own lots. The printed unit label varies by item too
+// ("10 PALLETS" vs "34 TOTES" on the very same page) — both mean the same
+// physical unit (one license plate) for this customer, so the prompt
+// tells Claude to copy the number as "count" regardless of which word is
+// printed; the adapter's math (count × that material's own pallet size)
+// doesn't care which label was used.
 
 const RICHELIEU_PROMPT = `You read a Richelieu Foods "Transfer Order" PDF (an outbound shipment instruction from CSW's warehouse to Richelieu's Wheeling, IL plant) and return ONLY a JSON object, no prose, no markdown fences.
 
@@ -317,35 +329,42 @@ Shape:
 {
   "transfer_order_number": string,
   "posting_date": string,
-  "item_number": string,
-  "description": string,
-  "total_quantity": number,
   "ship_to": { "name": string, "line1": string, "city": string, "state": string, "zip": string },
-  "lots": [ { "lot_code": string, "totes": number } ],
-  "printed_total_totes": number
+  "items": [
+    {
+      "item_number": string,
+      "description": string,
+      "total_quantity": number,
+      "lots": [ { "lot_code": string, "count": number } ],
+      "printed_total_count": number
+    }
+  ]
 }
 
 Rules:
 - "transfer_order_number" is the "Transfer Order No." value near the top.
-- "item_number", "description" and "total_quantity" come from the single item row in the main table (Item No. / Description / Quantity).
 - "ship_to" is the "WHEELING PLANT SHIPPING" address block at the top of the page (name, street line, city, state, zip) — this is who the shipment goes to.
-- "lots" is the list of lines below the main table, each in the form "<LOT CODE> <N> TOTES" (e.g. "26026P21 4 TOTES") — one entry per line, in the order printed. Copy each lot code and tote count exactly as printed.
-- "printed_total_totes" is the number from the "TOTAL <N> TOTES" line at the bottom of that list.
+- The main table near the top lists one row per ITEM (Item No. / Description / Quantity). Create one entry in "items" for EACH row, in the order printed — a PDF may have just one item or several; never drop a row.
+- Below the main table, each item has its own block: the item number printed again as a heading, then one line per lot in the form "<LOT CODE> <N> PALLETS" or "<LOT CODE> <N> TOTES" (both words mean the same physical unit here — just copy the number as "count" either way), then a "TOTAL <N> PALLETS"/"TOTAL <N> TOTES" line for that item. Match each lot block to the correct item by the item-number heading printed directly above it, not by position on the page.
+- "printed_total_count" is that item's own "TOTAL <N> ..." line.
 - Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
-- If the document has multiple pages or multiple item rows, this schema currently assumes exactly one — if you see more than one item row, still return only the first and note nothing extra; this is a known limitation to revisit if it occurs.
 - If any field is illegible or absent, use null for that field rather than guessing.`
 
 function validateRichelieuTotals(parsed: any): { ok: boolean; problems: string[] } {
   const problems: string[] = []
-  const lots = parsed.lots || []
-  const sumTotes = lots.reduce((s: number, l: any) => s + (Number(l.totes) || 0), 0)
-  if (parsed.printed_total_totes != null && sumTotes !== Number(parsed.printed_total_totes)) {
-    problems.push(`Sum of extracted tote counts ${sumTotes} != printed TOTAL ${parsed.printed_total_totes}`)
+  const items = parsed.items || []
+  for (const item of items) {
+    const lots = item.lots || []
+    const sum = lots.reduce((s: number, l: any) => s + (Number(l.count) || 0), 0)
+    if (item.printed_total_count != null && sum !== Number(item.printed_total_count)) {
+      problems.push(`${item.item_number}: sum of extracted lot counts ${sum} != printed TOTAL ${item.printed_total_count}`)
+    }
   }
   // The deeper check (sum of eaches == total_quantity, via each material's
-  // real Datex pallet size) needs MotherDuck and happens on the Netlify
-  // side in resolveOrderLines — this is only the structural self-
-  // consistency check the PDF's own printed numbers can confirm alone.
+  // real Datex pallet size, plus the lot-to-material disambiguation) needs
+  // MotherDuck and happens on the Netlify side in resolveOrderLines — this
+  // is only the structural self-consistency check the PDF's own printed
+  // numbers can confirm alone.
   return { ok: problems.length === 0, problems }
 }
 
@@ -515,21 +534,32 @@ const CUSTOMERS: CustomerConfig[] = [
     },
     validate: validateRichelieuTotals,
     dedupeKey: (parsed) => parsed.transfer_order_number || null,
-    isEmpty: (parsed) => !parsed.transfer_order_number || !Array.isArray(parsed.lots) || parsed.lots.length === 0,
-    ackBody: (parsed, ok, problems) => ok
-      ? `Order agent: read Transfer Order ${parsed.transfer_order_number} (${parsed.item_number}, ${parsed.lots.length} lot(s), ${parsed.total_quantity} total each). Checking against current Datex inventory now...`
-      : `Order agent: Transfer Order ${parsed.transfer_order_number || '(unknown)'} — extracted tote counts did not match the form's printed total — flagged for manual entry.\n\n${problems.map((p) => `- ${p}`).join('\n')}`,
-    batchFields: (parsed, ok, problems) => ({
-      customer_code: 'richelieu',
-      po_number: parsed.transfer_order_number,
-      ship_date: parsed.posting_date ? new Date(parsed.posting_date).toISOString().slice(0, 10) : null,
-      status: ok ? 'parsed' : 'validation_failed',
-      flag_reason: ok ? null : `Printed-total validation failed: ${problems.join('; ')}`,
-      line_count: parsed.lots.length,
-      total_quantity: parsed.total_quantity ?? null,
-      pallet_count: parsed.printed_total_totes ?? null,
-      raw_extracted: parsed,
-    }),
+    isEmpty: (parsed) => !parsed.transfer_order_number || !Array.isArray(parsed.items) || parsed.items.length === 0,
+    ackBody: (parsed, ok, problems) => {
+      const items = parsed.items || []
+      const totalLots = items.reduce((s: number, it: any) => s + (it.lots?.length || 0), 0)
+      const totalQty = items.reduce((s: number, it: any) => s + (Number(it.total_quantity) || 0), 0)
+      return ok
+        ? `Order agent: read Transfer Order ${parsed.transfer_order_number} (${items.length} item(s), ${totalLots} lot(s), ${totalQty} total each). Checking against current Datex inventory now...`
+        : `Order agent: Transfer Order ${parsed.transfer_order_number || '(unknown)'} — extracted lot counts did not match the form's printed totals — flagged for manual entry.\n\n${problems.map((p) => `- ${p}`).join('\n')}`
+    },
+    batchFields: (parsed, ok, problems) => {
+      const items = parsed.items || []
+      const totalLots = items.reduce((s: number, it: any) => s + (it.lots?.length || 0), 0)
+      const totalQty = items.reduce((s: number, it: any) => s + (Number(it.total_quantity) || 0), 0)
+      const totalPrintedCount = items.reduce((s: number, it: any) => s + (Number(it.printed_total_count) || 0), 0)
+      return {
+        customer_code: 'richelieu',
+        po_number: parsed.transfer_order_number,
+        ship_date: parsed.posting_date ? new Date(parsed.posting_date).toISOString().slice(0, 10) : null,
+        status: ok ? 'parsed' : 'validation_failed',
+        flag_reason: ok ? null : `Printed-total validation failed: ${problems.join('; ')}`,
+        line_count: totalLots,
+        total_quantity: totalQty || null,
+        pallet_count: totalPrintedCount || null,
+        raw_extracted: parsed,
+      }
+    },
   },
   {
     code: 'pedone',
