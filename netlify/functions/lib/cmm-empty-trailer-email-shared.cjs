@@ -38,6 +38,16 @@
 //
 // Content date is TODAY (Central), not tomorrow -- this is a morning
 // kickoff for the day that's starting, not a lookahead.
+//
+// Hourly "keep it on top of the inbox" ping -- added 2026-10-16, lives in
+// the SIBLING lib/cmm-empty-trailer-ping-shared.cjs rather than here, since
+// it has its own schedule (every hour, 4am-10pm CT, independent of this
+// email's own configurable send time) and its own run/test function pair.
+// The two are linked by last_conversation_id, written below the moment this
+// function sends: the ping function never re-derives or re-sends anything,
+// it only posts a comment to whatever conversation this file's send landed
+// in. last_ping_at resets to null here (new day, new thread) so the ping
+// function's "already pinged this hour" check starts clean each morning.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL
 const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY
@@ -196,7 +206,9 @@ async function runDigest({ isManualTest }) {
   }
 
   if (!isManualTest) {
-    await sbPatch(`prepick_notify_settings?facility=eq.${FACILITY}&dashboard_type=eq.${DASHBOARD_TYPE}`, { last_sent_date: date })
+    await sbPatch(`prepick_notify_settings?facility=eq.${FACILITY}&dashboard_type=eq.${DASHBOARD_TYPE}`, {
+      last_sent_date: date, last_conversation_id: conversationId, last_ping_at: null,
+    })
   }
 
   return {
