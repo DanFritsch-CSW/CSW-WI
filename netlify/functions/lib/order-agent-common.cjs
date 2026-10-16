@@ -236,10 +236,19 @@ async function resolveAndPushBatch(batchId) {
     error_message: pushResult.error ?? null,
   })
 
+  // ADDED 2026-10-16: an adapter can return `resolution.warnings` — a list
+  // of non-blocking issues worth a human's attention (e.g. Richelieu's
+  // inventory-availability shortfall) that should NOT have stopped the
+  // push. Appended to the success comment only; a failed push's own error
+  // message is detailed enough on its own.
+  const warningsBlock = pushResult.success && resolution.warnings?.length
+    ? `\n\n⚠️ ${resolution.warnings.join('\n⚠️ ')}`
+    : ''
+
   await postFrontComment(
     batch.front_conversation_id,
     pushResult.success
-      ? `Order agent: order ${pushResult.order_id} created in Datex (batch ${batch.id}). Reconciliation will verify line-level accuracy shortly.`
+      ? `Order agent: order ${pushResult.order_id} created in Datex (batch ${batch.id}). Reconciliation will verify line-level accuracy shortly.${warningsBlock}`
       : `Order agent: order creation failed. ${pushResult.error}\n(Tracked as batch ${batch.id} — check grassland_order_batches.)`
   )
 
