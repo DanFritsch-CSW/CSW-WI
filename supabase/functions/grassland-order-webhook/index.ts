@@ -461,6 +461,57 @@ function validateThomasFoods(_parsed: any): { ok: boolean; problems: string[] } 
 }
 
 // ---------------------------------------------------------------------------
+// Echo Lake Foods: extraction schema + real printed grand-total validation
+// ---------------------------------------------------------------------------
+//
+// ONE PDF = ONE "Order Verification" document = ONE order, one per email
+// (confirmed 2026-10-16, sender customerservice@echolakefoods.com). CSW
+// ships OUT of Kenosha on Echo Lake's behalf to a THIRD PARTY end customer
+// named on the PDF's own Bill To/Ship To (e.g. Holiday Stationstores LLC)
+// — see adapters/echolake.cjs for the full confirmation against real
+// Datex order history. Unlike Pedone/Thomas Foods, this document DOES
+// print a real grand total (the bottom "Total" row: total cases, total
+// pallets) — validateEchoLakeTotals below is a genuine structural check,
+// not a no-op.
+
+const ECHOLAKE_PROMPT = `You read an Echo Lake Foods "Order Verification" PDF (an outbound shipment order confirmation) and return ONLY a JSON object, no prose, no markdown fences.
+
+Shape:
+{
+  "order_number": string,
+  "bill_to_po": string,
+  "ship_date": string,
+  "ship_to": { "name": string, "line1": string, "line2": string, "city": string, "state": string, "zip": string },
+  "lines": [ { "part_number": string, "description": string, "case_quantity": number, "pallets": number } ],
+  "printed_total_cases": number,
+  "printed_total_pallets": number
+}
+
+Rules:
+- "order_number" is the "Order #" value printed at the top right of the page.
+- "bill_to_po" is the "Bill To PO" column value from the order details row (e.g. "PO003710 - WH3750141") — copy it exactly as printed, including the dash and any spaces around it.
+- "ship_date" is the "Ship Date" value from the same order details row.
+- "ship_to" is the "Ship To" address block (NOT the "Bill To" block, even though they are often similar) — name, the street address line, a second line if there's a facility/commissary name printed below the street address, city, state, zip.
+- "lines" is every row of the item table. "Part #" is "part_number". "Qty" (the first numeric column, in cases) is "case_quantity". "Pallets" is "pallets". Ignore the "Lbs", "Lbs/UOM", "UOM", "Cs/Pal", "$/Lb", "$/UOM", and "Total" (dollar) columns entirely — none of them are needed.
+- "printed_total_cases" and "printed_total_pallets" come from the bottom "Total" row of the item table (the Qty and Pallets columns of that row).
+- Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
+- If any field is illegible or absent, use null for that field rather than guessing.`
+
+function validateEchoLakeTotals(parsed: any): { ok: boolean; problems: string[] } {
+  const problems: string[] = []
+  const lines = parsed.lines || []
+  const sumCases = lines.reduce((s: number, l: any) => s + (Number(l.case_quantity) || 0), 0)
+  if (parsed.printed_total_cases != null && sumCases !== Number(parsed.printed_total_cases)) {
+    problems.push(`Sum of extracted case quantities ${sumCases} != printed total ${parsed.printed_total_cases}`)
+  }
+  const sumPallets = lines.reduce((s: number, l: any) => s + (Number(l.pallets) || 0), 0)
+  if (parsed.printed_total_pallets != null && sumPallets !== Number(parsed.printed_total_pallets)) {
+    problems.push(`Sum of extracted pallet counts ${sumPallets} != printed total ${parsed.printed_total_pallets}`)
+  }
+  return { ok: problems.length === 0, problems }
+}
+
+// ---------------------------------------------------------------------------
 // Per-customer config — the one thing to extend when adding a new customer
 // ---------------------------------------------------------------------------
 
@@ -612,6 +663,35 @@ const CUSTOMERS: CustomerConfig[] = [
       line_count: parsed.lines.length,
       total_quantity: (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.case_count) || 0), 0),
       pallet_count: null,
+      raw_extracted: parsed,
+    }),
+  },
+  {
+    code: 'echolake',
+    domains: ['echolakefoods.com'],
+    async buildJobs(pdfs) {
+      if (pdfs.length === 0) return []
+      if (pdfs.length > 1) console.log(`[order-agent:echolake] multiple PDF attachments found on one email — using the first: ${pdfs.map((a) => a.filename).join(', ')}`)
+      return [{ primaryId: pdfs[0].id, secondaryId: null }]
+    },
+    async extract(primaryB64) {
+      return callClaude(ECHOLAKE_PROMPT, [primaryB64], 'Extract this Order Verification as the JSON object described in your instructions.')
+    },
+    validate: validateEchoLakeTotals,
+    dedupeKey: (parsed) => parsed.order_number || null,
+    isEmpty: (parsed) => !parsed.order_number || !Array.isArray(parsed.lines) || parsed.lines.length === 0,
+    ackBody: (parsed, ok, problems) => ok
+      ? `Order agent: read Order #${parsed.order_number} (${parsed.lines.length} line(s), ${parsed.printed_total_cases ?? '?'} total cases). Checking against current Datex inventory now...`
+      : `Order agent: Order #${parsed.order_number || '(unknown)'} — extracted line totals did not match the form's printed totals — flagged for manual entry.\n\n${problems.map((p) => `- ${p}`).join('\n')}`,
+    batchFields: (parsed, ok, problems) => ({
+      customer_code: 'echolake',
+      po_number: parsed.order_number,
+      ship_date: parsed.ship_date ? new Date(parsed.ship_date).toISOString().slice(0, 10) : null,
+      status: ok ? 'parsed' : 'validation_failed',
+      flag_reason: ok ? null : `Printed-total validation failed: ${problems.join('; ')}`,
+      line_count: parsed.lines.length,
+      total_quantity: parsed.printed_total_cases ?? (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.case_quantity) || 0), 0),
+      pallet_count: parsed.printed_total_pallets ?? null,
       raw_extracted: parsed,
     }),
   },
