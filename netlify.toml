@@ -673,6 +673,24 @@
 [functions."cmm-empty-trailer-email-test"]
   timeout = 26
 
+# CMM Empty Trailer hourly ping -- added 2026-10-16. Posts a no-content
+# internal Front comment ("(4am Update)", "(5am Update)", etc.) every hour
+# from 4am-10pm CT to whatever conversation the kickoff email most recently
+# created, just to keep that thread at the top of the team's Front inbox.
+# Gated on the SAME active flag as the email above -- no separate toggle.
+# No duckdb/native-module dependency (Supabase REST + Front API only). See
+# lib/cmm-empty-trailer-ping-shared.cjs for the full design writeup.
+[functions."cmm-empty-trailer-ping-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# CMM Empty Trailer hourly ping MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as above). NOT a dry run -- really posts
+# a comment to today's conversation if one exists, bypassing the hour-window
+# and already-pinged-this-hour gates.
+[functions."cmm-empty-trailer-ping-test"]
+  timeout = 26
+
 # Customer Shortage Report EMAIL draft creation -- added 2026-09-01,
 # MOVED same day from an earlier "Daily Discussion Email" version per
 # Dan's follow-up: "I would've thought they would live within the
