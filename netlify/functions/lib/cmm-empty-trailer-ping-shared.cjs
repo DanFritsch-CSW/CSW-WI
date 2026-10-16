@@ -128,7 +128,18 @@ async function runPing({ isManualTest }) {
   if (!isManualTest) {
     if (settings.active === false) return { ok: true, skipped: true, reason: 'Disabled (Auto-send daily is unchecked)' }
     if (hour < PING_START_HOUR || hour > PING_END_HOUR) return { ok: true, skipped: true, reason: `Outside the ${PING_START_HOUR}am-${PING_END_HOUR - 12}pm CT ping window` }
-    if (minute !== 0) return { ok: true, skipped: true, reason: 'Not the top of the hour yet' }
+    // FIXED 2026-10-16: was `minute !== 0`, an exact match with zero
+    // tolerance. Netlify's scheduled functions commonly fire a few minutes
+    // late (documented behavior, and this app runs dozens of other
+    // functions on the same */15 cron pool), so an exact-minute check
+    // reliably missed the hour entirely once invocation drifted even one
+    // minute past :00 -- confirmed live: the 10:00 and 11:00 CT windows
+    // both silently no-op'd this way while manual test invocations (which
+    // skip this check) worked fine. Every other time-gated function in
+    // this app (see isNotifyTimeMatch in cmm-empty-trailer-email-shared.cjs)
+    // already matches a 15-minute bucket instead of an exact minute for
+    // exactly this reason -- this was the one place that didn't.
+    if (Math.floor(minute / 15) !== 0) return { ok: true, skipped: true, reason: 'Not the top of the hour yet' }
   }
 
   if (!settings.last_conversation_id) {
