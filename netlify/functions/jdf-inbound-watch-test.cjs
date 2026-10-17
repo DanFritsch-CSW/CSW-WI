@@ -3,7 +3,7 @@
 // JDF Inbound Watch — MANUAL test. No `schedule`, so it can be POSTed directly.
 // DRY RUN by default: reads Datex + Supabase and returns exactly what it WOULD
 // create (tasks/comments) without writing or calling Front.
-// POST body { "send": true } runs for real (ignores the kill switch).
+// POST body { "send": true } runs for real.
 // NOTE: a real first run on an empty table only SEEDS existing orders silently.
 
 const { runWatch } = require('./lib/jdf-inbound-watch-shared.cjs')
