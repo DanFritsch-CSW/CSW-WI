@@ -5,8 +5,10 @@
 // WHAT IT DOES (agreed with Dan 2026-10-17):
 //   Every 15 minutes, watch Jones Dairy Farm OUTBOUND orders at Madison
 //   (Datex project_id 365, order class type = Outbound). When the first
-//   Picking task of an order is completed, create ONE Front Task (same call
-//   the other digests use: lands in Dan's task list) and then add comments:
+//   Picking task of an order is completed, create ONE Front DISCUSSION thread
+//   (Dan is the participant; changed from a Front task on 2026-10-17 at Dan's
+//   request) that opens with the link to the order in Datex, and then add
+//   comments to that same thread:
 //     - Update      every tick while the completed-task counts change
 //     - Stall       once, when picks are open and nothing has completed for 2h
 //     - 10 PM note  once per night if the order is still open at 10 PM Central
@@ -51,6 +53,13 @@ const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN || ''
 const DAN_TEAMMATE_ID = 'tea_a3e8k' // same ID the other digests use
 const JDF_PROJECT_ID = 365
 const OUTBOUND_ORDER_TYPE_ID = 2 // datex_slv_orderclasses.order_type_id = 2 -> Sales Order etc.
+// Direct link to the order in Datex (FootPrint Cloud sales order editor; note the camelCase orderId
+// param, unlike the inbound ASN editor's order_id). JDF outbound is Sales Orders (class SO) and Hold
+// Orders (class OHSO), both order_class_type_id 5 and both opened by this editor (confirmed on
+// JD101626-6OUT, a Hold Order). The rare Outbound Material Transfer (class type 16) uses a different
+// editor, so no link is shown for it rather than a wrong one.
+const DATEX_SALES_ORDER_URL = 'https://csw-footprint-cloud.wavelength.host/FootprintManager_sales_order_editor?orderId='
+const SALES_ORDER_CLASS_TYPE_ID = 5
 const WINDOW_HOURS = 48 // look at orders whose first pick is this recent (dedupe is the table)
 const LOOKBACK_DAYS = 30 // task scan bound
 const QUIET_MIN = 30
@@ -122,10 +131,12 @@ async function frontFetch(path, body) {
   return text ? JSON.parse(text) : {}
 }
 
-// Same call the other digests use (auto-appt-review-digest-shared.cjs).
-async function createFrontTask({ subject, description }) {
+// Creates a Front internal discussion (same call as front-post-discussion.cjs and the
+// Footprint variance digest): teammate_ids adds Dan as a participant, and the first
+// comment is the opening message. Later updates are comments on the same conversation.
+async function createFrontDiscussion({ subject, description }) {
   const created = await frontFetch('/conversations', {
-    type: 'task', teammate_ids: [DAN_TEAMMATE_ID], subject, description,
+    type: 'discussion', teammate_ids: [DAN_TEAMMATE_ID], subject, comment: { body: description },
   })
   return created.id
 }
@@ -185,7 +196,7 @@ function snapshotSql(ids) {
         greatest(max(completed) FILTER (WHERE op = 'Picking'), max(completed) FILTER (WHERE op = 'Manual Pick Allocation')) AS last_any
       FROM t GROUP BY order_id
     )
-    SELECT o.order_id, od.lookup_code AS order_code, os.status_name,
+    SELECT o.order_id, od.lookup_code AS order_code, os.status_name, oc2.order_class_type_id AS class_type_id,
       strftime(od.fulfillment_date, '%Y-%m-%d %H:%M:%S') AS fulfilled_at,
       o.picks, o.picks_done, o.manuals, o.manuals_done,
       strftime(o.pick_first, '%Y-%m-%d %H:%M:%S') AS pick_first,
@@ -230,6 +241,7 @@ function openSql(ids) {
 function toSnap(r) {
   return {
     orderId: num(r.order_id), orderCode: r.order_code, status: r.status_name || 'Unknown', fulfilledAt: r.fulfilled_at || null,
+    classTypeId: num(r.class_type_id),
     picks: num(r.picks), picksDone: num(r.picks_done), manuals: num(r.manuals), manualsDone: num(r.manuals_done),
     pickFirst: r.pick_first, lastAny: r.last_any || r.pick_first, centralNow: r.central_now,
   }
@@ -291,6 +303,7 @@ function shortsText(items) {
 function buildTask(d) {
   const subject = `JDF pick timer · ${d.orderCode} · started ${clock(d.pickFirst)}`
   const lines = [
+    ...(d.classTypeId === SALES_ORDER_CLASS_TYPE_ID ? [`Order in Datex: ${DATEX_SALES_ORDER_URL}${d.orderId}`, ''] : []),
     `First pick ${d.pickFirst && !sameDay(d.pickFirst, d.centralNow) ? dayLabel(d.pickFirst) + ' ' : ''}${clock(d.pickFirst)} · ${d.picks} picks · ${d.manuals} manual allocations`,
     `Progress now: ${d.picksDone}/${d.picks} picks done, ${d.manualsDone}/${d.manuals} allocations done · Datex status: ${d.status}`,
     '',
@@ -421,7 +434,7 @@ async function runPickTimer({ dryRun }) {
           order_id: row.order_id, order_code: row.order_code, started_at: row.started_at, picks_expected: row.picks_expected,
           manuals_expected: row.manuals_expected, last_sig: row.last_sig } })
         try {
-          const taskId = await createFrontTask(task)
+          const taskId = await createFrontDiscussion(task)
           await sb(`${TABLE}?order_id=eq.${d.orderId}`, { method: 'PATCH', prefer: 'return=minimal', body: { task_id: taskId } })
           out.newTasks.push({ orderCode: d.orderCode, taskId })
           tracked.push({ ...row, task_id: taskId })
