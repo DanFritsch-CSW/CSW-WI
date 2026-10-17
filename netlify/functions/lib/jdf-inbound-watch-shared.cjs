@@ -5,10 +5,12 @@
 // WHAT IT DOES (v1, agreed with Dan 2026-10-17):
 //   Every 15 minutes, look for NEW Jones Dairy Farm inbound orders in Datex
 //   (project_id 365, order class type = Inbound). For each new order, create
-//   ONE Front Task assigned to Dan whose description lists pallets + SKUs
-//   (from the order lines, so it fires hours BEFORE the truck is unloaded).
+//   ONE Front DISCUSSION thread (Dan is the participant; changed from a Front
+//   task on 2026-10-17 at Dan's request) whose first comment gives the link to
+//   the order in Datex plus pallets + SKUs (from the order lines, so it fires
+//   hours BEFORE the truck is unloaded).
 //   Then, as pallets are received and moved into F8, add milestone COMMENTS to
-//   that same task with per-SKU put-away effectiveness:
+//   that same thread with per-SKU put-away effectiveness:
 //     - one progress comment when >= 50% of the order's pallets are put away
 //     - one final comment when everything received is put away (or a
 //       "stalled" final comment if the order is still open after STALE_HOURS)
@@ -70,6 +72,8 @@ const MOTHERDUCK_TOKEN = process.env.MOTHERDUCK_TOKEN || ''
 const DAN_TEAMMATE_ID = 'tea_a3e8k' // same ID the other digests use
 const JDF_PROJECT_ID = 365
 const INBOUND_ORDER_TYPE_ID = 1 // datex_slv_orderclasses.order_type_id = 1 -> Inbound ASN / Inbound Material Transfer
+// Direct link to the order in Datex (FootPrint Cloud ASN order editor); order_id is the only variable part.
+const DATEX_ASN_ORDER_URL = 'https://csw-footprint-cloud.wavelength.host/FootprintManager_asn_order_editor?order_id='
 // Wide on purpose: order timestamps and now() may be on different clocks, and
 // the seen-table does the real de-duplication. Only the very first (seeding)
 // run depends on this window.
@@ -129,13 +133,15 @@ async function frontFetch(path, body) {
   return text ? JSON.parse(text) : {}
 }
 
-// Same call the other digests use (auto-appt-review-digest-shared.cjs).
-async function createFrontTask({ subject, description }) {
+// Creates a Front internal discussion (same call as front-post-discussion.cjs and the
+// Footprint variance digest): teammate_ids adds Dan as a participant, and the first
+// comment is the opening message. Later updates are comments on the same conversation.
+async function createFrontDiscussion({ subject, description }) {
   const created = await frontFetch('/conversations', {
-    type: 'task',
+    type: 'discussion',
     teammate_ids: [DAN_TEAMMATE_ID],
     subject,
-    description,
+    comment: { body: description },
   })
   return created.id
 }
@@ -278,6 +284,8 @@ function groupOrders(rows) {
 function buildTask(order) {
   const subject = `JDF inbound ${order.orderCode} · ${order.pallets} pallets · ${order.skus.length} SKUs`
   const lines = [
+    `Order in Datex: ${DATEX_ASN_ORDER_URL}${order.orderId}`,
+    '',
     `${order.pallets} pallets · ${order.skus.length} SKUs (from the Datex order lines — truck not necessarily here yet)`,
     '',
     ...order.skus.map((s) => `${s.sku}  ${s.description}  — ${s.pallets} plt`),
@@ -286,7 +294,7 @@ function buildTask(order) {
   if (tails.length) {
     lines.push('', `Tail SKUs (≤${TAIL_MAX_PALLETS} plt, odd-lot candidates): ${tails.map((s) => `${s.sku} (${s.pallets})`).join(', ')}`)
   }
-  lines.push('', 'Put-away effectiveness (JDF-only: a pallet is clean if no other JDF SKU was already in its F8 location) will be added as comments on this task.')
+  lines.push('', 'Put-away effectiveness (JDF-only: a pallet is clean if no other JDF SKU was already in its F8 location) will be added as comments on this thread.')
   return { subject, description: lines.join('\n') }
 }
 
@@ -401,7 +409,7 @@ async function runWatch({ dryRun }) {
           body: { order_id: order.orderId, order_code: order.orderCode, pallets_expected: order.pallets, sku_count: order.skus.length },
         })
         try {
-          const taskId = await createFrontTask(task)
+          const taskId = await createFrontDiscussion(task)
           await sb(`${TABLE}?order_id=eq.${order.orderId}`, { method: 'PATCH', prefer: 'return=minimal', body: { task_id: taskId } })
           out.newTasks.push({ orderCode: order.orderCode, taskId })
         } catch (e) {
