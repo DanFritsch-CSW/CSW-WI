@@ -306,8 +306,6 @@ function buildTask(d) {
     ...(d.classTypeId === SALES_ORDER_CLASS_TYPE_ID ? [`Order in Datex: ${DATEX_SALES_ORDER_URL}${d.orderId}`, ''] : []),
     `First pick ${d.pickFirst && !sameDay(d.pickFirst, d.centralNow) ? dayLabel(d.pickFirst) + ' ' : ''}${clock(d.pickFirst)} · ${d.picks} picks · ${d.manuals} manual allocations`,
     `Progress now: ${d.picksDone}/${d.picks} picks done, ${d.manualsDone}/${d.manuals} allocations done · Datex status: ${d.status}`,
-    '',
-    'Clock = first completed pick → last completed pick/allocation. Updates post every 15 min while the counts change; a 10 PM note if the order is still open; a final message when picks are done (or Datex marks it Completed) and it has been quiet for 30 min.',
     `Typical JDF order: ${TYPICAL_TEXT} median (9/19–10/16, 103 orders).`,
   ]
   return { subject, description: lines.join('\n') }
