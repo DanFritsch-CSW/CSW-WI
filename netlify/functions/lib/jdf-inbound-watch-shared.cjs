@@ -286,7 +286,7 @@ function buildTask(order) {
   const lines = [
     `Order in Datex: ${DATEX_ASN_ORDER_URL}${order.orderId}`,
     '',
-    `${order.pallets} pallets · ${order.skus.length} SKUs (from the Datex order lines — truck not necessarily here yet)`,
+    `${order.pallets} pallets · ${order.skus.length} SKUs`,
     '',
     ...order.skus.map((s) => `${s.sku}  ${s.description}  — ${s.pallets} plt`),
   ]
@@ -294,7 +294,6 @@ function buildTask(order) {
   if (tails.length) {
     lines.push('', `Tail SKUs (≤${TAIL_MAX_PALLETS} plt, odd-lot candidates): ${tails.map((s) => `${s.sku} (${s.pallets})`).join(', ')}`)
   }
-  lines.push('', 'Put-away effectiveness (JDF-only: a pallet is clean if no other JDF SKU was already in its F8 location) will be added as comments on this thread.')
   return { subject, description: lines.join('\n') }
 }
 
