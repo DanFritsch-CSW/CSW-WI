@@ -949,6 +949,36 @@
 [functions."dan-footprint-digest-test"]
   timeout = 26
 
+# JDF Inbound Watch -- added 2026-10-17, Dan's explicit request. Creates one
+# Front Task (assigned to Dan) per NEW JDF inbound order, built from the
+# Datex order lines (so it fires hours BEFORE the truck is unloaded), then
+# adds put-away effectiveness comments as pallets are received and moved
+# into F8/F7 (JDF-only scoring -- see lib/jdf-inbound-watch-shared.cjs for
+# the full design writeup). State lives in the jdf_inbound_watch table.
+# INERT until the Netlify env var JDF_INBOUND_WATCH_ACTIVE is set to "true".
+#
+# Cron is every 15 minutes but deliberately OFFSET (:04/:19/:34/:49) rather
+# than the :00/:15/:30/:45 marks that the ~15 other */15 functions in this
+# file all fire on -- see the shortage-report-email-run comment above re:
+# the 2026-09-02 Netlify support ticket about scheduled functions
+# intermittently not being invoked in that crowded pool.
+[functions."jdf-inbound-watch-run"]
+  schedule = "4,19,34,49 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# JDF Inbound Watch MANUAL TEST -- no schedule, so direct POST works (same
+# 403-avoidance pattern as every other *-test.cjs in this app). Unlike most
+# of them this IS a dry run by default: it returns what it WOULD create
+# without writing to Supabase or calling Front. POST {"send": true} to run
+# for real (ignores the kill switch; a first real run on an empty table
+# only seeds existing orders silently).
+[functions."jdf-inbound-watch-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
