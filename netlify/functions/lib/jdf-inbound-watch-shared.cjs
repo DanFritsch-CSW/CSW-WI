@@ -9,11 +9,16 @@
 //   task on 2026-10-17 at Dan's request) whose first comment gives the link to
 //   the order in Datex plus pallets + SKUs (from the order lines, so it fires
 //   hours BEFORE the truck is unloaded).
-//   Then, as pallets are received and moved into F8, add milestone COMMENTS to
-//   that same thread with per-SKU put-away effectiveness:
-//     - one progress comment when >= 50% of the order's pallets are put away
-//     - one final comment when everything received is put away (or a
-//       \"stalled\" final comment if the order is still open after STALE_HOURS)
+//   Then, as pallets are received and moved into F8/F7, add COMMENTS to that
+//   same thread with per-SKU put-away effectiveness:
+//     - ONE progress comment as soon as >= 20% of the order's pallets have
+//       left C1 Receiving (PROGRESS_FRACTION; was 50% until 2026-10-17)
+//     - ONE final comment FINAL_HOURS (8) after the thread was announced,
+//       REGARDLESS of whether the order is complete (Dan, 2026-10-17). It
+//       reports whatever state the order is in at that moment (received, out
+//       of receiving, still staged), so late re-moves that fix mixed
+//       locations are captured before the final score is posted.
+//   There is no separate "stalled" comment any more; the 8h final replaces it.
 //
 // WHY ORDER-BASED, NOT RECEIPT-BASED:
 //   receipt_number is blank on JDF receiving tasks. The Datex inbound order
@@ -21,13 +26,13 @@
 //   (observed 0.2-3.9 hrs earlier on 23 recent orders) and carries ~one order
 //   line per pallet, so pallets-per-SKU is known at creation.
 //
-// \"EFFECTIVE\" / CLEAN (JDF-ONLY, per Dan):
+// "EFFECTIVE" / CLEAN (JDF-ONLY, per Dan):
 //   A pallet is clean if, at the moment of its (last) LicensePlateMove into an
 //   F8 location, no OTHER JDF SKU was already sitting in that same location.
 //   Other customers' product (Saputo, Lakeside...) is deliberately ignored:
 //   F8 locations are two-deep with JDF in the front and slow-moving customers
 //   behind, so sharing a location with them is by design.
-//   \"Already sitting there at move time\" is reconstructed from move tasks: a
+//   "Already sitting there at move time" is reconstructed from move tasks: a
 //   neighbour LP counts only if it arrived at that location at or before this
 //   pallet's move (or has no recorded move there = older stock). So when two
 //   SKUs get mixed, the pallet that arrived SECOND takes the hit, and a good
@@ -35,7 +40,7 @@
 //   pallet to a clean spot (a fix) is reflected because the LAST move counts.
 //
 // WHO PUT IT AWAY (Dan, 2026-10-17):
-//   Every progress / final / stalled comment names the user(s) who did the
+//   Every progress / final comment names the user(s) who did the
 //   put-aways, e.g. "Put away by: csw-dboss (47)". The user is the Datex
 //   Employee on each received LP's LAST completed LicensePlateMove (same
 //   "last move counts" rule as the scoring; falls back to the login part of
@@ -57,10 +62,11 @@
 //              move or a non-LicensePlateMove put-away) -> counted as out of
 //              receiving but NOT scored
 //   staged   = still in C1 Receiving
-//   An order is COMPLETE when every pallet has been received and none is
-//   still staged. (Observed over 30 days: 91% of JDF pallets end in F8, ~2.8%
-//   have no move task - 68 still in C1 Receiving, 32 at doors, ~9 in F8 via
-//   another task type.)
+//   COMPLETE (every pallet received, none still staged) no longer triggers
+//   anything by itself; it only changes the wording of the 8h final comment.
+//   (Observed over 30 days: 91% of JDF pallets end in F8, ~2.8% have no move
+//   task - 68 still in C1 Receiving, 32 at doors, ~9 in F8 via another task
+//   type.)
 //
 // STATE: Supabase table jdf_inbound_watch (see supabase/jdf_inbound_watch.sql).
 //   First ever run SEEDS the table with whatever orders already exist (no
@@ -69,7 +75,7 @@
 // ALWAYS LIVE (Dan, 2026-10-17): there is no env-var switch. The scheduled
 //   tick always runs for real; the first run on an empty table only SEEDS
 //   existing orders, so deploying never floods Dan. The manual test function
-//   is a DRY RUN unless the POST body contains { \"send\": true }.
+//   is a DRY RUN unless the POST body contains { "send": true }.
 //
 // Same run/test split as every other digest in this app (Netlify blocks
 // direct HTTP invocation of any function that carries a `schedule`).
@@ -90,14 +96,17 @@ const DATEX_ASN_ORDER_URL = 'https://csw-footprint-cloud.wavelength.host/Footpri
 // run depends on this window.
 const LOOKBACK_HOURS = 30
 const TAIL_MAX_PALLETS = 3 // SKUs with <= this many pallets are flagged as odd-lot candidates
-const PROGRESS_FRACTION = 0.5
-const STALE_HOURS = 36 // open this long -> post a final \"stalled\" comment and stop polling
+const PROGRESS_FRACTION = 0.2 // progress comment once this share of expected pallets has left C1 Receiving (Dan, 2026-10-17)
+const FINAL_HOURS = 8 // final comment this many hours after announce, regardless of completion (Dan, 2026-10-17)
+// false = the final comment ALWAYS waits for FINAL_HOURS (current behavior).
+// true  = also post it early the moment every pallet is received and none are staged.
+const FINAL_EARLY_WHEN_COMPLETE = false
 const MAX_FIX_LOCATIONS = 8
 
 const SCORED_FREEZERS = ['F8', 'F7'] // hard-coded per Dan 2026-10-16
 const RECEIVING_STAGING = 'C1 Receiving'
 
-// Optional login -> display name map for the \"Put away by\" line, e.g. { 'csw-dboss': 'D. Boss' }.
+// Optional login -> display name map for the "Put away by" line, e.g. { 'csw-dboss': 'D. Boss' }.
 // Unmapped logins are shown exactly as Datex has them.
 const PUTAWAY_USER_NAMES = {}
 
@@ -383,12 +392,16 @@ function putawayByLine(users) {
 function buildComment(kind, p) {
   const totalClean = p.skus.reduce((a, s) => a + s.clean, 0)
   const clean = `${totalClean}/${p.scored} clean (${pct(totalClean, p.scored)}%)`
-  const head =
-    kind === 'progress'
-      ? `Put-away check · ${p.leftReceiving} of ${p.expected} pallets out of receiving · ${clean}`
-      : kind === 'stalled'
-        ? `Stalled · ${p.received} of ${p.expected} received, ${p.leftReceiving} out of receiving, ${p.staged} still in receiving · ${clean}`
-        : `Final · ${p.leftReceiving} of ${p.expected} out of receiving · ${clean}`
+  let head
+  if (kind === 'progress') {
+    head = `Put-away check · ${p.leftReceiving} of ${p.expected} pallets out of receiving · ${clean}`
+  } else {
+    // 8h final: report the state as it is, including anything not received or still staged.
+    const gaps = []
+    if (p.received < p.expected) gaps.push(`${p.expected - p.received} not received`)
+    if (p.staged > 0) gaps.push(`${p.staged} still in receiving`)
+    head = `Final (${FINAL_HOURS}h) · ${p.leftReceiving} of ${p.expected} out of receiving${gaps.length ? ` · ${gaps.join(', ')}` : ''} · ${clean}`
+  }
   const lines = [head, '', ...[...p.skus].sort((a, b) => b.received - a.received).map(skuLine)]
   const by = putawayByLine(p.users)
   if (by) lines.push('', by)
@@ -404,12 +417,19 @@ function buildComment(kind, p) {
 
 // Pure decision function, exported for testing.
 // p: { expected, received, staged, leftReceiving }
+// 'final' = FINAL_HOURS after announce regardless of completion (or early on completion only
+// if FINAL_EARLY_WHEN_COMPLETE). 'progress' = once, as soon as PROGRESS_FRACTION of the
+// expected pallets have left C1 Receiving. Final takes priority; nothing posts after final.
 function decideComment(row, p, nowMs) {
   const ageHours = (nowMs - new Date(row.announced_at).getTime()) / 3.6e6
   const complete = p.expected > 0 && p.received >= p.expected && p.staged === 0
-  if (complete && !row.final_sent) return 'final'
-  if (!complete && ageHours >= STALE_HOURS && !row.final_sent) return 'stalled'
-  if (!complete && !row.progress_sent && p.leftReceiving >= Math.ceil(PROGRESS_FRACTION * p.expected)) return 'progress'
+  const finalDue = ageHours >= FINAL_HOURS || (FINAL_EARLY_WHEN_COMPLETE && complete)
+  if (finalDue && !row.final_sent) return 'final'
+  if (
+    !row.progress_sent && !row.final_sent &&
+    p.expected > 0 && p.leftReceiving > 0 &&
+    p.leftReceiving >= Math.ceil(PROGRESS_FRACTION * p.expected)
+  ) return 'progress'
   return null
 }
 
