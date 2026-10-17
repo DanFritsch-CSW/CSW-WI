@@ -980,6 +980,32 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# JDF Pick Timer -- added 2026-10-17, Dan's explicit request. Outbound
+# counterpart to JDF Inbound Watch above. Creates one Front Task (lands in
+# Dan's task list) per JDF OUTBOUND order at its first completed pick, then
+# comments with progress, a stall flag, a 10 PM Central handoff note, and a
+# final first-pick-to-last-task duration (see lib/jdf-pick-timer-shared.cjs
+# for the full design writeup and the data findings behind it). State lives
+# in the jdf_pick_timer table. Always live -- no env-var switch; the first
+# run on an empty table records already-Completed orders silently and only
+# announces orders still in progress.
+#
+# Cron is every 15 minutes, OFFSET (:09/:24/:39/:54) so it neither collides
+# with the :00/:15/:30/:45 pool nor with jdf-inbound-watch-run's :04/:19/:34/:49.
+[functions."jdf-pick-timer-run"]
+  schedule = "9,24,39,54 * * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# JDF Pick Timer MANUAL TEST -- no schedule, so direct POST works. DRY RUN by
+# default (returns what it WOULD create without writing to Supabase or calling
+# Front); POST {"send": true} to run for real.
+[functions."jdf-pick-timer-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [[edge_functions]]
   path = "/*"
   function = "pvi-password-gate"
