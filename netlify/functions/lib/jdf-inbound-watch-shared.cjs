@@ -13,7 +13,7 @@
 //   that same thread with per-SKU put-away effectiveness:
 //     - one progress comment when >= 50% of the order's pallets are put away
 //     - one final comment when everything received is put away (or a
-//       "stalled" final comment if the order is still open after STALE_HOURS)
+//       \"stalled\" final comment if the order is still open after STALE_HOURS)
 //
 // WHY ORDER-BASED, NOT RECEIPT-BASED:
 //   receipt_number is blank on JDF receiving tasks. The Datex inbound order
@@ -21,18 +21,29 @@
 //   (observed 0.2-3.9 hrs earlier on 23 recent orders) and carries ~one order
 //   line per pallet, so pallets-per-SKU is known at creation.
 //
-// "EFFECTIVE" / CLEAN (JDF-ONLY, per Dan):
+// \"EFFECTIVE\" / CLEAN (JDF-ONLY, per Dan):
 //   A pallet is clean if, at the moment of its (last) LicensePlateMove into an
 //   F8 location, no OTHER JDF SKU was already sitting in that same location.
 //   Other customers' product (Saputo, Lakeside...) is deliberately ignored:
 //   F8 locations are two-deep with JDF in the front and slow-moving customers
 //   behind, so sharing a location with them is by design.
-//   "Already sitting there at move time" is reconstructed from move tasks: a
+//   \"Already sitting there at move time\" is reconstructed from move tasks: a
 //   neighbour LP counts only if it arrived at that location at or before this
 //   pallet's move (or has no recorded move there = older stock). So when two
 //   SKUs get mixed, the pallet that arrived SECOND takes the hit, and a good
 //   put-away is never blamed for something placed beside it later. Re-moving a
 //   pallet to a clean spot (a fix) is reflected because the LAST move counts.
+//
+// WHO PUT IT AWAY (Dan, 2026-10-17):
+//   Every progress / final / stalled comment names the user(s) who did the
+//   put-aways, e.g. "Put away by: csw-dboss (47)". The user is the Datex
+//   Employee on each received LP's LAST completed LicensePlateMove (same
+//   "last move counts" rule as the scoring; falls back to the login part of
+//   modified_sys_user if Employee is blank). Counts cover every pallet that
+//   has left C1 Receiving by a move, scored or not. In the fix list, each
+//   mixed location also names who made the offending (second-arrival) move.
+//   PUTAWAY_USER_NAMES can map a login to a display name; unmapped logins are
+//   shown as-is.
 //
 // SCOPE (Dan, 2026-10-16): scored freezers are F8 and F7, HARD-CODED below
 //   (SCORED_FREEZERS). F1 and F2 are ignored — CSW is not putting new product
@@ -58,7 +69,7 @@
 // ALWAYS LIVE (Dan, 2026-10-17): there is no env-var switch. The scheduled
 //   tick always runs for real; the first run on an empty table only SEEDS
 //   existing orders, so deploying never floods Dan. The manual test function
-//   is a DRY RUN unless the POST body contains { "send": true }.
+//   is a DRY RUN unless the POST body contains { \"send\": true }.
 //
 // Same run/test split as every other digest in this app (Netlify blocks
 // direct HTTP invocation of any function that carries a `schedule`).
@@ -80,11 +91,15 @@ const DATEX_ASN_ORDER_URL = 'https://csw-footprint-cloud.wavelength.host/Footpri
 const LOOKBACK_HOURS = 30
 const TAIL_MAX_PALLETS = 3 // SKUs with <= this many pallets are flagged as odd-lot candidates
 const PROGRESS_FRACTION = 0.5
-const STALE_HOURS = 36 // open this long -> post a final "stalled" comment and stop polling
+const STALE_HOURS = 36 // open this long -> post a final \"stalled\" comment and stop polling
 const MAX_FIX_LOCATIONS = 8
 
 const SCORED_FREEZERS = ['F8', 'F7'] // hard-coded per Dan 2026-10-16
 const RECEIVING_STAGING = 'C1 Receiving'
+
+// Optional login -> display name map for the \"Put away by\" line, e.g. { 'csw-dboss': 'D. Boss' }.
+// Unmapped logins are shown exactly as Datex has them.
+const PUTAWAY_USER_NAMES = {}
 
 const TABLE = 'jdf_inbound_watch'
 
@@ -93,6 +108,12 @@ function scoredLocSql(col) {
 }
 
 function num(v) { return Number(v ?? 0) || 0 }
+
+function userLabel(u) {
+  const key = String(u || '').trim()
+  if (!key) return 'unknown'
+  return PUTAWAY_USER_NAMES[key] || key
+}
 
 // ───────────────────────────── Supabase ─────────────────────────────
 
@@ -187,7 +208,7 @@ function recentOrdersSql() {
     ORDER BY o.order_id, pallets DESC, sku`
 }
 
-// Per-order, per-SKU progress + conflict list for the given order IDs.
+// Per-order, per-SKU progress + conflict list + put-away users for the given order IDs.
 // orderIds MUST be validated integers (they are interpolated).
 function progressSql(orderIds) {
   const ids = orderIds.map((n) => {
@@ -206,6 +227,18 @@ function progressSql(orderIds) {
       LEFT JOIN production_db.silver.datex_slv_locationcontainers cl ON cl.location_container_id = lpc0.location_id
       WHERE t.order_id IN (${ids}) AND t.project_id = ${JDF_PROJECT_ID}
         AND (t.Undone IS NULL OR t.Undone = false)
+    ),
+    putaway AS (
+      SELECT lp_id, mv_user FROM (
+        SELECT t.actual_source_license_plate_id AS lp_id,
+               coalesce(nullif(trim(t.Employee), ''), list_extract(string_split(t.modified_sys_user, chr(92)), -1)) AS mv_user,
+               row_number() OVER (PARTITION BY t.actual_source_license_plate_id ORDER BY t.completed_date_time DESC) AS rn
+        FROM production_db.silver.datex_slv_tasks t
+        JOIN production_db.silver.datex_slv_operationcodes oc
+          ON oc.operation_code_id = t.operation_code_id AND oc.operation_code_name = 'LicensePlateMove'
+        WHERE t.actual_source_license_plate_id IN (SELECT lp_id FROM rcv)
+          AND t.completed_date_time IS NOT NULL AND (t.Undone IS NULL OR t.Undone = false)
+      ) WHERE rn = 1
     ),
     lastmove AS (
       SELECT lp_id, loc_id, loc_name, mv_at FROM (
@@ -231,9 +264,10 @@ function progressSql(orderIds) {
       GROUP BY 1, 2
     ),
     conflicts AS (
-      SELECT DISTINCT lm.lp_id AS subject_lp, lm.loc_name, m2.lookup_code AS other_sku
+      SELECT DISTINCT lm.lp_id AS subject_lp, lm.loc_name, m2.lookup_code AS other_sku, pa.mv_user
       FROM lastmove lm
       JOIN rcv r ON r.lp_id = lm.lp_id
+      LEFT JOIN putaway pa ON pa.lp_id = lm.lp_id
       JOIN production_db.silver.datex_slv_licenseplates lp2
         ON lp2.location_id = lm.loc_id AND lp2.license_plate_id <> lm.lp_id
        AND (lp2.Archived IS NULL OR lp2.Archived = false)
@@ -258,12 +292,21 @@ function progressSql(orderIds) {
     LEFT JOIN lastmove lm ON lm.lp_id = r.lp_id
     GROUP BY r.order_id, m.lookup_code`
   const conflictRows = `${base}
-    SELECT DISTINCT r.order_id, m.lookup_code AS sku, c.loc_name, c.other_sku
+    SELECT DISTINCT r.order_id, m.lookup_code AS sku, c.loc_name, c.other_sku, c.mv_user
     FROM conflicts c
     JOIN rcv r ON r.lp_id = c.subject_lp
     JOIN production_db.silver.datex_slv_materials m ON m.material_id = r.material_id
     ORDER BY c.loc_name`
-  return { skuRows, conflictRows }
+  // Who moved the pallets out of receiving: last completed LicensePlateMove per received LP
+  // (any destination), counted for every pallet no longer sitting in C1 Receiving.
+  const userRows = `${base}
+    SELECT r.order_id, pa.mv_user, count(DISTINCT r.lp_id) AS pallets
+    FROM rcv r
+    JOIN putaway pa ON pa.lp_id = r.lp_id
+    WHERE coalesce(r.cur_loc, '') <> '${RECEIVING_STAGING}'
+    GROUP BY r.order_id, pa.mv_user
+    ORDER BY r.order_id, pallets DESC`
+  return { skuRows, conflictRows, userRows }
 }
 
 // ───────────────────────────── Formatting ─────────────────────────────
@@ -309,17 +352,32 @@ function skuLine(s) {
 }
 
 function fixList(conflicts) {
-  // group by location -> set of SKUs involved
+  // group by location -> SKUs involved + who made the (second-arrival) move
   const byLoc = new Map()
   for (const c of conflicts) {
-    if (!byLoc.has(c.loc_name)) byLoc.set(c.loc_name, new Set())
-    byLoc.get(c.loc_name).add(c.sku)
-    byLoc.get(c.loc_name).add(c.other_sku)
+    if (!byLoc.has(c.loc_name)) byLoc.set(c.loc_name, { skus: new Set(), users: new Set() })
+    const e = byLoc.get(c.loc_name)
+    e.skus.add(c.sku)
+    e.skus.add(c.other_sku)
+    if (c.mv_user) e.users.add(userLabel(c.mv_user))
   }
   const entries = [...byLoc.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-  const shown = entries.slice(0, MAX_FIX_LOCATIONS).map(([loc, skus]) => `• ${loc}: ${[...skus].sort().join(' + ')}`)
+  const shown = entries.slice(0, MAX_FIX_LOCATIONS).map(([loc, e]) => {
+    const who = e.users.size ? ` (moved by ${[...e.users].sort().join(', ')})` : ''
+    return `• ${loc}: ${[...e.skus].sort().join(' + ')}${who}`
+  })
   if (entries.length > MAX_FIX_LOCATIONS) shown.push(`• …and ${entries.length - MAX_FIX_LOCATIONS} more locations`)
   return shown
+}
+
+// "Put away by: csw-dboss (47) · csw-xyz (3)" — empty string when nothing has been moved yet.
+function putawayByLine(users) {
+  const list = (users || []).filter((u) => num(u.pallets) > 0)
+  if (!list.length) return ''
+  const parts = [...list]
+    .sort((a, b) => num(b.pallets) - num(a.pallets) || String(a.user).localeCompare(String(b.user)))
+    .map((u) => `${userLabel(u.user)} (${num(u.pallets)})`)
+  return `Put away by: ${parts.join(' · ')}`
 }
 
 function buildComment(kind, p) {
@@ -332,6 +390,8 @@ function buildComment(kind, p) {
         ? `Stalled · ${p.received} of ${p.expected} received, ${p.leftReceiving} out of receiving, ${p.staged} still in receiving · ${clean}`
         : `Final · ${p.leftReceiving} of ${p.expected} out of receiving · ${clean}`
   const lines = [head, '', ...[...p.skus].sort((a, b) => b.received - a.received).map(skuLine)]
+  const by = putawayByLine(p.users)
+  if (by) lines.push('', by)
   const notes = []
   if (p.door) notes.push(`${p.door} cross-docked to doors (not scored)`)
   if (p.other) notes.push(`${p.other} left receiving by another task type (not scored)`)
@@ -425,8 +485,8 @@ async function runWatch({ dryRun }) {
       `${TABLE}?select=*&final_sent=eq.false&silent_seed=eq.false&task_id=not.is.null&order=order_id.asc&limit=40`
     )
     if (open.length) {
-      const { skuRows, conflictRows } = progressSql(open.map((r) => num(r.order_id)))
-      const [skuRes, conflictRes] = await Promise.all([md.query(skuRows), md.query(conflictRows)])
+      const { skuRows, conflictRows, userRows } = progressSql(open.map((r) => num(r.order_id)))
+      const [skuRes, conflictRes, userRes] = await Promise.all([md.query(skuRows), md.query(conflictRows), md.query(userRows)])
       const now = Date.now()
       for (const row of open) {
         const id = num(row.order_id)
@@ -445,6 +505,9 @@ async function runWatch({ dryRun }) {
           scored: sum('scored'), door: sum('door'), other: sum('other'),
           skus,
           conflicts: conflictRes.filter((r) => num(r.order_id) === id),
+          users: userRes
+            .filter((r) => num(r.order_id) === id)
+            .map((r) => ({ user: r.mv_user, pallets: num(r.pallets) })),
         }
         const kind = decideComment(row, p, now)
         if (!kind) continue
@@ -469,5 +532,5 @@ async function runWatch({ dryRun }) {
 module.exports = {
   runWatch,
   // exported for tests
-  groupOrders, buildTask, buildComment, decideComment, fixList, progressSql,
+  groupOrders, buildTask, buildComment, decideComment, fixList, progressSql, putawayByLine,
 }
