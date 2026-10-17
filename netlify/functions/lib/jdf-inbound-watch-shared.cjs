@@ -53,9 +53,10 @@
 //   First ever run SEEDS the table with whatever orders already exist (no
 //   tasks, no comments) so deploying never floods Dan with old orders.
 //
-// KILL SWITCH: scheduled runs do nothing unless env JDF_INBOUND_WATCH_ACTIVE
-//   is exactly 'true'. The manual test function ignores the switch and is a
-//   DRY RUN unless the POST body contains { "send": true }.
+// ALWAYS LIVE (Dan, 2026-10-17): there is no env-var switch. The scheduled
+//   tick always runs for real; the first run on an empty table only SEEDS
+//   existing orders, so deploying never floods Dan. The manual test function
+//   is a DRY RUN unless the POST body contains { "send": true }.
 //
 // Same run/test split as every other digest in this app (Netlify blocks
 // direct HTTP invocation of any function that carries a `schedule`).
