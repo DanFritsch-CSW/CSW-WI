@@ -110,6 +110,25 @@
 // app-wide digest, not SHADOW_START_DATE above (which is one day earlier
 // and predates this table).
 //
+// CHANGED 2026-10-18 (Dan's explicit request): the confidence headline and
+// the cumulative-since-10/11 per-field block are replaced by a SINGLE-DAY
+// view (today, America/Chicago) and a ROLLING 7-DAY view, shown side by
+// side per field, plus a one-line "fully correct" figure for each and a
+// day-by-day trend. Reason: the first two days of the pilot ran before the
+// webhook override, lead-time and owner fixes landed (10/11-10/12), so a
+// cumulative number can never reach the 99% bar no matter how well the
+// agent does now. The old headline ("N/M graded appointments matched
+// exactly") came from auto_appt_attempts.match_status, which flagged rows
+// whose agent and CSR times printed identically as MISMATCH, so it read
+// 0% regardless of reality; it is gone. Everything in the new view comes
+// from agent_field_accuracy (one row per graded submission, per-field
+// *_match booleans), bucketed by the America/Chicago calendar day of
+// compared_at (the moment the CSR's final values were compared). "Fully
+// correct" = every tracked field with a non-null *_match is true.
+// describeRow's mismatch text now also shows the date, and the raw stored
+// values when the short labels look identical, so whatever
+// compareShadowOutcome() is actually tripping on becomes visible.
+//
 // Same run/test split as every other digest in this app.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
@@ -198,8 +217,12 @@ async function fetchConfidenceTally() {
 // agent_field_accuracy started tracking sender_email. See header note.
 async function fetchPalermoFieldAccuracy() {
   const senderList = PALERMO_FIELD_SENDERS.map((s) => encodeURIComponent(s)).join(',')
+  // Only the last ~8 days are needed (today + rolling 7, with a day of slack
+  // for the Chicago/UTC offset); never earlier than the table's start date.
+  const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+  const since = eightDaysAgo > FIELD_ACCURACY_START_DATE ? eightDaysAgo : FIELD_ACCURACY_START_DATE
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/agent_field_accuracy?sender_email=in.(${senderList})&compared_at=gte.${encodeURIComponent(FIELD_ACCURACY_START_DATE)}&select=*`,
+    `${SUPABASE_URL}/rest/v1/agent_field_accuracy?sender_email=in.(${senderList})&compared_at=gte.${encodeURIComponent(since)}&select=*`,
     { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   )
   if (!res.ok) return []
@@ -223,6 +246,70 @@ function buildFieldTally(rows) {
 function fmtFieldPct(matched, compared) {
   if (compared === 0) return 'no data yet'
   return `${matched}/${compared} (${((matched / compared) * 100).toFixed(1)}%)`
+}
+
+// America/Chicago calendar date ('YYYY-MM-DD') for an ISO timestamp / Date.
+function centralDateStr(d) {
+  return new Date(d).toLocaleDateString('en-CA', { timeZone: 'America/Chicago' })
+}
+
+// Today (Central) plus the 6 days before it, newest first, as 'YYYY-MM-DD'.
+// Built from the Central date string via UTC arithmetic so DST changes can
+// never skip or repeat a day.
+function lastNCentralDates(n) {
+  const [y, m, d] = centralDateStr(new Date()).split('-').map(Number)
+  const out = []
+  for (let i = 0; i < n; i++) out.push(new Date(Date.UTC(y, m - 1, d - i)).toISOString().slice(0, 10))
+  return out
+}
+
+function mdLabel(ymd) {
+  const [, m, d] = ymd.split('-').map(Number)
+  return `${m}/${d}`
+}
+
+// A graded submission is "fully correct" when every tracked field that has a
+// comparison (non-null *_match) matched. Rows with no comparable field at all
+// return null and are left out of the count.
+function rowFullyCorrect(r) {
+  let compared = 0
+  for (const { key } of FIELD_KEYS) {
+    const v = r[`${key}_match`]
+    if (v === null || v === undefined) continue
+    compared++
+    if (v !== true) return false
+  }
+  return compared > 0 ? true : null
+}
+
+function fullyCorrectTally(rows) {
+  let ok = 0
+  let total = 0
+  for (const r of rows) {
+    const v = rowFullyCorrect(r)
+    if (v === null) continue
+    total++
+    if (v) ok++
+  }
+  return { ok, total }
+}
+
+// Today + rolling-7-day views over agent_field_accuracy rows. Returns null
+// when there's nothing in the 7-day window at all.
+function buildPeriodViews(fieldRows) {
+  const dates = lastNCentralDates(7) // newest first
+  const todayKey = dates[0]
+  const windowSet = new Set(dates)
+  const byDay = {}
+  for (const k of dates) byDay[k] = []
+  for (const r of fieldRows || []) {
+    if (!r.compared_at) continue
+    const k = centralDateStr(r.compared_at)
+    if (windowSet.has(k)) byDay[k].push(r)
+  }
+  const todayRows = byDay[todayKey]
+  const weekRows = dates.flatMap((k) => byDay[k])
+  return { dates, byDay, todayKey, todayRows, weekRows }
 }
 
 function formatTimeShort(iso) {
@@ -262,7 +349,17 @@ function describeRow(r) {
       if (r.match_status === 'mismatch') {
         const bits = []
         if (r.agent_scheduled_arrival !== r.actual_scheduled_arrival) {
-          bits.push(`agent had ${formatTimeShort(r.agent_scheduled_arrival) || '(none)'}, CSR used ${formatTimeShort(r.actual_scheduled_arrival) || '(none)'}`)
+          const a = formatTimeShort(r.agent_scheduled_arrival) || '(none)'
+          const c = formatTimeShort(r.actual_scheduled_arrival) || '(none)'
+          const ad = r.agent_scheduled_arrival ? String(r.agent_scheduled_arrival).slice(0, 10) : ''
+          const cd = r.actual_scheduled_arrival ? String(r.actual_scheduled_arrival).slice(0, 10) : ''
+          // Same hour label but flagged anyway: show the date, and the raw
+          // stored strings, so the real difference (date, timezone suffix,
+          // seconds) is visible instead of "6am vs 6am".
+          const same = a === c
+          const dateTxt = ad && cd && ad !== cd ? ` [date ${ad} vs ${cd}]` : ''
+          const rawTxt = same ? ` [raw: ${r.agent_scheduled_arrival} vs ${r.actual_scheduled_arrival}]` : ''
+          bits.push(`agent had ${a}, CSR used ${c}${dateTxt}${rawTxt}`)
         }
         if (r.recommended_dock_door && r.recommended_dock_door !== r.actual_dock_door) {
           bits.push(`recommended dock ${r.recommended_dock_door}, CSR used ${r.actual_dock_door || '(none)'}`)
@@ -299,26 +396,36 @@ function buildSummary(attempts, tally, fieldRows) {
   const subject = `Palermo's Auto-Scheduling — ${today}`
   const lines = []
 
-  if (tally) {
-    const pct = tally.compared > 0 ? ((tally.matched / tally.compared) * 100).toFixed(1) : null
-    lines.push(
-      pct !== null
-        ? `Confidence so far: ${tally.matched}/${tally.compared} graded appointments matched exactly (${pct}%). ${tally.pending} more awaiting CSR approval before they can be graded. Target: 99%+ before Sam/Daren go fully automatic.`
-        : `Confidence so far: no graded appointments yet (${tally.pending} awaiting CSR approval). Target: 99%+ before Sam/Daren go fully automatic.`
-    )
-    if (tally.mismatch > 0) {
-      lines.push(`⚠️ ${tally.mismatch} mismatch${tally.mismatch === 1 ? '' : 'es'} so far — see below for today's, or ask me to pull the full list.`)
+  if (fieldRows) {
+    const { dates, byDay, todayKey, todayRows, weekRows } = buildPeriodViews(fieldRows)
+    const todayFc = fullyCorrectTally(todayRows)
+    const weekFc = fullyCorrectTally(weekRows)
+    const fcTxt = (t) => (t.total === 0 ? 'no graded appointments' : `${t.ok}/${t.total} appointments fully correct (${((t.ok / t.total) * 100).toFixed(1)}%)`)
+    lines.push(`Today (${mdLabel(todayKey)}): ${fcTxt(todayFc)}`)
+    lines.push(`Rolling 7 days (${mdLabel(dates[dates.length - 1])}–${mdLabel(todayKey)}): ${fcTxt(weekFc)}`)
+    lines.push('"Fully correct" = every tracked field matched what the CSR finally approved. Target: 99%+ on the 7-day number before Sam/Daren go fully automatic.')
+    if (tally && tally.pending > 0) {
+      lines.push(`${tally.pending} appointment${tally.pending === 1 ? '' : 's'} still awaiting CSR approval (not graded yet).`)
     }
     lines.push('')
-  }
 
-  if (fieldRows) {
-    const fieldTally = buildFieldTally(fieldRows)
-    lines.push(`Per-field confidence, cumulative since 2026-10-11 (${fieldRows.length} submission${fieldRows.length === 1 ? '' : 's'} graded so far):`)
+    const todayTally = buildFieldTally(todayRows)
+    const weekTally = buildFieldTally(weekRows)
+    lines.push('Per-field confidence — today | rolling 7 days:')
     lines.push('')
     for (const { key, label } of FIELD_KEYS) {
-      lines.push(`- ${label}: ${fmtFieldPct(fieldTally[key].matched, fieldTally[key].compared)}`)
+      lines.push(`- ${label}: ${fmtFieldPct(todayTally[key].matched, todayTally[key].compared)} | ${fmtFieldPct(weekTally[key].matched, weekTally[key].compared)}`)
     }
+    lines.push('')
+
+    lines.push('Day by day (fully correct):')
+    for (const k of dates) {
+      const t = fullyCorrectTally(byDay[k])
+      lines.push(`- ${mdLabel(k)}: ${t.total === 0 ? 'no graded appointments' : `${t.ok}/${t.total} (${((t.ok / t.total) * 100).toFixed(0)}%)`}`)
+    }
+    lines.push('')
+  } else if (tally) {
+    lines.push(`Per-field confidence unavailable this run (agent_field_accuracy fetch failed). ${tally.pending} appointment${tally.pending === 1 ? '' : 's'} awaiting CSR approval.`)
     lines.push('')
   }
 
