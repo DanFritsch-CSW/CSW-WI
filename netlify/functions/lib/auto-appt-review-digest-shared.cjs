@@ -130,6 +130,11 @@
 // compareShadowOutcome() is actually tripping on becomes visible.
 // Same day: Notes removed from FIELD_KEYS here (see that constant's note).
 //
+// QUIET DAYS + DELIVERY LOG 2026-10-18: postDigest now posts every night even
+// when there were no attempts in the window (it used to return silently),
+// posts a short "DIGEST FAILED" task if Front rejects the post, and logs
+// every run to public.digest_runs (digest 'palermo-auto-appt-digest').
+//
 // Same run/test split as every other digest in this app.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
@@ -452,14 +457,7 @@ function buildSummary(attempts, tally, fieldRows) {
   return { subject, description: lines.join('\n').trim() }
 }
 
-async function postDigest() {
-  const [attempts, tally, fieldRows] = await Promise.all([fetchWindowAttempts(), fetchConfidenceTally(), fetchPalermoFieldAccuracy()])
-  const meaningful = attempts.filter((a) => a.outcome !== 'skipped_already_processed')
-  if (meaningful.length === 0) {
-    return { posted: false, reason: 'no activity in the last 24 hours' }
-  }
-
-  const { subject, description } = buildSummary(attempts, tally, fieldRows)
+async function createFrontTask(subject, description) {
   const res = await fetch('https://api2.frontapp.com/conversations', {
     method: 'POST',
     headers: { Authorization: `Bearer ${FRONT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -470,12 +468,58 @@ async function postDigest() {
       description,
     }),
   })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Front create-conversation (task) API -> HTTP ${res.status}: ${text.slice(0, 300)}`)
+  const text = await res.text().catch(() => '')
+  let id = null
+  if (res.ok) {
+    try { id = JSON.parse(text).id } catch (_) { /* leave null */ }
   }
-  const created = await res.json()
-  return { posted: true, count: meaningful.length, taskId: created.id }
+  return { ok: res.ok, status: res.status, text, id }
+}
+
+// Every run -- posted or failed -- is logged to public.digest_runs (added
+// 2026-10-18) so "did it run, did it reach Front" is a query, not a mystery.
+async function logRun({ posted, taskId, error, detail }) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/digest_runs`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ digest: 'palermo-auto-appt-digest', posted: !!posted, task_id: taskId || null, error: error || null, detail: detail || null }),
+    })
+  } catch (_) { /* best effort */ }
+}
+
+// Front caps a task description at 65,535 chars; stay under it.
+const MAX_DESCRIPTION_CHARS = 60000
+
+async function postDigest() {
+  try {
+    const [attempts, tally, fieldRows] = await Promise.all([fetchWindowAttempts(), fetchConfidenceTally(), fetchPalermoFieldAccuracy()])
+    const meaningful = attempts.filter((a) => a.outcome !== 'skipped_already_processed')
+    // CHANGED 2026-10-18 (Dan: be kept in the loop): this used to post
+    // NOTHING on a day with no attempts. It now always posts -- the
+    // today / rolling-7-day confidence figures are useful on a quiet day, and
+    // a task that shows up every night is the heartbeat that the job ran.
+    const built = buildSummary(attempts, tally, fieldRows)
+    const subject = built.subject
+    let description = built.description
+    if (description.length > MAX_DESCRIPTION_CHARS) description = `${description.slice(0, MAX_DESCRIPTION_CHARS)}\n\n…(truncated to fit Front's task size limit)`
+
+    const attempt = await createFrontTask(subject, description)
+    if (!attempt.ok) {
+      const err = `HTTP ${attempt.status}: ${attempt.text.slice(0, 300)}`
+      console.error("[palermo-digest] post failed ->", err)
+      await createFrontTask(`${subject} — DIGEST FAILED`, `The Palermo's Auto-Scheduling digest could not be posted to Front.\n\nError: ${err}\n\n${meaningful.length} attempts were logged in the last 24 hours (auto_appt_attempts).`)
+      await logRun({ posted: false, error: err, detail: { attempts: meaningful.length } })
+      const e = new Error(`Front create-conversation (task) API -> ${err}`)
+      e.logged = true
+      throw e
+    }
+    await logRun({ posted: true, taskId: attempt.id, detail: { attempts: meaningful.length, chars: description.length } })
+    return { posted: true, count: meaningful.length, taskId: attempt.id }
+  } catch (e) {
+    if (!e.logged) await logRun({ posted: false, error: String(e.message).slice(0, 800) })
+    throw e
+  }
 }
 
 module.exports = { postDigest }
