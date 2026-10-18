@@ -204,6 +204,19 @@
 // would otherwise silently diverge from what the webhook actually wrote,
 // and start reporting false mismatches against real CSR-approved
 // appointments. Keep both in sync if this changes again.
+//
+// CHANGED 2026-10-18 (Dan's explicit request, "option 1") -- no hard
+// 12:00am appointments. CSRs don't like them and, in practice, pull a
+// computed midnight appointment back into the prior evening (real example:
+// TO473933, "10/20 (needed 4am)" -> the rule gives 12:00am 10/20, the CSR
+// used 11:45pm 10/19). resolveDatesFromParts now snaps an appointment that
+// lands at exactly 00:00 to 23:45 of the PREVIOUS calendar day (see
+// MIDNIGHT_SNAP_MINUTES). Always earlier, never later, so it can never
+// miss the customer's needed-by time. Needed-by times are always whole
+// hours for both senders, so exactly-midnight is the only case that
+// occurs. fmtLocal now emits real minutes (it used to hardcode ":00").
+// scheduling-agent-webhook's resolvePalermoDatesFromParts carries the
+// identical rule -- keep both in sync.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -215,6 +228,7 @@ const CAL_INBOX_ID = 'inb_aut78' // CAL Appointments inbox -- confirmed 2026-09-
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.' // confirmed via live MotherDuck query before writing this, not guessed
 const CAL_WAREHOUSE = 'CSW-Franksville' // this app's canonical CAL warehouse name (see WAREHOUSE_MAP in pluginUtils.js)
 const APPT_TYPE = 'Outbound' // every observed order from either sender is an Outbound Sales Order in Datex
+const MIDNIGHT_SNAP_MINUTES = 15 // an appointment computed at exactly 12:00am is moved this many minutes EARLIER (to 11:45pm the prior day) -- added 2026-10-18, Dan's explicit request; keep in sync with scheduling-agent-webhook
 const LEAD_TIME_HOURS = 4 // appointment is scheduled this many hours BEFORE the "needed by"/stated time -- was 3, changed 2026-10-13 (Dan's explicit request); keep in sync with scheduling-agent-webhook's PALERMO_LEAD_TIME_HOURS
 
 // Structurally constant for every Sam/Daren email -- never stated in the
@@ -508,7 +522,8 @@ function fmtLocal(d) {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const dd = String(d.getDate()).padStart(2, '0')
   const hh = String(d.getHours()).padStart(2, '0')
-  return `${y}-${m}-${dd}T${hh}:00`
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${y}-${m}-${dd}T${hh}:${mi}`
 }
 
 function resolveDatesFromParts(digits, month, day, hour24) {
@@ -524,7 +539,11 @@ function resolveDatesFromParts(digits, month, day, hour24) {
     year += 1
     neededByDate = new Date(year, month - 1, day, hour24, 0, 0)
   }
-  const apptDate = new Date(neededByDate.getTime() - LEAD_TIME_HOURS * 60 * 60 * 1000)
+  let apptDate = new Date(neededByDate.getTime() - LEAD_TIME_HOURS * 60 * 60 * 1000)
+  // No hard 12:00am appointments (2026-10-18) -- see header note.
+  if (apptDate.getHours() === 0 && apptDate.getMinutes() === 0) {
+    apptDate = new Date(apptDate.getTime() - MIDNIGHT_SNAP_MINUTES * 60 * 1000)
+  }
   return {
     reference,
     neededBy: fmtLocal(neededByDate),
