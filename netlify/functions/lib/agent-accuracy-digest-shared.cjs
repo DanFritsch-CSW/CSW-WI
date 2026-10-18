@@ -46,6 +46,9 @@
 // and Time stay exact string comparisons. If a row somehow lacks the
 // agent/actual columns the stored flag is used.
 //
+// DELIVERY LOG 2026-10-18: every run is also written to public.digest_runs
+// (digest 'agent-accuracy-digest': posted, task_id, error, detail).
+//
 // Same run/test split as every other digest in this app. Delivered as a
 // Front TASK via POST /conversations (type:'task', teammate_ids) -- see
 // lib/auto-appt-review-digest-shared.cjs's 2026-10-11 header note.
@@ -226,19 +229,40 @@ async function createFrontTask(subject, description) {
   return { ok: res.ok, status: res.status, text, id }
 }
 
-async function postDigest() {
-  const rows = await fetchRecentRows()
-  const { subject, description, gradedToday, gradedWeek } = buildSummary(rows)
+// Every run -- posted or failed -- is logged to public.digest_runs (added
+// 2026-10-18) so "did it run, did it reach Front" is a query, not a mystery.
+async function logRun({ posted, taskId, error, detail }) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/digest_runs`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ digest: 'agent-accuracy-digest', posted: !!posted, task_id: taskId || null, error: error || null, detail: detail || null }),
+    })
+  } catch (_) { /* best effort */ }
+}
 
-  const attempt = await createFrontTask(subject, description)
-  if (!attempt.ok) {
-    // Never let a failure be silent (see header note).
-    const err = `HTTP ${attempt.status}: ${attempt.text.slice(0, 300)}`
-    console.error('[agent-accuracy-digest] post failed ->', err)
-    await createFrontTask(`${subject} — DIGEST FAILED`, `The Scheduling Agent Field Accuracy digest could not be posted to Front.\n\nError: ${err}\n\nThe data is in agent_field_accuracy (${gradedToday} graded today, ${gradedWeek} in the last 7 days).`)
-    throw new Error(`Front create-conversation (task) API -> ${err}`)
+async function postDigest() {
+  try {
+    const rows = await fetchRecentRows()
+    const { subject, description, gradedToday, gradedWeek } = buildSummary(rows)
+
+    const attempt = await createFrontTask(subject, description)
+    if (!attempt.ok) {
+      // Never let a failure be silent (see header note).
+      const err = `HTTP ${attempt.status}: ${attempt.text.slice(0, 300)}`
+      console.error('[agent-accuracy-digest] post failed ->', err)
+      await createFrontTask(`${subject} — DIGEST FAILED`, `The Scheduling Agent Field Accuracy digest could not be posted to Front.\n\nError: ${err}\n\nThe data is in agent_field_accuracy (${gradedToday} graded today, ${gradedWeek} in the last 7 days).`)
+      await logRun({ posted: false, error: err, detail: { gradedToday, gradedWeek } })
+      const e = new Error(`Front create-conversation (task) API -> ${err}`)
+      e.logged = true
+      throw e
+    }
+    await logRun({ posted: true, taskId: attempt.id, detail: { gradedToday, gradedWeek, chars: description.length } })
+    return { posted: true, gradedToday, gradedWeek, taskId: attempt.id }
+  } catch (e) {
+    if (!e.logged) await logRun({ posted: false, error: String(e.message).slice(0, 800) })
+    throw e
   }
-  return { posted: true, gradedToday, gradedWeek, taskId: attempt.id }
 }
 
 module.exports = { postDigest }
