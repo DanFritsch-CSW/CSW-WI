@@ -55,6 +55,24 @@
 // 2026-10-11 header note for the create-conversation (type:'task') API
 // details, which this reuses verbatim.
 
+// FIXED 2026-10-18 (Dan: "I did not get the 10/16 report") -- delivery
+// reliability. Root cause: this digest listed EVERY graded submission from
+// the last 24 hours in the Front task description. Once daily volume
+// passed ~110-120 submissions (10/13 onward: 141, 86, 175, 171), the
+// description grew past Front's 65,535-char limit for a task description,
+// the create-task POST failed with a 4xx, and this function simply threw
+// -- a scheduled function's 502 reaches nobody, so the nightly task just
+// never appeared (10/13, 10/15 and 10/16 runs; 10/12 at ~63K chars and the
+// light 10/14 day squeaked under the limit). Nothing alerted anyone.
+// Changes: (1) rows that matched every field are collapsed into one count
+// instead of one line each; (2) mismatch detail is added only up to
+// MAX_DESCRIPTION_CHARS, with a "...N more not shown" line; (3) if the
+// full post still fails, a truncated version is retried, and if THAT fails
+// a short "DIGEST FAILED" task carrying the error is posted so a failure
+// is never silent; (4) Supabase reads are paginated (a plain GET silently
+// caps at 1,000 rows, which the cumulative query would have hit around
+// 10/20).
+//
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || ''
@@ -87,28 +105,45 @@ const FIELD_KEYS = [
   { key: 'notes', label: 'Notes' },
 ]
 
-async function fetchWindowRows() {
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/agent_field_accuracy?compared_at=gte.${encodeURIComponent(since)}&order=compared_at.asc&select=*`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-  )
-  if (!res.ok) throw new Error(`Supabase fetch failed: HTTP ${res.status}`)
-  return res.json()
+// Pages through the full result set explicitly -- a plain unbounded
+// Supabase REST GET silently caps at 1,000 rows (same bug class fixed in
+// scheduling-agent-webhook's sbGetAll on 2026-10-12).
+async function sbGetAllRows(path) {
+  const PAGE = 1000
+  let offset = 0
+  let all = []
+  for (;;) {
+    const sep = path.includes('?') ? '&' : '?'
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}${sep}limit=${PAGE}&offset=${offset}`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    })
+    if (!res.ok) throw new Error(`Supabase fetch failed: HTTP ${res.status}`)
+    const page = await res.json()
+    if (!Array.isArray(page) || page.length === 0) break
+    all = all.concat(page)
+    if (page.length < PAGE) break
+    offset += PAGE
+  }
+  return all
 }
 
-// Cumulative, since the feature launched -- not a 24-hour window. Same
-// pattern as the Palermo's digest's confidence tally: a running percentage
-// across a real sample is what tells Dan whether a field is actually
-// unreliable, not a single day's handful of submissions.
-async function fetchCumulativeRows() {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/agent_field_accuracy?compared_at=gte.${encodeURIComponent(ACCURACY_START_DATE)}&select=*`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-  )
-  if (!res.ok) return []
-  return res.json()
+async function fetchWindowRows() {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  return sbGetAllRows(`agent_field_accuracy?compared_at=gte.${encodeURIComponent(since)}&order=compared_at.asc&select=*`)
 }
+
+async function fetchCumulativeRows() {
+  try {
+    return await sbGetAllRows(`agent_field_accuracy?compared_at=gte.${encodeURIComponent(ACCURACY_START_DATE)}&order=compared_at.asc&select=*`)
+  } catch (_) {
+    return []
+  }
+}
+
+// Front caps a task description at 65,535 chars; stay well under it. See
+// the 2026-10-18 header note.
+const MAX_DESCRIPTION_CHARS = 55000
+const FALLBACK_DESCRIPTION_CHARS = 20000
 
 function buildFieldTally(rows) {
   const tally = {}
@@ -200,28 +235,32 @@ function buildSummary(windowRows, cumulativeRows) {
   if (windowRows.length === 0) {
     lines.push('No submissions graded in the last 24 hours.')
   } else {
-    lines.push(`Submissions graded in the last 24 hours (${windowRows.length}):`)
+    const withIssues = []
+    let perfect = 0
     for (const r of windowRows) {
       const mismatches = describeMismatches(r)
-      if (mismatches.length === 0) {
-        lines.push(`  • ${senderLine(r)} (${r.warehouse || 'unknown warehouse'}) — every field matched exactly. ✅`)
-      } else {
-        lines.push(`  • ${senderLine(r)} (${r.warehouse || 'unknown warehouse'}) — ${mismatches.length} field${mismatches.length === 1 ? '' : 's'} off:`)
-        lines.push(...mismatches)
-      }
+      if (mismatches.length === 0) perfect++
+      else withIssues.push({ r, mismatches })
+    }
+    lines.push(`Submissions graded in the last 24 hours: ${windowRows.length} (${perfect} matched every field exactly, ${withIssues.length} had at least one field off).`)
+    let used = lines.join('\n').length
+    let shown = 0
+    for (const { r, mismatches } of withIssues) {
+      const block = [`  • ${senderLine(r)} (${r.warehouse || 'unknown warehouse'}) — ${mismatches.length} field${mismatches.length === 1 ? '' : 's'} off:`, ...mismatches].join('\n')
+      if (used + block.length + 1 > MAX_DESCRIPTION_CHARS - 500) break
+      lines.push(block)
+      used += block.length + 1
+      shown++
+    }
+    if (shown < withIssues.length) {
+      lines.push(`…and ${withIssues.length - shown} more submission${withIssues.length - shown === 1 ? '' : 's'} with mismatches not shown (Front task size limit). Full detail: agent_field_accuracy rows with compared_at in the last 24 hours.`)
     }
   }
 
   return { subject, description: lines.join('\n').trim() }
 }
 
-async function postDigest() {
-  const [windowRows, cumulativeRows] = await Promise.all([fetchWindowRows(), fetchCumulativeRows()])
-  if (windowRows.length === 0) {
-    return { posted: false, reason: 'no submissions graded in the last 24 hours' }
-  }
-
-  const { subject, description } = buildSummary(windowRows, cumulativeRows)
+async function createFrontTask(subject, description) {
   const res = await fetch('https://api2.frontapp.com/conversations', {
     method: 'POST',
     headers: { Authorization: `Bearer ${FRONT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -232,12 +271,38 @@ async function postDigest() {
       description,
     }),
   })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Front create-conversation (task) API -> HTTP ${res.status}: ${text.slice(0, 300)}`)
+  const text = await res.text().catch(() => '')
+  let id = null
+  if (res.ok) {
+    try { id = JSON.parse(text).id } catch (_) { /* leave null */ }
   }
-  const created = await res.json()
-  return { posted: true, count: windowRows.length, taskId: created.id }
+  return { ok: res.ok, status: res.status, text, id }
+}
+
+async function postDigest() {
+  const [windowRows, cumulativeRows] = await Promise.all([fetchWindowRows(), fetchCumulativeRows()])
+  if (windowRows.length === 0) {
+    return { posted: false, reason: 'no submissions graded in the last 24 hours' }
+  }
+
+  const { subject, description } = buildSummary(windowRows, cumulativeRows)
+  let attempt = await createFrontTask(subject, description)
+  let degraded = null
+  if (!attempt.ok) {
+    // Never let a failure be silent (see 2026-10-18 header note): retry
+    // with a truncated body, and if even that fails, post a short alert.
+    const firstError = `HTTP ${attempt.status}: ${attempt.text.slice(0, 300)}`
+    console.error('[agent-accuracy-digest] full post failed ->', firstError)
+    degraded = `full post failed (${firstError})`
+    const truncated = `${description.slice(0, FALLBACK_DESCRIPTION_CHARS)}\n\n⚠️ Truncated: the full digest could not be posted to Front (${firstError}).`
+    attempt = await createFrontTask(subject, truncated)
+    if (!attempt.ok) {
+      const secondError = `HTTP ${attempt.status}: ${attempt.text.slice(0, 300)}`
+      await createFrontTask(`${subject} — DIGEST FAILED`, `The Scheduling Agent Field Accuracy digest could not be posted.\n\nFirst error: ${firstError}\nRetry (truncated) error: ${secondError}\n\n${windowRows.length} submissions were graded in the window; the data is in agent_field_accuracy.`)
+      throw new Error(`Front create-conversation (task) API -> ${secondError} (first error: ${firstError})`)
+    }
+  }
+  return { posted: true, count: windowRows.length, taskId: attempt.id, degraded }
 }
 
 module.exports = { postDigest }
