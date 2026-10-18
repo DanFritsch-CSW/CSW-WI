@@ -20,7 +20,7 @@
 // not pushed into Front every night.
 //
 // Why this is also the delivery-reliability fix: the old digest listed
-// every graded submission in the task description. Once daily volume
+// every graded submission in the Front task description. Once daily volume
 // passed ~110-120 (10/13 onward: 141, 86, 175, 171), the description
 // exceeded Front's 65,535-char limit, the create-task POST failed with a
 // 4xx and the function simply threw -- a scheduled function's 502 reaches
@@ -34,6 +34,17 @@
 //     silent.
 // Supabase reads are paginated (a plain REST GET silently caps at 1,000
 // rows; ~8 days of rows already approaches that).
+//
+// GRADING CLEANUP 2026-10-18 (Dan's improvement #2): a field is now graded
+// by comparing the agent's value to the CSR's value after normalizing case,
+// periods, spaces around commas and repeated whitespace (effectiveMatch),
+// instead of trusting the stored *_match flag, which compares raw strings.
+// Measured on 2026-10-12..18 data this only moves a little (Carrier +11,
+// Owner +8, Reference +2, Notes +1 of 687 -- most "misses" are real: blanks,
+// wrong customer, or a different reference convention), but "Crown
+// Bakeries" vs "CROWN BAKERIES" is no longer counted wrong. Arrival Date
+// and Time stay exact string comparisons. If a row somehow lacks the
+// agent/actual columns the stored flag is used.
 //
 // Same run/test split as every other digest in this app. Delivered as a
 // Front TASK via POST /conversations (type:'task', teammate_ids) -- see
@@ -67,7 +78,31 @@ const FIELD_KEYS = [
 ]
 
 // Only the columns this digest needs -- keeps the payload small.
-const SELECT_COLUMNS = ['compared_at', ...FIELD_KEYS.map((f) => `${f.key}_match`)].join(',')
+const SELECT_COLUMNS = ['compared_at', ...FIELD_KEYS.flatMap((f) => [`${f.key}_match`, `${f.key}_agent`, `${f.key}_actual`])].join(',')
+
+// Normalized text for grading: lowercase, drop periods, no spaces around
+// commas, collapse whitespace. Blank and null are equivalent.
+function normText(v) {
+  return String(v == null ? '' : v)
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/\s*,\s*/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const EXACT_FIELDS = new Set(['arrival_date', 'arrival_time'])
+
+// true / false / null (null = neither side stated the field, not a comparison).
+function effectiveMatch(r, key) {
+  const a = r[`${key}_agent`]
+  const c = r[`${key}_actual`]
+  if (a === undefined && c === undefined) return r[`${key}_match`]
+  const na = EXACT_FIELDS.has(key) ? String(a == null ? '' : a).trim() : normText(a)
+  const nc = EXACT_FIELDS.has(key) ? String(c == null ? '' : c).trim() : normText(c)
+  if (!na && !nc) return null
+  return na === nc
+}
 
 // Pages through the full result set explicitly -- a plain unbounded
 // Supabase REST GET silently caps at 1,000 rows (same bug class fixed in
@@ -125,7 +160,7 @@ function buildFieldTally(rows) {
   for (const { key } of FIELD_KEYS) tally[key] = { matched: 0, compared: 0 }
   for (const r of rows) {
     for (const { key } of FIELD_KEYS) {
-      const matchVal = r[`${key}_match`]
+      const matchVal = effectiveMatch(r, key)
       if (matchVal === null || matchVal === undefined) continue // field never stated by either side -- not a comparison
       tally[key].compared++
       if (matchVal === true) tally[key].matched++
