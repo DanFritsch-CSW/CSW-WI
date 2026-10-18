@@ -128,6 +128,7 @@
 // describeRow's mismatch text now also shows the date, and the raw stored
 // values when the short labels look identical, so whatever
 // compareShadowOutcome() is actually tripping on becomes visible.
+// Same day: Notes removed from FIELD_KEYS here (see that constant's note).
 //
 // Same run/test split as every other digest in this app.
 
@@ -152,6 +153,10 @@ const SHADOW_START_DATE = '2026-10-10T00:00:00Z'
 // Code is left out here (unlike the app-wide digest) to match exactly
 // what Dan asked for -- it has no independent accuracy story (see that
 // file's header note) and would just add noise to a pilot-scoped view.
+// Notes is ALSO left out (Dan's explicit call, 2026-10-18: not graded in
+// this pilot digest), so this list is nine fields, not the app-wide ten --
+// a Notes-only difference no longer counts against "fully correct" or
+// shows in the per-field table. agent_field_accuracy still records it.
 const FIELD_KEYS = [
   { key: 'warehouse', label: 'Warehouse' },
   { key: 'type', label: 'Type' },
@@ -162,7 +167,6 @@ const FIELD_KEYS = [
   { key: 'dock_door', label: 'Dock Door' },
   { key: 'carrier', label: 'Carrier' },
   { key: 'reference', label: 'Reference #' },
-  { key: 'notes', label: 'Notes' },
 ]
 
 // Same three addresses this pilot already tracks end-to-end (see
