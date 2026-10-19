@@ -11,16 +11,19 @@
 // this is the primary, deterministic signal, checked
 // before any AI extraction runs. Each customer's config below (CUSTOMERS)
 // owns its own: which attachment(s) to read per "order" (Grassland: one
-// Release Form + optional Lot Info PDF per mention; Richelieu: EVERY PDF
-// on the message, each one its own independent order — confirmed
-// 2026-10-13, Richelieu's daily "CSW TO WL" email carries several Transfer
-// Order PDFs in one message; Pedone: one PDF per email, like Grassland),
-// its extraction prompt/schema, its own pre-Datex structural validation
-// (the one check that needs no external data — Pedone has none, see its
-// section below), and how to build the ack/duplicate/empty messages.
-// Everything downstream of extraction (the MotherDuck resolution, the
-// Datex push) lives in Netlify's order-agent-common.cjs + per-customer
-// adapter, mirroring this file's CUSTOMERS map.
+// Release Form + optional Lot Info PDF per mention; Richelieu AND Thomas
+// Foods: EVERY PDF on the message, each one its own independent order —
+// confirmed 2026-10-13 for Richelieu (7 PDFs in one real email) and
+// 2026-10-19 for Thomas Foods (5 PDFs in one real "Kingdom Farms
+// Transfers" email, see that section below); Pedone/Echo Lake: one PDF
+// per email), its extraction prompt/schema, its own pre-Datex structural
+// validation (the one check that needs no external data — Pedone/Thomas
+// Foods have none, see their sections below), an optional shouldSkip
+// check for orders that are real but not CSW's to create (Thomas Foods'
+// other-facility transfers), and how to build the ack/duplicate/empty
+// messages. Everything downstream of extraction (the MotherDuck
+// resolution, the Datex push) lives in Netlify's order-agent-common.cjs +
+// per-customer adapter, mirroring this file's CUSTOMERS map.
 //
 // WHAT THIS FUNCTION DOES, AND DOES NOT DO: as before — verify the
 // webhook, read the triggering email, find and download the relevant
@@ -35,8 +38,8 @@
 //
 // Handoff: after writing EACH batch row, this POSTs {batchId} to
 // order-agent-resolve-background on Netlify (fire-and-forget, under
-// EdgeRuntime.waitUntil) — for Richelieu's multi-PDF case, that means one
-// handoff call per PDF/order, not one per @mention.
+// EdgeRuntime.waitUntil) — for Richelieu/Thomas Foods' multi-PDF case,
+// that means one handoff call per PDF/order, not one per @mention.
 //
 // TODO-VERIFY (carried over, still unconfirmed): findPdfAttachment-style
 // attachment discovery below is modeled on the REGULAR Front OAuth
@@ -415,18 +418,42 @@ function validatePedone(_parsed: any): { ok: boolean; problems: string[] } {
 }
 
 // ---------------------------------------------------------------------------
-// Thomas Foods International: extraction schema (no printed total either)
+// Thomas Foods International: extraction schema + CSW-origin filtering
 // ---------------------------------------------------------------------------
 //
-// ONE PDF = ONE "Fulfillment Authorization" = ONE order, one per email
-// (confirmed 2026-10-14, sender tfiusainventoryauthorization@thomasfoodsusa.com).
-// Like Pedone, this document has no printed grand total anywhere to
-// structurally cross-check against — validateThomasFoods below is a
-// deliberate no-op for the same reason. Unlike Pedone, there IS a real
-// cross-check available on the Netlify side: the PDF states a material
-// code AND a storage lot independently on each line, and the resolved
-// lot's own material in Datex must agree with what's printed — see
-// adapters/thomasfoods.cjs for that logic.
+// ONE EMAIL CAN CARRY SEVERAL ORDERS. Originally built 2026-10-14 on a
+// single real sample (one PDF, one email) and assumed one-PDF-per-email,
+// same as Pedone. REWRITTEN 2026-10-19 after a real failure: a genuine
+// "Kingdom Farms Transfers" email (cnv_1coe9t78) carried FIVE Transfer
+// Order PDFs at once, and the old code — which always grabbed only the
+// FIRST pdf found — kept re-finding and re-reporting the same one
+// (TO10006631, already pushed) no matter how many times the CSR
+// re-mentioned the agent or what they typed ("create order TO10006628",
+// "create orders", etc.). The agent had no way to advance past the first
+// attachment at all. Fixed the same way Richelieu's identical multi-PDF
+// gap was fixed 2026-10-16: buildJobs now returns one job per PDF.
+//
+// A SECOND, MORE IMPORTANT ISSUE SURFACED BY THE SAME EMAIL: Thomas Foods
+// operates more than one facility, and a single consolidated email can
+// carry transfers that do NOT originate from CSW at all — in that real
+// email, 3 of the 5 PDFs printed "LOAD From: CSW ... Pleasant Prairie"
+// (genuinely CSW's to create) but 2 printed a different origin entirely
+// (Thomas Foods' other facility, referred to in the email body as "001"/
+// "Lakeside"). CSW has no inventory for those and must NOT create Datex
+// orders for them. shouldSkip below reads each PDF's own "LOAD From"
+// line (already visible on every one of these documents, confirmed
+// 2026-10-14 on the original sample) and skips — with a clear, explicit
+// comment explaining why, never silently — any order that doesn't
+// originate from CSW. This runs in processOneJob BEFORE a batch row is
+// even created, since a skipped order isn't CSW's to track at all.
+//
+// Still true from the original build: this document has no printed grand
+// total anywhere to structurally cross-check against — validateThomasFoods
+// below is a deliberate no-op for that reason. Unlike Pedone, there IS a
+// real cross-check available on the Netlify side: the PDF states a
+// material code AND a storage lot independently on each line, and the
+// resolved lot's own material in Datex must agree with what's printed —
+// see adapters/thomasfoods.cjs for that logic.
 //
 // The email itself asks CSW to reply with shipping details (carrier etc.)
 // separately — deliberately NOT captured here, same precedent as ignoring
@@ -440,6 +467,7 @@ Shape:
   "transfer_order_number": string,
   "customer_po": string,
   "ship_date": string,
+  "load_from": string,
   "ship_to": { "name": string, "line1": string, "city": string, "state": string, "zip": string },
   "lines": [ { "material_code": string, "description": string, "storage_lot": string, "case_count": number } ]
 }
@@ -448,6 +476,7 @@ Rules:
 - "fulfillment_authorization_number" is the "#IF..." number printed at the top right of the page.
 - "transfer_order_number" is the number after "Transfer Order #" in the "Sales Order #" column (e.g. "Transfer Order #TO10006606" -> "TO10006606").
 - "customer_po" is the "Customer PO#" column value — this is very often blank; use null when it is, do not invent a value.
+- "load_from" is the value of the "LOAD From:" line exactly as printed (e.g. "CSW 7800 95th Street Pleasant Prairie, WI 53158") — this is the warehouse the shipment originates from, NOT the customer. Some of these documents originate from a different Thomas Foods facility entirely, not CSW — copy whatever is actually printed here, do not assume it always says CSW.
 - "ship_to" is the "Ship To" address block (name, street line, city, state, zip) — NOT the "Ship From" block, which is always CSW's own address.
 - "lines" is every row of the item table. The "Item" column is in the form "<description> : <material code>" — split it into "description" and "material_code" (the part after the colon). "storage_lot" is the "Lot" column value exactly as printed (e.g. "PO156366-1"). "case_count" is the "Cases Ordered" column value. Ignore the "Lot Ref", "Pack Date", "Ship Mark", "Box ID", and "General Notes" columns — none of them are needed.
 - Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
@@ -458,6 +487,20 @@ function validateThomasFoods(_parsed: any): { ok: boolean; problems: string[] } 
   // cross-check (item material code vs. the resolved lot's actual
   // material) needs MotherDuck and happens in the Netlify adapter.
   return { ok: true, problems: [] }
+}
+
+// ADDED 2026-10-19 (real failure, cnv_1coe9t78 — see section header note
+// above): returns a skip reason when a Thomas Foods order's own printed
+// "LOAD From" line doesn't start with CSW — this is a real order, just not
+// CSW's to create in Datex. Returns null (don't skip) when load_from is
+// missing entirely, rather than guessing either way — an empty field is a
+// different, separate problem (extraction miss) that should surface via
+// the normal isEmpty/resolution path, not get silently swallowed here.
+function thomasFoodsSkipReason(parsed: any): string | null {
+  const loadFrom = (parsed.load_from || '').trim()
+  if (!loadFrom) return null
+  if (/^CSW\b/i.test(loadFrom)) return null
+  return `Order agent: ${parsed.transfer_order_number || '(unknown TO#)'} ships from "${loadFrom}", not CSW — skipping. This order isn't CSW's to create in Datex; it belongs to the other facility it's printed under.`
 }
 
 // ---------------------------------------------------------------------------
@@ -527,13 +570,20 @@ interface CustomerConfig {
   domains: string[]
   // Reads every PDF on the triggering message and returns one "job" per
   // order to extract + push. Grassland: one job (primary + optional
-  // secondary PDF). Richelieu: one job per PDF, no secondary. Pedone: one
-  // job for the first PDF found, no secondary.
+  // secondary PDF). Richelieu/Thomas Foods: one job per PDF, no secondary.
+  // Pedone/Echo Lake: one job for the first PDF found, no secondary.
   buildJobs(pdfs: Array<{ id: string; filename: string }>, downloadPdf: (id: string) => Promise<string>): Promise<Array<{ primaryId: string; secondaryId: string | null }>>
   extract(primaryB64: string, secondaryB64: string | null): Promise<any>
   validate(parsed: any): { ok: boolean; problems: string[] }
   dedupeKey(parsed: any): string | null
   isEmpty(parsed: any): boolean
+  // ADDED 2026-10-19: optional — returns a non-null comment body when a
+  // genuinely extracted, non-empty order should NOT be processed at all
+  // (e.g. Thomas Foods orders that ship from a different facility, not
+  // CSW). Checked in processOneJob right after isEmpty and before the
+  // dedupe check or any batch row is created — a skipped order was never
+  // CSW's to track in grassland_order_batches in the first place.
+  shouldSkip?(parsed: any): string | null
   ackBody(parsed: any, totalsOk: boolean, problems: string[]): string
   batchFields(parsed: any, totalsOk: boolean, problems: string[]): Record<string, any>
 }
@@ -643,9 +693,11 @@ const CUSTOMERS: CustomerConfig[] = [
     code: 'thomasfoods',
     domains: ['thomasfoodsusa.com'],
     async buildJobs(pdfs) {
-      if (pdfs.length === 0) return []
-      if (pdfs.length > 1) console.log(`[order-agent:thomasfoods] multiple PDF attachments found on one email — using the first: ${pdfs.map((a) => a.filename).join(', ')}`)
-      return [{ primaryId: pdfs[0].id, secondaryId: null }]
+      // FIXED 2026-10-19 (real failure, cnv_1coe9t78) — see section header
+      // note above. Used to take only pdfs[0]; now one job per PDF, same
+      // pattern as Richelieu.
+      if (pdfs.length > 1) console.log(`[order-agent:thomasfoods] ${pdfs.length} PDF attachments found — processing each as its own order: ${pdfs.map((a) => a.filename).join(', ')}`)
+      return pdfs.map((p) => ({ primaryId: p.id, secondaryId: null }))
     },
     async extract(primaryB64) {
       return callClaude(THOMAS_FOODS_PROMPT, [primaryB64], 'Extract this Fulfillment Authorization as the JSON object described in your instructions.')
@@ -653,6 +705,7 @@ const CUSTOMERS: CustomerConfig[] = [
     validate: validateThomasFoods,
     dedupeKey: (parsed) => parsed.transfer_order_number || null,
     isEmpty: (parsed) => !parsed.transfer_order_number || !Array.isArray(parsed.lines) || parsed.lines.length === 0,
+    shouldSkip: thomasFoodsSkipReason,
     ackBody: (parsed) => `Order agent: read ${parsed.transfer_order_number} (${parsed.fulfillment_authorization_number || 'no IF#'}, ${parsed.lines.length} lot line(s)). Checking against current Datex inventory now...`,
     batchFields: (parsed) => ({
       customer_code: 'thomasfoods',
@@ -731,6 +784,18 @@ async function processOneJob(conversationId: string, customer: CustomerConfig, j
   if (customer.isEmpty(parsed)) {
     await withMcp((call) => call('add_comment', { conversationId, body: `Order agent could not read one of this conversation's documents (missing key fields) — left for manual entry.` }))
     return { ok: false, reason: 'extraction empty' }
+  }
+
+  // ADDED 2026-10-19: a real, fully-readable order that still isn't CSW's
+  // to process (see CustomerConfig.shouldSkip doc comment above). Checked
+  // before dedupe/batch creation — this order never gets a row in
+  // grassland_order_batches at all, since CSW never owned it.
+  if (customer.shouldSkip) {
+    const skipReason = customer.shouldSkip(parsed)
+    if (skipReason) {
+      await withMcp((call) => call('add_comment', { conversationId, body: skipReason }))
+      return { ok: false, reason: 'skipped-not-csw' }
+    }
   }
 
   const key = customer.dedupeKey(parsed)
