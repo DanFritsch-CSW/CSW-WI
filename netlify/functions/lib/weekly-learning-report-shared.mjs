@@ -16,9 +16,24 @@
 // alias into settings.owner_aliases (read by scheduling-agent-webhook on every
 // intake). Every run -- posted or failed -- is logged to public.digest_runs.
 //
+// REFERENCE # CALLOUT 2026-10-21 (Dan's explicit request: "call this out and
+// watch the progress"): when public.weekly_reference_report_data() reports
+// configured (settings.reference_fixes.deployed_at is set), the report gains a
+// "Reference # fixes" block right under the per-field accuracy table:
+// accuracy since go-live vs before for the three targeted customers
+// (Palermo's, Pretzilla, Fair Oaks) combined and one by one, plus everyone else
+// as a no-fix CONTROL line (it should stay flat -- if it moves too, the change
+// is not the fixes), how often each fix fired in the last 7 days (from
+// public.reference_fix_events written by the scheduling-reference-fixer Edge
+// Function), and the biggest remaining misses on the targeted customers. Both
+// periods are graded with the same normalizer (public.norm_reference), so the
+// comparison is not flattered by the grading cleanup. The data call is
+// optional: if it fails, the weekly report still goes out without the block.
+//
 // KEEP THE TEXT BUILDER IN SYNC with the Edge Function's buildReport()
 // (supabase function weekly-learning-report) -- or delete that function once
-// this path is live.
+// this path is live. (As of 2026-10-21 that copy does NOT have the Reference #
+// block; Netlify is the delivery path that matters.)
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
@@ -54,7 +69,58 @@ const md = (ymd) => { const [, m, d] = ymd.split('-').map(Number); return `${m}/
 const pct = (m, c) => (c > 0 ? `${Math.round((m / c) * 100)}% (${m}/${c})` : 'no data')
 const clip = (s, n = 28) => { const t = String(s == null ? '' : s).trim(); return t.length > n ? `${t.slice(0, n - 1)}\u2026` : t }
 
-export function buildReport(data) {
+const REF_TARGETS = ['palermo', 'pretzilla', 'fairoaks']
+const REF_GROUP_LABELS = {
+  palermo: "Palermo's", pretzilla: 'Pretzilla', fairoaks: 'Fair Oaks',
+  other: 'Everyone else (no fix, control)',
+}
+
+// The "Reference # fixes" block -- see this file's 2026-10-21 header note.
+// `ref` is the JSON from public.weekly_reference_report_data(); returns '' when
+// it isn't configured/available so the report simply omits the block.
+export function buildReferenceSection(ref) {
+  if (!ref || ref.configured === false) return ''
+  const groups = Array.isArray(ref.groups) ? ref.groups : []
+  const get = (grp, period) => groups.find((g) => g.grp === grp && g.period === period) || { compared: 0, matched: 0, agent_blank: 0 }
+  const sum = (grps, period) => grps.reduce((acc, g) => {
+    const x = get(g, period)
+    return { compared: acc.compared + Number(x.compared || 0), matched: acc.matched + Number(x.matched || 0) }
+  }, { compared: 0, matched: 0 })
+  const trend = (a, b) => {
+    if (!a.compared || !b.compared) return ''
+    const x = a.matched / a.compared
+    const y = b.matched / b.compared
+    return x > y + 0.005 ? ' \u25b2' : x < y - 0.005 ? ' \u25bc' : ' \u2248'
+  }
+  const line = (label, a, b) => `- ${label}: ${pct(a.matched, a.compared)} since go-live vs ${pct(b.matched, b.compared)} before${trend(a, b)}`
+  const goLive = ref.deployed_at ? new Date(ref.deployed_at).toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }) : null
+
+  const L = []
+  L.push(`Reference # fixes${goLive ? ` \u2014 live since ${md(goLive)}` : ''} (appointments graded since go-live vs before, same normalized grading):`)
+  const tA = sum(REF_TARGETS, 'after')
+  const tB = sum(REF_TARGETS, 'before')
+  L.push(line('Targeted customers combined', tA, tB))
+  for (const g of REF_TARGETS) L.push(line(REF_GROUP_LABELS[g], get(g, 'after'), get(g, 'before')))
+  L.push(line(REF_GROUP_LABELS.other, get('other', 'after'), get('other', 'before')))
+  if (tA.compared < 10) L.push(`  (small sample so far: ${tA.compared} targeted appointments graded since go-live \u2014 read the trend loosely.)`)
+
+  const tally = (list) => {
+    const m = {}
+    for (const f of list || []) m[f.kind] = (m[f.kind] || 0) + Number(f.n || 0)
+    return m
+  }
+  const w = tally(ref.fires_week)
+  L.push(`Fixes applied in the last 7 days: PU/SO found in the first email ${w.label_applied || 0}, found only in a follow-up message ${w.followup_applied || 0}, Fair Oaks order # from Datex ${w.datex_owner_reference || 0}, formatting clean-ups ${w.tidy_applied || 0}. PU/SO not in the email at all (CSR has to ask the carrier): ${w.label_not_found || 0}. Fair Oaks order Datex couldn't resolve: ${w.datex_skipped || 0}.`)
+
+  const misses = Array.isArray(ref.misses) ? ref.misses : []
+  if (misses.length) {
+    L.push('Still wrong since go-live (targeted customers):')
+    for (const m of misses) L.push(`- ${REF_GROUP_LABELS[m.grp] || m.grp}: "${clip(m.agent, 24)}" \u2192 "${clip(m.csr, 24)}" (${m.n}\u00d7)`)
+  }
+  return L.join('\n')
+}
+
+export function buildReport(data, refSection = '') {
   const subject = `Weekly agent learning report \u2014 ${md(data.period_end)}`
   const L = []
   const g = data.graded || {}
@@ -67,6 +133,10 @@ export function buildReport(data) {
     let trend = ''
     if (cur !== null && prev !== null) trend = cur > prev + 0.005 ? ' \u25b2' : cur < prev - 0.005 ? ' \u25bc' : ' \u2248'
     L.push(`- ${FIELD_LABELS[f.field] || f.field}: ${pct(f.cur_matched, f.cur_compared)} vs ${pct(f.prev_matched, f.prev_compared)}${trend}`)
+  }
+  if (refSection) {
+    L.push('')
+    L.push(refSection)
   }
   const fill = data.fill || {}
   L.push('')
@@ -114,15 +184,20 @@ export async function runWeeklyReport({ dry = false } = {}) {
   try {
     const proposalsWritten = await rpc('generate_learning_proposals')
     const data = await rpc('weekly_learning_report_data')
-    const { subject, description } = buildReport(data)
-    if (dry) return { dry: true, proposalsWritten, subject, description, chars: description.length }
+    // Optional: never let the Reference # callout block the weekly report.
+    let refData = null
+    let refError = null
+    try { refData = await rpc('weekly_reference_report_data') } catch (e) { refError = String(e.message).slice(0, 300) }
+    const refSection = buildReferenceSection(refData)
+    const { subject, description } = buildReport(data, refSection)
+    if (dry) return { dry: true, proposalsWritten, subject, description, chars: description.length, refSection: !!refSection, refError }
     const attempt = await createFrontTask(subject, description)
     if (!attempt.ok) {
       const error = `Front create task -> HTTP ${attempt.status}: ${attempt.text.slice(0, 300)}`
       await logRun({ posted: false, error, detail: { channel: 'netlify', chars: description.length } })
       throw new Error(error)
     }
-    await logRun({ posted: true, taskId: attempt.id, detail: { channel: 'netlify', chars: description.length, proposalsWritten } })
+    await logRun({ posted: true, taskId: attempt.id, detail: { channel: 'netlify', chars: description.length, proposalsWritten, refSection: !!refSection, refError } })
     return { posted: true, taskId: attempt.id, chars: description.length, proposalsWritten }
   } catch (err) {
     if (!String(err.message).startsWith('Front create task')) await logRun({ posted: false, error: String(err.message).slice(0, 800), detail: { channel: 'netlify' } })

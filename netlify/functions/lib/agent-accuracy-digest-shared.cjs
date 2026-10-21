@@ -46,6 +46,24 @@
 // and Time stay exact string comparisons. If a row somehow lacks the
 // agent/actual columns the stored flag is used.
 //
+// REFERENCE # GRADING 2026-10-21 (Dan's reference-number plan, fix #4):
+// Reference # is now compared with normReference() instead of normText():
+// uppercase, "PUR/PO/SO 123" -> "PUR123", the nose/middle/tail/target role
+// labels (and N)/M)/T) markers) are dropped, only tokens containing a digit
+// are kept (so store names in parentheses vanish), a leading SO on SO+digits
+// is stripped, and the token set is de-duplicated and sorted -- so order,
+// spacing, case, role labels and the SO prefix are no longer counted as
+// misses ("522069,522710" == "NOSE: 522069 / TAIL: 522710";
+// "621935" == "SO621935"). References with no digit at all ("HOLD") are
+// compared as plain normalized text so blank-vs-"HOLD" still counts. Real
+// differences stay misses (a different number, an extra order number the CSR
+// added, "-100" suffixes). Measured on 10/11-10/21 non-pilot rows this alone
+// moves Reference # from 556/885 (63%) to 611/885 (69%) -- a GRADING step
+// change, not agent improvement; the weekly report's before/after callout
+// uses the identical normalizer on both sides. IDENTICAL LOGIC LIVES IN
+// Postgres as public.norm_reference (used by the weekly report) -- keep the
+// two in sync if either changes. Everything else is graded as before.
+//
 // DELIVERY LOG 2026-10-18: every run is also written to public.digest_runs
 // (digest 'agent-accuracy-digest': posted, task_id, error, detail).
 //
@@ -94,6 +112,21 @@ function normText(v) {
     .trim()
 }
 
+// Reference # grading normalizer (2026-10-21) -- see this file's header note.
+// Mirrors public.norm_reference in Supabase. Returns '' for a blank value.
+function normReference(v) {
+  const raw = String(v == null ? '' : v)
+  let s = raw.toUpperCase()
+  s = s.replace(/\b(PUR|PO|SO)\s+(\d)/g, '$1$2')
+  s = s.replace(/\b(MIDDLE\s+NOSE|MIDDLE\s+TAIL|NOSE|MIDDLE|TAIL|TARGET)\b|\b[NMT]\)/g, ' ')
+  const toks = new Set()
+  for (const m of s.matchAll(/[A-Z0-9][A-Z0-9-]*[A-Z0-9]|[A-Z0-9]/g)) {
+    if (/[0-9]/.test(m[0])) toks.add(m[0].replace(/^SO(\d+)$/, '$1'))
+  }
+  if (toks.size) return [...toks].sort().join(',')
+  return normText(raw)
+}
+
 const EXACT_FIELDS = new Set(['arrival_date', 'arrival_time'])
 
 // true / false / null (null = neither side stated the field, not a comparison).
@@ -101,8 +134,9 @@ function effectiveMatch(r, key) {
   const a = r[`${key}_agent`]
   const c = r[`${key}_actual`]
   if (a === undefined && c === undefined) return r[`${key}_match`]
-  const na = EXACT_FIELDS.has(key) ? String(a == null ? '' : a).trim() : normText(a)
-  const nc = EXACT_FIELDS.has(key) ? String(c == null ? '' : c).trim() : normText(c)
+  const norm = key === 'reference' ? normReference : normText
+  const na = EXACT_FIELDS.has(key) ? String(a == null ? '' : a).trim() : norm(a)
+  const nc = EXACT_FIELDS.has(key) ? String(c == null ? '' : c).trim() : norm(c)
   if (!na && !nc) return null
   return na === nc
 }
