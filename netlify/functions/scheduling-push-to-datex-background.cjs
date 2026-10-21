@@ -59,6 +59,29 @@
  * email, so without this column every lookup for a repeat sender would
  * always come back empty.
  *
+ * FIXED 2026-10-21 (Dan's report, false-positive MISMATCH flags in the
+ * Palermo's nightly digest) -- compareShadowOutcome() was comparing
+ * auto_appt_attempts.agent_scheduled_arrival (written at email-parse time
+ * with no trailing seconds, e.g. "2026-10-22T09:00") against
+ * submissions.scheduled_arrival with a strict string ===. By the time a
+ * submission is actually pushed to Datex, scheduled_arrival frequently
+ * carries a trailing :00 (e.g. "2026-10-22T09:00:00") from normalization
+ * elsewhere in the approval/push path, so the two sides compared unequal
+ * purely on string shape even when the appointment time was identical to
+ * the minute -- every pending Palermo's appointment in a given batch was
+ * showing up as "⚠️ MISMATCH" in the nightly digest's "waiting on CSR
+ * approval" section even though it matched exactly. Appointment times are
+ * never meaningfully precise below the minute, so the fix
+ * (normalizeArrivalForCompare) truncates both sides to YYYY-MM-DDTHH:MM
+ * before comparing -- same truncation compareAgentFieldAccuracy's
+ * splitDateTime() below already uses, which is why the per-field Arrival
+ * Date/Time accuracy percentages were never wrong, only this row-level
+ * MISMATCH flag was. The real 2026-10-16 Sam Rohde miss (agent proposed
+ * exactly midnight, CSR used 11:45pm the prior day -- see the 2026-10-18
+ * "Sam/Daren midnight snaps to 11:45pm" rule this prompted) still grades
+ * as a genuine mismatch after this fix, since its date AND hour:minute
+ * both differ, not just its seconds.
+ *
  * POST /.netlify/functions/scheduling-push-to-datex-background
  * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean }
  */
@@ -122,6 +145,16 @@ async function postCustomerReply(record, { sendImmediately, template }) {
   return data
 }
 
+// Truncates an ISO-ish "YYYY-MM-DDTHH:MM[:SS]" string to the minute so a
+// trailing-seconds formatting difference between two sources of the same
+// timestamp never reads as a real mismatch. See the 2026-10-21 header note
+// above for why this exists. Mirrors the truncation splitDateTime() below
+// already applies for the per-field accuracy comparison.
+function normalizeArrivalForCompare(v) {
+  if (!v || typeof v !== 'string' || !v.includes('T')) return v || null
+  return v.slice(0, 16)
+}
+
 // Phase 2 of the Sam Rohde / Daren Peet full-automation confidence build
 // (2026-10-10) -- see lib/auto-appt-parse-shared.cjs's header note. If this
 // submission has a pending shadow-validation row in auto_appt_attempts
@@ -145,7 +178,9 @@ async function compareShadowOutcome(record) {
 
     const actualArrival = record.scheduled_arrival || null
     const actualDockDoor = record.scheduled_dock_door || null
-    const arrivalMatches = shadow.agent_scheduled_arrival === actualArrival
+    // Compared to the minute, not as raw strings -- see
+    // normalizeArrivalForCompare's note above (2026-10-21 fix).
+    const arrivalMatches = normalizeArrivalForCompare(shadow.agent_scheduled_arrival) === normalizeArrivalForCompare(actualArrival)
     const dockDoorMatches = !shadow.recommended_dock_door || shadow.recommended_dock_door === actualDockDoor
     const matchStatus = arrivalMatches && dockDoorMatches ? 'matched' : 'mismatch'
 
