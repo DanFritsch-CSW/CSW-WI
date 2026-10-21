@@ -212,6 +212,26 @@
 [functions."agent-accuracy-digest-test"]
   timeout = 26
 
+# order_agent usage digest -- added 2026-10-21, Dan's explicit request.
+# Per customer, share of outbound Datex orders created by the "SmartUp API"
+# user (order_agent) vs. entered by hand: today | rolling 7 days, Front Task
+# to Dan. Reads MotherDuck directly, so it needs the duckdb bundling block
+# (unlike the Supabase-only digests above). 04:00 UTC = 11pm Central during
+# DST; drifts to 10pm Central after the first Sunday in November, same
+# caveat as the other agent digests. See lib/order-agent-digest-shared.cjs.
+[functions."order-agent-digest-run"]
+  schedule = "0 4 * * *"
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
+# Manual test -- no schedule, so direct POST works. NOT a dry run -- really
+# creates a Front Task assigned to Dan.
+[functions."order-agent-digest-test"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 # AI Appointment Intake -- added 2026-09-05. Claude-based extraction from
 # the FIRST inbound message on all 5 Appointments inboxes (CAL/KEN/MAD/
 # WR/EC), with Front Playbook remaining as the fallback (see
