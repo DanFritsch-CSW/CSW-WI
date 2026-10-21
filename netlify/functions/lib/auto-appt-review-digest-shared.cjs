@@ -135,6 +135,25 @@
 // posts a short "DIGEST FAILED" task if Front rejects the post, and logs
 // every run to public.digest_runs (digest 'palermo-auto-appt-digest').
 //
+// FIXED 2026-10-21 (Dan's report): the "Validated — waiting on CSR
+// approval to grade" section listed every shadow_logged row under one
+// static header regardless of its actual match_status, which only ever
+// reflects the row's state at CREATION time (outcome never changes after
+// that). Several rows shown there had already been approved, pushed to
+// Datex, and correctly graded as 'matched' -- the header made it look
+// like all of them were still unapproved. buildSummary now splits
+// shadow_logged into three honest sub-groups (✅ Matched / ⚠️ Mismatch /
+// ⏳ Not yet approved or pushed) so the header always matches what's
+// actually true of the rows under it. Same report also surfaced the
+// underlying cause of several rows being permanently stuck at
+// pending_outcome despite being pushed to Datex days earlier -- see
+// lib/auto-appt-parse-shared.cjs's matching 2026-10-21 header note (the
+// race-condition fix) for that side of it. The "N appointments still
+// awaiting CSR approval" line below is reworded to reflect that a few
+// pre-fix rows may be stuck rather than genuinely unapproved, since this
+// digest has no way to tell the difference without a one-time backfill
+// (not done as part of this fix).
+//
 // Same run/test split as every other digest in this app.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
@@ -188,6 +207,11 @@ const PALERMO_FIELD_SENDERS = ['s.rohde@palermospizza.com', 'da.peet@palermospiz
 const FIELD_ACCURACY_START_DATE = '2026-10-11T00:00:00Z'
 
 const OUTCOME_LABELS = {
+  // shadow_logged is no longer rendered via this map -- buildSummary
+  // below splits it into three honest sub-groups by match_status
+  // (Matched / Mismatch / Not yet approved or pushed) instead, fixed
+  // 2026-10-21 (see that date's header note). Key kept here only so
+  // nothing else referencing OUTCOME_LABELS.shadow_logged breaks.
   shadow_logged: '🔎 Validated — waiting on CSR approval to grade',
   agent_missing: '🚨 Validated, but scheduling_agent never created an entry',
   order_not_found: '⚠️ Order not found in Datex', // retired 2026-10-11 as its own gating outcome -- kept for any residual pre-fix rows
@@ -414,7 +438,14 @@ function buildSummary(attempts, tally, fieldRows) {
     lines.push(`Rolling 7 days (${mdLabel(dates[dates.length - 1])}–${mdLabel(todayKey)}): ${fcTxt(weekFc)}`)
     lines.push('"Fully correct" = every tracked field matched what the CSR finally approved. Target: 99%+ on the 7-day number before Sam/Daren go fully automatic.')
     if (tally && tally.pending > 0) {
-      lines.push(`${tally.pending} appointment${tally.pending === 1 ? '' : 's'} still awaiting CSR approval (not graded yet).`)
+      // Reworded 2026-10-21 (Dan's report) -- this count used to read as
+      // "still awaiting CSR approval", implying every one of these rows
+      // was genuinely unapproved. Some have actually been approved and
+      // pushed to Datex days ago; they're stuck at pending_outcome only
+      // because of a grading-race condition fixed the same day (see
+      // lib/auto-appt-parse-shared.cjs's header note) that predates this
+      // fix and was never retroactively backfilled.
+      lines.push(`${tally.pending} shadow-grading row${tally.pending === 1 ? '' : 's'} still show match_status: pending_outcome -- most are genuinely unapproved, but a few from before the 2026-10-21 grading-race fix may already be pushed to Datex and just need a manual backfill to grade.`)
     }
     lines.push('')
 
@@ -445,7 +476,29 @@ function buildSummary(attempts, tally, fieldRows) {
     byOutcome[a.outcome].push(a)
   }
 
-  const order = ['shadow_logged', 'agent_missing', 'order_not_found', 'owner_mismatch', 'parse_failed', 'error', 'pending_created']
+  // shadow_logged rows are split by their CURRENT match_status instead of
+  // being lumped under one static "waiting on CSR approval" header --
+  // fixed 2026-10-21 (Dan's report; see this file's matching header
+  // note). outcome is frozen at the moment the row is created and never
+  // changes; match_status evolves afterward as a CSR approves and the row
+  // gets graded (immediately, via the 2026-10-21 race fix, or later via
+  // compareShadowOutcome), so a single header covering all three states
+  // misrepresented rows that were actually already matched or mismatched.
+  const shadowRows = byOutcome.shadow_logged || []
+  delete byOutcome.shadow_logged
+  const shadowGroups = [
+    { label: '✅ Matched — CSR approved exactly as predicted', rows: shadowRows.filter((r) => r.match_status === 'matched') },
+    { label: '⚠️ Mismatch — CSR changed something before approving', rows: shadowRows.filter((r) => r.match_status === 'mismatch') },
+    { label: '⏳ Not yet approved/pushed', rows: shadowRows.filter((r) => r.match_status !== 'matched' && r.match_status !== 'mismatch') },
+  ]
+  for (const g of shadowGroups) {
+    if (!g.rows.length) continue
+    lines.push(`${g.label} (${g.rows.length})`)
+    for (const r of g.rows) lines.push(describeRow(r))
+    lines.push('')
+  }
+
+  const order = ['agent_missing', 'order_not_found', 'owner_mismatch', 'parse_failed', 'error', 'pending_created']
   for (const outcome of order) {
     const rows = byOutcome[outcome]
     if (!rows?.length) continue
