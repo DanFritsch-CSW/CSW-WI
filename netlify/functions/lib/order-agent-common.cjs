@@ -192,7 +192,7 @@ async function resolveAndPushBatch(batchId) {
   const active = process.env.GRASSLAND_AGENT_ACTIVE !== 'false'
 
   const resolution = await adapter.resolveOrderLines(parsed)
-  if (resolution.resolvedLines) await insertLineRows(batch.id, resolution.resolvedLines)
+  if (resolution.resolvedLines && resolution.resolvedLines.length) await insertLineRows(batch.id, resolution.resolvedLines)
 
   if (!resolution.ok) {
     await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, {
@@ -214,7 +214,7 @@ async function resolveAndPushBatch(batchId) {
     })
     await postFrontComment(
       batch.front_conversation_id,
-      `Order agent (dry run): resolved cleanly against current Datex inventory.\n${resolution.projectCode ? `Project: ${resolution.projectCode}, ` : ''}${resolution.resolvedLines.length} line(s). No order was created — review batch ${batch.id} before enabling real pushes.`
+      `Order agent (dry run): resolved cleanly against current Datex inventory.\n${resolution.projectCode ? `Project: ${resolution.projectCode}, ` : ''}${resolution.headerOnly ? 'header only (no lines)' : `${resolution.resolvedLines.length} line(s)`}. No order was created — review batch ${batch.id} before enabling real pushes.`
     )
     return { ok: true, dryRun: true, batchId: batch.id }
   }
@@ -248,7 +248,7 @@ async function resolveAndPushBatch(batchId) {
   await postFrontComment(
     batch.front_conversation_id,
     pushResult.success
-      ? `Order agent: order ${pushResult.order_id} created in Datex (batch ${batch.id}). Reconciliation will verify line-level accuracy shortly.${warningsBlock}`
+      ? `Order agent: order ${pushResult.order_id} created in Datex (batch ${batch.id}). ${resolution.successNote || 'Reconciliation will verify line-level accuracy shortly.'}${warningsBlock}`
       : `Order agent: order creation failed. ${pushResult.error}\n(Tracked as batch ${batch.id} — check grassland_order_batches.)`
   )
 

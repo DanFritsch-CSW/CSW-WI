@@ -81,6 +81,22 @@ const GRASSLAND_PROJECTS = {
 }
 const GRASSLAND_PROJECT_IDS = Object.values(GRASSLAND_PROJECTS).map((p) => p.id)
 
+// ── LINE-ITEM MODE SWITCH (added 2026-10-21) ────────────────────────────────
+// false = HEADER-ONLY (current): the agent creates the Datex outbound order
+//   as a shell — project, Sales Order #, PO, ship-to, carrier, expected date —
+//   with ZERO lines. A CSR then adds the lines and assigns license plates in
+//   Datex before the warehouse picks. Reason: create_outbound_order_line has
+//   no license_plate_id parameter, so lines pushed through the API can only
+//   land at the lot level and the CSR has to redo them down to the LP anyway.
+// true  = FULL LINE-ITEM mode (the original behavior, all logic below is
+//   intact): resolve every PDF line to a lot / license plate and push a
+//   line per pallet. Flip this to true and push once Datex's API accepts a
+//   license plate on order lines.
+// A code constant, not an env var, on purpose: this Netlify site is at
+// Lambda's hard 4KB total-env-var ceiling, and adding a new variable fails
+// the deploy for the whole site (see GRASSLAND_AGENT_ACTIVE history).
+const GRASSLAND_LINE_ITEM_MODE = false
+
 function decodePalletNumber(lpLookupCode) {
   if (!lpLookupCode || lpLookupCode.length < 4) return null
   const threeDigits = lpLookupCode.slice(-4, -1)
@@ -165,6 +181,21 @@ async function resolveOrderLines(parsed) {
   }
   if (vote.conflict) {
     return { ok: false, flagReason: `Order's storage lots voted for more than one project (${JSON.stringify(vote.votes)}) — this should not occur; needs manual review.` }
+  }
+
+  // HEADER-ONLY MODE: the project vote above is all the header needs
+  // (project_id can't be guessed from the item #, see note 1 at the top).
+  // Skip every line / license-plate lookup below — they stay intact for
+  // when GRASSLAND_LINE_ITEM_MODE is flipped back on.
+  if (!GRASSLAND_LINE_ITEM_MODE) {
+    return {
+      ok: true,
+      headerOnly: true,
+      projectCode: vote.projectCode,
+      projectId: vote.projectId,
+      resolvedLines: [],
+      successNote: 'Header only — no lines were created. A CSR needs to add the lines and assign license plates in Datex before this can be picked.',
+    }
   }
 
   const lpCacheByLotId = new Map()
@@ -292,6 +323,7 @@ function buildLinePayload(line, ctx) {
 
 module.exports = {
   customerCode: 'grassland',
+  GRASSLAND_LINE_ITEM_MODE,
   domains: ['grassland.com'],
   resolveOrderLines,
   buildOrderHeader,
