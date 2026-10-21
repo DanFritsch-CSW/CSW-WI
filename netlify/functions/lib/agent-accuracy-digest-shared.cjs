@@ -55,7 +55,10 @@
 // spacing, case, role labels and the SO prefix are no longer counted as
 // misses ("522069,522710" == "NOSE: 522069 / TAIL: 522710";
 // "621935" == "SO621935"). References with no digit at all ("HOLD") are
-// compared as plain normalized text so blank-vs-"HOLD" still counts. Real
+// compared as plain normalized text so blank-vs-"HOLD" still counts. From
+// 2026-10-21 (Dan approved) leading zeros on all-digit values are ignored too
+// ("00516272" == "516272", "0010315636" == "10315636"): zero padding is
+// formatting, not a different number. Real
 // differences stay misses (a different number, an extra order number the CSR
 // added, "-100" suffixes). Measured on 10/11-10/21 non-pilot rows this alone
 // moves Reference # from 556/885 (63%) to 611/885 (69%) -- a GRADING step
@@ -121,7 +124,7 @@ function normReference(v) {
   s = s.replace(/\b(MIDDLE\s+NOSE|MIDDLE\s+TAIL|NOSE|MIDDLE|TAIL|TARGET)\b|\b[NMT]\)/g, ' ')
   const toks = new Set()
   for (const m of s.matchAll(/[A-Z0-9][A-Z0-9-]*[A-Z0-9]|[A-Z0-9]/g)) {
-    if (/[0-9]/.test(m[0])) toks.add(m[0].replace(/^SO(\d+)$/, '$1'))
+    if (/[0-9]/.test(m[0])) toks.add(m[0].replace(/^SO(\d+)$/, '$1').replace(/^0+(\d+)$/, '$1'))
   }
   if (toks.size) return [...toks].sort().join(',')
   return normText(raw)
