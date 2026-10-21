@@ -21,7 +21,7 @@
 // configured (settings.reference_fixes.deployed_at is set), the report gains a
 // "Reference # fixes" block right under the per-field accuracy table:
 // accuracy since go-live vs before for the three targeted customers
-// (Palermo's, Pretzilla, Fair Oaks, Grassland, Birchwood, Sargento, Richelieu) combined and one by one, plus everyone else
+// (Palermo's, Pretzilla, Fair Oaks, Grassland, Birchwood, Sargento, Richelieu, Rhodes) combined and one by one, plus everyone else
 // as a no-fix CONTROL line (it should stay flat -- if it moves too, the change
 // is not the fixes), how often each fix fired in the last 7 days (from
 // public.reference_fix_events written by the scheduling-reference-fixer Edge
@@ -71,10 +71,10 @@ const md = (ymd) => { const [, m, d] = ymd.split('-').map(Number); return `${m}/
 const pct = (m, c) => (c > 0 ? `${Math.round((m / c) * 100)}% (${m}/${c})` : 'no data')
 const clip = (s, n = 28) => { const t = String(s == null ? '' : s).trim(); return t.length > n ? `${t.slice(0, n - 1)}\u2026` : t }
 
-const REF_TARGETS = ['palermo', 'pretzilla', 'fairoaks', 'grassland', 'birchwood', 'sargento', 'richelieu']
+const REF_TARGETS = ['palermo', 'pretzilla', 'fairoaks', 'grassland', 'birchwood', 'sargento', 'richelieu', 'rhodes']
 const REF_GROUP_LABELS = {
   palermo: "Palermo's", pretzilla: 'Pretzilla', fairoaks: 'Fair Oaks', grassland: 'Grassland',
-  birchwood: 'Birchwood', sargento: 'Sargento', richelieu: 'Richelieu',
+  birchwood: 'Birchwood', sargento: 'Sargento', richelieu: 'Richelieu', rhodes: 'Rhodes',
   other: 'Everyone else (no fix, control)',
 }
 
@@ -113,7 +113,7 @@ export function buildReferenceSection(ref) {
     return m
   }
   const w = tally(ref.fires_week)
-  L.push(`Fixes applied in the last 7 days: PU/SO found in the first email ${w.label_applied || 0}, found only in a follow-up message ${w.followup_applied || 0}, Fair Oaks order # from Datex ${w.datex_owner_reference || 0}, Grassland order # from the weekly list ${w.list_applied || 0}, Birchwood/Sargento/Richelieu order # from Datex ${w.datex_order_pair || 0}, Richelieu PO prefix added ${w.prefix_applied || 0}, formatting clean-ups ${w.tidy_applied || 0}. PU/SO not in the email at all (CSR has to ask the carrier): ${w.label_not_found || 0}. Fair Oaks order Datex couldn't resolve: ${w.datex_skipped || 0}.`)
+  L.push(`Fixes applied in the last 7 days: PU/SO found in the first email ${w.label_applied || 0}, found only in a follow-up message ${w.followup_applied || 0}, Fair Oaks order # from Datex ${w.datex_owner_reference || 0}, Grassland order # from the weekly list ${w.list_applied || 0}, Birchwood/Sargento/Richelieu order # from Datex ${w.datex_order_pair || 0}, Richelieu PO prefix added ${w.prefix_applied || 0}, Rhodes S/R # from the load sheet ${w.loadsheet_applied || 0}, formatting clean-ups ${w.tidy_applied || 0}. PU/SO not in the email at all (CSR has to ask the carrier): ${w.label_not_found || 0}. Fair Oaks order Datex couldn't resolve: ${w.datex_skipped || 0}.`)
 
   // Grassland weekly-list health: the list reader runs unattended, so a missing or changed list must be visible here.
   const gl = ref.grassland
