@@ -25,7 +25,9 @@
 // as a no-fix CONTROL line (it should stay flat -- if it moves too, the change
 // is not the fixes), how often each fix fired in the last 7 days (from
 // public.reference_fix_events written by the scheduling-reference-fixer Edge
-// Function), and the biggest remaining misses on the targeted customers. Both
+// Function), a Grassland weekly-list health line (lists loaded, ship dates covered,
+// pending requests waiting; warns when no list covers the next 6 days), and the
+// biggest remaining misses on the targeted customers. Both
 // periods are graded with the same normalizer (public.norm_reference), so the
 // comparison is not flattered by the grading cleanup. The data call is
 // optional: if it fails, the weekly report still goes out without the block.
@@ -69,9 +71,9 @@ const md = (ymd) => { const [, m, d] = ymd.split('-').map(Number); return `${m}/
 const pct = (m, c) => (c > 0 ? `${Math.round((m / c) * 100)}% (${m}/${c})` : 'no data')
 const clip = (s, n = 28) => { const t = String(s == null ? '' : s).trim(); return t.length > n ? `${t.slice(0, n - 1)}\u2026` : t }
 
-const REF_TARGETS = ['palermo', 'pretzilla', 'fairoaks']
+const REF_TARGETS = ['palermo', 'pretzilla', 'fairoaks', 'grassland']
 const REF_GROUP_LABELS = {
-  palermo: "Palermo's", pretzilla: 'Pretzilla', fairoaks: 'Fair Oaks',
+  palermo: "Palermo's", pretzilla: 'Pretzilla', fairoaks: 'Fair Oaks', grassland: 'Grassland',
   other: 'Everyone else (no fix, control)',
 }
 
@@ -110,7 +112,18 @@ export function buildReferenceSection(ref) {
     return m
   }
   const w = tally(ref.fires_week)
-  L.push(`Fixes applied in the last 7 days: PU/SO found in the first email ${w.label_applied || 0}, found only in a follow-up message ${w.followup_applied || 0}, Fair Oaks order # from Datex ${w.datex_owner_reference || 0}, formatting clean-ups ${w.tidy_applied || 0}. PU/SO not in the email at all (CSR has to ask the carrier): ${w.label_not_found || 0}. Fair Oaks order Datex couldn't resolve: ${w.datex_skipped || 0}.`)
+  L.push(`Fixes applied in the last 7 days: PU/SO found in the first email ${w.label_applied || 0}, found only in a follow-up message ${w.followup_applied || 0}, Fair Oaks order # from Datex ${w.datex_owner_reference || 0}, Grassland order # from the weekly list ${w.list_applied || 0}, formatting clean-ups ${w.tidy_applied || 0}. PU/SO not in the email at all (CSR has to ask the carrier): ${w.label_not_found || 0}. Fair Oaks order Datex couldn't resolve: ${w.datex_skipped || 0}.`)
+
+  // Grassland weekly-list health: the list reader runs unattended, so a missing or changed list must be visible here.
+  const gl = ref.grassland
+  if (gl && Number(gl.map_rows) >= 0) {
+    const cov = gl.coverage_through ? String(gl.coverage_through) : null
+    let line = `Grassland weekly list: ${gl.lists_ingested || 0} list(s) loaded (${gl.map_rows || 0} loads)${cov ? `, covering ship dates through ${md(cov)}` : ''}; ${gl.pending_outbound_waiting || 0} pending Grassland outbound request(s) still waiting on a list.`
+    if (!cov || (new Date(`${cov}T00:00:00Z`).getTime() - new Date(`${gl.today}T00:00:00Z`).getTime()) / 86400000 < 6) {
+      line += ' \u26a0\ufe0f No list covers the coming week yet \u2014 check that Grassland sent it and that it landed in MAD Appointments.'
+    }
+    L.push(line)
+  }
 
   const misses = Array.isArray(ref.misses) ? ref.misses : []
   if (misses.length) {
