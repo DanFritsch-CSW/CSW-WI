@@ -217,6 +217,36 @@
 // occurs. fmtLocal now emits real minutes (it used to hardcode ":00").
 // scheduling-agent-webhook's resolvePalermoDatesFromParts carries the
 // identical rule -- keep both in sync.
+//
+// FIXED 2026-10-21 (Dan's report, 14 real approved appointments stuck
+// reading "still awaiting CSR approval" in the nightly digest when
+// they'd already been pushed to Datex, confirmed independently in
+// MotherDuck) -- a race condition between this file's own 15-minute cron
+// tick and the Datex push. processMessage() writes this row with
+// match_status:'pending_outcome', and scheduling-push-to-datex-
+// background.cjs's compareShadowOutcome() is the ONLY thing that ever
+// flips it to matched/mismatch -- but that function only looks for a
+// pending_outcome row AT THE MOMENT OF PUSH. If a CSR reviews and pushes
+// an appointment before this cron's next tick gets around to creating
+// this row at all (routine when a CSR is fast -- confirmed on all 14
+// stuck rows, whose datex_pushed_at timestamps were all 13 seconds to 10
+// minutes EARLIER than this row's own created_at), compareShadowOutcome
+// finds nothing to grade, no-ops, and the row is never looked at again --
+// permanently stuck at pending_outcome even though the real outcome
+// already happened and is sitting right there in `submissions`. Fixed by
+// checking, right here at row-creation time, whether
+// scheduling_agent's submission (already fetched via findAgentSubmission,
+// which now also selects datex_appointment_id) is already 'approved'; if
+// so, this row is written already graded (matched/mismatch, with
+// actual_scheduled_arrival/actual_dock_door/actual_datex_appointment_id/
+// compared_at filled in) instead of as pending_outcome, using the exact
+// same minute-truncated comparison (normalizeArrivalForCompare) as
+// compareShadowOutcome, so the two grading paths can never disagree. This
+// closes the race from this side; compareShadowOutcome on the push side
+// still handles the more common case where a row already exists by the
+// time a CSR approves. The 14 rows already stuck before this fix are NOT
+// retroactively corrected by this change -- that needs a one-time manual
+// backfill if ever wanted.
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || ''
 const SUPABASE_KEY =
@@ -526,6 +556,18 @@ function fmtLocal(d) {
   return `${y}-${m}-${dd}T${hh}:${mi}`
 }
 
+// Truncates an ISO-ish "YYYY-MM-DDTHH:MM[:SS]" string to the minute so a
+// trailing-seconds formatting difference between two sources of the same
+// timestamp never reads as a real mismatch -- mirrors the identical
+// helper in scheduling-push-to-datex-background.cjs (added 2026-10-21,
+// same bug) so the two grading paths (this file's immediate-grade path
+// below, and that file's compareShadowOutcome) can never disagree about
+// what counts as a match.
+function normalizeArrivalForCompare(v) {
+  if (!v || typeof v !== 'string' || !v.includes('T')) return v || null
+  return v.slice(0, 16)
+}
+
 function resolveDatesFromParts(digits, month, day, hour24) {
   // FIXED 2026-10-10: Datex stores this reference WITHOUT a "TO" prefix
   // (see header note). Bare digits match both lookupOrder's SQL and the
@@ -670,10 +712,16 @@ async function checkLabor(warehouse, scheduledArrival) {
 // function can grade it instead of creating a competing one. One
 // submission per conversation is the expectation (scheduling_agent's
 // Front rule fires only on a conversation's first inbound message).
+//
+// datex_appointment_id added 2026-10-21 alongside the immediate-grade
+// race fix in processMessage() below -- needed so a row that's graded
+// immediately (because the submission is already approved by the time
+// this runs) can carry actual_datex_appointment_id the same way
+// compareShadowOutcome does on the push side.
 async function findAgentSubmission(conversationId) {
   if (!conversationId) return null
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/submissions?front_conversation_id=eq.${encodeURIComponent(conversationId)}&select=id,scheduled_arrival,scheduled_dock_door,status,reference_number,project,owner&limit=1`,
+    `${SUPABASE_URL}/rest/v1/submissions?front_conversation_id=eq.${encodeURIComponent(conversationId)}&select=id,scheduled_arrival,scheduled_dock_door,status,reference_number,project,owner,datex_appointment_id&limit=1`,
     { headers: sbHeaders() }
   )
   if (!res.ok) {
@@ -883,7 +931,33 @@ async function processMessage(message, senderConfig, conversationId) {
   // per-project dock-door resolution, just unused by this pilot now.
   const laborWarning = await checkLabor(CAL_WAREHOUSE, scheduledArrival)
 
-  log('processMessage: shadow_logged', reference, agentSubmission.id, 'order_found:', orderFound)
+  // RACE FIX 2026-10-21 (Dan's report) -- see this file's 2026-10-21
+  // header note for the full explanation. If scheduling_agent's
+  // submission is already 'approved' by the time this row is being
+  // created, compareShadowOutcome() on the push side will never see a
+  // pending_outcome row to grade (it already ran, before this row
+  // existed, and found nothing). Grade immediately instead, using the
+  // same minute-truncated comparison compareShadowOutcome uses, so this
+  // row is never left stranded.
+  const alreadyApproved = agentSubmission.status === 'approved'
+  const gradedFields = alreadyApproved
+    ? (() => {
+        const arrivalMatches = normalizeArrivalForCompare(scheduledArrival) === normalizeArrivalForCompare(agentSubmission.scheduled_arrival)
+        const dockDoorMatches = !PALERMO_DOCK_DOOR || PALERMO_DOCK_DOOR === agentSubmission.scheduled_dock_door
+        return {
+          match_status: arrivalMatches && dockDoorMatches ? 'matched' : 'mismatch',
+          actual_scheduled_arrival: agentSubmission.scheduled_arrival || null,
+          actual_dock_door: agentSubmission.scheduled_dock_door || null,
+          actual_datex_appointment_id: agentSubmission.datex_appointment_id ?? null,
+          compared_at: new Date().toISOString(),
+        }
+      })()
+    : { match_status: 'pending_outcome' }
+
+  log(
+    'processMessage: shadow_logged', reference, agentSubmission.id, 'order_found:', orderFound,
+    alreadyApproved ? `graded immediately (${gradedFields.match_status}) -- race fix` : 'pending_outcome'
+  )
   await logAttempt({
     front_message_id: messageId, front_conversation_id: conversationId, sender: senderHandle, subject,
     matched_reference: reference, needed_by: neededBy, parsed_arrival: scheduledArrival, outcome: 'shadow_logged',
@@ -894,10 +968,10 @@ async function processMessage(message, senderConfig, conversationId) {
     agent_dock_door: PALERMO_DOCK_DOOR,
     recommended_dock_door: PALERMO_DOCK_DOOR,
     labor_warning: laborWarning,
-    match_status: 'pending_outcome',
+    ...gradedFields,
   })
 
-  return { messageId, outcome: 'shadow_logged', reference, agentSubmissionId: agentSubmission.id, orderFound }
+  return { messageId, outcome: 'shadow_logged', reference, agentSubmissionId: agentSubmission.id, orderFound, matchStatus: gradedFields.match_status }
 }
 
 async function runScan() {
