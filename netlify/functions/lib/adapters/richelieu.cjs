@@ -28,9 +28,9 @@
 // exists as THREE separate Datex lot records, one each for R1116537,
 // R1117692, and R1117575 (confirmed directly). The PDF disambiguates this
 // correctly by printing each lot block directly under its own item
-// number; resolution now matches on (lot_code, material_code) TOGETHER,
-// never lot_code alone — matching lot_code alone can and did pick an
-// entirely wrong lot/material pairing.
+// number; resolution matches on (lot_code, material_code) TOGETHER, never
+// lot_code alone — matching lot_code alone can and did pick an entirely
+// wrong lot/material pairing.
 //
 // ONE PDF = ONE ORDER. There is no per-pallet license-plate matching here
 // (unlike Grassland); the Datex-side math is: each physical pallet
@@ -49,20 +49,41 @@
 // to push the real per-lot detail every time, not match that historical
 // shortcut.
 //
-// AVAILABILITY SHORTFALLS ARE A FLAG, NOT A FAILURE (Dan's explicit
-// request, 2026-10-16, same real order): TOP1060598's 26AUG6EF lot needed
-// 34 pallets of R1117692 (26,520 eaches) but Datex currently shows only
-// 32 pallets (24,960 eaches) actually on real license plates for that lot
-// — confirmed directly. Unlike an unresolvable lot (a genuine data
-// problem that still blocks the order), a quantity shortfall is a normal
-// warehouse timing situation — more inventory may be in transit, or the
-// order may simply short-ship — so resolution still succeeds and pushes
-// the order at the FULL requested quantity; the shortfall is surfaced as
-// a `warnings` entry that order-agent-common.cjs appends to the success
-// comment, not as a flagReason that blocks the push. If CSW ever wants
-// the pushed quantity capped at what's actually available instead of the
-// requested amount, that's a real policy choice to revisit, not assumed
-// here.
+// REWRITTEN AGAIN 2026-10-23 (real team feedback, cnv_1cpor7v8): the
+// 2026-10-16 "push the full requested quantity anyway and flag the
+// shortfall" behavior was a genuine miss — Sadie (CSR handling these
+// orders) reported she still had to manually remove the short lines
+// herself every time, so the flag added no value over the prior manual
+// process. The real, Richelieu-confirmed policy (relayed by Sadie, who
+// used to email Richelieu about every shortfall until they told her not
+// to): when a requested lot can't cover the full amount, automatically
+// pull the remainder from the NEXT lot in FEFO rotation for that same
+// material — FULL PALLETS ONLY, never a partial pallet — and no customer
+// email is needed as long as that holds. Confirmed directly against real
+// data before building this: Richelieu's own lot codes encode a pack date
+// right in the code (e.g. "16SEP6EF", "26AUG6EF"), and `receive_date` on
+// `datex_slv_lots` tracks that embedded date in lockstep — so
+// `receive_date` ascending is a clean, reliable FEFO ordering key, no
+// fragile parsing of the lot code's own text required.
+//
+// Allocation logic (resolveLotLineWithFefo below): try the originally
+// requested lot first; if it can't cover the full pallet count, walk
+// forward through that material's remaining lots in receive_date order,
+// taking whole pallets from each (skipping any with none available) until
+// the request is met. This can turn one requested lot line into several
+// pushed lines (e.g. 34 pallets requested on 26AUG6EF → 32 from 26AUG6EF
+// + 2 from the next lot with stock) — still one Datex order, just sourced
+// from real inventory instead of a lot that can't fully cover it.
+//
+// If the ENTIRE rotation for that material still can't cover the request
+// (not just the one named lot, but every later lot too), that's a real
+// shortage, not a rotation question — Dan's explicit call (2026-10-23):
+// still don't hard-fail the order over it. Push whatever full pallets
+// exist across the whole rotation and surface the remaining shortfall as
+// a `warnings` entry (order-agent-common.cjs appends these to the success
+// comment) for manual follow-up, the same mechanism as before — just now
+// reserved for this genuinely-out-of-stock case instead of every
+// shortfall.
 //
 // NOT YET RESOLVED / left for the first real test push, same spirit as
 // Grassland's iterative confirm-via-real-order approach:
@@ -80,6 +101,10 @@ const { runMotherDuckQuery } = require('../order-agent-common.cjs')
 const RICHELIEU_PROJECT_ID = 224 // RICHR5 — Richelieu Raw Materials Kenosha
 const KENOSHA_WAREHOUSE_ID = 5 // CSW-Kenosha (Pleasant Prairie)
 const RICHELIEU_ORDER_CLASS_ID = 2 // "SO" Sales Order — same class as Grassland/DPI
+// Safety cap on how many later-lot candidates to pull per material when
+// substituting — comfortably more than any real shortfall should need;
+// just a guard against a runaway query on a material with huge lot churn.
+const MAX_ROTATION_CANDIDATES = 50
 
 // Looks up every lot code printed on one PDF, across every item, in a
 // single query, scoped to the Richelieu project. Returns ALL candidate
@@ -88,13 +113,14 @@ const RICHELIEU_ORDER_CLASS_ID = 2 // "SO" Sales Order — same class as Grassla
 // matches that lot's own item block, since lot codes are confirmed NOT
 // unique across materials within this project (see file header note).
 // TRIM() on both sides guards against the same stray-whitespace issue
-// confirmed on other customers' lot codes (2026-10-14).
+// confirmed on other customers' lot codes (2026-10-14). receive_date is
+// the FEFO ordering key for the substitution logic below.
 async function fetchLotDetails(lotCodes) {
   if (!lotCodes.length) return new Map()
   const inList = lotCodes.map((s) => `'${s.trim().replace(/'/g, "''")}'`).join(',')
   const rows = await runMotherDuckQuery(`
     SELECT TRIM(lot.lookup_code) AS lot_code, lot.lot_id AS lot_id, lot.material_id AS material_id,
-           lot.vendor_lot_id AS vendor_lot_id, m.lookup_code AS material_code,
+           lot.vendor_lot_id AS vendor_lot_id, lot.receive_date AS receive_date, m.lookup_code AS material_code,
            pk.packaging_id AS packaging_id, pk.pallet_tie AS pallet_tie, pk.pallet_high AS pallet_high
     FROM production_db.silver.datex_slv_lots lot
     JOIN production_db.silver.datex_slv_materials m ON m.material_id = lot.material_id
@@ -111,10 +137,31 @@ async function fetchLotDetails(lotCodes) {
   return map
 }
 
+// Every later lot for one material, in FEFO (receive_date ascending)
+// order, starting from the originally-requested lot's own receive_date —
+// excludes that lot itself (it's tried separately, first, in
+// resolveLotLineWithFefo). Capped at MAX_ROTATION_CANDIDATES; in the
+// extremely unlikely case a real shortfall needs more than that many
+// lots to cover, it will show up as a flagged shortfall rather than
+// silently stopping, since the allocation loop below simply runs out of
+// candidates and reports whatever's left unmet.
+async function fetchRotationCandidates(materialId, fromReceiveDate, excludeLotId) {
+  const rows = await runMotherDuckQuery(`
+    SELECT lot.lot_id AS lot_id, TRIM(lot.lookup_code) AS lot_code, lot.vendor_lot_id AS vendor_lot_id,
+           lot.receive_date AS receive_date
+    FROM production_db.silver.datex_slv_lots lot
+    WHERE lot.material_id = ${materialId}
+      AND lot.receive_date >= TIMESTAMP '${fromReceiveDate}'
+      AND lot.lot_id != ${excludeLotId}
+    ORDER BY lot.receive_date ASC
+    LIMIT ${MAX_ROTATION_CANDIDATES}
+  `)
+  return rows
+}
+
 // Real on-hand quantity for a set of resolved lot_ids, summed from actual
 // license plate contents — the same source Grassland's amount-mismatch
-// check reads from. Used only to produce the shortfall warning below;
-// never blocks resolution on its own.
+// check reads from.
 async function fetchAvailableQuantities(lotIds) {
   if (!lotIds.length) return new Map()
   const rows = await runMotherDuckQuery(`
@@ -126,6 +173,46 @@ async function fetchAvailableQuantities(lotIds) {
   const map = new Map()
   for (const r of rows) map.set(r.lot_id, Number(r.available_qty) || 0)
   return map
+}
+
+// Allocates one requested (lot, pallet count) against real inventory,
+// trying the named lot first and then walking forward through FEFO
+// rotation for the same material if it falls short — full pallets only,
+// per Dan's 2026-10-23 confirmation. Returns one entry per lot actually
+// used (only entries with pallets > 0), plus any pallets still unmet
+// after exhausting the whole rotation.
+async function resolveLotLineWithFefo(primary, requestedPallets) {
+  const eachesPerTote = Number(primary.pallet_tie) * Number(primary.pallet_high)
+  const rotation = await fetchRotationCandidates(primary.material_id, primary.receive_date, primary.lot_id)
+  const candidateLotIds = [primary.lot_id, ...rotation.map((r) => r.lot_id)]
+  const availableByLotId = await fetchAvailableQuantities(candidateLotIds)
+
+  const orderedCandidates = [
+    { lot_id: primary.lot_id, lot_code: primary.lot_code, vendor_lot_id: primary.vendor_lot_id },
+    ...rotation,
+  ]
+
+  const allocations = []
+  let remainingPallets = requestedPallets
+  for (const candidate of orderedCandidates) {
+    if (remainingPallets <= 0) break
+    const availableEaches = availableByLotId.get(candidate.lot_id) ?? 0
+    const availablePallets = Math.floor(availableEaches / eachesPerTote)
+    const take = Math.min(availablePallets, remainingPallets)
+    if (take > 0) {
+      allocations.push({
+        lot_id: candidate.lot_id,
+        lot_code: candidate.lot_code,
+        vendor_lot_id: candidate.vendor_lot_id,
+        pallets: take,
+        each_quantity: take * eachesPerTote,
+        substituted: candidate.lot_id !== primary.lot_id,
+      })
+      remainingPallets -= take
+    }
+  }
+
+  return { allocations, eachesPerTote, shortfallPallets: remainingPallets }
 }
 
 async function resolveOrderLines(parsed) {
@@ -140,10 +227,13 @@ async function resolveOrderLines(parsed) {
   const resolvedLines = []
   const unresolved = []
   const totalMismatches = []
+  const warnings = []
 
   for (const item of items) {
     const lots = item.lots || []
-    const itemResolved = []
+    const itemResolvedCounts = []
+    let itemHadUnresolved = false
+
     for (const lotLine of lots) {
       const lotCode = (lotLine.lot_code || '').trim()
       const candidates = (detailsByLotCode.get(lotCode) || []).filter(
@@ -152,33 +242,49 @@ async function resolveOrderLines(parsed) {
       if (candidates.length !== 1) {
         unresolved.push(`${lotCode} (${item.item_number})`)
         resolvedLines.push({ ...lotLine, item_number: item.item_number, line_status: candidates.length === 0 ? 'missing_lp' : 'ambiguous' })
+        itemHadUnresolved = true
         continue
       }
-      const { lot_id, material_id, material_code, vendor_lot_id, packaging_id, pallet_tie, pallet_high } = candidates[0]
-      const eachesPerTote = Number(pallet_tie) * Number(pallet_high)
-      const quantity = Number(lotLine.count) * eachesPerTote
+      const primary = candidates[0]
+      const requestedPallets = Number(lotLine.count)
+      const { allocations, eachesPerTote, shortfallPallets } = await resolveLotLineWithFefo(primary, requestedPallets)
 
-      const resolvedLine = {
-        ...lotLine,
-        item_number: item.item_number,
-        line_status: 'resolved',
-        item_count: quantity,
-        resolved_lot_id: lot_id,
-        resolved_material_id: material_id,
-        resolved_material_code: material_code,
-        resolved_vendor_lot_id: vendor_lot_id ?? null,
-        resolved_packaging_id: packaging_id,
-        eaches_per_tote: eachesPerTote,
+      let totalEaches = 0
+      for (const alloc of allocations) {
+        totalEaches += alloc.each_quantity
+        resolvedLines.push({
+          ...lotLine,
+          lot_code: alloc.lot_code,
+          item_number: item.item_number,
+          line_status: 'resolved',
+          item_count: alloc.each_quantity,
+          resolved_lot_id: alloc.lot_id,
+          resolved_material_id: primary.material_id,
+          resolved_material_code: primary.material_code,
+          resolved_vendor_lot_id: alloc.vendor_lot_id ?? null,
+          resolved_packaging_id: primary.packaging_id,
+          eaches_per_tote: eachesPerTote,
+          substituted_from_lot: alloc.substituted ? lotCode : null,
+        })
       }
-      resolvedLines.push(resolvedLine)
-      itemResolved.push(resolvedLine)
+      itemResolvedCounts.push(totalEaches)
+
+      if (shortfallPallets > 0) {
+        warnings.push(
+          `${item.item_number}: requested ${requestedPallets} pallet(s) starting from lot ${lotCode}, but only ${requestedPallets - shortfallPallets} pallet(s) were available across the full FEFO rotation for this material — short by ${shortfallPallets} pallet(s). Pushed what's available; flagging for manual follow-up since there's no further rotation to pull from.`
+        )
+      }
     }
 
     // Per-item structural check against this item's own printed total —
     // a mismatch here means a real extraction/math problem, not a stock
-    // question, and still blocks the push.
-    if (itemResolved.length === lots.length && item.total_quantity != null) {
-      const sum = itemResolved.reduce((s, l) => s + (Number(l.item_count) || 0), 0)
+    // question, and still blocks the push. Skipped for an item that had
+    // any unresolved lot (true total can't be known yet) or a genuine
+    // shortfall (its own warning already explains why the sum is lower
+    // than the printed total — that's not an extraction error).
+    const itemHadShortfall = warnings.some((w) => w.startsWith(`${item.item_number}:`))
+    if (!itemHadUnresolved && !itemHadShortfall && item.total_quantity != null) {
+      const sum = itemResolvedCounts.reduce((s, n) => s + n, 0)
       if (sum !== Number(item.total_quantity)) {
         totalMismatches.push(`${item.item_number}: sum of resolved lot quantities ${sum} != printed total ${item.total_quantity}`)
       }
@@ -197,25 +303,6 @@ async function resolveOrderLines(parsed) {
       ok: false,
       resolvedLines,
       flagReason: `Printed-total validation failed: ${totalMismatches.join('; ')}.`,
-    }
-  }
-
-  // Availability check — a shortfall is surfaced as a warning, never a
-  // block. See file header note for why (2026-10-16, Dan's explicit call).
-  const lotIds = [...new Set(resolvedLines.map((l) => l.resolved_lot_id))]
-  const availableByLotId = await fetchAvailableQuantities(lotIds)
-  const warnings = []
-  for (const line of resolvedLines) {
-    const available = availableByLotId.get(line.resolved_lot_id) ?? 0
-    if (available < Number(line.item_count)) {
-      const eachesShort = Number(line.item_count) - available
-      const palletsNeeded = Math.round(Number(line.item_count) / line.eaches_per_tote)
-      const palletsAvailable = Math.round(available / line.eaches_per_tote)
-      line.availability_short = true
-      line.available_qty = available
-      warnings.push(
-        `Lot ${line.lot_code} (${line.resolved_material_code}): order needs ${palletsNeeded} pallet(s) (${line.item_count} each) but Datex currently shows only ${palletsAvailable} pallet(s) (${available} each) on real license plates — short by ${eachesShort} each. Pushed at the full requested quantity regardless; flagging for manual follow-up.`
-      )
     }
   }
 
