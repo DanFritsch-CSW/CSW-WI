@@ -82,6 +82,24 @@
  * as a genuine mismatch after this fix, since its date AND hour:minute
  * both differ, not just its seconds.
  *
+ * UPDATED 2026-10-23 (Dan's explicit decision, Palermo's full automation
+ * except same-day) -- this function is now also triggered DIRECTLY by
+ * scheduling-agent-webhook (a Supabase Edge Function, not just the
+ * plugin's own scheduling-approve-submission.cjs) for a Sam/Daren
+ * appointment whose computed date is NOT today. That caller passes
+ * source: 'palermo_auto'. Every step below (Datex push attempts,
+ * compareShadowOutcome, compareAgentFieldAccuracy) already ran
+ * unconditionally regardless of source -- the only change needed was
+ * recognizing 'palermo_auto' alongside 'plugin' in the two places this
+ * file gates the customer/carrier confirmation reply on `source`, so an
+ * auto-pushed Palermo's appointment gets the same real confirmation send
+ * (and scheduling-agent-reply's own auto-archive after a real send) that
+ * a CSR-approved one already gets -- without that, the appointment would
+ * push to Datex silently with no confirmation ever reaching Sam/Daren.
+ * See scheduling-agent-webhook's 2026-10-23 header note for the full
+ * design (same-day carve-out, the 'processing' PATCH before this is
+ * triggered, the @mention note posted back to the Front thread).
+ *
  * POST /.netlify/functions/scheduling-push-to-datex-background
  * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean }
  */
@@ -106,6 +124,13 @@ const FRONT_API_KEY = process.env.FRONT_API_TOKEN || process.env.FRONT_API_KEY |
 // customer/carrier reply via Front's MCP instead of the raw REST API.
 const SCHEDULING_AGENT_REPLY_URL = process.env.SCHEDULING_AGENT_REPLY_URL || ''
 const SCHEDULING_REPLY_SERVICE_SECRET = process.env.SCHEDULING_REPLY_SERVICE_SECRET || ''
+
+// ADDED 2026-10-23 -- sources allowed to trigger the real customer/carrier
+// confirmation reply (and its auto-archive). 'plugin' is the original CSR
+// Approve & Push path; 'palermo_auto' is scheduling-agent-webhook's direct
+// trigger for a non-same-day Sam/Daren appointment -- see this file's
+// 2026-10-23 header note.
+const REPLY_ELIGIBLE_SOURCES = new Set(['plugin', 'palermo_auto'])
 
 function supabaseHeaders(extra) {
   return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) }
@@ -386,7 +411,7 @@ async function _run({ id, source, draft_template, send_email }) {
     const warnMsg = datexResult.error || 'Datex request timed out -- appointment may have been created. Verify in Datex before re-approving.'
     console.warn('[scheduling-push-to-datex-background] Marking approved with warning (ambiguous timeout):', warnMsg)
     await updateRecord(id, { status: 'approved', datex_pushed_at: new Date().toISOString(), datex_error: warnMsg })
-    if (source === 'plugin' && record.front_conversation_id) {
+    if (REPLY_ELIGIBLE_SOURCES.has(source) && record.front_conversation_id) {
       const recordForDraft = { ...record, status: 'approved', datex_error: warnMsg }
       try {
         // Ambiguous timeout always drafts (never auto-sends) regardless of
@@ -425,11 +450,15 @@ async function _run({ id, source, draft_template, send_email }) {
   await compareShadowOutcome({ ...record, ...approveFields })
   await compareAgentFieldAccuracy({ ...record, ...approveFields })
 
-  // Post the confirmation reply (draft or send) when triggered from the plugin.
-  // On failure, fall back to an internal error note -- never silent, and never
-  // back to the old raw-REST draft/send/comment chain (that's the mechanism
-  // we're moving away from).
-  if (source === 'plugin' && record.front_conversation_id) {
+  // Post the confirmation reply (draft or send) when triggered from the
+  // plugin's CSR Approve & Push flow, OR (as of 2026-10-23) directly from
+  // scheduling-agent-webhook's Palermo's auto-push trigger for a
+  // non-same-day Sam/Daren appointment -- see REPLY_ELIGIBLE_SOURCES and
+  // this file's 2026-10-23 header note. On failure, fall back to an
+  // internal error note -- never silent, and never back to the old
+  // raw-REST draft/send/comment chain (that's the mechanism we're moving
+  // away from).
+  if (REPLY_ELIGIBLE_SOURCES.has(source) && record.front_conversation_id) {
     const recordForDraft = { ...record, ...approveFields }
     try {
       await postCustomerReply(recordForDraft, { sendImmediately: !!send_email, template: draft_template })
