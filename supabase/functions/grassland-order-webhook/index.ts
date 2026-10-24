@@ -183,6 +183,113 @@ function pdfAttachments(readMessageRaw: string): Array<{ id: string; filename: s
     .map((a: any) => ({ id: a.id || a.attachmentId, filename: a.filename || 'document.pdf' }))
 }
 
+// ADDED 2026-10-24 for McCain: confirmed across 10 real emails that
+// bizlink@mccain.com's "Shipping Information Email" never attaches a PDF
+// directly to the Front message — every one attaches a single `.eml`
+// (message/rfc822), and the real PDF lives as an attachment INSIDE that
+// forwarded/relayed message. This is the McCain-specific counterpart to
+// pdfAttachments above; findPdfInMime below does the actual unwrap once
+// the .eml's own bytes are downloaded.
+function emlAttachments(readMessageRaw: string): Array<{ id: string; filename: string }> {
+  const parsed = tryJson(readMessageRaw)
+  const attachments = Array.isArray(parsed?.attachments) ? parsed.attachments : []
+  return attachments
+    .filter((a: any) => /\.eml$/i.test(a.filename || '') || /message\/rfc822/i.test(a.contentType || a.content_type || ''))
+    .map((a: any) => ({ id: a.id || a.attachmentId, filename: a.filename || 'forwarded.eml' }))
+}
+
+// ---------------------------------------------------------------------------
+// Minimal recursive MIME parser — McCain's .eml unwrap only
+// ---------------------------------------------------------------------------
+//
+// No npm/Deno MIME library is already a dependency here, and pulling one in
+// for a single attachment-extraction need felt like more risk than a small,
+// purpose-built parser. This handles exactly what's needed: a raw RFC 822
+// message, walking into multipart/* parts (and, in case a mail client wraps
+// the original message a second time, a nested message/rfc822 part) to find
+// the first base64-encoded application/pdf part. Not a general-purpose MIME
+// parser — e.g. quoted-printable PDF encoding isn't handled, since every
+// real sample confirmed base64 — if a future McCain email fails extraction
+// with "no PDF found inside forwarded email", check the encoding first.
+
+function parseMimeHeaders(headerBlock: string): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const lines = headerBlock.split(/\r?\n/)
+  let currentKey: string | null = null
+  for (const line of lines) {
+    if (/^[ \t]/.test(line) && currentKey) {
+      headers[currentKey] += ' ' + line.trim()
+    } else {
+      const m = line.match(/^([^:]+):\s*(.*)$/)
+      if (m) { currentKey = m[1].toLowerCase(); headers[currentKey] = m[2] }
+    }
+  }
+  return headers
+}
+
+function mimeHeaderParam(headerValue: string, param: string): string | null {
+  const re = new RegExp(`${param}\\s*=\\s*"?([^";]+)"?`, 'i')
+  const m = (headerValue || '').match(re)
+  return m ? m[1].trim() : null
+}
+
+function splitMimeMessage(raw: string): { headers: Record<string, string>; body: string } {
+  const idxCrlf = raw.indexOf('\r\n\r\n')
+  const idxLf = raw.indexOf('\n\n')
+  let i = idxCrlf
+  let sepLen = 4
+  if (i === -1 || (idxLf !== -1 && idxLf < i)) { i = idxLf; sepLen = 2 }
+  if (i === -1) return { headers: parseMimeHeaders(raw), body: '' }
+  return { headers: parseMimeHeaders(raw.slice(0, i)), body: raw.slice(i + sepLen) }
+}
+
+// Recursively walks a raw MIME message/part looking for the first base64
+// application/pdf part. Descends into multipart/* (splitting on that part's
+// own boundary) and message/rfc822 (a message nested as a part, e.g. an
+// extra layer of forwarding) parts until it finds one or runs out.
+function findPdfInMime(raw: string): { base64: string; filename: string } | null {
+  const { headers, body } = splitMimeMessage(raw)
+  const contentType = headers['content-type'] || ''
+
+  if (/application\/pdf/i.test(contentType)) {
+    const encoding = (headers['content-transfer-encoding'] || '').toLowerCase()
+    if (!encoding.includes('base64')) return null // see file header note
+    const filename = mimeHeaderParam(contentType, 'name')
+      || mimeHeaderParam(headers['content-disposition'] || '', 'filename')
+      || 'document.pdf'
+    return { base64: body.replace(/[\r\n]+/g, ''), filename }
+  }
+
+  if (/multipart\//i.test(contentType)) {
+    const boundary = mimeHeaderParam(contentType, 'boundary')
+    if (!boundary) return null
+    const parts = body.split(`--${boundary}`)
+    for (const part of parts) {
+      const trimmed = part.replace(/^\r?\n/, '')
+      if (!trimmed.trim() || trimmed.trim() === '--') continue
+      const found = findPdfInMime(trimmed)
+      if (found) return found
+    }
+    return null
+  }
+
+  if (/message\/rfc822/i.test(contentType)) {
+    return findPdfInMime(body)
+  }
+
+  return null
+}
+
+// Entry point: given the base64 of a downloaded .eml FILE (what
+// downloadAttachmentBase64 returns for any attachment, regardless of type),
+// decode it to the raw MIME text and find the embedded PDF. atob/text
+// round-tripping assumes the .eml itself is ASCII-safe, true of standard
+// email structure even when it carries base64-encoded binary parts.
+function extractPdfFromEmlBase64(emlBase64: string): { base64: string; filename: string } | null {
+  const raw = atob(emlBase64)
+  return findPdfInMime(raw)
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   const CHUNK = 8192
   let binary = ''
@@ -555,6 +662,83 @@ function validateEchoLakeTotals(parsed: any): { ok: boolean; problems: string[] 
 }
 
 // ---------------------------------------------------------------------------
+// McCain Foods (Wisconsin Rapids): .eml unwrap + catch-weight extraction
+// ---------------------------------------------------------------------------
+//
+// ONE EMAIL = ONE .eml ATTACHMENT = ONE PDF = ONE "Shipping information"
+// document = ONE order (confirmed across 10 real emails, 2026-10-24,
+// sender bizlink@mccain.com). Unlike every other customer here, the PDF is
+// never a direct Front attachment — see emlAttachments/findPdfInMime above
+// for the unwrap this customer's buildJobs performs before extraction.
+//
+// CATCH-WEIGHT: the document gives a target WEIGHT per batch/lot line, not
+// a case or tote count. See adapters/mccain.cjs for how that's turned into
+// a Datex tote-count line (Datex's line-create API takes neither a weight
+// nor a license plate, matching the Grassland/Richelieu constraints already
+// documented there).
+//
+// "footer_po_number" IS NOT the same as "reference_number": confirmed
+// against 9 real Datex orders with zero exceptions — "Reference number"
+// (near the top of the page) maps 1:1 to Datex's owner_reference, while a
+// DIFFERENT 10-digit number that appears only in the free-text paragraph at
+// the bottom of the page (e.g. "...MOZZ - 4500821227 - 40,249.72 LBS...")
+// is what the Datex lot lookup_code is built from, together with each
+// "BATCH#" value in that same paragraph — see mccain.cjs's buildLotCode for
+// the exact construction. Both numbers are genuinely present and genuinely
+// different; do not let the model collapse them into one field.
+const MCCAIN_PROMPT = `You read a McCain Foods "Shipping information" / "Delivery Note" PDF (an outbound shipment release from CSW's Wisconsin Rapids warehouse) and return ONLY a JSON object, no prose, no markdown fences.
+
+Shape:
+{
+  "delivery_note_number": string,
+  "reference_number": string,
+  "shipment_number": string,
+  "ship_date": string,
+  "ship_to": { "name": string, "line1": string, "city": string, "state": string, "zip": string },
+  "net_weight": number,
+  "items": [
+    {
+      "material_code": string,
+      "description": string,
+      "lines": [ { "batch_number": string, "weight": number } ]
+    }
+  ],
+  "footer_po_number": string,
+  "printed_total_weight": number
+}
+
+Rules:
+- "delivery_note_number" is the number on the "Delivery note <number> / <date>" line near the top (just the number, not the date).
+- "reference_number" is the "Reference number" value printed near the top — do not confuse this with the different number that appears later in the free-text paragraph at the bottom of the page (see "footer_po_number" below).
+- "shipment_number" is the "Shipment No." value.
+- "ship_date" is the "Scheduled Ship Date" value.
+- "ship_to" is the "Ship-To:" address block at the top of the page (name, street line, city, state, zip) — NOT the "Ship-From:" block, which is always CSW's own warehouse.
+- "net_weight" is the "Net weight" value from the weight/volume summary block.
+- The "Shipping details" table lists one block per material: an item line with the material code and description, followed by one row per batch — each row has a batch number (an 8-digit number, e.g. "20260911") and a weight (the LB figure; the Quantity and Weight columns print the same number — use either). Create one entry in "items" per material block, with one entry in its "lines" array per batch row, in the order printed. Never drop a row.
+- "footer_po_number" comes from the free-text paragraph at the very bottom of the page (it starts with something like "PLEASE SEND THE FOLLOWING LOAD...") — it is the 10-digit number that appears right after the material code and right before the first "BATCH#" mention (e.g. in "...3000001249 MOZZ - 4500821227 - 40,249.72 LBS. BATCH# 20260911...", the value is "4500821227"). This is a DIFFERENT number from "reference_number" above — copy it exactly even if it looks similar.
+- "printed_total_weight" is the value on the "Total:" line near the bottom of the shipping details table (the one just above the free-text paragraph, not any value inside that paragraph).
+- Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
+- If any field is illegible or absent, use null for that field rather than guessing.`
+
+function validateMcCainTotals(parsed: any): { ok: boolean; problems: string[] } {
+  const problems: string[] = []
+  const items = parsed.items || []
+  const sum = items.reduce((s: number, it: any) => s + (it.lines || []).reduce((s2: number, l: any) => s2 + (Number(l.weight) || 0), 0), 0)
+  if (parsed.printed_total_weight != null && Math.abs(sum - Number(parsed.printed_total_weight)) > 0.01) {
+    problems.push(`Sum of extracted line weights ${sum} != printed Total ${parsed.printed_total_weight}`)
+  }
+  if (parsed.net_weight != null && Math.abs(sum - Number(parsed.net_weight)) > 0.01) {
+    problems.push(`Sum of extracted line weights ${sum} != printed Net weight ${parsed.net_weight}`)
+  }
+  // The real lot-code resolution (constructing each lot from footer_po_number
+  // + batch_number, confirming it exists with on-hand inventory in Datex, and
+  // the tote-count allocation) needs MotherDuck and happens in the Netlify
+  // adapter — this is only the structural self-consistency check the PDF's
+  // own printed numbers can confirm alone.
+  return { ok: problems.length === 0, problems }
+}
+
+// ---------------------------------------------------------------------------
 // Per-customer config — the one thing to extend when adding a new customer
 // ---------------------------------------------------------------------------
 
@@ -571,8 +755,13 @@ interface CustomerConfig {
   // Reads every PDF on the triggering message and returns one "job" per
   // order to extract + push. Grassland: one job (primary + optional
   // secondary PDF). Richelieu/Thomas Foods: one job per PDF, no secondary.
-  // Pedone/Echo Lake: one job for the first PDF found, no secondary.
-  buildJobs(pdfs: Array<{ id: string; filename: string }>, downloadPdf: (id: string) => Promise<string>): Promise<Array<{ primaryId: string; secondaryId: string | null }>>
+  // Pedone/Echo Lake: one job for the first PDF found, no secondary. McCain
+  // (added 2026-10-24): one job per .eml attachment, built from `emls`
+  // instead of `pdfs` — it downloads and MIME-unwraps the PDF itself and
+  // returns it pre-decoded via `primaryB64` so processOneJob can skip the
+  // normal downloadPdf(primaryId) call (there is no separate attachment id
+  // for the embedded PDF to download by).
+  buildJobs(pdfs: Array<{ id: string; filename: string }>, emls: Array<{ id: string; filename: string }>, downloadPdf: (id: string) => Promise<string>): Promise<Array<{ primaryId: string | null; secondaryId: string | null; primaryB64?: string }>>
   extract(primaryB64: string, secondaryB64: string | null): Promise<any>
   validate(parsed: any): { ok: boolean; problems: string[] }
   dedupeKey(parsed: any): string | null
@@ -748,6 +937,57 @@ const CUSTOMERS: CustomerConfig[] = [
       raw_extracted: parsed,
     }),
   },
+  {
+    code: 'mccain',
+    domains: ['mccain.com'],
+    // McCain's PDF is never a direct attachment (see emlAttachments /
+    // findPdfInMime above) — this downloads and MIME-unwraps each .eml
+    // itself and returns the decoded PDF via primaryB64, so processOneJob
+    // skips its normal downloadPdf(primaryId) call for this customer.
+    // Confirmed one .eml per email, one PDF per .eml, 2026-10-24 (10 real
+    // samples) — if a future email bundles more than one, this only
+    // processes the first and logs the rest, same precedent as
+    // Pedone/Echo Lake's single-attachment assumption.
+    async buildJobs(pdfs, emls, downloadPdf) {
+      if (emls.length === 0) return []
+      if (emls.length > 1) console.log(`[order-agent:mccain] multiple .eml attachments found on one email — using the first: ${emls.map((a) => a.filename).join(', ')}`)
+      const emlBase64 = await downloadPdf(emls[0].id)
+      const found = extractPdfFromEmlBase64(emlBase64)
+      if (!found) {
+        console.log(`[order-agent:mccain] no PDF found inside forwarded email ${emls[0].filename} — see findPdfInMime encoding caveat in file header note`)
+        return []
+      }
+      return [{ primaryId: null, secondaryId: null, primaryB64: found.base64 }]
+    },
+    async extract(primaryB64) {
+      return callClaude(MCCAIN_PROMPT, [primaryB64], 'Extract this Shipping information / Delivery Note document as the JSON object described in your instructions.')
+    },
+    validate: validateMcCainTotals,
+    dedupeKey: (parsed) => parsed.delivery_note_number || null,
+    isEmpty: (parsed) => !parsed.delivery_note_number || !Array.isArray(parsed.items) || parsed.items.length === 0,
+    ackBody: (parsed, ok, problems) => {
+      const totalLines = (parsed.items || []).reduce((s: number, it: any) => s + (it.lines?.length || 0), 0)
+      return ok
+        ? `Order agent: read Delivery Note ${parsed.delivery_note_number} (${(parsed.items || []).length} item(s), ${totalLines} lot line(s), ${parsed.printed_total_weight ?? '?'} LB total). Checking against current Datex inventory now...`
+        : `Order agent: Delivery Note ${parsed.delivery_note_number || '(unknown)'} — extracted line weights did not match the form's printed totals — flagged for manual entry.\n\n${problems.map((p) => `- ${p}`).join('\n')}`
+    },
+    batchFields: (parsed, ok, problems) => {
+      const items = parsed.items || []
+      const totalLines = items.reduce((s: number, it: any) => s + (it.lines?.length || 0), 0)
+      const totalWeight = items.reduce((s: number, it: any) => s + (it.lines || []).reduce((s2: number, l: any) => s2 + (Number(l.weight) || 0), 0), 0)
+      return {
+        customer_code: 'mccain',
+        po_number: parsed.delivery_note_number,
+        ship_date: parsed.ship_date ? new Date(parsed.ship_date).toISOString().slice(0, 10) : null,
+        status: ok ? 'parsed' : 'validation_failed',
+        flag_reason: ok ? null : `Printed-total validation failed: ${problems.join('; ')}`,
+        line_count: totalLines,
+        total_quantity: parsed.printed_total_weight ?? totalWeight ?? null,
+        pallet_count: null,
+        raw_extracted: parsed,
+      }
+    },
+  },
 ]
 
 function customerForDomain(domain: string | null): CustomerConfig | null {
@@ -776,8 +1016,11 @@ async function triggerNetlifyResolve(batchId: number) {
   }
 }
 
-async function processOneJob(conversationId: string, customer: CustomerConfig, job: { primaryId: string; secondaryId: string | null }, downloadPdf: (id: string) => Promise<string>) {
-  const primaryB64 = await downloadPdf(job.primaryId)
+async function processOneJob(conversationId: string, customer: CustomerConfig, job: { primaryId: string | null; secondaryId: string | null; primaryB64?: string }, downloadPdf: (id: string) => Promise<string>) {
+  // McCain's buildJobs already downloaded + MIME-unwrapped the PDF itself
+  // (there's no separate attachment id for the embedded PDF to pass here) —
+  // see CustomerConfig.buildJobs doc comment above.
+  const primaryB64 = job.primaryB64 || await downloadPdf(job.primaryId as string)
   const secondaryB64 = job.secondaryId ? await downloadPdf(job.secondaryId) : null
   const parsed = await customer.extract(primaryB64, secondaryB64)
 
@@ -842,6 +1085,10 @@ async function runOrderAgentForMention(conversationId: string) {
       let cursor: string | undefined
       let triggeringMsgRaw: string | null = null
       let pdfs: Array<{ id: string; filename: string }> = []
+      // ADDED 2026-10-24 for McCain: that customer never attaches a PDF
+      // directly (see emlAttachments/findPdfInMime above) — a candidate
+      // message now also counts as "found" if it carries a .eml instead.
+      let emls: Array<{ id: string; filename: string }> = []
       const MAX_PAGES = 5
       for (let page = 0; page < MAX_PAGES && !triggeringMsgRaw; page++) {
         const convRaw: string = cursor
@@ -849,14 +1096,15 @@ async function runOrderAgentForMention(conversationId: string) {
           : await call('read_conversation', { conversationId, limit: 50 })
         const inboundIds = allInboundMessageIds(convRaw)
         // Find the first (newest-first) inbound message that actually has
-        // PDF attachments — the message that triggered this, not just
-        // whichever inbound entry happens to be most recent (a Richelieu
-        // thread can have later inbound replies about driver ETAs etc.
-        // with no attachments at all).
+        // PDF (or, for McCain, .eml) attachments — the message that
+        // triggered this, not just whichever inbound entry happens to be
+        // most recent (a Richelieu thread can have later inbound replies
+        // about driver ETAs etc. with no attachments at all).
         for (const messageId of inboundIds) {
           const msgRaw = await call('read_message', { messageId })
-          const found = pdfAttachments(msgRaw)
-          if (found.length > 0) { triggeringMsgRaw = msgRaw; pdfs = found; break }
+          const foundPdfs = pdfAttachments(msgRaw)
+          const foundEmls = emlAttachments(msgRaw)
+          if (foundPdfs.length > 0 || foundEmls.length > 0) { triggeringMsgRaw = msgRaw; pdfs = foundPdfs; emls = foundEmls; break }
         }
         if (triggeringMsgRaw) break
         const parsedConv = tryJson(convRaw)
@@ -870,7 +1118,7 @@ async function runOrderAgentForMention(conversationId: string) {
       if (!customer) return { unknownCustomer: true as const, domain }
 
       const downloadPdf = (id: string) => withMcp((innerCall) => downloadAttachmentBase64(innerCall, id))
-      const jobs = await customer.buildJobs(pdfs, downloadPdf)
+      const jobs = await customer.buildJobs(pdfs, emls, downloadPdf)
       if (jobs.length === 0) return { noAttachment: true as const }
 
       const jobResults = []
