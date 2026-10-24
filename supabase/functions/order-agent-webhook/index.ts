@@ -88,14 +88,12 @@ const CLAUDE_MODEL = 'claude-sonnet-4-5'
 const MCP_URL = 'https://mcp.frontapp.com/mcp'
 const MCP_PROTOCOL = '2025-11-25'
 const MAX_SKEW_MS = 10 * 60 * 1000
-// TEMPORARY REVERT (2026-10-24): points back at the OLD Netlify function
-// name. Netlify has not picked up the git push containing the renamed
-// order-agent-resolve-background.cjs — the GitHub repo was renamed
-// (csw-wi -> CSW-WI) mid-session and its auto-deploy webhook appears to
-// not have fired as a result. Revert to order-agent-resolve-background
-// once Dan confirms (via Netlify's dashboard, Site settings > Build &
-// deploy) that a deploy has actually run against the latest commit.
-const NETLIFY_RESOLVE_URL = 'https://csw-wi.netlify.app/.netlify/functions/grassland-order-resolve-background'
+// Confirmed 2026-10-24 that Netlify deployed the renamed function (the
+// stall turned out to be the site's AWS Lambda 4KB env-var ceiling, hit by
+// adding ORDER_AGENT_INTERNAL_SECRET as a new var — not the GitHub repo
+// rename as first suspected; removing the redundant new var let the next
+// deploy through). Back to the renamed name.
+const NETLIFY_RESOLVE_URL = 'https://csw-wi.netlify.app/.netlify/functions/order-agent-resolve-background'
 
 const sbH = (extra?: any) => ({ apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) })
 async function sbGet(path: string): Promise<any> {
@@ -1028,11 +1026,11 @@ async function triggerNetlifyResolve(batchId: number) {
   try {
     // TEMPORARY FALLBACK (2026-10-24, remove once Dan confirms
     // ORDER_AGENT_INTERNAL_SECRET is set in this project's Edge Function
-    // secrets — programmatic secret writes are paused in the dashboard, so
-    // it can't be set via MCP yet): falls back to the pre-rename
-    // GRASSLAND_INTERNAL_SECRET (same value) so this handoff still carries
-    // a real, matching secret in the meantime — order-agent-resolve-
-    // background.cjs on Netlify accepts either name during this window.
+    // secrets — programmatic secret writes are still paused in the Supabase
+    // dashboard): falls back to the pre-rename GRASSLAND_INTERNAL_SECRET
+    // (same value) so this handoff still carries a real, matching secret in
+    // the meantime — order-agent-resolve-background.cjs on Netlify (now
+    // confirmed live) accepts either name during this window.
     const internalSecret = env('ORDER_AGENT_INTERNAL_SECRET') || env('GRASSLAND_INTERNAL_SECRET')
     const res = await fetch(NETLIFY_RESOLVE_URL, {
       method: 'POST',
