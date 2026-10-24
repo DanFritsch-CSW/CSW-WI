@@ -1019,9 +1019,17 @@ function customerForDomain(domain: string | null): CustomerConfig | null {
 
 async function triggerNetlifyResolve(batchId: number) {
   try {
+    // TEMPORARY FALLBACK (2026-10-24, remove once Dan confirms
+    // ORDER_AGENT_INTERNAL_SECRET is set in this project's Edge Function
+    // secrets — programmatic secret writes are paused in the dashboard, so
+    // it can't be set via MCP yet): falls back to the pre-rename
+    // GRASSLAND_INTERNAL_SECRET (same value) so this handoff still carries
+    // a real, matching secret in the meantime — order-agent-resolve-
+    // background.cjs on Netlify accepts either name during this window.
+    const internalSecret = env('ORDER_AGENT_INTERNAL_SECRET') || env('GRASSLAND_INTERNAL_SECRET')
     const res = await fetch(NETLIFY_RESOLVE_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-order-agent-internal-secret': env('ORDER_AGENT_INTERNAL_SECRET') },
+      headers: { 'Content-Type': 'application/json', 'x-order-agent-internal-secret': internalSecret },
       body: JSON.stringify({ batchId }),
     })
     const bodyText = await res.text().catch(() => '')
