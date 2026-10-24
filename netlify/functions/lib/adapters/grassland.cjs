@@ -28,7 +28,7 @@
 //      the fallback search in resolveOrderLines below handles this.
 //   4. create_outbound_order_line is a CONFIRMED UNRELIABLE Datex endpoint
 //      (see dpi-monthly-shared.cjs) — silently drops lines under load.
-//      Every push here writes to grassland_order_batches/_lines and MUST
+//      Every push here writes to order_agent_batches/_lines and MUST
 //      be paired with a reconciliation job (not yet built) before being
 //      trusted unattended.
 //

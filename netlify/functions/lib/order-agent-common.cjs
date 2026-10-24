@@ -4,10 +4,11 @@
 // Added 2026-10-13 when the agent expanded from Grassland-only to a
 // multi-customer design (Grassland + Richelieu, more to follow). This file
 // holds everything that is the SAME regardless of which customer an order
-// belongs to: Supabase CRUD against grassland_order_batches/_lines (table
-// names kept as-is — renaming them mid-build risked breaking Grassland's
-// already-working pipeline for no functional gain; customer_code is the
-// new column that makes them multi-customer), the Front reply call, the
+// belongs to: Supabase CRUD against order_agent_batches/_lines (renamed
+// 2026-10-24 from order_agent_batches/_lines as part of clearing the
+// "Known naming debt" flagged in the Notion Architecture doc — the tables
+// have been fully generic, customer_code and all, since 2026-10-13; only
+// the name still said Grassland), the Front reply call, the
 // SmartUp API client, and pushOrderGeneric — the actual
 // create_outbound_order + create_outbound_order_line loop, which is
 // IDENTICAL in mechanics across customers (same two endpoints, same
@@ -24,8 +25,14 @@ const SUPABASE_KEY =
   process.env.VITE_SUPABASE_ANON_KEY ||
   process.env.SUPABASE_ANON_KEY ||
   ''
-const ORDER_AGENT_INTERNAL_SECRET = process.env.GRASSLAND_INTERNAL_SECRET || ''
-const ORDER_AGENT_REPLY_URL = 'https://ppsbqekabtbwsmvdiyga.supabase.co/functions/v1/grassland-order-reply'
+// ORDER_AGENT_INTERNAL_SECRET: renamed 2026-10-24 from GRASSLAND_INTERNAL_SECRET
+// (same value, swapped on both Netlify and Supabase in the same change — see
+// Known naming debt cleanup, Notion Architecture doc).
+const ORDER_AGENT_INTERNAL_SECRET = process.env.ORDER_AGENT_INTERNAL_SECRET || ''
+// order-agent-reply: renamed 2026-10-24 from grassland-order-reply (fresh
+// Supabase slug deployed with identical logic, only this constant needed to
+// change since nothing outside this codebase calls that URL directly).
+const ORDER_AGENT_REPLY_URL = 'https://ppsbqekabtbwsmvdiyga.supabase.co/functions/v1/order-agent-reply'
 
 const DATEX_SMARTUP_BASE_URL =
   process.env.DATEX_SMARTUP_BASE_URL || 'https://csw-smartup-api.wavelength.host'
@@ -72,7 +79,7 @@ async function sbGet(path) {
 async function postFrontComment(conversationId, body) {
   const res = await fetch(ORDER_AGENT_REPLY_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-grassland-internal-secret': ORDER_AGENT_INTERNAL_SECRET },
+    headers: { 'Content-Type': 'application/json', 'x-order-agent-internal-secret': ORDER_AGENT_INTERNAL_SECRET },
     body: JSON.stringify({ conversationId, body }),
   })
   if (!res.ok) {
@@ -164,7 +171,7 @@ async function insertLineRows(batchId, resolvedLines) {
     amount_mismatch: !!l.amount_mismatch,
     line_status: l.line_status || 'pending',
   }))
-  await sbPost('grassland_order_lines', rows, 'return=minimal')
+  await sbPost('order_agent_lines', rows, 'return=minimal')
 }
 
 // ── Top-level entry: called by order-agent-resolve-background.cjs ──────────
@@ -174,14 +181,14 @@ async function insertLineRows(batchId, resolvedLines) {
 // runs live resolution, pushes to Datex if active, updates the row, and
 // posts the final comment back to Front.
 async function resolveAndPushBatch(batchId) {
-  const rows = await sbGet(`grassland_order_batches?id=eq.${batchId}&select=*&limit=1`)
+  const rows = await sbGet(`order_agent_batches?id=eq.${batchId}&select=*&limit=1`)
   const batch = rows && rows[0]
   if (!batch) return { ok: false, error: `Batch ${batchId} not found` }
   if (batch.status !== 'parsed') return { ok: false, error: `Batch ${batchId} is not in 'parsed' status (currently '${batch.status}') — not re-processing` }
 
   const adapter = ADAPTERS[batch.customer_code]
   if (!adapter) {
-    await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, { status: 'failed', error_message: `No adapter registered for customer_code '${batch.customer_code}'.` })
+    await sbPatch(`order_agent_batches?id=eq.${batch.id}`, { status: 'failed', error_message: `No adapter registered for customer_code '${batch.customer_code}'.` })
     await postFrontComment(batch.front_conversation_id, `Order agent: no adapter is registered for customer '${batch.customer_code}' — this needs code support before it can be processed.`)
     return { ok: false, batchId: batch.id, error: 'unknown customer_code' }
   }
@@ -189,13 +196,13 @@ async function resolveAndPushBatch(batchId) {
   const parsed = batch.raw_extracted
   // Defaults to active (real Datex pushes) unless explicitly disabled —
   // see adapters/grassland.cjs header note for why this isn't `=== 'true'`.
-  const active = process.env.GRASSLAND_AGENT_ACTIVE !== 'false'
+  const active = process.env.ORDER_AGENT_ACTIVE !== 'false'
 
   const resolution = await adapter.resolveOrderLines(parsed)
   if (resolution.resolvedLines && resolution.resolvedLines.length) await insertLineRows(batch.id, resolution.resolvedLines)
 
   if (!resolution.ok) {
-    await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, {
+    await sbPatch(`order_agent_batches?id=eq.${batch.id}`, {
       status: 'flagged',
       resolved_project_code: resolution.projectCode || null,
       flag_reason: resolution.flagReason,
@@ -208,7 +215,7 @@ async function resolveAndPushBatch(batchId) {
   }
 
   if (!active) {
-    await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, {
+    await sbPatch(`order_agent_batches?id=eq.${batch.id}`, {
       status: 'dry_run_resolved',
       resolved_project_code: resolution.projectCode,
     })
@@ -220,7 +227,7 @@ async function resolveAndPushBatch(batchId) {
   }
 
   if (!isConfigured()) {
-    await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, { status: 'failed', error_message: 'Datex SmartUp credentials not configured.' })
+    await sbPatch(`order_agent_batches?id=eq.${batch.id}`, { status: 'failed', error_message: 'Datex SmartUp credentials not configured.' })
     await postFrontComment(batch.front_conversation_id, 'Order agent: Datex SmartUp credentials not configured — order was not created.')
     return { ok: false, batchId: batch.id, error: 'Datex SmartUp credentials not configured.' }
   }
@@ -228,7 +235,7 @@ async function resolveAndPushBatch(batchId) {
   const header = adapter.buildOrderHeader(parsed, resolution)
   const pushResult = await pushOrderGeneric(header, resolution.resolvedLines, adapter.buildLinePayload)
 
-  await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, {
+  await sbPatch(`order_agent_batches?id=eq.${batch.id}`, {
     status: pushResult.success ? 'pushed' : 'failed',
     resolved_project_code: resolution.projectCode,
     datex_order_id: pushResult.order_id ?? null,
@@ -249,7 +256,7 @@ async function resolveAndPushBatch(batchId) {
     batch.front_conversation_id,
     pushResult.success
       ? `Order agent: order ${pushResult.order_id} created in Datex (batch ${batch.id}). ${resolution.successNote || 'Reconciliation will verify line-level accuracy shortly.'}${warningsBlock}`
-      : `Order agent: order creation failed. ${pushResult.error}\n(Tracked as batch ${batch.id} — check grassland_order_batches.)`
+      : `Order agent: order creation failed. ${pushResult.error}\n(Tracked as batch ${batch.id} — check order_agent_batches.)`
   )
 
   return { ok: pushResult.success, batchId: batch.id, orderId: pushResult.order_id, error: pushResult.error }
@@ -262,10 +269,10 @@ async function resolveAndPushBatch(batchId) {
 // order-agent-resolve-background.cjs when something throws before any of
 // resolveAndPushBatch's own (normal) comment paths get a chance to run.
 async function postFailureComment(batchId, message) {
-  const rows = await sbGet(`grassland_order_batches?id=eq.${batchId}&select=front_conversation_id&limit=1`)
+  const rows = await sbGet(`order_agent_batches?id=eq.${batchId}&select=front_conversation_id&limit=1`)
   const batch = rows && rows[0]
   if (!batch) return
-  await sbPatch(`grassland_order_batches?id=eq.${batchId}`, { status: 'failed', error_message: message.slice(0, 1000) }).catch(() => {})
+  await sbPatch(`order_agent_batches?id=eq.${batchId}`, { status: 'failed', error_message: message.slice(0, 1000) }).catch(() => {})
   await postFrontComment(batch.front_conversation_id, message)
 }
 

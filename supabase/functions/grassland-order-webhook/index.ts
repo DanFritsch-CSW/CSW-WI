@@ -29,8 +29,9 @@
 // webhook, read the triggering email, find and download the relevant
 // PDF(s), have Claude read them into structured JSON, run the one
 // validation check that needs no external data, write batch row(s) to
-// `grassland_order_batches` (table name kept — see order-agent-common.cjs
-// header note), post ack comment(s), then hand off to Netlify for
+// `order_agent_batches` (renamed 2026-10-24 from grassland_order_batches —
+// see order-agent-common.cjs header note), post ack comment(s), then hand
+// off to Netlify for
 // everything needing live Datex data. Deno Edge Functions cannot run the
 // native `duckdb` module MotherDuck queries depend on, which is why this
 // split exists at all (same reason scheduling-agent-webhook lives here
@@ -53,13 +54,30 @@
 //
 // Secrets (Supabase > Edge Functions > Secrets):
 //   FRONT_GRASSLAND_AGENT_CLIENT_ID, FRONT_GRASSLAND_AGENT_CLIENT_SECRET,
-//   FRONT_GRASSLAND_AGENT_SIGNING_SECRET, FRONT_GRASSLAND_AGENT_TOKEN_URL,
-//   ANTHROPIC_API_KEY, GRASSLAND_INTERNAL_SECRET (var names kept as-is —
-//   see order-agent-common.cjs header note; they are not Grassland-
-//   specific in function, just in name).
+//   FRONT_GRASSLAND_AGENT_SIGNING_SECRET, FRONT_GRASSLAND_AGENT_TOKEN_URL
+//   (these four deliberately KEPT Grassland-named 2026-10-24 — they're the
+//   actual live Front OAuth client credentials for this agent, and renaming
+//   the env var key would mean re-pasting live secret values that aren't
+//   readable back from Supabase/Netlify once set; not worth the live-agent
+//   risk for a cosmetic rename. They are not Grassland-specific in
+//   function, just in name.),
+//   ANTHROPIC_API_KEY, ORDER_AGENT_INTERNAL_SECRET (renamed 2026-10-24 from
+//   GRASSLAND_INTERNAL_SECRET, same value, swapped on both Netlify and
+//   Supabase together — see order-agent-common.cjs header note).
 // Auto-provided: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
-// Kill switch: GRASSLAND_AGENT_ENABLED=false (stops ALL customers).
+// Kill switch: ORDER_AGENT_ENABLED=false (stops ALL customers) — renamed
+// 2026-10-24 from GRASSLAND_AGENT_ENABLED.
 // Deploy with verify_jwt=false (Front cannot send a Supabase JWT).
+//
+// SLUG NOTE (2026-10-24): this function is still deployed under the slug
+// `grassland-order-webhook` because Front's own Agent webhook registration
+// (set in Front's UI, outside this codebase) hardcodes that URL. An
+// identical copy is also deployed under the slug `order-agent-webhook` —
+// once Dan repoints Front's registration to the new URL and confirms a live
+// @mention works, the old slug can be retired. Every internal reference
+// (tables, Netlify handoff URL, internal secret, header name) is already
+// renamed in both deployments; only the externally-registered URL itself
+// is pending.
 
 // deno-lint-ignore-file no-explicit-any
 const env = (k: string) => Deno.env.get(k) || ''
@@ -70,7 +88,7 @@ const CLAUDE_MODEL = 'claude-sonnet-4-5'
 const MCP_URL = 'https://mcp.frontapp.com/mcp'
 const MCP_PROTOCOL = '2025-11-25'
 const MAX_SKEW_MS = 10 * 60 * 1000
-const NETLIFY_RESOLVE_URL = 'https://csw-wi.netlify.app/.netlify/functions/grassland-order-resolve-background'
+const NETLIFY_RESOLVE_URL = 'https://csw-wi.netlify.app/.netlify/functions/order-agent-resolve-background'
 
 const sbH = (extra?: any) => ({ apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) })
 async function sbGet(path: string): Promise<any> {
@@ -771,7 +789,7 @@ interface CustomerConfig {
   // (e.g. Thomas Foods orders that ship from a different facility, not
   // CSW). Checked in processOneJob right after isEmpty and before the
   // dedupe check or any batch row is created — a skipped order was never
-  // CSW's to track in grassland_order_batches in the first place.
+  // CSW's to track in order_agent_batches in the first place.
   shouldSkip?(parsed: any): string | null
   ackBody(parsed: any, totalsOk: boolean, problems: string[]): string
   batchFields(parsed: any, totalsOk: boolean, problems: string[]): Record<string, any>
@@ -1003,7 +1021,7 @@ async function triggerNetlifyResolve(batchId: number) {
   try {
     const res = await fetch(NETLIFY_RESOLVE_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-grassland-internal-secret': env('GRASSLAND_INTERNAL_SECRET') },
+      headers: { 'Content-Type': 'application/json', 'x-order-agent-internal-secret': env('ORDER_AGENT_INTERNAL_SECRET') },
       body: JSON.stringify({ batchId }),
     })
     const bodyText = await res.text().catch(() => '')
@@ -1032,7 +1050,7 @@ async function processOneJob(conversationId: string, customer: CustomerConfig, j
   // ADDED 2026-10-19: a real, fully-readable order that still isn't CSW's
   // to process (see CustomerConfig.shouldSkip doc comment above). Checked
   // before dedupe/batch creation — this order never gets a row in
-  // grassland_order_batches at all, since CSW never owned it.
+  // order_agent_batches at all, since CSW never owned it.
   if (customer.shouldSkip) {
     const skipReason = customer.shouldSkip(parsed)
     if (skipReason) {
@@ -1043,7 +1061,7 @@ async function processOneJob(conversationId: string, customer: CustomerConfig, j
 
   const key = customer.dedupeKey(parsed)
   if (key) {
-    const existing = await sbGet(`grassland_order_batches?po_number=eq.${encodeURIComponent(key)}&select=id,status&limit=1`)
+    const existing = await sbGet(`order_agent_batches?po_number=eq.${encodeURIComponent(key)}&select=id,status&limit=1`)
     if (Array.isArray(existing) && existing[0]) {
       await withMcp((call) => call('add_comment', { conversationId, body: `Order agent: ${key} already has a batch (status ${existing[0].status}) — not processing again.` }))
       return { ok: false, reason: 'duplicate' }
@@ -1051,14 +1069,14 @@ async function processOneJob(conversationId: string, customer: CustomerConfig, j
   }
 
   const totalsCheck = customer.validate(parsed)
-  const batchRows = await sbPost('grassland_order_batches', {
+  const batchRows = await sbPost('order_agent_batches', {
     front_conversation_id: conversationId,
     ...customer.batchFields(parsed, totalsCheck.ok, totalsCheck.problems),
   })
   const batch = batchRows[0]
 
   await withMcp((call) => call('add_comment', { conversationId, body: customer.ackBody(parsed, totalsCheck.ok, totalsCheck.problems) }))
-  await sbPatch(`grassland_order_batches?id=eq.${batch.id}`, { ack_comment_posted: true }).catch(() => {})
+  await sbPatch(`order_agent_batches?id=eq.${batch.id}`, { ack_comment_posted: true }).catch(() => {})
 
   if (totalsCheck.ok) await triggerNetlifyResolve(batch.id)
 
@@ -1066,7 +1084,7 @@ async function processOneJob(conversationId: string, customer: CustomerConfig, j
 }
 
 async function runOrderAgentForMention(conversationId: string) {
-  if (env('GRASSLAND_AGENT_ENABLED') === 'false') return { skipped: 'kill switch' }
+  if (env('ORDER_AGENT_ENABLED') === 'false') return { skipped: 'kill switch' }
 
   try {
     const results = await withMcp(async (call) => {
