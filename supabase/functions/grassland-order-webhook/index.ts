@@ -88,7 +88,14 @@ const CLAUDE_MODEL = 'claude-sonnet-4-5'
 const MCP_URL = 'https://mcp.frontapp.com/mcp'
 const MCP_PROTOCOL = '2025-11-25'
 const MAX_SKEW_MS = 10 * 60 * 1000
-const NETLIFY_RESOLVE_URL = 'https://csw-wi.netlify.app/.netlify/functions/order-agent-resolve-background'
+// TEMPORARY REVERT (2026-10-24): points back at the OLD Netlify function
+// name. Netlify has not picked up the git push containing the renamed
+// order-agent-resolve-background.cjs — the GitHub repo was renamed
+// (csw-wi -> CSW-WI) mid-session and its auto-deploy webhook appears to
+// not have fired as a result. Revert to order-agent-resolve-background
+// once Dan confirms (via Netlify's dashboard, Site settings > Build &
+// deploy) that a deploy has actually run against the latest commit.
+const NETLIFY_RESOLVE_URL = 'https://csw-wi.netlify.app/.netlify/functions/grassland-order-resolve-background'
 
 const sbH = (extra?: any) => ({ apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', ...(extra || {}) })
 async function sbGet(path: string): Promise<any> {
