@@ -332,4 +332,5 @@ ADAPTERS = {
   thomasfoods: require('./adapters/thomasfoods.cjs'),
   echolake: require('./adapters/echolake.cjs'),
   mccain: require('./adapters/mccain.cjs'),
+  dsm: require('./adapters/dsm.cjs'),
 }

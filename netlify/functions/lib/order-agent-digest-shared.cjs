@@ -58,6 +58,7 @@ const CUSTOMERS = [
   { label: 'Pedone Pinsa', projects: ['PEDPI5'] },
   { label: 'Thomas Foods', projects: ['THOMA5'] },
   { label: 'Echo Lake', projects: ['ECHOL5'] },
+  { label: 'DSM', projects: ['DSMEN5', 'DSMFO8'] },
 ]
 
 const PROJECT_TO_CUSTOMER = {}

@@ -762,6 +762,89 @@ function validateMcCainTotals(parsed: any): { ok: boolean; problems: string[] } 
 }
 
 // ---------------------------------------------------------------------------
+// DSM Firmenich: extraction schema + real printed net-weight validation
+// ---------------------------------------------------------------------------
+//
+// Added 2026-10-26 after a live kickoff call with the Kenosha DSM team. TWO
+// Datex projects (DSMEN5 enzymes, DSMFO8 cultures) ship under this ONE
+// sender domain — the subject sometimes carries "( E )" or "(C)" but Dan
+// confirmed by voice this isn't reliable enough to route on. This layer
+// (extraction + structural validation) is deliberately project-agnostic:
+// it just reads the document into JSON. Which Datex project an order
+// belongs to is resolved on the Netlify side, from the item numbers
+// themselves, after live MotherDuck lookup — see adapters/dsm.cjs for that
+// logic and the full confirmation behind it (zero item-number overlap
+// across the full 816-material catalog spanning both projects).
+//
+// ONE EMAIL, UNCONFIRMED WHETHER ALWAYS ONE PDF: both real samples seen so
+// far (order 859860/DSMEN5, order 860637/DSMFO8) had exactly one PDF
+// attachment. Some subjects use "Orders" plural (e.g. "10/28 Orders (C)"),
+// which is suggestive of a multi-PDF email but not yet confirmed either
+// way — buildJobs below processes EVERY PDF found on the triggering
+// message as its own independent order, the same defensive pattern already
+// proven necessary for Richelieu (7 PDFs in one real email) and Thomas
+// Foods (5 PDFs in one real email), so nothing silently gets dropped if a
+// multi-PDF DSM email does turn up.
+//
+// DOCUMENT SHAPE: a "Delivery Note" (one or two pages) followed by a
+// "Picking list" page. The Picking list carries the Batch/lot code per
+// line, printed as ONE literal token (not constructed from two fields,
+// despite how that sounded read aloud digit-by-digit on the kickoff call —
+// confirmed directly against real Datex lot records before writing this
+// prompt). Cultures orders also repeat the batch inline on the Delivery
+// Note page itself; enzymes orders do not — the Picking list page is the
+// one place both formats reliably carry it, so the prompt treats that as
+// the primary source and the Delivery Note's inline mention (when present)
+// as a secondary confirmation only.
+
+const DSM_PROMPT = `You read a DSM Firmenich "Delivery Note" PDF (an outbound shipment document, usually followed by a "Picking list" page for the same order) and return ONLY a JSON object, no prose, no markdown fences.
+
+Shape:
+{
+  "delivery_number": string,
+  "shipment_id_number": string,
+  "your_po_number": string,
+  "sales_order_number": string,
+  "delivery_date": string,
+  "net_weight": number,
+  "ship_to": { "name": string, "line1": string, "city": string, "state": string, "zip": string },
+  "lines": [
+    { "item_number": string, "description": string, "item_count": number, "net_weight": number, "lot_code": string }
+  ]
+}
+
+Rules:
+- "delivery_number" is the "Delivery" value near the top of the Delivery Note page (e.g. "81050660") — NOT "Our order number" and NOT "Shipment ID number", which are different fields printed on the same page.
+- "shipment_id_number" is the "Shipment ID number" value on the Delivery Note page.
+- "your_po_number" is the "Your purchase order" value.
+- "sales_order_number" is the "Our order number" value — informational only.
+- "delivery_date" is the "Delivery date" value — NOT the separate freeform "Ship <date>" note that sometimes appears later in the body text, which is a different, earlier date.
+- "net_weight" is the "Net weight" figure from the weight block near "Shipped From" (strip "KG", just the number).
+- "ship_to" is the "Shipped To" address block (NOT "Sold To", which is very often a different company) — name, street line, city, state, zip.
+- "lines" is every material line item on the Delivery Note's item table, one entry per material in the order printed. "item_number" is the Material code (the number, not the product name). "item_count" is the number in the Quantity column before its unit (e.g. "5" from "5 PC" — strip the unit). "net_weight" is that line's own Net weight figure (strip "KG").
+- "lot_code" is each line's Batch number. Read it from the "Picking list" page (it appears later in the document), matching each line to its item there by the item/material number — this page always carries it in both formats seen so far. If a line's batch is also printed inline on the Delivery Note page itself (common on cultures orders, as "Batch<code>" right next to the quantity), you can use that to confirm the Picking list reading, but the Picking list is the authoritative source if they ever disagree.
+- Copy numbers and codes EXACTLY as printed. Never estimate, round, or infer a value not visible on the page.
+- If any field is illegible or absent, use null for that field rather than guessing.`
+
+function validateDSMTotals(parsed: any): { ok: boolean; problems: string[] } {
+  const problems: string[] = []
+  const lines = parsed.lines || []
+  const sumWeight = lines.reduce((s: number, l: any) => s + (Number(l.net_weight) || 0), 0)
+  // Confirmed exact on both real samples (100 KG single-line; 42 KG =
+  // 15 + 13.5 + 13.5 three-line) — a small tolerance covers ordinary
+  // rounding on a document this agent has only seen twice so far.
+  if (parsed.net_weight != null && Math.abs(sumWeight - Number(parsed.net_weight)) > 0.5) {
+    problems.push(`Sum of extracted line net weights ${sumWeight} KG != printed Net weight ${parsed.net_weight} KG`)
+  }
+  // The real project/lot resolution (which Datex project this belongs to,
+  // and whether each line's lot actually exists and matches its material)
+  // needs MotherDuck and happens in the Netlify adapter — this is only the
+  // structural self-consistency check the PDF's own printed numbers can
+  // confirm alone.
+  return { ok: problems.length === 0, problems }
+}
+
+// ---------------------------------------------------------------------------
 // Per-customer config — the one thing to extend when adding a new customer
 // ---------------------------------------------------------------------------
 
@@ -1019,6 +1102,38 @@ const CUSTOMERS: CustomerConfig[] = [
         raw_extracted: parsed,
       }
     },
+  },
+  {
+    code: 'dsm',
+    domains: ['dsm-firmenich.com'],
+    async buildJobs(pdfs) {
+      // UNCONFIRMED whether a DSM email can ever carry more than one PDF —
+      // see section header note above. Processing every PDF found as its
+      // own order is the safe default regardless, same as Richelieu/Thomas
+      // Foods.
+      if (pdfs.length > 1) console.log(`[order-agent:dsm] ${pdfs.length} PDF attachments found — processing each as its own order: ${pdfs.map((a) => a.filename).join(', ')}`)
+      return pdfs.map((p) => ({ primaryId: p.id, secondaryId: null }))
+    },
+    async extract(primaryB64) {
+      return callClaude(DSM_PROMPT, [primaryB64], 'Extract this Delivery Note (and its Picking list page) as the JSON object described in your instructions.')
+    },
+    validate: validateDSMTotals,
+    dedupeKey: (parsed) => parsed.delivery_number || null,
+    isEmpty: (parsed) => !parsed.delivery_number || !Array.isArray(parsed.lines) || parsed.lines.length === 0,
+    ackBody: (parsed, ok, problems) => ok
+      ? `Order agent: read Delivery ${parsed.delivery_number} (${parsed.lines.length} line(s)). Checking against current Datex inventory now — this will resolve to DSMEN5 or DSMFO8 based on the item number(s) on the order.`
+      : `Order agent: Delivery ${parsed.delivery_number || '(unknown)'} — extracted line weights did not match the document's printed Net weight — flagged for manual entry.\n\n${problems.map((p) => `- ${p}`).join('\n')}`,
+    batchFields: (parsed, ok, problems) => ({
+      customer_code: 'dsm',
+      po_number: parsed.delivery_number,
+      ship_date: parsed.delivery_date ? new Date(parsed.delivery_date).toISOString().slice(0, 10) : null,
+      status: ok ? 'parsed' : 'validation_failed',
+      flag_reason: ok ? null : `Printed-total validation failed: ${problems.join('; ')}`,
+      line_count: parsed.lines.length,
+      total_quantity: (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.item_count) || 0), 0),
+      pallet_count: null,
+      raw_extracted: parsed,
+    }),
   },
 ]
 
