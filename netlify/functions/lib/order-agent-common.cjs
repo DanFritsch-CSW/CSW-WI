@@ -166,6 +166,62 @@ async function pushOrderGeneric(header, resolvedLines, buildLinePayload) {
   return { success: true, order_id, shipment_id, lineResults }
 }
 
+// ── Duplicate-order guard — generic across every customer ──────────────────
+//
+// ADDED 2026-10-26 after a real duplicate: DSM delivery 81050663 (lookup_code
+// 0081050663, owner_reference 0000953027, project DSMFO8) was entered
+// manually in Datex by a CSR (created_by FOOTPRINT\csw-fpservice) at 1:00 PM,
+// then pushed again by this agent via the SmartUp API at 2:52 PM — two real
+// orders now exist in Datex for the same shipment. The dedup check in the
+// Edge Function (order-agent-webhook's processOneJob) only catches the agent
+// re-processing the SAME email twice, by checking our OWN order_agent_batches
+// table — it has no way to see an order a human already keyed into Datex
+// directly, or one created through some other path entirely. This is a gap
+// in every customer's pipeline, not just DSM's, so the fix lives here rather
+// than in any one adapter.
+//
+// Mirrors the existence-check pattern already proven in
+// shortage-report-email-shared.cjs / motherduck-shortage-report.cjs (the
+// Sargento vendor_reference story, 2026-09-09): project-scoped, matches
+// lookup_code (exact), owner_reference (exact), OR vendor_reference (LIKE
+// prefix) — never just lookup_code alone, since different customers key
+// their "the number that must not collide" into different header fields
+// (e.g. DSM's real duplicate matched on BOTH lookup_code and
+// owner_reference) — with ROW_NUMBER() dedup per lookup_code to collapse
+// Datex's CDC chain-versioned rows (an order can appear multiple times in
+// the silver table as it's updated) down to one, latest, row per order.
+//
+// Runs AFTER buildOrderHeader (so it has the adapter's own resolved
+// project_id/lookup_code/owner_reference/vendor_reference — confirmed by
+// inspection that every adapter's header shape includes all four) and
+// BEFORE pushOrderGeneric, so a genuine match blocks the Datex write
+// entirely rather than racing it.
+async function findExistingDatexOrder(header) {
+  const candidates = [...new Set([header.lookup_code, header.owner_reference, header.vendor_reference].filter(Boolean))]
+  if (!header.project_id || candidates.length === 0) return null
+  const quoted = candidates.map((c) => `'${String(c).replace(/'/g, "''")}'`).join(', ')
+  const rows = await runMotherDuckQuery(`
+    WITH candidates(c) AS (VALUES (${quoted}))
+    , matched AS (
+      SELECT o.order_id AS order_id, o.lookup_code AS lookup_code, o.owner_reference AS owner_reference,
+             o.vendor_reference AS vendor_reference,
+             ROW_NUMBER() OVER (PARTITION BY o.lookup_code ORDER BY o.order_id DESC) AS rn
+      FROM production_db.silver.datex_slv_orders o
+      WHERE o.project_id = ${header.project_id}
+        AND EXISTS (
+          SELECT 1 FROM candidates c
+          WHERE o.lookup_code = c.c OR o.owner_reference = c.c OR o.vendor_reference LIKE c.c || '%'
+        )
+    )
+    SELECT order_id, lookup_code, owner_reference, vendor_reference
+    FROM matched
+    WHERE rn = 1
+    ORDER BY order_id DESC
+    LIMIT 1
+  `)
+  return (rows && rows[0]) || null
+}
+
 async function insertLineRows(batchId, resolvedLines) {
   const rows = resolvedLines.map((l) => ({
     batch_id: batchId,
@@ -248,6 +304,29 @@ async function resolveAndPushBatch(batchId) {
   }
 
   const header = adapter.buildOrderHeader(parsed, resolution)
+
+  // ADDED 2026-10-26 — see findExistingDatexOrder header note (real DSM
+  // duplicate, delivery 81050663). Checked here, after resolution succeeds
+  // but before any write to Datex, so a genuine match blocks the push
+  // entirely rather than creating a second order alongside one a human
+  // (or another path) already created.
+  const existing = await findExistingDatexOrder(header).catch((e) => {
+    console.error(`[order-agent] duplicate-order check failed for batch ${batch.id} (continuing — not blocking a real push over a check failure):`, e.message)
+    return null
+  })
+  if (existing) {
+    await sbPatch(`order_agent_batches?id=eq.${batch.id}`, {
+      status: 'flagged',
+      resolved_project_code: resolution.projectCode,
+      flag_reason: `An order already exists in Datex for this shipment (order_id ${existing.order_id}, lookup_code ${existing.lookup_code}, owner_reference ${existing.owner_reference}) — not creating a duplicate.`,
+    })
+    await postFrontComment(
+      batch.front_conversation_id,
+      `Order agent: an order already exists in Datex for this shipment — Datex order ${existing.order_id} (lookup_code ${existing.lookup_code}, owner_reference ${existing.owner_reference}). Not creating a duplicate — flagged for manual review in case the existing order needs correcting instead.`
+    )
+    return { ok: false, batchId: batch.id, duplicateOf: existing.order_id }
+  }
+
   const pushResult = await pushOrderGeneric(header, resolution.resolvedLines, adapter.buildLinePayload)
 
   await sbPatch(`order_agent_batches?id=eq.${batch.id}`, {
@@ -319,6 +398,7 @@ module.exports = {
   runMotherDuckQuery,
   isConfigured,
   pushOrderGeneric,
+  findExistingDatexOrder,
   insertLineRows,
   resolveAndPushBatch,
   postFailureComment,
