@@ -49,12 +49,30 @@ function supabaseHeaders() {
 // filtering to status='approved' — tolerates the same lag between the
 // background Datex push completing and the status update being visible to
 // this query that the created_after path already accounted for.
+//
+// FIXED 2026-10-26 (Dan's report -- combined confirmation draft sometimes
+// lists appointments out of the order they were requested in, e.g.
+// cnv_1cqcrrh0: scheduled 11/3 then 11/5 x2, draft showed 11/5, 11/3, 11/5).
+// PostgREST's `id=in.(...)` filter does NOT preserve the order of the IDs
+// in the list, and with no `order=` clause Postgres returns rows in
+// whatever order its query plan picks -- on a UUID primary key that has no
+// relationship to creation order, so the result is effectively arbitrary.
+// fetchApprovedByCreatedAfter() below already had `order=created_at.asc`;
+// this path (the PRIMARY one -- record_ids is always provided by the
+// current frontend) never did. Confirmed against real Grassland batches
+// (cnv_1b3kp9g4, cnv_1b4detuc, and Anne's cnv_1cqcrrh0) that created_at
+// order reliably matches the order the CSR entered appointments in (and
+// therefore the customer/carrier's original requested order) -- rows in a
+// batch are created milliseconds apart, strictly in request order, even
+// when the appointment times themselves aren't monotonic. Added
+// `order=created_at.asc` here to match, so the multi-draft always lists
+// appointments in the order they were originally requested.
 async function fetchApprovedByIds(recordIds) {
   const idsFilter = recordIds.map((id) => encodeURIComponent(id)).join(',')
   for (let attempt = 0; attempt < 5; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 4000))
     console.log(`[scheduling-create-multi-front-draft] attempt ${attempt + 1}/5: checking record_ids for approved status`)
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/submissions?select=*&id=in.(${idsFilter})&status=eq.approved`, {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/submissions?select=*&id=in.(${idsFilter})&status=eq.approved&order=created_at.asc`, {
       headers: supabaseHeaders(),
     })
     if (res.ok) {
