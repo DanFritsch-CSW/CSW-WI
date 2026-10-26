@@ -956,7 +956,16 @@ const CUSTOMERS: CustomerConfig[] = [
       flag_reason: ok ? null : `Printed-total validation failed: ${problems.join('; ')}`,
       line_count: parsed.lines.length,
       total_quantity: parsed.printed_total_cases ?? (parsed.lines || []).reduce((s: number, l: any) => s + (Number(l.case_quantity) || 0), 0),
-      pallet_count: parsed.printed_total_pallets ?? null,
+      // FIXED 2026-10-26 (real failure, Echo Lake order 438995, cnv_1cqehhsk):
+      // Echo Lake's printed "Pallets" total is cases / cs_per_pal and often
+      // doesn't divide evenly (1384 / 84 = 16.48), but pallet_count is an
+      // integer column — the raw printed value threw Postgres 22P02 and
+      // killed the whole batch insert before the order was ever created.
+      // Per Dan: the agent doesn't need to determine a pallet count at all
+      // for this customer (the order is built from case_quantity alone,
+      // see echolake.cjs) — leave it null like Pedone/Thomas Foods rather
+      // than storing a rounded/derived number nobody asked for.
+      pallet_count: null,
       raw_extracted: parsed,
     }),
   },
