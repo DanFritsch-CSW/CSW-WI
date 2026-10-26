@@ -28,8 +28,12 @@ import { PALERMOS_LOGO } from '../lib/palermos-logo.js'
 // to Palermo's At Risk Inventory Manager."
 //
 // Revisions sub-tab removed 2026-07-24 per Dan's request (front-end +
-// nav entry point removed; the backing files/schema/netlify.toml entry
-// still need manual cleanup — see the corresponding changelog entry).
+// nav entry point removed then). Backing files (src/pages/Revisions.jsx,
+// src/components/customers/RevisionsTab.jsx, src/lib/revisions.js,
+// netlify/functions/revision-sync.cjs, netlify.toml entry) removed
+// 2026-10-26 — the feature and its csw-kb-assistant Supabase source are
+// both obsolete. revision_conversations / revision_comments tables in
+// Supabase were intentionally left in place (not part of this cleanup).
 //
 // EXP Check (Pretzilla) tab added 2026-08-02, per Front conversation
 // cnv_186hmlg4 (Pretzilla Lots and Expiration Dates) — Julian/manufacture

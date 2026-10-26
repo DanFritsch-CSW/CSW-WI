@@ -270,10 +270,6 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
-[functions."revision-sync"]
-  external_node_modules = ["duckdb"]
-  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
-
 [functions."motherduck-labor"]
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
