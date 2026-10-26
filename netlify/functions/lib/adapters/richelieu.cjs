@@ -137,6 +137,26 @@ async function fetchLotDetails(lotCodes) {
   return map
 }
 
+// FIXED 2026-10-26 (real failure, four stuck Richelieu orders
+// TOP1061055-TOP1061058, all four crashing in resolution): fetchLotDetails
+// pulls lot.receive_date from MotherDuck via the `duckdb` node driver,
+// which returns TIMESTAMP columns as native JS Date objects, not strings.
+// resolveLotLineWithFefo passed that Date straight through as
+// fromReceiveDate below, and interpolating a Date into a template literal
+// calls its default .toString() — producing something like "Tue Sep 15
+// 2026 07:46:06 GMT+0000 (Coordinated Universal Time)", which isn't a
+// format MotherDuck's TIMESTAMP literal can parse ("Conversion Error:
+// invalid timestamp field format"). This formats whatever comes in (Date
+// object or already-a-string) into MotherDuck's expected
+// 'YYYY-MM-DD HH:MM:SS' shape before it ever reaches the query string.
+function toMotherDuckTimestamp(value) {
+  const d = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`toMotherDuckTimestamp: could not parse receive_date value: ${value}`)
+  }
+  return d.toISOString().slice(0, 19).replace('T', ' ')
+}
+
 // Every later lot for one material, in FEFO (receive_date ascending)
 // order, starting from the originally-requested lot's own receive_date —
 // excludes that lot itself (it's tried separately, first, in
@@ -146,12 +166,13 @@ async function fetchLotDetails(lotCodes) {
 // silently stopping, since the allocation loop below simply runs out of
 // candidates and reports whatever's left unmet.
 async function fetchRotationCandidates(materialId, fromReceiveDate, excludeLotId) {
+  const fromReceiveDateSql = toMotherDuckTimestamp(fromReceiveDate)
   const rows = await runMotherDuckQuery(`
     SELECT lot.lot_id AS lot_id, TRIM(lot.lookup_code) AS lot_code, lot.vendor_lot_id AS vendor_lot_id,
            lot.receive_date AS receive_date
     FROM production_db.silver.datex_slv_lots lot
     WHERE lot.material_id = ${materialId}
-      AND lot.receive_date >= TIMESTAMP '${fromReceiveDate}'
+      AND lot.receive_date >= TIMESTAMP '${fromReceiveDateSql}'
       AND lot.lot_id != ${excludeLotId}
     ORDER BY lot.receive_date ASC
     LIMIT ${MAX_ROTATION_CANDIDATES}
