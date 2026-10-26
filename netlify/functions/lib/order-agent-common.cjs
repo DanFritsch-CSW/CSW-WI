@@ -28,7 +28,22 @@ const SUPABASE_KEY =
 // ORDER_AGENT_INTERNAL_SECRET: renamed 2026-10-24 from GRASSLAND_INTERNAL_SECRET
 // (same value, swapped on both Netlify and Supabase in the same change — see
 // Known naming debt cleanup, Notion Architecture doc).
-const ORDER_AGENT_INTERNAL_SECRET = process.env.ORDER_AGENT_INTERNAL_SECRET || ''
+//
+// FIXED 2026-10-26 (real failure, Echo Lake order 438995 — the order
+// actually pushed to Datex successfully, but no confirmation ever reached
+// Front): this constant used to read ONLY process.env.ORDER_AGENT_INTERNAL_SECRET,
+// with no fallback — unlike the inbound check in
+// order-agent-resolve-background.cjs, which already falls back to
+// GRASSLAND_INTERNAL_SECRET. ORDER_AGENT_INTERNAL_SECRET was never actually
+// set as a Netlify env var (only the old GRASSLAND_INTERNAL_SECRET is), so
+// this was always ''. Every call postFrontComment made to order-agent-reply
+// sent an empty secret header, which that function's own auth check
+// rejects outright (`if (!got || ...)`) — so EVERY reply since the
+// 2026-10-24 rename (success or failure) has been silently 401'ing,
+// visible only in Netlify's own function logs, never in Front. Added the
+// same fallback used everywhere else in this pipeline so this stops being
+// a silent single point of failure.
+const ORDER_AGENT_INTERNAL_SECRET = process.env.ORDER_AGENT_INTERNAL_SECRET || process.env.GRASSLAND_INTERNAL_SECRET || ''
 // order-agent-reply: renamed 2026-10-24 from grassland-order-reply (fresh
 // Supabase slug deployed with identical logic, only this constant needed to
 // change since nothing outside this codebase calls that URL directly).
