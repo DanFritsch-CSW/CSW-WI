@@ -935,9 +935,13 @@ const CUSTOMERS: CustomerConfig[] = [
     code: 'echolake',
     domains: ['echolakefoods.com'],
     async buildJobs(pdfs) {
-      if (pdfs.length === 0) return []
-      if (pdfs.length > 1) console.log(`[order-agent:echolake] multiple PDF attachments found on one email — using the first: ${pdfs.map((a) => a.filename).join(', ')}`)
-      return [{ primaryId: pdfs[0].id, secondaryId: null }]
+      // FIXED 2026-10-27 (real failure, Echo Lake 438995/438996 cnv_1cqpihec):
+      // used to take only pdfs[0] and silently log the rest — a second,
+      // DIFFERENT order (438996) in the same email was dropped entirely,
+      // never even flagged. Now one job per PDF, same pattern as
+      // Richelieu/Thomas Foods/DSM.
+      if (pdfs.length > 1) console.log(`[order-agent:echolake] ${pdfs.length} PDF attachments found — processing each as its own order: ${pdfs.map((a) => a.filename).join(', ')}`)
+      return pdfs.map((p) => ({ primaryId: p.id, secondaryId: null }))
     },
     async extract(primaryB64) {
       return callClaude(ECHOLAKE_PROMPT, [primaryB64], 'Extract this Order Verification as the JSON object described in your instructions.')
@@ -1056,6 +1060,51 @@ async function triggerNetlifyResolve(batchId: number) {
   }
 }
 
+// ADDED 2026-10-27 per Dan: a dedupe hit used to be a flat "not processing
+// again" with no detail — fine when the PO really is a re-send of the same
+// document, but on a real Echo Lake case the agent silently dropped a
+// SECOND, different PO in the same email (see echolake.buildJobs fix
+// above) which made the dedupe skip on the first PO look like the whole
+// conversation had hard-failed. This walks the newly-parsed document
+// against the already-stored raw_extracted for that PO and reports what,
+// if anything, actually differs — so a true re-send comes back "nothing
+// changed" and a genuinely different document (corrected quantities, a
+// different lot, etc.) gets its differences spelled out in the comment
+// instead of being silently discarded. This never creates or updates a
+// batch row itself — a flagged difference still needs a human to decide
+// what to do with it; the point is visibility, not auto-reconciliation.
+function diffParsedOrders(oldObj: any, newObj: any, prefix = ''): string[] {
+  const diffs: string[] = []
+  const a = oldObj ?? {}
+  const b = newObj ?? {}
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  for (const k of keys) {
+    const path = prefix ? `${prefix}.${k}` : k
+    const av = a[k]
+    const bv = b[k]
+    if (Array.isArray(av) || Array.isArray(bv)) {
+      const aArr = Array.isArray(av) ? av : []
+      const bArr = Array.isArray(bv) ? bv : []
+      const len = Math.max(aArr.length, bArr.length)
+      for (let i = 0; i < len; i++) {
+        if (i >= aArr.length) { diffs.push(`${path}[${i}]: new line — ${JSON.stringify(bArr[i])}`); continue }
+        if (i >= bArr.length) { diffs.push(`${path}[${i}]: line removed (was ${JSON.stringify(aArr[i])})`); continue }
+        const x = aArr[i], y = bArr[i]
+        if (x && typeof x === 'object' && y && typeof y === 'object') {
+          diffs.push(...diffParsedOrders(x, y, `${path}[${i}]`))
+        } else if (JSON.stringify(x) !== JSON.stringify(y)) {
+          diffs.push(`${path}[${i}]: ${JSON.stringify(x)} → ${JSON.stringify(y)}`)
+        }
+      }
+    } else if (av && typeof av === 'object' && bv && typeof bv === 'object') {
+      diffs.push(...diffParsedOrders(av, bv, path))
+    } else if (JSON.stringify(av) !== JSON.stringify(bv)) {
+      diffs.push(`${path}: ${JSON.stringify(av)} → ${JSON.stringify(bv)}`)
+    }
+  }
+  return diffs
+}
+
 async function processOneJob(conversationId: string, customer: CustomerConfig, job: { primaryId: string | null; secondaryId: string | null; primaryB64?: string }, downloadPdf: (id: string) => Promise<string>) {
   // McCain's buildJobs already downloaded + MIME-unwrapped the PDF itself
   // (there's no separate attachment id for the embedded PDF to pass here) —
@@ -1083,10 +1132,19 @@ async function processOneJob(conversationId: string, customer: CustomerConfig, j
 
   const key = customer.dedupeKey(parsed)
   if (key) {
-    const existing = await sbGet(`order_agent_batches?po_number=eq.${encodeURIComponent(key)}&select=id,status&limit=1`)
+    const existing = await sbGet(`order_agent_batches?po_number=eq.${encodeURIComponent(key)}&select=id,status,raw_extracted&limit=1`)
     if (Array.isArray(existing) && existing[0]) {
-      await withMcp((call) => call('add_comment', { conversationId, body: `Order agent: ${key} already has a batch (status ${existing[0].status}) — not processing again.` }))
-      return { ok: false, reason: 'duplicate' }
+      const prior = existing[0]
+      // Soft fail: never hard-stop the conversation over a dedupe hit — see
+      // diffParsedOrders doc comment above. Compare this PDF's parsed
+      // content against what was actually stored for that PO and say so,
+      // rather than a bare "not processing again" that reads as an error.
+      const diffs = diffParsedOrders(prior.raw_extracted, parsed)
+      const body = diffs.length === 0
+        ? `Order agent: ${key} already has a batch (status ${prior.status}) — not processing again. This PDF matches what's already on file, no differences found.`
+        : `Order agent: ${key} already has a batch (status ${prior.status}) — not processing again, but this PDF doesn't match what's on file:\n\n${diffs.map((d) => `- ${d}`).join('\n')}\n\nFlagging for manual review rather than creating a second batch.`
+      await withMcp((call) => call('add_comment', { conversationId, body }))
+      return { ok: false, reason: 'duplicate', diffs }
     }
   }
 
