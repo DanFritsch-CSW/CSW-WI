@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase.js'
 import { parseFdp201w, MAX_NAME_LENGTH } from '../lib/dpiMonthlyParser.js'
+import { downloadDatexImportFile } from '../lib/dpiDatexImportExport.js'
 import { colors, cardStyle } from './dpiMonthly/dpiMonthlyStyles.js'
 import Phase2BuildFlag from './dpiMonthly/Phase2BuildFlag.jsx'
 import Phase4AgencyComms from './dpiMonthly/Phase4AgencyComms.jsx'
@@ -28,6 +29,22 @@ import AgencyContactList from './dpiMonthly/AgencyContactList.jsx'
 // click through the entire pipeline UI with real test data before any of
 // those integrations are wired up for real. See each phase component's
 // header comment for its specific simplifications.
+//
+// 2026-10-28: Phase 1's live Datex push (dpi-import-push-background.cjs)
+// is PAUSED per Dan — repeated test-cycle resets created duplicate REAL
+// Datex orders under the same deterministic lookup code (root cause: the
+// dedup check queries Datex's own API, which has read-after-write lag
+// against a reset-and-rerun seconds later — see dpiDatexImportExport.js
+// header comment for the full writeup). Phase 1 now generates a Datex
+// "ExcelOrderImport" file (src/lib/dpiDatexImportExport.js) for a human
+// to review and run through Datex's own native Excel import instead —
+// nothing here calls Datex. The old push function/background job and
+// forceSimulate plumbing are left in the repo untouched (just unused from
+// this screen) in case the API path gets fixed and re-enabled later.
+// Generated rows are tracked in dpi_import_batches with status='exported'
+// (not 'success' — no Datex order actually exists until a human uploads
+// the file), so resetTestCycle's "real orders already in Datex" warning
+// below still only fires for rows from the old API path.
 //
 // "Start next month" lives ONLY in Phase5FinalPush, at the true end of the
 // pipeline — NOT here. An earlier version of this page showed that button
@@ -113,6 +130,7 @@ function statusMeta(status) {
   switch (status) {
     case 'queued': return { label: 'Queued', color: colors.textMuted }
     case 'success': return { label: 'Pushed', color: colors.success, bg: colors.successBg }
+    case 'exported': return { label: 'In export file', color: colors.success, bg: colors.successBg }
     case 'duplicate_skipped': return { label: 'Already imported', color: colors.textFaint }
     case 'failed': return { label: 'Failed', color: colors.danger, bg: colors.dangerBg }
     case 'simulated': return { label: 'Simulated — not pushed', color: colors.accent, bg: colors.accentBg }
@@ -199,34 +217,24 @@ function rowToAgency(row) {
   }
 }
 
-// 2026-09-18 fix: expected_date / requested delivery date were always
-// coming through as the 1st of the delivery month (e.g. "10/1/2026" for
-// an October cycle) — Dan expected the LAST day of the month instead,
-// since that's when a month's deliveries need to be complete by, not
-// when they start. monthKey is "YYYY-MM"; Date.UTC(year, month, 0) gives
-// day 0 of the given 1-indexed month, which JS resolves to the last day
-// of the PRECEDING (0-indexed) month — i.e. exactly the month monthKey
-// names. UTC throughout to avoid local-timezone off-by-one issues.
-function lastDayOfMonth(monthKey) {
-  const [year, month] = monthKey.split('-').map(Number)
-  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate()
-  return `${monthKey}-${String(lastDay).padStart(2, '0')}T00:00:00.000Z`
-}
+// NOTE: the old API-push path's expected_date (last day of the delivery
+// month) has no equivalent column in Datex's Excel import template — see
+// dpiDatexImportExport.js header comment ("known gaps"). Not reproduced
+// here since the file-export path doesn't set it at all right now.
 
 export default function DpiMonthlyProcess() {
   const [view, setView] = useState('cycle') // 'cycle' | 'templates' | 'contacts'
   const [facility, setFacility] = useState('Eau Claire')
   const [loading, setLoading] = useState(true)
-  const [stage, setStage] = useState('empty') // empty | parsed | pushing | done | push_failed (Phase 1 only)
+  const [stage, setStage] = useState('empty') // empty | parsed | done (Phase 1 only)
   const [parseError, setParseError] = useState(null)
+  const [exportError, setExportError] = useState(null)
   const [cycle, setCycle] = useState(null) // dpi_monthly_cycles row
   const [monthKey, setMonthKey] = useState(null)
   const [agencies, setAgencies] = useState([])
   const [editingIdx, setEditingIdx] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [batchRows, setBatchRows] = useState([])
-  const [forceSimulate, setForceSimulate] = useState(false)
-  const pollRef = useRef(null)
 
   // Load (or resume) whatever cycle is active for the selected facility.
   const loadCycleState = useCallback(async (fac) => {
@@ -269,13 +277,13 @@ export default function DpiMonthlyProcess() {
     if (batchErr) console.error('load batch rows:', batchErr)
     setBatchRows(batch || [])
 
-    if (!batch || batch.length === 0) {
-      setStage('parsed')
-    } else if (batch.every((r) => r.status !== 'queued')) {
-      setStage(batch.some((r) => r.status === 'failed') ? 'push_failed' : 'done')
-    } else {
-      setStage('pushing')
-    }
+    // 'exported'/'simulated'/'success' are all terminal, non-failure
+    // outcomes (the latter two only ever come from the now-paused API
+    // path, on a resumed older cycle) — anything else (no rows yet, or
+    // only legacy 'failed'/'queued' rows from an old API-push attempt)
+    // leaves this on 'parsed' so the export button is still available.
+    const hasTerminalRow = (batch || []).some((r) => ['exported', 'simulated', 'success'].includes(r.status))
+    setStage(hasTerminalRow ? 'done' : 'parsed')
     setLoading(false)
   }, [])
 
@@ -357,66 +365,75 @@ export default function DpiMonthlyProcess() {
     }
   }
 
-  const pushToDatex = async () => {
+  // Generates the Datex Excel Import file client-side (no network call to
+  // Datex at all — see header comment) and triggers a browser download.
+  // Tracks one dpi_import_batches row per agency with status='exported' so
+  // the existing per-row badge UI and resetTestCycle's real-order warning
+  // keep working unchanged; re-clicking after an edit (e.g. a shortened
+  // name) regenerates the file and updates those rows rather than piling
+  // up duplicates (dpi_import_batches has no unique constraint on
+  // batch_id+lookup_code, so this is enforced here, not by the DB).
+  const generateExportFile = async () => {
     if (!cycle) return
-    setStage('pushing')
+    setExportError(null)
 
-    const expectedDate = monthKey ? lastDayOfMonth(monthKey) : null
+    try {
+      downloadDatexImportFile(agencies, facility, monthKey)
+    } catch (err) {
+      console.error('generate Datex export file:', err)
+      setExportError(`Could not generate the export file: ${err.message}`)
+      return
+    }
 
-    await fetch('/.netlify/functions/dpi-import-push-background', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        batchId: cycle.batch_id,
-        facility,
-        monthKey,
-        forceSimulate,
-        agencies: agencies.map((a) => ({ ...a, expectedDate })),
-      }),
-    }).catch(() => {
-      // Background functions don't return a useful body — real failures
-      // show up per-row via the dpi_import_batches poll below.
-    })
-  }
+    if (!supabase) { setExportError('Supabase not configured — file downloaded, but could not record export status.'); return }
 
-  // Poll dpi_import_batches while a push is in flight. Only advances to
-  // Phase 2 if every row succeeded or was simulated — any failure blocks
-  // advance and surfaces a visible banner instead (see file header, 2026-09-18).
-  useEffect(() => {
-    if (stage !== 'pushing' || !cycle || !supabase) return
+    const existingByLookupCode = new Map(batchRows.map((r) => [r.lookup_code, r]))
+    const toInsert = []
+    const toUpdate = []
+    const nowIso = new Date().toISOString()
 
-    pollRef.current = setInterval(async () => {
-      const { data, error } = await supabase
-        .from('dpi_import_batches')
-        .select('*')
-        .eq('batch_id', cycle.batch_id)
-      if (error) { console.error('poll dpi_import_batches:', error); return }
-      setBatchRows(data ?? [])
-
-      const allDone = data?.length > 0 && data.every((r) => r.status !== 'queued')
-      if (allDone) {
-        clearInterval(pollRef.current)
-        const anyFailed = data.some((r) => r.status === 'failed')
-
-        if (anyFailed) {
-          setStage('push_failed')
-          return // stay on Phase 1 — do not advance
-        }
-
-        setStage('done')
-        if (cycle.current_phase < 2) {
-          const { error: advanceErr } = await supabase
-            .from('dpi_monthly_cycles')
-            .update({ current_phase: 2, updated_at: new Date().toISOString() })
-            .eq('id', cycle.id)
-          if (advanceErr) console.error('advance cycle phase:', advanceErr)
-          else setCycle((prev) => (prev ? { ...prev, current_phase: 2 } : prev))
-        }
+    for (const agency of agencies) {
+      const totalQuantity = agency.lines.reduce((sum, l) => sum + (Number(l.quantity) || 0), 0)
+      const existing = existingByLookupCode.get(agency.lookupCode)
+      if (existing) {
+        toUpdate.push({ id: existing.id, line_count: agency.lines.length, total_quantity: totalQuantity, updated_at: nowIso })
+      } else {
+        toInsert.push({
+          batch_id: cycle.batch_id,
+          facility,
+          month_key: monthKey,
+          agency_number: agency.agencyNumber,
+          agency_name: agency.agencyName,
+          first_name_sent: agency.firstName,
+          lookup_code: agency.lookupCode,
+          line_count: agency.lines.length,
+          total_quantity: totalQuantity,
+          status: 'exported',
+        })
       }
-    }, 2000)
+    }
 
-    return () => clearInterval(pollRef.current)
-  }, [stage, cycle])
+    if (toInsert.length > 0) {
+      const { error: insertErr } = await supabase.from('dpi_import_batches').insert(toInsert)
+      if (insertErr) { console.error('insert exported batch rows:', insertErr); setExportError(`File downloaded, but could not save export status: ${insertErr.message}`); return }
+    }
+    for (const update of toUpdate) {
+      const { error: updateErr } = await supabase.from('dpi_import_batches').update(update).eq('id', update.id)
+      if (updateErr) console.error('update exported batch row:', updateErr)
+    }
+
+    const { data: refreshed, error: refreshErr } = await supabase
+      .from('dpi_import_batches')
+      .select('*')
+      .eq('batch_id', cycle.batch_id)
+    if (refreshErr) console.error('reload batch rows after export:', refreshErr)
+    setBatchRows(refreshed ?? [])
+    setStage('done')
+    // Deliberately does NOT auto-advance to Phase 2 — unlike the old API
+    // push, generating this file proves nothing about Datex (no order
+    // exists until a human actually runs the import there). Advancing is
+    // the separate, explicit "Continue to Route Build" button below.
+  }
 
   // Phase 2/4 components call this after they advance current_phase
   // themselves — just reloads so the shell picks up the new phase + any
@@ -492,7 +509,6 @@ export default function DpiMonthlyProcess() {
 
   const flaggedCount = agencies.filter((a) => a.nameWasAbbreviated).length
   const currentPhase = cycle?.current_phase ?? 1
-  const failedCount = batchRows.filter((r) => r.status === 'failed').length
 
   return (
     <div style={{ background: colors.bg, minHeight: '100vh', padding: 24, color: colors.text }}>
@@ -527,13 +543,12 @@ export default function DpiMonthlyProcess() {
               <button
                 key={f}
                 onClick={() => setFacility(f)}
-                disabled={stage === 'pushing'}
                 style={{
                   fontSize: 13, padding: '6px 14px', borderRadius: 6,
                   border: `1px solid ${facility === f ? colors.accent : colors.border}`,
                   background: facility === f ? colors.accentBg : colors.panel,
                   color: facility === f ? colors.accent : colors.textMuted,
-                  cursor: stage === 'pushing' ? 'default' : 'pointer',
+                  cursor: 'pointer',
                 }}
               >
                 {f}
@@ -576,17 +591,21 @@ export default function DpiMonthlyProcess() {
 
       {!loading && cycle && currentPhase === 1 && (
         <>
-          {stage === 'push_failed' && (
+          <div style={{
+            ...cardStyle, marginBottom: 16,
+            border: `1px solid ${colors.border}`, background: colors.panelAlt,
+          }}>
+            <div style={{ fontSize: 13, color: colors.textMuted }}>
+              Live Datex push is paused — this generates a Datex "ExcelOrderImport" file instead. Review it, then run it through Datex's own Excel import yourself; nothing here reaches Datex automatically.
+            </div>
+          </div>
+
+          {exportError && (
             <div style={{
               ...cardStyle, marginBottom: 16,
               border: `1px solid ${colors.danger}`, background: colors.dangerBg,
             }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: colors.danger, marginBottom: 4 }}>
-                Push failed — {failedCount} of {agencies.length} order{agencies.length === 1 ? '' : 's'} did not reach Datex
-              </div>
-              <div style={{ fontSize: 13, color: colors.textMuted }}>
-                Nothing advanced to Phase 2. Hover ⚠ on a row below for the exact error, fix it, then push again — succeeded/duplicate rows won't be re-created.
-              </div>
+              <div style={{ fontSize: 13, color: colors.danger }}>{exportError}</div>
             </div>
           )}
 
@@ -606,7 +625,7 @@ export default function DpiMonthlyProcess() {
             </div>
             {agencies.map((agency, idx) => {
               const liveRow = batchRows.find((r) => r.lookup_code === agency.lookupCode)
-              const status = liveRow?.status || (stage === 'pushing' ? 'queued' : null)
+              const status = liveRow?.status || null
               return (
                 <React.Fragment key={agency.agencyNumber}>
                   <div style={{
@@ -670,30 +689,46 @@ export default function DpiMonthlyProcess() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: colors.textFaint, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={forceSimulate}
-                onChange={(e) => setForceSimulate(e.target.checked)}
-              />
-              Force simulate (skip real Datex push)
-            </label>
             <button
-              onClick={pushToDatex}
-              disabled={stage === 'pushing'}
+              onClick={generateExportFile}
               style={{
                 fontSize: 14, padding: '9px 18px', borderRadius: 7, border: 'none',
-                background: stage === 'push_failed' ? colors.danger : colors.accent, color: '#fff',
-                cursor: stage === 'pushing' ? 'default' : 'pointer',
+                background: colors.accent, color: '#fff',
+                cursor: 'pointer',
                 fontWeight: 500,
               }}
             >
-              {stage === 'pushing' ? 'Pushing to Datex…' : stage === 'push_failed' ? `Retry push (${failedCount} failed)` : `Push ${agencies.length} orders to Datex`}
+              {stage === 'done' ? `Re-download Datex import file (${agencies.length} orders)` : `Generate Datex import file (${agencies.length} orders)`}
             </button>
             <span style={{ fontSize: 12, color: colors.textFaint }}>
-              {stage === 'parsed' && flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before pushing.`}
+              {flaggedCount > 0 && `${flaggedCount} name${flaggedCount > 1 ? 's' : ''} shortened — review before generating.`}
             </span>
           </div>
+
+          {stage === 'done' && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 12, color: colors.textFaint, marginBottom: 8 }}>
+                File downloaded. Once it's actually been run through Datex's Excel import, continue on — this app can't confirm that for you.
+              </div>
+              <button
+                onClick={async () => {
+                  if (!cycle || !supabase) return
+                  const { error } = await supabase
+                    .from('dpi_monthly_cycles')
+                    .update({ current_phase: 2, updated_at: new Date().toISOString() })
+                    .eq('id', cycle.id)
+                  if (error) { console.error('advance cycle phase:', error); return }
+                  setCycle((prev) => (prev ? { ...prev, current_phase: 2 } : prev))
+                }}
+                style={{
+                  fontSize: 13, padding: '7px 14px', borderRadius: 6,
+                  border: `1px solid ${colors.accent}`, background: 'transparent', color: colors.accent, cursor: 'pointer',
+                }}
+              >
+                Continue to Route Build
+              </button>
+            </div>
+          )}
         </>
       )}
 
