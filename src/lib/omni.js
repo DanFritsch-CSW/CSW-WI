@@ -1309,7 +1309,28 @@ export async function fetchB2eTimeOff(facilityId, date) {
 // then filtered back to entryDate only after the stale-filter has done its
 // job. If an employee's newest snapshot doesn't include entryDate, their
 // row for entryDate is filtered out — which is exactly what we want.
-async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssignments) {
+//
+// `scopeToExactDate` (added 2026-10-28, KEN 3rd-shift carryover bug — Dean/
+// Dan, Jesus Rojas/Juan Ordonez/Manuel Calderon missing from the 5am/6am
+// STAFFED count): the window-wide max_ingestion_ts rule above only holds for
+// TODAY-or-FUTURE dates, where B2E keeps re-emitting every date in its
+// forward horizon on every batch. fetchB2eRoster()'s carryover lookup calls
+// this function for YESTERDAY instead — a date that has already elapsed.
+// futurescheduleentries never re-emits a row for a date once it's past, so
+// ANY later batch that happens to touch a different (future) date in the
+// 14-day window becomes that employee's new window-wide max, which silently
+// invalidates yesterday's already-final row even though nothing about
+// yesterday changed. Confirmed in production_db 2026-10-28: Calderon/Rojas/
+// Ordonez's Oct 27 row carried ingestion_ts from the 5:04am nightly sync,
+// but a 12:35pm resync that only touched Oct 28/29 became their window-wide
+// max — dropping the Oct 27 row and erasing all three from today's 5am/6am
+// carryover headcount. When `scopeToExactDate` is true, the freshness check
+// is computed per (employee, entry_date) instead of per-employee-across-
+// window, so a resync of other dates can't shadow out entryDate's own
+// newest row. Only safe to use for a date that's already in the past — the
+// Daniel Franco ghost-row scenario above is a FUTURE-dates problem and still
+// needs the window-wide rule, which is why this isn't just made the default.
+async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssignments, scopeToExactDate = false) {
   const location = B2E_LOCATION[facilityId]
   if (!location) return []
 
@@ -1324,13 +1345,21 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
 
   const activeIds = new Set(rosterRows.map(r => String(r[`${ROSTER}.employee_id`])))
 
-  // Compute per-employee max_ingestion_ts ACROSS the full 14-day window.
-  // This lets us detect stale-snapshot ghost rows: an employee whose newest
-  // snapshot doesn't include entryDate will have that row filtered.
+  function rowDateIso(r) {
+    const dateRaw = r[`${SCHEDULE}.entry_date`]
+    if (!dateRaw) return null
+    return typeof dateRaw === 'string' ? dateRaw.slice(0, 10) : new Date(dateRaw).toISOString().slice(0, 10)
+  }
+
+  // Compute per-employee max_ingestion_ts. Normally across the full 14-day
+  // window (see header comment); with scopeToExactDate, restricted to rows
+  // AT entryDate only, so a resync of other dates in the window can't
+  // shadow out a past date's own freshest row.
   const maxIngestByEmp = new Map()
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
     if (!activeIds.has(id)) continue
+    if (scopeToExactDate && rowDateIso(r) !== entryDate) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
     if (!maxIngestByEmp.has(id) || ts > maxIngestByEmp.get(id)) {
       maxIngestByEmp.set(id, ts)
@@ -1405,7 +1434,10 @@ export async function fetchB2eRoster(facilityId, date) {
 
   const [todayRoster, priorNightRoster] = await Promise.all([
     fetchB2eRosterForEntryDate(facilityId, refDate, isCal, dockAssignments),
-    fetchB2eRosterForEntryDate(facilityId, prevDayISO(refDate), isCal, dockAssignments).catch(e => {
+    // scopeToExactDate=true: prior night is always a past date by the time
+    // this runs, so the window-wide stale filter must not apply here — see
+    // the scopeToExactDate comment on fetchB2eRosterForEntryDate.
+    fetchB2eRosterForEntryDate(facilityId, prevDayISO(refDate), isCal, dockAssignments, true).catch(e => {
       console.warn('Prior-night carryover fetch failed (non-fatal):', e.message)
       return []
     }),
