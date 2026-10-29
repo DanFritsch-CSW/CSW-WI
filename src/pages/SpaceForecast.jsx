@@ -344,7 +344,7 @@ export default function SpaceForecast() {
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
                   <thead>
                     <tr style={{ background: 'var(--bg3, #edf0f5)', color: 'var(--text-secondary, #4b5a72)' }}>
-                      <th style={th('left', 210)} title="Datex project name for rows linked to MotherDuck; the plan label otherwise">Customer</th>
+                      <th style={{ ...th('left', 210), ...stickyCol('var(--bg3, #edf0f5)'), zIndex: 3 }} title="Datex project name for rows linked to MotherDuck; the plan label otherwise">Customer</th>
                       {zoneSel === 'all' && <th style={th('left')}>Zone</th>}
                       <th style={th('right')}>Stack</th>
                       <th style={th('right')} title="Green = live LPs from Datex (MotherDuck). White = typed by hand.">Now</th>
@@ -362,7 +362,7 @@ export default function SpaceForecast() {
                   <tbody>
                     {rows.map((c) => (
                       <tr key={c.id} style={{ borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
-                        <td style={td()}>
+                        <td style={{ ...td(), ...stickyCol('var(--bg1, #fff)') }}>
                           {linkOf(c) ? (
                             <div title={`Datex project${linkOf(c).projects.length > 1 ? 's' : ''}: ${nameOf(c)}\nPlan label: ${c.name}`}>
                               <div style={{ ...numInput(190), textAlign: 'left', fontFamily: 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: 'var(--bg3, #edf0f5)', cursor: 'default' }}>{nameOf(c)}</div>
@@ -409,7 +409,8 @@ export default function SpaceForecast() {
                     ))}
                     {liveOn && match.unmapped.length > 0 && (
                       <tr style={{ borderTop: '2px solid var(--border, #dce2ec)', background: 'var(--bg2, #f8f9fb)' }}>
-                        <td style={{ ...td(), fontWeight: 600 }} colSpan={zoneSel === 'all' ? 3 : 2}>Not in plan ({match.unmapped.length} Datex projects, see below)</td>
+                        <td style={{ ...td(), ...stickyCol('var(--bg2, #f8f9fb)'), fontWeight: 600 }}>Not in plan ({match.unmapped.length} Datex projects, see below)</td>
+                        <td colSpan={zoneSel === 'all' ? 2 : 1} />
                         <td style={{ ...td('right'), ...mono, fontWeight: 600 }}>{n0(unmappedTotal)}</td>
                         <td style={{ ...td(), fontSize: 11, color: 'var(--text-secondary, #4b5a72)' }}>unmapped</td>
                         <td colSpan={17} />
@@ -471,6 +472,8 @@ function Banner({ tone, children }) {
 
 const th = (align = 'left', minW) => ({ padding: '8px 8px', textAlign: align, fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap', minWidth: minW })
 const td = (align = 'left') => ({ padding: '4px 8px', textAlign: align, whiteSpace: 'nowrap' })
+// Frozen first column: stays put while the month columns scroll sideways (needs an opaque background)
+const stickyCol = (bg) => ({ position: 'sticky', left: 0, zIndex: 2, background: bg, boxShadow: '1px 0 0 var(--border, #dce2ec)' })
 
 function StatusChip({ c, cur }) {
   const st = status(c, cur)
