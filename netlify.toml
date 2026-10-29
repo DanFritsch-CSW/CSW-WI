@@ -298,6 +298,15 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Space Forecast live feed -- added 2026-10-29. Reads on-hand LPs per Datex
+# project + material group from MotherDuck for /spaceforecast's "Now" column.
+# Same duckdb bundling as the other motherduck-*.cjs functions (it requires
+# duckdb directly).
+[functions."space-forecast-live"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 [functions."motherduck-appointments"]
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]

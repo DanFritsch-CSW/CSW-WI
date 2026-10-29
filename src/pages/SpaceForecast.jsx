@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import {
   monthKeys, monthLabel, deriveFc, loadFacility, saveZone, saveCustomer, saveScenario,
-  deleteRow, TABLES, seedMadisonStarter,
+  deleteRow, TABLES, seedMadisonStarter, fetchLive, loadProjectMap, addProjectMap, matchLive, GROUP_LABEL,
 } from '../lib/spaceForecast.js'
 
 // /spaceforecast — per-facility capacity vs. projected footprint, next 12 months.
@@ -16,7 +16,10 @@ import {
 // Model: positions = pallets / stack factor. Customer forecast months with no
 // explicit value inherit the previous explicit month (then "Now").
 // Alerts: status() compares today's count to the current month's forecast.
-// "Now" is typed in by hand until a live feed is wired (planned: Omni/MotherDuck).
+// "Now": plan rows linked to a Datex project (space_forecast_project_map) show the live
+// LP count from MotherDuck (netlify/functions/space-forecast-live.cjs) and display the
+// Datex project name. Unlinked rows keep a manual Now. Live values are display-only and
+// never written to space_forecast_customers.
 
 const KEYS = monthKeys()
 const MONTHS = KEYS.map(monthLabel)
@@ -41,11 +44,11 @@ const n0 = (n) => Math.round(n || 0).toLocaleString()
 
 // Trigger rule (digest should additionally require 3 consecutive days out of band
 // and only announce state changes: on track -> above -> on track).
-const status = (c) => {
+const status = (c, cur = c.current) => {
   const f = c.fc[0] || 0
-  const d = c.current - f
-  if (d > 0 && c.current > f * (1 + c.up / 100) && d >= c.gap) return { s: 'above', d, f }
-  if (d < 0 && c.current < f * (1 - c.down / 100) && -d >= c.gap) return { s: 'below', d, f }
+  const d = cur - f
+  if (d > 0 && cur > f * (1 + c.up / 100) && d >= c.gap) return { s: 'above', d, f }
+  if (d < 0 && cur < f * (1 - c.down / 100) && -d >= c.gap) return { s: 'below', d, f }
   return { s: 'ok', d, f }
 }
 const STATUS_UI = {
@@ -99,6 +102,31 @@ export default function SpaceForecast() {
       .finally(() => { if (!dead) setLoading(false) })
     return () => { dead = true }
   }, [fac, loaded]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // live feed (Datex via MotherDuck) + project map, per facility
+  const [liveStore, setLiveStore] = useState({})
+  const [liveTick, setLiveTick] = useState(0)
+  const [showUnmapped, setShowUnmapped] = useState(true)
+  const [addZone, setAddZone] = useState('')
+  useEffect(() => {
+    if (!loaded) return undefined
+    let dead = false
+    setLiveStore((s) => ({ ...s, [fac]: { ...(s[fac] || {}), status: 'loading' } }))
+    Promise.all([fetchLive(fac), loadProjectMap(fac).catch((e) => { throw new Error('project map: ' + (e.message || e)) })])
+      .then(([lv, map]) => { if (!dead) setLiveStore((s) => ({ ...s, [fac]: { status: 'ok', asOf: lv.asOf, rows: lv.rows, map } })) })
+      .catch((e) => { if (!dead) setLiveStore((s) => ({ ...s, [fac]: { status: 'error', err: e.message || String(e) } })) })
+    return () => { dead = true }
+  }, [fac, loaded, liveTick])
+  const live = liveStore[fac] || { status: 'loading' }
+  const liveOn = live.status === 'ok'
+  const match = useMemo(() => (liveOn ? matchLive(live.map, live.rows) : { byCustomer: {}, unmapped: [] }), [liveOn, live.map, live.rows])
+  const linkOf = (c) => (liveOn ? match.byCustomer[c.id] || null : null)
+  const curOf = (c) => { const l = linkOf(c); return l ? Math.round(l.lps) : c.current }
+  const nameOf = (c) => {
+    const l = linkOf(c)
+    if (!l || !l.projects.length) return c.name
+    return l.projects.map((p) => (p.mg != null ? `${p.name} · ${GROUP_LABEL[p.mg] || 'group ' + p.mg}` : p.name)).filter((v, i, a) => a.indexOf(v) === i).join(' + ')
+  }
 
   const cur = store[fac] || EMPTY
   const { zones, customers } = cur
@@ -156,6 +184,21 @@ export default function SpaceForecast() {
     now(async () => { for (const c of next) await saveCustomer(fac, c) })
   }
 
+  // promote an unmapped Datex project into the plan: new plan row (flat forecast at today's count)
+  // + a project map row covering every material group of that project
+  const addFromLive = (u) => {
+    const zid = addZone && zones.some((z) => z.id === addZone) ? addZone : zoneSel !== 'all' ? zoneSel : zones[0]?.id
+    if (!zid) return
+    const lps = Math.round(u.lps)
+    const c = { id: newId(), zone: zid, name: u.name, stack: 1, current: lps, fcMap: {}, fc: Array(KEYS.length).fill(lps), ...dflt }
+    update((f) => ({ ...f, customers: [...f.customers, c] }))
+    setLiveStore((s) => ({ ...s, [fac]: { ...s[fac], map: [...s[fac].map, { id: newId(), customer: c.id, wid: u.wid, pid: u.pid, mg: null, name: u.name }] } }))
+    now(async () => {
+      await saveCustomer(fac, c, { currentChanged: true })
+      await addProjectMap(fac, { wid: u.wid, pid: u.pid, mg: null, name: u.name, customerId: c.id })
+    })
+  }
+
   // zones
   const patchZone = (id, p) => {
     const idx = cur.zones.findIndex((z) => z.id === id)
@@ -210,7 +253,8 @@ export default function SpaceForecast() {
     return { b, e, t: b + e }
   })
   const capAll = zoneIds.reduce((s, z) => s + calc.cap(z), 0)
-  const alerts = customers.map((c) => ({ c, ...status(c) })).filter((a) => a.s !== 'ok')
+  const alerts = customers.map((c) => { const cu = curOf(c); return { c, cu, ...status(c, cu) } }).filter((a) => a.s !== 'ok')
+  const unmappedTotal = match.unmapped.reduce((a, u) => a + u.lps, 0)
   const rows = customers.filter((c) => zoneSel === 'all' || c.zone === zoneSel)
   const peak = series.reduce((a, s, i) => (s.t > a.v ? { v: s.t, i } : a), { v: 0, i: 0 })
   const firstOver = series.findIndex((s) => capAll > 0 && s.t > capAll)
@@ -277,21 +321,33 @@ export default function SpaceForecast() {
             <Scenarios zones={zones} list={facScen} onAdd={addScen} onUpdate={updScen} onRemove={rmScen} />
 
             <div style={{ height: 14 }} />
-            <AlertsPanel alerts={alerts} zones={zones} dflt={dflt} setDflt={setDflt} month={MONTHS[0]} applyAll={applyAll} />
+            <AlertsPanel alerts={alerts} zones={zones} dflt={dflt} setDflt={setDflt} month={MONTHS[0]} applyAll={applyAll} nameOf={nameOf} />
 
             <div style={{ ...card, overflow: 'hidden' }}>
               <div style={{ padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <div style={{ fontSize: 13, fontWeight: 600 }}>Customer forecast (pallets)</div>
                 <button style={btn(false)} onClick={addCustomer}>Add customer</button>
               </div>
+              <div style={{ padding: '0 14px 10px', fontSize: 11, color: 'var(--text-secondary, #4b5a72)' }}>
+                {live.status === 'loading' && 'Loading live counts from Datex…'}
+                {live.status === 'error' && <span style={{ color: 'var(--red, #c0392b)' }}>Live counts unavailable ({live.err}). “Now” shows the typed values on file.</span>}
+                {liveOn && (
+                  <>
+                    <span style={{ ...mono, display: 'inline-block', padding: '0 6px', borderRadius: 4, background: 'var(--green-bg, #eaf6ef)', border: '1px solid var(--green, #1a8a52)', color: 'var(--green, #1a8a52)', marginRight: 6 }}>live</span>
+                    “Now” = on-hand license plates from Datex as of <b>{live.asOf}</b>, for rows linked to a Datex project. Typed values are kept on file but not used for linked rows.
+                    LPs are raw counts: Positions = LPs ÷ Stack, so rows imported in positions (Stack 1) can read high for stacked or bulk product until stackability overrides are set.
+                    {' '}<button style={{ ...btn(false), padding: '1px 8px' }} onClick={() => setLiveTick((t) => t + 1)}>Refresh</button>
+                  </>
+                )}
+              </div>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
                   <thead>
                     <tr style={{ background: 'var(--bg3, #edf0f5)', color: 'var(--text-secondary, #4b5a72)' }}>
-                      <th style={th('left', 160)}>Customer</th>
+                      <th style={th('left', 210)} title="Datex project name for rows linked to MotherDuck; the plan label otherwise">Customer</th>
                       {zoneSel === 'all' && <th style={th('left')}>Zone</th>}
                       <th style={th('right')}>Stack</th>
-                      <th style={th('right')}>Now</th>
+                      <th style={th('right')} title="Green = live LPs from Datex (MotherDuck). White = typed by hand.">Now</th>
                       <th style={th('left')}>Status</th>
                       {MONTHS.map((mo, i) => (
                         <th key={KEYS[i]} onClick={() => setM(i)} style={{ ...th('right'), cursor: 'pointer', color: i === m ? 'var(--brand, #a07818)' : undefined, background: i === m ? 'var(--brand-bg, #fef9ec)' : undefined }}>{mo}</th>
@@ -307,7 +363,14 @@ export default function SpaceForecast() {
                     {rows.map((c) => (
                       <tr key={c.id} style={{ borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
                         <td style={td()}>
-                          <input value={c.name} onChange={(e) => patchCust(c.id, { name: e.target.value })} style={{ ...numInput(150), textAlign: 'left', fontFamily: 'inherit' }} />
+                          {linkOf(c) ? (
+                            <div title={`Datex project${linkOf(c).projects.length > 1 ? 's' : ''}: ${nameOf(c)}\nPlan label: ${c.name}`}>
+                              <div style={{ ...numInput(190), textAlign: 'left', fontFamily: 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: 'var(--bg3, #edf0f5)', cursor: 'default' }}>{nameOf(c)}</div>
+                              {nameOf(c) !== c.name && <div style={{ fontSize: 10, color: 'var(--text-dim, #9aaabb)', maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis' }}>plan label: {c.name}</div>}
+                            </div>
+                          ) : (
+                            <input value={c.name} onChange={(e) => patchCust(c.id, { name: e.target.value })} style={{ ...numInput(190), textAlign: 'left', fontFamily: 'inherit' }} />
+                          )}
                         </td>
                         {zoneSel === 'all' && (
                           <td style={td()}>
@@ -317,8 +380,18 @@ export default function SpaceForecast() {
                           </td>
                         )}
                         <td style={td('right')}><input type="number" step="0.05" value={c.stack} onChange={(e) => patchCust(c.id, { stack: Number(e.target.value) || 1 })} style={numInput(52)} /></td>
-                        <td style={td('right')}><input type="number" value={c.current} onChange={(e) => patchCust(c.id, { current: Number(e.target.value) || 0 }, true)} title="Today's pallet count (manual until the live feed is wired)" style={{ ...numInput(62), background: 'var(--bg1, #fff)' }} /></td>
-                        <td style={td()}><StatusChip c={c} /></td>
+                        <td style={td('right')}>
+                          {linkOf(c) ? (
+                            <span
+                              title={`Live from Datex (MotherDuck), as of ${live.asOf}\nLPs: ${n0(linkOf(c).lps)}   Datex weighted: ${n0(linkOf(c).weighted)}\nTyped value on file (not used): ${n0(c.current)}\n` +
+                                linkOf(c).projects.map((p) => '• ' + p.name + (p.mg != null ? ' · ' + (GROUP_LABEL[p.mg] || 'group ' + p.mg) : '')).join('\n')}
+                              style={{ ...numInput(62), display: 'inline-block', background: 'var(--green-bg, #eaf6ef)', borderColor: 'var(--green, #1a8a52)', cursor: 'help' }}
+                            >{n0(curOf(c))}</span>
+                          ) : (
+                            <input type="number" value={c.current} onChange={(e) => patchCust(c.id, { current: Number(e.target.value) || 0 }, true)} title="Today's pallet count, typed by hand (this row isn't linked to a Datex project)" style={{ ...numInput(62), background: 'var(--bg1, #fff)' }} />
+                          )}
+                        </td>
+                        <td style={td()}><StatusChip c={c} cur={curOf(c)} /></td>
                         {c.fc.map((v, i) => (
                           <td key={KEYS[i]} style={{ ...td('right'), background: i === m ? 'var(--brand-bg, #fef9ec)' : undefined }}>
                             <input type="number" value={v} onChange={(e) => setCell(c.id, i, Number(e.target.value) || 0)} onDoubleClick={() => fillRight(c.id, i)}
@@ -334,15 +407,56 @@ export default function SpaceForecast() {
                         </td>
                       </tr>
                     ))}
+                    {liveOn && match.unmapped.length > 0 && (
+                      <tr style={{ borderTop: '2px solid var(--border, #dce2ec)', background: 'var(--bg2, #f8f9fb)' }}>
+                        <td style={{ ...td(), fontWeight: 600 }} colSpan={zoneSel === 'all' ? 3 : 2}>Not in plan ({match.unmapped.length} Datex projects, see below)</td>
+                        <td style={{ ...td('right'), ...mono, fontWeight: 600 }}>{n0(unmappedTotal)}</td>
+                        <td style={{ ...td(), fontSize: 11, color: 'var(--text-secondary, #4b5a72)' }}>unmapped</td>
+                        <td colSpan={17} />
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
               <div style={{ padding: '10px 14px', fontSize: 11, color: 'var(--text-dim, #9aaabb)' }}>
                 Positions = pallets / stack factor. Gold-outlined cells are explicit forecasts; other months inherit the month before. Double-click a cell to carry it through the later months.
-                Status compares "Now" to this month's forecast. "Now" is typed by hand until a live feed is wired.
+                Status compares "Now" to this month's forecast. "Now" is live from Datex for rows linked to a project and typed by hand for the rest.
                 {fac === 'mad' && ' Madison starter data came from an older workbook snapshot; update "Now" before trusting alerts.'}
               </div>
             </div>
+
+            {liveOn && match.unmapped.length > 0 && (
+              <div style={{ ...card, marginTop: 14, overflow: 'hidden' }}>
+                <div style={{ padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>Unmapped Datex inventory <span style={{ ...mono, fontWeight: 400, color: 'var(--text-secondary, #4b5a72)' }}>{n0(unmappedTotal)} LPs, {match.unmapped.length} projects</span></div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary, #4b5a72)' }}>On hand in Datex as of {live.asOf} but not linked to any plan row, so it is missing from the plan. “Add to plan” creates a row named for the Datex project, starting flat at today's count.</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <Field l="Add to">
+                      <select value={addZone && zones.some((z) => z.id === addZone) ? addZone : zoneSel !== 'all' ? zoneSel : zones[0]?.id} onChange={(e) => setAddZone(e.target.value)} style={{ ...numInput(120), textAlign: 'left', fontFamily: 'inherit' }}>
+                        {zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>)}
+                      </select>
+                    </Field>
+                    <button style={btn(false)} onClick={() => setShowUnmapped((v) => !v)}>{showUnmapped ? 'Hide' : 'Show'}</button>
+                  </div>
+                </div>
+                {showUnmapped && (
+                  <div style={{ maxHeight: 360, overflowY: 'auto', borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
+                    {match.unmapped.map((u) => (
+                      <div key={`${u.wid}:${u.pid}`} style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '6px 14px', borderTop: '1px solid var(--border-subtle, #eceff5)', fontSize: 12 }}>
+                        <span style={{ fontWeight: 600, minWidth: 250 }}>{u.name}</span>
+                        <span style={{ color: 'var(--text-secondary, #4b5a72)', flex: 1, fontSize: 11 }}>
+                          {u.groups.map((g) => `${g.name} ${n0(g.lps)}`).join(' · ')}
+                        </span>
+                        <span style={{ ...mono, minWidth: 60, textAlign: 'right' }}>{n0(u.lps)}</span>
+                        <button style={{ ...btn(false), padding: '2px 8px' }} onClick={() => addFromLive(u)}>Add to plan</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -358,8 +472,8 @@ function Banner({ tone, children }) {
 const th = (align = 'left', minW) => ({ padding: '8px 8px', textAlign: align, fontWeight: 600, fontSize: 11, whiteSpace: 'nowrap', minWidth: minW })
 const td = (align = 'left') => ({ padding: '4px 8px', textAlign: align, whiteSpace: 'nowrap' })
 
-function StatusChip({ c }) {
-  const st = status(c)
+function StatusChip({ c, cur }) {
+  const st = status(c, cur)
   const u = STATUS_UI[st.s]
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: u.c, fontWeight: 600 }}>
@@ -369,7 +483,7 @@ function StatusChip({ c }) {
   )
 }
 
-function AlertsPanel({ alerts, zones, dflt, setDflt, applyAll, month }) {
+function AlertsPanel({ alerts, zones, dflt, setDflt, applyAll, month, nameOf }) {
   const zn = (id) => zones.find((z) => z.id === id)?.name || ''
   return (
     <div style={{ ...card, padding: 14, marginBottom: 14 }}>
@@ -388,13 +502,13 @@ function AlertsPanel({ alerts, zones, dflt, setDflt, applyAll, month }) {
       {alerts.length === 0 ? (
         <div style={{ fontSize: 12, color: 'var(--green, #1a8a52)' }}>Every customer is within threshold.</div>
       ) : (
-        alerts.map(({ c, s, d, f }) => (
+        alerts.map(({ c, cu, s, d, f }) => (
           <div key={c.id} style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '6px 0', borderTop: '1px solid var(--border-subtle, #eceff5)', fontSize: 12 }}>
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_UI[s].c, flex: 'none', alignSelf: 'center' }} />
-            <span style={{ fontWeight: 600, minWidth: 150 }}>{c.name}</span>
+            <span style={{ fontWeight: 600, minWidth: 150 }}>{nameOf(c)}</span>
             <span style={{ color: 'var(--text-secondary, #4b5a72)' }}>{zn(c.zone)}</span>
             <span style={{ ...mono, marginLeft: 'auto' }}>
-              {n0(c.current)} vs {n0(f)} forecast ({d > 0 ? '+' : ''}{n0(d)}, {f ? ((d / f) * 100).toFixed(0) : '—'}%)
+              {n0(cu)} vs {n0(f)} forecast ({d > 0 ? '+' : ''}{n0(d)}, {f ? ((d / f) * 100).toFixed(0) : '—'}%)
             </span>
           </div>
         ))

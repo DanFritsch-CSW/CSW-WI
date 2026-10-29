@@ -9,6 +9,13 @@ import { supabase } from './supabase.js'
 //
 // positions = pallets / stack. All of this is independent of lib/spacePlanning.js
 // (the Customers > Space Planning tab's current-footprint code).
+//
+// LIVE "NOW" (added 2026-10-29): plan rows can be linked to Datex projects via
+// space_forecast_project_map (warehouse_id + project_id + optional material_group_id).
+// netlify/functions/space-forecast-live.cjs returns on-hand LPs per project + group
+// from MotherDuck; matchLive() below sums the ones mapped to each plan row. The live
+// number is display-only: it is never written into space_forecast_customers, so the
+// stored manual current_pallets (and everyone's forecast inheritance) is untouched.
 
 export const WINDOW = 12
 
@@ -139,4 +146,81 @@ export async function seedMadisonStarter() {
     )
     if (e2) throw e2
   }
+}
+
+
+// ── Live feed (MotherDuck / Datex) ──────────────────────────────────────────
+
+export async function fetchLive(facility) {
+  const res = await fetch('/.netlify/functions/space-forecast-live', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ facilityId: facility }),
+  })
+  if (!res.ok) {
+    let msg = ''
+    try { msg = (await res.json()).error } catch { /* body not JSON */ }
+    throw new Error(msg || `Live feed returned ${res.status}`)
+  }
+  return res.json() // { asOf, rows: [{ warehouseId, projectId, projectName, materialGroupId, materialGroup, lps, weighted }] }
+}
+
+export async function loadProjectMap(facility) {
+  if (!supabase) return []
+  const { data, error } = await supabase.from('space_forecast_project_map').select('*').eq('facility', facility)
+  if (error) throw error
+  return data.map((r) => ({
+    id: r.id, customer: r.customer_id, wid: r.warehouse_id, pid: r.project_id,
+    mg: r.material_group_id, name: r.project_name,
+  }))
+}
+
+export async function addProjectMap(facility, { wid, pid, mg = null, name, customerId }) {
+  if (!supabase) return
+  const { error } = await supabase.from('space_forecast_project_map').insert({
+    facility, warehouse_id: wid, project_id: pid, material_group_id: mg, project_name: name, customer_id: customerId,
+  })
+  if (error) throw error
+}
+
+// Only the three groups the seed uses to split a project across plan rows.
+export const GROUP_LABEL = { 7: 'Cooler', 11: 'Dry', 14: 'Freezer' }
+
+// Match live (project + material group) rows to plan rows through the map.
+//   A group-specific map row wins; a map row with no group takes whatever groups of
+//   that project nothing else has claimed. Anything left over is "unmapped".
+// Returns:
+//   byCustomer[customerId] = { lps, weighted, rows: [live rows], projects: [{ pid, name, mg }] }
+//   unmapped = [{ wid, pid, name, lps, weighted, groups: [{ id, name, lps }] }] biggest first
+export function matchLive(map, liveRows) {
+  const specific = new Map(), wildcard = new Map()
+  for (const m of map) (m.mg == null ? wildcard : specific).set(`${m.wid}:${m.pid}:${m.mg ?? '*'}`, m)
+
+  const byCustomer = {}
+  const ensure = (id) => (byCustomer[id] ||= { lps: 0, weighted: 0, rows: [], projects: [] })
+  const liveName = new Map()
+  for (const r of liveRows) liveName.set(`${r.warehouseId}:${r.projectId}`, r.projectName)
+
+  // every mapped plan row is "live", even when Datex currently holds 0 for it
+  for (const m of map) {
+    const e = ensure(m.customer)
+    if (!e.projects.some((p) => p.pid === m.pid && p.mg === m.mg)) {
+      e.projects.push({ pid: m.pid, mg: m.mg, name: liveName.get(`${m.wid}:${m.pid}`) || m.name })
+    }
+  }
+
+  const left = new Map()
+  for (const r of liveRows) {
+    const m = specific.get(`${r.warehouseId}:${r.projectId}:${r.materialGroupId}`) || wildcard.get(`${r.warehouseId}:${r.projectId}:*`)
+    if (m) {
+      const e = ensure(m.customer)
+      e.lps += r.lps; e.weighted += r.weighted; e.rows.push(r)
+    } else {
+      const k = `${r.warehouseId}:${r.projectId}`
+      const u = left.get(k) || { wid: r.warehouseId, pid: r.projectId, name: r.projectName, lps: 0, weighted: 0, groups: [] }
+      u.lps += r.lps; u.weighted += r.weighted
+      u.groups.push({ id: r.materialGroupId, name: r.materialGroup, lps: r.lps })
+      left.set(k, u)
+    }
+  }
+  const unmapped = [...left.values()].sort((a, b) => b.lps - a.lps)
+  return { byCustomer, unmapped }
 }
