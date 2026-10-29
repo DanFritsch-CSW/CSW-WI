@@ -45,6 +45,7 @@ export function normalizeCustomer(row, keys) {
   const fcMap = row.forecast || {}
   return {
     id: row.id, zone: row.zone_id, name: row.name, stack: Number(row.stack) || 1,
+    version: row.version_id || null, source: row.source_id || null,
     current: Number(row.current_pallets) || 0, fcMap,
     fc: deriveFc(fcMap, row.current_pallets, keys),
     up: Number(row.up_pct), down: Number(row.down_pct), gap: Number(row.min_gap),
@@ -57,20 +58,23 @@ const idxOf = (keys, k) => {
   return k < keys[0] ? 0 : WINDOW - 1
 }
 
-export async function loadFacility(facility, keys) {
+// versionId null = Master (every pre-versions row). A hypothetical version only ever sees its own copies.
+const inVersion = (q, versionId) => (versionId ? q.eq('version_id', versionId) : q.is('version_id', null))
+
+export async function loadFacility(facility, keys, versionId = null) {
   if (!supabase) return null
   const [z, c, s] = await Promise.all([
-    supabase.from('space_forecast_zones').select('*').eq('facility', facility).order('sort_order').order('name'),
-    supabase.from('space_forecast_customers').select('*').eq('facility', facility).order('name'),
-    supabase.from('space_forecast_scenarios').select('*').eq('facility', facility).order('name'),
+    inVersion(supabase.from('space_forecast_zones').select('*').eq('facility', facility), versionId).order('sort_order').order('name'),
+    inVersion(supabase.from('space_forecast_customers').select('*').eq('facility', facility), versionId).order('name'),
+    inVersion(supabase.from('space_forecast_scenarios').select('*').eq('facility', facility), versionId).order('name'),
   ])
   const err = z.error || c.error || s.error
   if (err) throw err
   return {
-    zones: z.data.map((r) => ({ id: r.id, name: r.name, note: r.note, capacity: Number(r.capacity) || 0 })),
+    zones: z.data.map((r) => ({ id: r.id, name: r.name, note: r.note, capacity: Number(r.capacity) || 0, version: r.version_id || null })),
     customers: c.data.map((r) => normalizeCustomer(r, keys)),
     scen: s.data.map((r) => ({
-      id: r.id, name: r.name, zone: r.zone_id, pallets: Number(r.pallets) || 0, stack: Number(r.stack) || 1,
+      id: r.id, name: r.name, zone: r.zone_id, pallets: Number(r.pallets) || 0, stack: Number(r.stack) || 1, version: r.version_id || null,
       from: idxOf(keys, r.from_month), to: idxOf(keys, r.to_month), on: r.active,
     })),
   }
@@ -81,7 +85,7 @@ const stamp = () => new Date().toISOString()
 export async function saveZone(facility, z, sortOrder = 0) {
   if (!supabase) return
   const { error } = await supabase.from('space_forecast_zones').upsert({
-    id: z.id, facility, name: z.name, note: z.note || '', capacity: z.capacity || 0, sort_order: sortOrder, updated_at: stamp(),
+    id: z.id, facility, name: z.name, note: z.note || '', capacity: z.capacity || 0, sort_order: sortOrder, updated_at: stamp(), version_id: z.version || null,
   })
   if (error) throw error
 }
@@ -91,6 +95,7 @@ export async function saveCustomer(facility, c, { currentChanged = false } = {})
   const row = {
     id: c.id, facility, zone_id: c.zone, name: c.name, stack: c.stack || 1, current_pallets: c.current || 0,
     forecast: c.fcMap || {}, up_pct: c.up, down_pct: c.down, min_gap: c.gap, updated_at: stamp(),
+    version_id: c.version || null, source_id: c.source || null,
   }
   if (currentChanged) row.current_updated_at = stamp()
   const { error } = await supabase.from('space_forecast_customers').upsert(row)
@@ -101,7 +106,7 @@ export async function saveScenario(facility, s, keys) {
   if (!supabase) return
   const { error } = await supabase.from('space_forecast_scenarios').upsert({
     id: s.id, facility, zone_id: s.zone, name: s.name, pallets: s.pallets || 0, stack: s.stack || 1,
-    from_month: keys[s.from] || keys[0], to_month: keys[s.to] || keys[WINDOW - 1], active: s.on, updated_at: stamp(),
+    from_month: keys[s.from] || keys[0], to_month: keys[s.to] || keys[WINDOW - 1], active: s.on, updated_at: stamp(), version_id: s.version || null,
   })
   if (error) throw error
 }
@@ -253,5 +258,86 @@ export async function clearStackOverride(wid, pid, mg) {
   if (!supabase) return
   const { error } = await supabase.from('space_forecast_stack_override').delete()
     .eq('warehouse_id', wid).eq('project_id', pid).eq('material_group_id', mg == null ? -1 : mg)
+  if (error) throw error
+}
+
+
+// ── Scenario versions (shared) ───────────────────────────────────────────────
+// Master = rows with version_id null. A hypothetical is a full copy (all five facilities)
+// stamped with its version_id. Customer copies keep source_id = the Master customer they
+// came from so they still read that customer's live Datex count (live data is the same
+// in every version). Deleting a version cascades only to its own copies.
+
+export async function listVersions() {
+  if (!supabase) return []
+  const { data, error } = await supabase.from('space_forecast_versions').select('*').order('created_at')
+  if (error) throw error
+  return data.map((r) => ({ id: r.id, name: r.name, by: r.created_by, at: r.created_at, editedBy: r.updated_by, editedAt: r.updated_at, basedOn: r.based_on }))
+}
+
+export async function touchVersion(id, by) {
+  if (!supabase || !id) return
+  await supabase.from('space_forecast_versions').update({ updated_by: by || '', updated_at: new Date().toISOString() }).eq('id', id)
+}
+
+export async function renameVersion(id, name) {
+  if (!supabase) return
+  const { error } = await supabase.from('space_forecast_versions').update({ name, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+}
+
+export async function deleteVersion(id) {
+  if (!supabase) return
+  const { error } = await supabase.from('space_forecast_versions').delete().eq('id', id)
+  if (error) throw error
+}
+
+const uid = () => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'id' + Date.now() + Math.random().toString(16).slice(2))
+
+// Copy every facility of `fromVersion` (null = Master) into a brand-new version. Insert-only.
+export async function duplicateVersion({ name, by, fromVersion = null, fromName = 'Master', facilities, keys }) {
+  if (!supabase) throw new Error('Supabase is not configured')
+  const { data: v, error: ve } = await supabase.from('space_forecast_versions')
+    .insert({ name, created_by: by || '', updated_by: by || '', based_on: fromName }).select().single()
+  if (ve) throw ve
+  try {
+    for (const fac of facilities) {
+      const d = await loadFacility(fac, keys, fromVersion)
+      if (!d || !d.zones.length) continue
+      const zmap = {}
+      d.zones.forEach((z) => { zmap[z.id] = uid() })
+      const zrows = d.zones.map((z, i) => ({ id: zmap[z.id], facility: fac, name: z.name, note: z.note || '', capacity: z.capacity || 0, sort_order: i, version_id: v.id }))
+      let r = await supabase.from('space_forecast_zones').insert(zrows)
+      if (r.error) throw r.error
+      if (d.customers.length) {
+        const crows = d.customers.map((c) => ({
+          id: uid(), facility: fac, zone_id: zmap[c.zone], name: c.name, stack: c.stack || 1, current_pallets: c.current || 0,
+          forecast: c.fcMap || {}, up_pct: c.up, down_pct: c.down, min_gap: c.gap, version_id: v.id, source_id: c.source || (fromVersion ? null : c.id),
+        }))
+        r = await supabase.from('space_forecast_customers').insert(crows)
+        if (r.error) throw r.error
+      }
+      if (d.scen.length) {
+        const srows = d.scen.map((s) => ({
+          id: uid(), facility: fac, zone_id: zmap[s.zone], name: s.name, pallets: s.pallets || 0, stack: s.stack || 1,
+          from_month: keys[s.from] || keys[0], to_month: keys[s.to] || keys[WINDOW - 1], active: s.on, version_id: v.id,
+        }))
+        r = await supabase.from('space_forecast_scenarios').insert(srows)
+        if (r.error) throw r.error
+      }
+    }
+  } catch (e) {
+    await supabase.from('space_forecast_versions').delete().eq('id', v.id) // cascade removes the partial copy only
+    throw e
+  }
+  return { id: v.id, name: v.name, by: v.created_by, at: v.created_at, editedBy: v.updated_by, editedAt: v.updated_at, basedOn: v.based_on }
+}
+
+// Move a customer to another facility inside a hypothetical version: same row, new facility + zone.
+// The live Datex link is dropped (source_id null) because that inventory belongs to the original warehouse.
+export async function moveCustomerRow(id, toFacility, toZoneId, source = null) {
+  if (!supabase) return
+  const { error } = await supabase.from('space_forecast_customers')
+    .update({ facility: toFacility, zone_id: toZoneId, source_id: source, updated_at: new Date().toISOString() }).eq('id', id)
   if (error) throw error
 }

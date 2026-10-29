@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js'
 import {
   monthKeys, monthLabel, deriveFc, loadFacility, saveZone, saveCustomer, saveScenario,
   deleteRow, TABLES, seedMadisonStarter, fetchLive, loadProjectMap, addProjectMap, matchLive, GROUP_LABEL, loadStackOverrides, saveStackOverride, clearStackOverride, ovKey,
+  listVersions, duplicateVersion, renameVersion, deleteVersion, touchVersion, moveCustomerRow,
 } from '../lib/spaceForecast.js'
 
 // /spaceforecast — per-facility capacity vs. projected footprint, next 12 months.
@@ -91,26 +92,74 @@ export default function SpaceForecast() {
   const [dflt, setDflt] = useState({ up: 10, down: 10, gap: 25 })
   const timers = useRef({})
 
+  // scenario versions: Master (verId null) + shared hypotheticals
+  const [versions, setVersions] = useState([])
+  const [verId, setVerId] = useState(null)
+  const [unlocked, setUnlocked] = useState(false)
+  const [verBusy, setVerBusy] = useState(false)
+  const [moveId, setMoveId] = useState(null)
+  const [undo, setUndo] = useState(null)
+  const locked = verId === null && !unlocked
+  const ver = versions.find((v) => v.id === verId) || null
+  const who = (ask = true) => {
+    let n = ''
+    try { n = localStorage.getItem('csw_spaceforecast_user') || '' } catch { /* storage blocked */ }
+    if (!n && ask) {
+      n = (window.prompt('Your name (shown on versions you create or edit):') || '').trim()
+      if (n) { try { localStorage.setItem('csw_spaceforecast_user', n) } catch { /* storage blocked */ } }
+    }
+    return n
+  }
+  useEffect(() => { listVersions().then(setVersions).catch(() => {}) }, [])
+  const selectVersion = (id) => {
+    if (id === verId) return
+    setVerId(id); setUnlocked(false); setStore({}); setZoneSel('all'); setMoveId(null); setUndo(null); setLoadErr('')
+  }
+  const duplicate = async () => {
+    const base = ver ? ver.name : 'Master'
+    const name = (window.prompt(`Name for the new hypothetical (a full copy of ${base}):`, `Hypothetical ${versions.length + 1}`) || '').trim()
+    if (!name) return
+    setVerBusy(true)
+    try {
+      const v = await duplicateVersion({ name, by: who(), fromVersion: verId, fromName: base, facilities: FAC_ORDER, keys: KEYS })
+      setVersions((vs) => [...vs, v])
+      selectVersion(v.id)
+    } catch (e) { setSync({ state: 'error', msg: 'Duplicate failed: ' + (e.message || e) }) } finally { setVerBusy(false) }
+  }
+  const renameVer = async () => {
+    const name = (window.prompt('Rename this hypothetical:', ver.name) || '').trim()
+    if (!name || name === ver.name) return
+    try { await renameVersion(ver.id, name); setVersions((vs) => vs.map((v) => (v.id === ver.id ? { ...v, name } : v))) } catch (e) { setSync({ state: 'error', msg: e.message || String(e) }) }
+  }
+  const deleteVer = async () => {
+    if (!window.confirm(`Delete "${ver.name}" and everything in it for all five facilities? Master is not affected. This can't be undone.`)) return
+    try { await deleteVersion(ver.id); setVersions((vs) => vs.filter((v) => v.id !== ver.id)); selectVersion(null) } catch (e) { setSync({ state: 'error', msg: e.message || String(e) }) }
+  }
+  const unlock = () => { if (window.confirm('Unlock Master for editing? Everyone relies on Master. To try ideas safely, duplicate it into a hypothetical instead.')) setUnlocked(true) }
+
   const loaded = !!store[fac]
   useEffect(() => {
     if (store[fac]) return undefined
     if (!supabase) { setStore((s) => ({ ...s, [fac]: EMPTY })); return undefined }
     let dead = false
     setLoading(true); setLoadErr('')
-    loadFacility(fac, KEYS)
+    loadFacility(fac, KEYS, verId)
       .then((d) => { if (!dead) setStore((s) => ({ ...s, [fac]: d })) })
       .catch((e) => { if (!dead) { setLoadErr(e.message || String(e)); setStore((s) => ({ ...s, [fac]: EMPTY })) } })
       .finally(() => { if (!dead) setLoading(false) })
     return () => { dead = true }
-  }, [fac, loaded]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fac, loaded, verId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // live feed (Datex via MotherDuck) + project map, per facility
   const [liveStore, setLiveStore] = useState({})
   const [liveTick, setLiveTick] = useState(0)
   const [showUnmapped, setShowUnmapped] = useState(true)
   const [addZone, setAddZone] = useState('')
+  const fetchedTick = useRef({})
   useEffect(() => {
     if (!loaded) return undefined
+    if (fetchedTick.current[fac] === liveTick) return undefined // live data is the same in every version: don't refetch on a version switch
+    fetchedTick.current[fac] = liveTick
     let dead = false
     setLiveStore((s) => ({ ...s, [fac]: { ...(s[fac] || {}), status: 'loading' } }))
     Promise.all([fetchLive(fac), loadProjectMap(fac).catch((e) => { throw new Error('project map: ' + (e.message || e)) }), loadStackOverrides(fac).catch(() => ({}))])
@@ -121,7 +170,7 @@ export default function SpaceForecast() {
   const live = liveStore[fac] || { status: 'loading' }
   const liveOn = live.status === 'ok'
   const match = useMemo(() => (liveOn ? matchLive(live.map, live.rows) : { byCustomer: {}, unmapped: [] }), [liveOn, live.map, live.rows])
-  const linkOf = (c) => (liveOn ? match.byCustomer[c.id] || null : null)
+  const linkOf = (c) => (liveOn ? match.byCustomer[c.source || c.id] || null : null)
   // Stackability: a live row's effective stack is the override for its Datex warehouse + project + material
   // group, else the plan row's own stack. Now is expressed in the plan row's pallet unit
   // (positions x plan stack), so with no override it equals raw LPs.
@@ -156,12 +205,12 @@ export default function SpaceForecast() {
     clearTimeout(timers.current[key])
     setSync({ state: 'saving', msg: '' })
     timers.current[key] = setTimeout(async () => {
-      try { await fn(); setSync({ state: 'saved', msg: '' }) } catch (e) { setSync({ state: 'error', msg: e.message || String(e) }) }
+      try { await fn(); setSync({ state: 'saved', msg: '' }); if (verId) touchVersion(verId, who(false)) } catch (e) { setSync({ state: 'error', msg: e.message || String(e) }) }
     }, 500)
   }
   const now = async (fn) => {
     setSync({ state: 'saving', msg: '' })
-    try { await fn(); setSync({ state: 'saved', msg: '' }) } catch (e) { setSync({ state: 'error', msg: e.message || String(e) }) }
+    try { await fn(); setSync({ state: 'saved', msg: '' }); if (verId) touchVersion(verId, who(false)) } catch (e) { setSync({ state: 'error', msg: e.message || String(e) }) }
   }
 
   // customers
@@ -188,7 +237,7 @@ export default function SpaceForecast() {
     patchCust(id, { fcMap, fc: deriveFc(fcMap, c0.current, KEYS) })
   }
   const addCustomer = () => {
-    const c = { id: newId(), zone: zoneSel === 'all' ? zones[0].id : zoneSel, name: 'New customer', stack: 1, current: 0, fcMap: {}, fc: Array(KEYS.length).fill(0), ...dflt }
+    const c = { id: newId(), version: verId, source: null, zone: zoneSel === 'all' ? zones[0].id : zoneSel, name: 'New customer', stack: 1, current: 0, fcMap: {}, fc: Array(KEYS.length).fill(0), ...dflt }
     update((f) => ({ ...f, customers: [...f.customers, c] }))
     now(() => saveCustomer(fac, c))
   }
@@ -208,12 +257,13 @@ export default function SpaceForecast() {
     const zid = addZone && zones.some((z) => z.id === addZone) ? addZone : zoneSel !== 'all' ? zoneSel : zones[0]?.id
     if (!zid) return
     const lps = Math.round(u.lps)
-    const c = { id: newId(), zone: zid, name: u.name, stack: 1, current: lps, fcMap: {}, fc: Array(KEYS.length).fill(lps), ...dflt }
+    const c = { id: newId(), version: verId, source: null, zone: zid, name: u.name, stack: 1, current: lps, fcMap: {}, fc: Array(KEYS.length).fill(lps), ...dflt }
     update((f) => ({ ...f, customers: [...f.customers, c] }))
-    setLiveStore((s) => ({ ...s, [fac]: { ...s[fac], map: [...s[fac].map, { id: newId(), customer: c.id, wid: u.wid, pid: u.pid, mg: null, name: u.name }] } }))
+    // In Master the new row is linked to the Datex project; inside a hypothetical it stays a typed row so Master's links are never touched.
+    if (!verId) setLiveStore((s) => ({ ...s, [fac]: { ...s[fac], map: [...s[fac].map, { id: newId(), customer: c.id, wid: u.wid, pid: u.pid, mg: null, name: u.name }] } }))
     now(async () => {
       await saveCustomer(fac, c, { currentChanged: true })
-      await addProjectMap(fac, { wid: u.wid, pid: u.pid, mg: null, name: u.name, customerId: c.id })
+      if (!verId) await addProjectMap(fac, { wid: u.wid, pid: u.pid, mg: null, name: u.name, customerId: c.id })
     })
   }
 
@@ -224,7 +274,7 @@ export default function SpaceForecast() {
     try {
       const facs = []
       for (const id of FAC_ORDER) {
-        const d = store[id] || (await loadFacility(id, KEYS)) || EMPTY
+        const d = store[id] || (await loadFacility(id, KEYS, verId)) || EMPTY
         let lv = liveStore[id]
         if (!lv || lv.status !== 'ok') {
           try { const [l, map] = await Promise.all([fetchLive(id), loadProjectMap(id)]); lv = { status: 'ok', asOf: l.asOf, rows: l.rows, map } } catch { lv = null }
@@ -235,7 +285,7 @@ export default function SpaceForecast() {
           id, name: F[id].name, asOf: lv ? lv.asOf : '',
           zones: d.zones.map((z) => ({ name: z.name, capacity: z.capacity })),
           customers: d.customers.map((c) => {
-            const l = mt.byCustomer[c.id]
+            const l = mt.byCustomer[c.source || c.id]
             const nm = l && l.projects.length
               ? l.projects.map((p) => (p.mg != null ? `${p.name} · ${GROUP_LABEL[p.mg] || 'group ' + p.mg}` : p.name)).filter((v, i, ar) => ar.indexOf(v) === i).join(' + ')
               : c.name
@@ -247,6 +297,22 @@ export default function SpaceForecast() {
       const { buildWorkbook, downloadWorkbook } = await import('../lib/spaceForecastExport.js')
       downloadWorkbook(buildWorkbook(facs, MONTHS), `space-forecast-${new Date().toISOString().slice(0, 10)}.xlsx`)
     } catch (e) { setSync({ state: 'error', msg: 'Export failed: ' + (e.message || e) }) } finally { setExporting(false) }
+  }
+
+  // move a customer to another facility (hypotheticals only)
+  const moveCustomer = async (c, destFac, destZoneId, destZoneName) => {
+    if (!window.confirm(`Move "${nameOf(c)}" from ${F[fac].name} to ${F[destFac].name} (${destZoneName})?\n\nThis only changes the hypothetical "${ver ? ver.name : ''}". Master is untouched. The forecast and alert thresholds travel with it; its live Datex link is dropped.`)) return
+    await now(() => moveCustomerRow(c.id, destFac, destZoneId))
+    setUndo({ id: c.id, fromFac: fac, fromZone: c.zone, toFac: destFac, source: c.source, name: nameOf(c) })
+    update((f) => ({ ...f, customers: f.customers.filter((x) => x.id !== c.id) }))
+    setStore((st) => { const n = { ...st }; delete n[destFac]; return n })
+    setMoveId(null)
+  }
+  const undoMove = async () => {
+    if (!undo) return
+    await now(() => moveCustomerRow(undo.id, undo.fromFac, undo.fromZone, undo.source))
+    setStore((st) => { const n = { ...st }; delete n[undo.fromFac]; delete n[undo.toFac]; return n })
+    setUndo(null)
   }
 
   // zones
@@ -272,14 +338,14 @@ export default function SpaceForecast() {
     now(() => deleteRow(TABLES.zone, z.id))
   }
   const addFirstZone = () => {
-    const z = { id: newId(), name: 'New zone', note: '', capacity: 0 }
+    const z = { id: newId(), version: verId, name: 'New zone', note: '', capacity: 0 }
     update((f) => ({ ...f, zones: [...f.zones, z] }))
     now(() => saveZone(fac, z, cur.zones.length))
   }
 
   // scenarios
   const addScen = () => {
-    const s = { id: newId(), name: 'New scenario', zone: zones[0].id, pallets: 500, stack: 1, from: 1, to: 3, on: true }
+    const s = { id: newId(), version: verId, name: 'New scenario', zone: zones[0].id, pallets: 500, stack: 1, from: 1, to: 3, on: true }
     update((f) => ({ ...f, scen: [...f.scen, s] }))
     now(() => saveScenario(fac, s, KEYS))
   }
@@ -338,6 +404,33 @@ export default function SpaceForecast() {
         {!supabase && <Banner tone="warn">Supabase isn't configured in this build, so edits won't be saved.</Banner>}
         {loadErr && <Banner tone="err">Couldn't load saved data: {loadErr}. If this is the first deploy, the space_forecast_* migration hasn't been applied yet.</Banner>}
 
+        <div style={{ ...card, padding: '8px 12px', marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ ...label, marginRight: 4 }}>Version</span>
+            <button onClick={() => selectVersion(null)} style={btn(verId === null)} title="The plan of record, locked by default">Master{verId === null && locked ? ' 🔒' : ''}</button>
+            {versions.map((v) => <button key={v.id} onClick={() => selectVersion(v.id)} style={btn(verId === v.id)}>{v.name}</button>)}
+            <button onClick={duplicate} disabled={verBusy} style={btn(false)} title={`Make a full copy of ${ver ? ver.name : 'Master'} (all five facilities) to try ideas in`}>{verBusy ? 'Copying…' : `+ Duplicate ${ver ? 'this' : 'Master'}`}</button>
+            {ver && <button onClick={renameVer} style={btn(false)}>Rename</button>}
+            {ver && <button onClick={deleteVer} style={{ ...btn(false), color: 'var(--red, #c0392b)' }}>Delete</button>}
+            <span style={{ flex: 1 }} />
+            <button onClick={exportExcel} disabled={exporting} style={btn(false)} title="All facilities of this version: one sheet each with live formulas, plus Scenarios and Summary sheets">{exporting ? 'Exporting…' : 'Export to Excel'}</button>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary, #4b5a72)', marginTop: 6 }}>
+            {ver
+              ? <>Hypothetical, shared with everyone. Created by <b>{ver.by || 'unknown'}</b> on {new Date(ver.at).toLocaleDateString()} from {ver.basedOn}; last edited by <b>{ver.editedBy || ver.by || 'unknown'}</b> {new Date(ver.editedAt).toLocaleString()}. Edits here never touch Master. Live Datex counts are the same in every version.</>
+              : <>Master is the plan of record.{locked ? ' It is locked so nobody changes it by accident. ' : ' Unlocked: edits go straight to the plan everyone uses. '}
+                {locked ? <button style={{ ...btn(false), padding: '1px 8px' }} onClick={unlock}>Unlock to edit</button> : <button style={{ ...btn(false), padding: '1px 8px' }} onClick={() => setUnlocked(false)}>Lock</button>}
+                {' '}To try ideas or move customers between facilities, duplicate it into a hypothetical.</>}
+          </div>
+        </div>
+        {undo && (
+          <Banner tone="warn">
+            Moved <b>{undo.name}</b> from {F[undo.fromFac].name} to {F[undo.toFac].name} in this hypothetical.{' '}
+            <button style={{ ...btn(false), padding: '1px 8px' }} onClick={undoMove}>Undo</button>{' '}
+            <button style={{ ...btn(false), padding: '1px 8px' }} onClick={() => setUndo(null)}>Dismiss</button>
+          </Banner>
+        )}
+
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
           {FAC_ORDER.map((id) => (
             <button key={id} onClick={() => { setFac(id); setZoneSel('all') }} style={{ ...btn(fac === id), display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -353,6 +446,7 @@ export default function SpaceForecast() {
           <EmptyFacility name={F[fac].name} onAdd={addFirstZone} onSeed={fac === 'mad' ? importMadison : null} busy={busy} />
         ) : (
           <>
+            <LockBox locked={locked}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 10, marginBottom: 14 }}>
               <ZoneCard active={zoneSel === 'all'} onClick={() => setZoneSel('all')} name="All zones" note={MONTHS[m]}
                 cap={zones.reduce((s, z) => s + z.capacity, 0)}
@@ -366,6 +460,7 @@ export default function SpaceForecast() {
               <button onClick={addFirstZone} style={{ ...card, padding: 12, cursor: 'pointer', borderStyle: 'dashed', color: 'var(--text-secondary, #4b5a72)', fontSize: 12, fontFamily: 'inherit', minHeight: 96 }}
                 title="Add a zone (room or temperature area) to this facility">+ Add zone</button>
             </div>
+            </LockBox>
             {zoneMsg && <Banner tone="warn">{zoneMsg}</Banner>}
 
             <div style={{ ...card, padding: 14, marginBottom: 14 }}>
@@ -388,16 +483,15 @@ export default function SpaceForecast() {
               </div>
             </div>
 
-            <Scenarios zones={zones} list={facScen} onAdd={addScen} onUpdate={updScen} onRemove={rmScen} />
+            <LockBox locked={locked}><Scenarios zones={zones} list={facScen} onAdd={addScen} onUpdate={updScen} onRemove={rmScen} /></LockBox>
 
             <div style={{ height: 14 }} />
-            <AlertsPanel alerts={alerts} zones={zones} dflt={dflt} setDflt={setDflt} month={MONTHS[0]} applyAll={applyAll} nameOf={nameOf} />
+            <LockBox locked={locked}><AlertsPanel alerts={alerts} zones={zones} dflt={dflt} setDflt={setDflt} month={MONTHS[0]} applyAll={applyAll} nameOf={nameOf} /></LockBox>
 
             <div style={{ ...card, overflow: 'hidden' }}>
               <div style={{ padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <div style={{ fontSize: 13, fontWeight: 600 }}>Customer forecast (pallets)</div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button style={btn(false)} onClick={exportExcel} disabled={exporting} title="All facilities: one sheet each, formulas for positions, zone totals and utilization, plus Scenarios and Summary sheets">{exporting ? 'Exporting…' : 'Export to Excel'}</button>
                   <button style={btn(false)} onClick={addCustomer}>Add customer</button>
                 </div>
               </div>
@@ -413,6 +507,7 @@ export default function SpaceForecast() {
                   </>
                 )}
               </div>
+              <LockBox locked={locked}>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
                   <thead>
@@ -488,9 +583,17 @@ export default function SpaceForecast() {
                         <td style={td('right')}><input type="number" value={c.down} onChange={(e) => patchCust(c.id, { down: Number(e.target.value) || 0 })} style={numInput(46)} /></td>
                         <td style={td('right')}><input type="number" value={c.gap} onChange={(e) => patchCust(c.id, { gap: Number(e.target.value) || 0 })} style={numInput(52)} /></td>
                         <td style={td('right')}>
+                          <button onClick={() => setMoveId(moveId === c.id ? null : c.id)} disabled={!verId} title={verId ? 'Move this customer to another facility (this hypothetical only)' : 'Duplicate Master into a hypothetical to move customers between facilities'} style={{ ...btn(false), padding: '2px 8px', marginRight: 4 }}>Move</button>
                           <button onClick={() => removeCustomer(c.id)} style={{ ...btn(false), padding: '2px 8px', color: 'var(--red, #c0392b)' }}>Remove</button>
                         </td>
                       </tr>
+                      {moveId === c.id && verId && (
+                        <tr style={{ background: 'var(--bg2, #f8f9fb)' }}>
+                          <td colSpan={30} style={{ padding: '8px 14px' }}>
+                            <MovePanel fac={fac} verId={verId} onMove={(df, zid, zn) => moveCustomer(c, df, zid, zn)} onCancel={() => setMoveId(null)} />
+                          </td>
+                        </tr>
+                      )}
                       {auditId === c.id && linkOf(c) && (
                         <tr style={{ background: 'var(--bg2, #f8f9fb)' }}>
                           <td colSpan={30} style={{ padding: '8px 14px' }}>
@@ -533,6 +636,7 @@ export default function SpaceForecast() {
                   </tbody>
                 </table>
               </div>
+              </LockBox>
               <div style={{ padding: '10px 14px', fontSize: 11, color: 'var(--text-dim, #9aaabb)' }}>
                 Positions = pallets / stack factor. Gold-outlined cells are explicit forecasts; other months inherit the month before. Double-click a cell to carry it through the later months.
                 Status compares "Now" to this month's forecast. "Now" is live from Datex for rows linked to a project and typed by hand for the rest.
@@ -827,5 +931,40 @@ function OverrideInput({ initial, onSet, onClear }) {
       <button style={{ ...btn(false), padding: '1px 8px' }} disabled={!(num > 0) || num === Number(initial)} onClick={() => onSet(num)}>Set</button>
       {onClear && <button style={{ ...btn(false), padding: '1px 8px' }} onClick={onClear}>Clear</button>}
     </span>
+  )
+}
+
+// fieldset disabled = every input/button inside is inert (used to lock Master)
+const LockBox = ({ locked, children }) => (
+  <fieldset disabled={locked} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>{children}</fieldset>
+)
+
+// Move a customer row to another facility + zone (hypothetical versions only)
+function MovePanel({ fac, verId, onMove, onCancel }) {
+  const [dest, setDest] = useState(FAC_ORDER.find((f) => f !== fac))
+  const [zones, setZones] = useState(null)
+  const [zid, setZid] = useState('')
+  useEffect(() => {
+    let dead = false
+    setZones(null)
+    loadFacility(dest, KEYS, verId).then((d) => { if (!dead) { setZones(d ? d.zones : []); setZid(d && d.zones[0] ? d.zones[0].id : '') } }).catch(() => { if (!dead) setZones([]) })
+    return () => { dead = true }
+  }, [dest, verId])
+  const zn = zones && zones.find((z) => z.id === zid)
+  return (
+    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 }}>
+      <b>Move to</b>
+      <select value={dest} onChange={(e) => setDest(e.target.value)} style={{ ...numInput(130), textAlign: 'left', fontFamily: 'inherit' }}>
+        {FAC_ORDER.filter((f) => f !== fac).map((f) => <option key={f} value={f}>{F[f].name}</option>)}
+      </select>
+      <select value={zid} onChange={(e) => setZid(e.target.value)} disabled={!zones || !zones.length} style={{ ...numInput(140), textAlign: 'left', fontFamily: 'inherit' }}>
+        {(zones || []).map((z) => <option key={z.id} value={z.id}>{z.name}</option>)}
+      </select>
+      <button style={btn(true)} disabled={!zn} onClick={() => onMove(dest, zid, zn.name)}>Move</button>
+      <button style={btn(false)} onClick={onCancel}>Cancel</button>
+      <span style={{ color: 'var(--text-secondary, #4b5a72)' }}>
+        {zones && !zones.length ? 'That facility has no zones in this version yet.' : 'Carries the forecast, stack and alert thresholds. The live Datex link is dropped.'}
+      </span>
+    </div>
   )
 }
