@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import {
   monthKeys, monthLabel, deriveFc, loadFacility, saveZone, saveCustomer, saveScenario,
-  deleteRow, TABLES, seedMadisonStarter, fetchLive, loadProjectMap, addProjectMap, matchLive, GROUP_LABEL,
+  deleteRow, TABLES, seedMadisonStarter, fetchLive, loadProjectMap, addProjectMap, matchLive, GROUP_LABEL, loadStackOverrides, saveStackOverride, clearStackOverride, ovKey,
 } from '../lib/spaceForecast.js'
 
 // /spaceforecast — per-facility capacity vs. projected footprint, next 12 months.
@@ -113,8 +113,8 @@ export default function SpaceForecast() {
     if (!loaded) return undefined
     let dead = false
     setLiveStore((s) => ({ ...s, [fac]: { ...(s[fac] || {}), status: 'loading' } }))
-    Promise.all([fetchLive(fac), loadProjectMap(fac).catch((e) => { throw new Error('project map: ' + (e.message || e)) })])
-      .then(([lv, map]) => { if (!dead) setLiveStore((s) => ({ ...s, [fac]: { status: 'ok', asOf: lv.asOf, rows: lv.rows, map } })) })
+    Promise.all([fetchLive(fac), loadProjectMap(fac).catch((e) => { throw new Error('project map: ' + (e.message || e)) }), loadStackOverrides(fac).catch(() => ({}))])
+      .then(([lv, map, ov]) => { if (!dead) setLiveStore((s) => ({ ...s, [fac]: { status: 'ok', asOf: lv.asOf, rows: lv.rows, map, ov } })) })
       .catch((e) => { if (!dead) setLiveStore((s) => ({ ...s, [fac]: { status: 'error', err: e.message || String(e) } })) })
     return () => { dead = true }
   }, [fac, loaded, liveTick])
@@ -122,7 +122,24 @@ export default function SpaceForecast() {
   const liveOn = live.status === 'ok'
   const match = useMemo(() => (liveOn ? matchLive(live.map, live.rows) : { byCustomer: {}, unmapped: [] }), [liveOn, live.map, live.rows])
   const linkOf = (c) => (liveOn ? match.byCustomer[c.id] || null : null)
-  const curOf = (c) => { const l = linkOf(c); return l ? Math.round(l.lps) : c.current }
+  // Stackability: a live row's effective stack is the override for its Datex warehouse + project + material
+  // group, else the plan row's own stack. Now is expressed in the plan row's pallet unit
+  // (positions x plan stack), so with no override it equals raw LPs.
+  const ovMap = (liveOn && live.ov) || {}
+  const stackFor = (c, r) => (ovMap[ovKey(r.warehouseId, r.projectId, r.materialGroupId)] || {}).stack || c.stack || 1
+  const livePositions = (c) => { const l = linkOf(c); return l ? l.rows.reduce((a, r) => a + r.lps / stackFor(c, r), 0) : 0 }
+  const curOf = (c) => { const l = linkOf(c); return l ? Math.round(livePositions(c) * (c.stack || 1)) : c.current }
+  const [auditId, setAuditId] = useState(null)
+  const setOverride = (r, stack) => {
+    const k = ovKey(r.warehouseId, r.projectId, r.materialGroupId)
+    setLiveStore((st) => ({ ...st, [fac]: { ...st[fac], ov: { ...(st[fac].ov || {}), [k]: { stack, note: '' } } } }))
+    now(() => saveStackOverride(fac, { wid: r.warehouseId, pid: r.projectId, mg: r.materialGroupId, stack }))
+  }
+  const clearOverride = (r) => {
+    const k = ovKey(r.warehouseId, r.projectId, r.materialGroupId)
+    setLiveStore((st) => { const o = { ...(st[fac].ov || {}) }; delete o[k]; return { ...st, [fac]: { ...st[fac], ov: o } } })
+    now(() => clearStackOverride(r.warehouseId, r.projectId, r.materialGroupId))
+  }
   const nameOf = (c) => {
     const l = linkOf(c)
     if (!l || !l.projects.length) return c.name
@@ -311,7 +328,7 @@ export default function SpaceForecast() {
 
   return (
     <div style={{ fontFamily: "var(--font-body, 'DM Sans', system-ui, sans-serif)", color: 'var(--text-primary, #111827)', background: 'var(--bg0, #f3f5f8)', padding: 16, minHeight: '100vh' }}>
-      <div style={{ maxWidth: 1180, margin: '0 auto' }}>
+      <div style={{ maxWidth: 'none', margin: '0 auto' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
           <h1 style={{ margin: 0, fontFamily: "var(--font-display, 'Syne', sans-serif)", fontSize: 24, fontWeight: 700 }}>Space forecast</h1>
           <span style={{ fontSize: 12, color: 'var(--text-secondary, #4b5a72)' }}>Capacity vs. projected footprint, next 12 months. Edits save automatically.</span>
@@ -391,7 +408,7 @@ export default function SpaceForecast() {
                   <>
                     <span style={{ ...mono, display: 'inline-block', padding: '0 6px', borderRadius: 4, background: 'var(--green-bg, #eaf6ef)', border: '1px solid var(--green, #1a8a52)', color: 'var(--green, #1a8a52)', marginRight: 6 }}>live</span>
                     “Now” = on-hand license plates from Datex as of <b>{live.asOf}</b>, for rows linked to a Datex project. Typed values are kept on file but not used for linked rows.
-                    LPs are raw counts: Positions = LPs ÷ Stack, so rows imported in positions (Stack 1) can read high for stacked or bulk product until stackability overrides are set.
+                    Click a green Now to audit its stacking by material group and set a stack override (LPs per position) where Datex's flag is wrong. With no override, Now is raw LPs and uses the row's own Stack; * marks a row with an override.
                     {' '}<button style={{ ...btn(false), padding: '1px 8px' }} onClick={() => setLiveTick((t) => t + 1)}>Refresh</button>
                   </>
                 )}
@@ -426,7 +443,8 @@ export default function SpaceForecast() {
                     {groups.map((g) => (
                       <Fragment key={g.z.id}>
                     {g.rows.map((c) => (
-                      <tr key={c.id} style={{ borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
+                      <Fragment key={c.id}>
+                      <tr style={{ borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
                         <td style={{ ...td(), ...stickyCol('var(--bg1, #fff)') }}>
                           {linkOf(c) ? (
                             <div title={`Datex project${linkOf(c).projects.length > 1 ? 's' : ''}: ${nameOf(c)}\nPlan label: ${c.name}`}>
@@ -448,10 +466,12 @@ export default function SpaceForecast() {
                         <td style={td('right')}>
                           {linkOf(c) ? (
                             <span
-                              title={`Live from Datex (MotherDuck), as of ${live.asOf}\nLPs: ${n0(linkOf(c).lps)}   Datex weighted: ${n0(linkOf(c).weighted)}\nTyped value on file (not used): ${n0(c.current)}\n` +
-                                linkOf(c).projects.map((p) => '• ' + p.name + (p.mg != null ? ' · ' + (GROUP_LABEL[p.mg] || 'group ' + p.mg) : '')).join('\n')}
-                              style={{ ...numInput(62), display: 'inline-block', background: 'var(--green-bg, #eaf6ef)', borderColor: 'var(--green, #1a8a52)', cursor: 'help' }}
-                            >{n0(curOf(c))}</span>
+                              onClick={() => setAuditId(auditId === c.id ? null : c.id)}
+                              title={`Live from Datex (MotherDuck), as of ${live.asOf}. Click to audit stacking.\nLPs ${n0(linkOf(c).lps)}  |  Datex weighted ${n0(linkOf(c).weighted)}  |  effective positions ${n0(livePositions(c))}\n` +
+                                linkOf(c).rows.map((r) => `• ${r.projectName} · ${r.materialGroup}: ${n0(r.lps)} LPs ÷ ${stackFor(c, r)}${ovMap[ovKey(r.warehouseId, r.projectId, r.materialGroupId)] ? ' (override)' : ''} = ${n0(r.lps / stackFor(c, r))} pos`).join('\n') +
+                                `\nTyped value on file (not used): ${n0(c.current)}`}
+                              style={{ ...numInput(62), display: 'inline-block', background: 'var(--green-bg, #eaf6ef)', borderColor: auditId === c.id ? 'var(--brand, #a07818)' : 'var(--green, #1a8a52)', cursor: 'pointer' }}
+                            >{n0(curOf(c))}{linkOf(c).rows.some((r) => ovMap[ovKey(r.warehouseId, r.projectId, r.materialGroupId)]) ? '*' : ''}</span>
                           ) : (
                             <input type="number" value={c.current} onChange={(e) => patchCust(c.id, { current: Number(e.target.value) || 0 }, true)} title="Today's pallet count, typed by hand (this row isn't linked to a Datex project)" style={{ ...numInput(62), background: 'var(--bg1, #fff)' }} />
                           )}
@@ -471,6 +491,14 @@ export default function SpaceForecast() {
                           <button onClick={() => removeCustomer(c.id)} style={{ ...btn(false), padding: '2px 8px', color: 'var(--red, #c0392b)' }}>Remove</button>
                         </td>
                       </tr>
+                      {auditId === c.id && linkOf(c) && (
+                        <tr style={{ background: 'var(--bg2, #f8f9fb)' }}>
+                          <td colSpan={30} style={{ padding: '8px 14px' }}>
+                            <StackAudit c={c} rows={linkOf(c).rows} stackFor={stackFor} ov={ovMap} onSet={setOverride} onClear={clearOverride} now={curOf(c)} positions={livePositions(c)} />
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     ))}
                     {(() => {
                       const z = g.z
@@ -650,7 +678,7 @@ function Chart({ series, cap, sel, onSel, color }) {
   const bw = (W - L - R) / series.length
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((p) => Math.round((max / 1.12) * p))
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }} role="img" aria-label="Projected positions by month against capacity">
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', maxHeight: 330, display: 'block' }} role="img" aria-label="Projected positions by month against capacity">
       <defs>
         <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <rect width="6" height="6" fill="var(--brand-bg, #fef9ec)" />
@@ -747,5 +775,57 @@ function EmptyFacility({ name, onAdd, onSeed, busy }) {
         {onSeed && <button style={btn(false)} onClick={onSeed} disabled={busy}>{busy ? 'Importing…' : 'Import Madison workbook snapshot'}</button>}
       </div>
     </div>
+  )
+}
+
+// Stack audit: per Datex project + material group, LPs vs effective positions, with an override input.
+function StackAudit({ c, rows, stackFor, ov, onSet, onClear, now, positions }) {
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Stack audit: {c.name} <span style={{ fontWeight: 400, color: 'var(--text-secondary, #4b5a72)' }}>(plan Stack {c.stack}; Now = {n0(positions)} positions × {c.stack} = {n0(now)})</span></div>
+      <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
+        <thead>
+          <tr style={{ color: 'var(--text-secondary, #4b5a72)', textAlign: 'right' }}>
+            {['Datex project', 'Material group', 'LPs', 'Datex weighted', 'Datex stack', 'Stack used', 'Positions', 'Override (LPs / position)'].map((h, i) => (
+              <th key={h} style={{ padding: '2px 10px', textAlign: i < 2 ? 'left' : 'right', fontWeight: 600 }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const k = ovKey(r.warehouseId, r.projectId, r.materialGroupId)
+            const o = ov[k]
+            const used = stackFor(c, r)
+            return (
+              <tr key={k} style={{ borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
+                <td style={{ padding: '3px 10px' }}>{r.projectName}</td>
+                <td style={{ padding: '3px 10px' }}>{r.materialGroup}</td>
+                <td style={{ padding: '3px 10px', textAlign: 'right', ...mono }}>{n0(r.lps)}</td>
+                <td style={{ padding: '3px 10px', textAlign: 'right', ...mono }}>{n0(r.weighted)}</td>
+                <td style={{ padding: '3px 10px', textAlign: 'right', ...mono }}>{r.weighted > 0 ? (r.lps / r.weighted).toFixed(2).replace(/\.?0+$/, '') : '—'}</td>
+                <td style={{ padding: '3px 10px', textAlign: 'right', ...mono, fontWeight: o ? 700 : 400, color: o ? 'var(--brand, #a07818)' : undefined }}>{used}{o ? ' (override)' : ' (plan)'}</td>
+                <td style={{ padding: '3px 10px', textAlign: 'right', ...mono }}>{n0(r.lps / used)}</td>
+                <td style={{ padding: '3px 10px', textAlign: 'right' }}>
+                  <OverrideInput key={k + (o ? o.stack : '')} initial={o ? o.stack : ''} onSet={(v) => onSet(r, v)} onClear={o ? () => onClear(r) : null} />
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 10, color: 'var(--text-dim, #9aaabb)', marginTop: 4 }}>Override applies to this Datex project + material group everywhere (all plan rows, all users). 1 = one LP per position, 2 = double-stacked.</div>
+    </div>
+  )
+}
+
+function OverrideInput({ initial, onSet, onClear }) {
+  const [v, setV] = useState(String(initial))
+  const num = Number(v)
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+      <input type="number" min="0.1" step="0.5" value={v} onChange={(e) => setV(e.target.value)} style={numInput(52)} />
+      <button style={{ ...btn(false), padding: '1px 8px' }} disabled={!(num > 0) || num === Number(initial)} onClick={() => onSet(num)}>Set</button>
+      {onClear && <button style={{ ...btn(false), padding: '1px 8px' }} onClick={onClear}>Clear</button>}
+    </span>
   )
 }

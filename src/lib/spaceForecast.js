@@ -224,3 +224,34 @@ export function matchLive(map, liveRows) {
   const unmapped = [...left.values()].sort((a, b) => b.lps - a.lps)
   return { byCustomer, unmapped }
 }
+
+// ── Stackability overrides (project + material group) ───────────────────────
+// space_forecast_stack_override: LPs per position for a Datex warehouse + project +
+// material group, replacing the plan row's own stack when turning live LPs into
+// effective positions. material_group_id -1 = live row with no material group.
+
+export const ovKey = (wid, pid, mg) => `${wid}:${pid}:${mg == null ? -1 : mg}`
+
+export async function loadStackOverrides(facility) {
+  if (!supabase) return {}
+  const { data, error } = await supabase.from('space_forecast_stack_override').select('*').eq('facility', facility)
+  if (error) throw error
+  const out = {}
+  for (const r of data) out[ovKey(r.warehouse_id, r.project_id, r.material_group_id)] = { id: r.id, stack: Number(r.stack), note: r.note || '' }
+  return out
+}
+
+export async function saveStackOverride(facility, { wid, pid, mg, stack, note = '' }) {
+  if (!supabase) return
+  const { error } = await supabase.from('space_forecast_stack_override').upsert({
+    facility, warehouse_id: wid, project_id: pid, material_group_id: mg == null ? -1 : mg, stack, note, updated_at: new Date().toISOString(),
+  }, { onConflict: 'warehouse_id,project_id,material_group_id' })
+  if (error) throw error
+}
+
+export async function clearStackOverride(wid, pid, mg) {
+  if (!supabase) return
+  const { error } = await supabase.from('space_forecast_stack_override').delete()
+    .eq('warehouse_id', wid).eq('project_id', pid).eq('material_group_id', mg == null ? -1 : mg)
+  if (error) throw error
+}
