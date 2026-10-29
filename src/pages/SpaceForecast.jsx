@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase.js'
 import {
   monthKeys, monthLabel, deriveFc, loadFacility, saveZone, saveCustomer, saveScenario,
@@ -40,6 +40,7 @@ const band = (pct) => {
   if (pct < 95) return { c: 'var(--orange, #d4824a)', t: 'High' }
   return { c: 'var(--red, #c0392b)', t: 'Over' }
 }
+const TARGET = 0.95 // Dean: operate at 95% of capacity
 const n0 = (n) => Math.round(n || 0).toLocaleString()
 
 // Trigger rule (digest should additionally require 3 consecutive days out of band
@@ -199,6 +200,38 @@ export default function SpaceForecast() {
     })
   }
 
+  // Excel export: all five facilities, live Now where the feed answers, formulas for everything derived
+  const [exporting, setExporting] = useState(false)
+  const exportExcel = async () => {
+    setExporting(true)
+    try {
+      const facs = []
+      for (const id of FAC_ORDER) {
+        const d = store[id] || (await loadFacility(id, KEYS)) || EMPTY
+        let lv = liveStore[id]
+        if (!lv || lv.status !== 'ok') {
+          try { const [l, map] = await Promise.all([fetchLive(id), loadProjectMap(id)]); lv = { status: 'ok', asOf: l.asOf, rows: l.rows, map } } catch { lv = null }
+        }
+        const mt = lv ? matchLive(lv.map, lv.rows) : { byCustomer: {} }
+        const zname = Object.fromEntries(d.zones.map((z) => [z.id, z.name]))
+        facs.push({
+          id, name: F[id].name, asOf: lv ? lv.asOf : '',
+          zones: d.zones.map((z) => ({ name: z.name, capacity: z.capacity })),
+          customers: d.customers.map((c) => {
+            const l = mt.byCustomer[c.id]
+            const nm = l && l.projects.length
+              ? l.projects.map((p) => (p.mg != null ? `${p.name} · ${GROUP_LABEL[p.mg] || 'group ' + p.mg}` : p.name)).filter((v, i, ar) => ar.indexOf(v) === i).join(' + ')
+              : c.name
+            return { name: nm, zone: zname[c.zone] || '', stack: c.stack || 1, now: l ? l.lps : c.current, src: l ? 'Datex live' : 'typed', fc: c.fc }
+          }),
+          scen: d.scen.map((s) => ({ name: s.name, zone: zname[s.zone] || '', pallets: s.pallets, stack: s.stack, from: s.from, to: s.to, on: s.on })),
+        })
+      }
+      const { buildWorkbook, downloadWorkbook } = await import('../lib/spaceForecastExport.js')
+      downloadWorkbook(buildWorkbook(facs, MONTHS), `space-forecast-${new Date().toISOString().slice(0, 10)}.xlsx`)
+    } catch (e) { setSync({ state: 'error', msg: 'Export failed: ' + (e.message || e) }) } finally { setExporting(false) }
+  }
+
   // zones
   const patchZone = (id, p) => {
     const idx = cur.zones.findIndex((z) => z.id === id)
@@ -206,6 +239,20 @@ export default function SpaceForecast() {
     const z = { ...cur.zones[idx], ...p }
     update((f) => ({ ...f, zones: f.zones.map((x) => (x.id === id ? z : x)) }))
     persist('z' + id, () => saveZone(fac, z, idx))
+  }
+  const [zoneMsg, setZoneMsg] = useState('')
+  const removeZone = (z) => {
+    const nc = customers.filter((c) => c.zone === z.id).length
+    const ns = facScen.filter((x) => x.zone === z.id).length
+    if (nc + ns > 0) {
+      setZoneMsg(`Can't remove ${z.name}: it still has ${nc} customer${nc === 1 ? '' : 's'}${ns ? ` and ${ns} scenario${ns === 1 ? '' : 's'}` : ''}. Move them to another zone first (Zone column in the table), then remove it.`)
+      return
+    }
+    if (!window.confirm(`Remove the empty zone "${z.name}" from ${F[fac].name}?`)) return
+    setZoneMsg('')
+    if (zoneSel === z.id) setZoneSel('all')
+    update((f) => ({ ...f, zones: f.zones.filter((x) => x.id !== z.id) }))
+    now(() => deleteRow(TABLES.zone, z.id))
   }
   const addFirstZone = () => {
     const z = { id: newId(), name: 'New zone', note: '', capacity: 0 }
@@ -256,6 +303,7 @@ export default function SpaceForecast() {
   const alerts = customers.map((c) => { const cu = curOf(c); return { c, cu, ...status(c, cu) } }).filter((a) => a.s !== 'ok')
   const unmappedTotal = match.unmapped.reduce((a, u) => a + u.lps, 0)
   const rows = customers.filter((c) => zoneSel === 'all' || c.zone === zoneSel)
+  const groups = zones.filter((z) => zoneSel === 'all' || z.id === zoneSel).map((z) => ({ z, rows: customers.filter((c) => c.zone === z.id) })).filter((g) => g.rows.length > 0)
   const peak = series.reduce((a, s, i) => (s.t > a.v ? { v: s.t, i } : a), { v: 0, i: 0 })
   const firstOver = series.findIndex((s) => capAll > 0 && s.t > capAll)
 
@@ -293,11 +341,15 @@ export default function SpaceForecast() {
                 cap={zones.reduce((s, z) => s + z.capacity, 0)}
                 used={zones.reduce((s, z) => s + calc.base(z.id, m) + calc.extra(z.id, m), 0)} />
               {zones.map((z) => (
-                <ZoneCard key={z.id} active={zoneSel === z.id} onClick={() => setZoneSel(z.id)} name={z.name} note={z.note}
+                <ZoneCard key={z.id} active={zoneSel === z.id} onClick={() => { setZoneSel(z.id); setZoneMsg('') }} name={z.name} note={z.note}
                   cap={z.capacity} used={calc.base(z.id, m) + calc.extra(z.id, m)}
-                  onCap={(v) => patchZone(z.id, { capacity: v })} />
+                  onCap={(v) => patchZone(z.id, { capacity: v })}
+                  onName={(v) => patchZone(z.id, { name: v })} onRemove={() => removeZone(z)} />
               ))}
+              <button onClick={addFirstZone} style={{ ...card, padding: 12, cursor: 'pointer', borderStyle: 'dashed', color: 'var(--text-secondary, #4b5a72)', fontSize: 12, fontFamily: 'inherit', minHeight: 96 }}
+                title="Add a zone (room or temperature area) to this facility">+ Add zone</button>
             </div>
+            {zoneMsg && <Banner tone="warn">{zoneMsg}</Banner>}
 
             <div style={{ ...card, padding: 14, marginBottom: 14 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
@@ -315,6 +367,7 @@ export default function SpaceForecast() {
                 <Legend swatch={F[fac].color} text="Customer forecast" />
                 <Legend swatch="url(#hatch)" text="What-if scenarios" hatch />
                 <Legend dash text="Capacity" />
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 16, borderTop: '2px dotted var(--orange, #d4824a)' }} />95% target</span>
               </div>
             </div>
 
@@ -326,7 +379,10 @@ export default function SpaceForecast() {
             <div style={{ ...card, overflow: 'hidden' }}>
               <div style={{ padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <div style={{ fontSize: 13, fontWeight: 600 }}>Customer forecast (pallets)</div>
-                <button style={btn(false)} onClick={addCustomer}>Add customer</button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button style={btn(false)} onClick={exportExcel} disabled={exporting} title="All facilities: one sheet each, formulas for positions, zone totals and utilization, plus Scenarios and Summary sheets">{exporting ? 'Exporting…' : 'Export to Excel'}</button>
+                  <button style={btn(false)} onClick={addCustomer}>Add customer</button>
+                </div>
               </div>
               <div style={{ padding: '0 14px 10px', fontSize: 11, color: 'var(--text-secondary, #4b5a72)' }}>
                 {live.status === 'loading' && 'Loading live counts from Datex…'}
@@ -343,6 +399,13 @@ export default function SpaceForecast() {
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
                   <thead>
+                    <tr style={{ background: 'var(--bg3, #edf0f5)', color: 'var(--text-dim, #6f7f96)', fontSize: 10, letterSpacing: 0.4 }}>
+                      <th style={{ ...stickyCol('var(--bg3, #edf0f5)'), zIndex: 3 }} />
+                      <th colSpan={zoneSel === 'all' ? 2 : 1} />
+                      <th colSpan={2} style={{ padding: '6px 8px', textAlign: 'left', color: 'var(--green, #1a8a52)', borderBottom: '2px solid var(--green, #1a8a52)' }}>LIVE · DATEX{liveOn ? ` · ${live.asOf}` : ''}</th>
+                      <th colSpan={12} style={{ padding: '6px 8px', textAlign: 'left', color: 'var(--brand, #a07818)', borderBottom: '2px solid var(--brand, #a07818)' }}>FORECAST · PLAN, PALLETS BY MONTH (typed)</th>
+                      <th colSpan={5} style={{ padding: '6px 8px', textAlign: 'left' }}>POSITIONS & ALERT RULES</th>
+                    </tr>
                     <tr style={{ background: 'var(--bg3, #edf0f5)', color: 'var(--text-secondary, #4b5a72)' }}>
                       <th style={{ ...th('left', 210), ...stickyCol('var(--bg3, #edf0f5)'), zIndex: 3 }} title="Datex project name for rows linked to MotherDuck; the plan label otherwise">Customer</th>
                       {zoneSel === 'all' && <th style={th('left')}>Zone</th>}
@@ -360,7 +423,9 @@ export default function SpaceForecast() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((c) => (
+                    {groups.map((g) => (
+                      <Fragment key={g.z.id}>
+                    {g.rows.map((c) => (
                       <tr key={c.id} style={{ borderTop: '1px solid var(--border-subtle, #eceff5)' }}>
                         <td style={{ ...td(), ...stickyCol('var(--bg1, #fff)') }}>
                           {linkOf(c) ? (
@@ -406,6 +471,27 @@ export default function SpaceForecast() {
                           <button onClick={() => removeCustomer(c.id)} style={{ ...btn(false), padding: '2px 8px', color: 'var(--red, #c0392b)' }}>Remove</button>
                         </td>
                       </tr>
+                    ))}
+                    {(() => {
+                      const z = g.z
+                      const pos = g.rows.reduce((a, c) => a + (c.fc[m] || 0) / (c.stack || 1), 0)
+                      const pct = z.capacity > 0 ? (pos / z.capacity) * 100 : null
+                      const bg = 'var(--bg2, #f8f9fb)'
+                      return (
+                        <tr style={{ background: bg, borderTop: '1px solid var(--border, #dce2ec)', fontWeight: 600 }}>
+                          <td style={{ ...td(), ...stickyCol(bg) }}>{z.name} total</td>
+                          <td colSpan={zoneSel === 'all' ? 2 : 1} />
+                          <td style={{ ...td('right'), ...mono }}>{n0(g.rows.reduce((a, c) => a + curOf(c), 0))}</td>
+                          <td style={{ ...td(), fontSize: 11, color: band(pct).c }}>{pct == null ? 'no capacity set' : `${pct.toFixed(0)}% of ${n0(z.capacity)}`}</td>
+                          {MONTHS.map((_, i) => (
+                            <td key={KEYS[i]} style={{ ...td('right'), ...mono, background: i === m ? 'var(--brand-bg, #fef9ec)' : undefined }}>{n0(g.rows.reduce((a, c) => a + (c.fc[i] || 0), 0))}</td>
+                          ))}
+                          <td style={{ ...td('right'), ...mono }}>{n0(pos)}</td>
+                          <td colSpan={4} />
+                        </tr>
+                      )
+                    })()}
+                      </Fragment>
                     ))}
                     {liveOn && match.unmapped.length > 0 && (
                       <tr style={{ borderTop: '2px solid var(--border, #dce2ec)', background: 'var(--bg2, #f8f9fb)' }}>
@@ -520,17 +606,25 @@ function AlertsPanel({ alerts, zones, dflt, setDflt, applyAll, month, nameOf }) 
   )
 }
 
-function ZoneCard({ name, note, cap, used, active, onClick, onCap }) {
+function ZoneCard({ name, note, cap, used, active, onClick, onCap, onName, onRemove }) {
   const pct = cap > 0 ? (used / cap) * 100 : null
   const b = band(pct)
   const free = cap - used
   return (
     <div onClick={onClick} style={{ ...card, padding: 12, cursor: 'pointer', borderColor: active ? 'var(--brand, #a07818)' : 'var(--border, #dce2ec)', background: active ? 'var(--brand-bg, #fef9ec)' : 'var(--bg1, #fff)' }}>
-      <div style={{ fontSize: 12, fontWeight: 700 }}>{name}</div>
+      {onName ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <input value={name} onClick={(e) => e.stopPropagation()} onChange={(e) => onName(e.target.value)} title="Rename zone"
+            style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, fontFamily: 'inherit', border: '1px solid transparent', background: 'transparent', padding: '0 2px', borderRadius: 4, color: 'inherit' }} />
+          <button onClick={(e) => { e.stopPropagation(); onRemove() }} title="Remove zone (only allowed when empty)"
+            style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--text-dim, #9aaabb)', fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+        </div>
+      ) : <div style={{ fontSize: 12, fontWeight: 700 }}>{name}</div>}
       <div style={{ fontSize: 10, color: 'var(--text-dim, #9aaabb)', minHeight: 14 }}>{note}</div>
       <div style={{ ...mono, fontSize: 22, fontWeight: 600, color: b.c, marginTop: 4 }}>{pct == null ? '—' : pct.toFixed(0) + '%'}</div>
-      <div style={{ height: 5, borderRadius: 3, background: 'var(--bg4, #e2e7ef)', margin: '6px 0', overflow: 'hidden' }}>
+      <div style={{ height: 5, borderRadius: 3, background: 'var(--bg4, #e2e7ef)', margin: '6px 0', overflow: 'hidden', position: 'relative' }}>
         <div style={{ width: Math.min(100, pct || 0) + '%', height: '100%', background: b.c }} />
+        <div title="95% target" style={{ position: 'absolute', left: TARGET * 100 + '%', top: 0, width: 2, height: '100%', background: 'var(--text, #1a2638)' }} />
       </div>
       <div style={{ ...mono, fontSize: 11, color: 'var(--text-secondary, #4b5a72)' }}>
         {n0(used)} / {onCap ? (
@@ -540,6 +634,11 @@ function ZoneCard({ name, note, cap, used, active, onClick, onCap }) {
       <div style={{ fontSize: 11, color: free < 0 ? 'var(--red, #c0392b)' : 'var(--text-secondary, #4b5a72)' }}>
         {free < 0 ? `${n0(-free)} over` : `${n0(free)} open`}
       </div>
+      {cap > 0 && (
+        <div style={{ fontSize: 10, color: cap * TARGET - used < 0 ? 'var(--red, #c0392b)' : 'var(--text-dim, #9aaabb)' }}>
+          {cap * TARGET - used < 0 ? `${n0(used - cap * TARGET)} over 95%` : `${n0(cap * TARGET - used)} to 95%`}
+        </div>
+      )}
     </div>
   )
 }
@@ -580,6 +679,8 @@ function Chart({ series, cap, sel, onSel, color }) {
       })}
       {cap > 0 && (
         <g>
+          <line x1={L} x2={W - R} y1={y(cap * TARGET)} y2={y(cap * TARGET)} stroke="var(--orange, #d4824a)" strokeDasharray="2 3" strokeWidth="1.4" />
+          <text x={L + 4} y={y(cap * TARGET) + 11} fontSize="10" fill="var(--orange, #d4824a)">95% target {n0(cap * TARGET)}</text>
           <line x1={L} x2={W - R} y1={y(cap)} y2={y(cap)} stroke="var(--red, #c0392b)" strokeDasharray="5 4" strokeWidth="1.4" />
           <text x={W - R} y={y(cap) - 4} textAnchor="end" fontSize="10" fill="var(--red, #c0392b)">Capacity {n0(cap)}</text>
         </g>
