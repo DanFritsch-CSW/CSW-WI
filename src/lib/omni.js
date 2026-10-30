@@ -404,6 +404,15 @@ function scheduleToLane(workSchedule, startTime, facilityId) {
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
     if (!isNaN(hour)) {
+      // WR: own cutoffs, no 3rd shift. 2nd Shift is the catch-all for the
+      // rest of the day since there's no 3rd-shift bucket to fall into.
+      // Set per Dan 2026-10-30 (Donald Sargent, "WR 1st Bulk" @ 7am, was
+      // landing in 1st Shift under the old <10 cutoff — wanted in Mid).
+      if (facilityId === 'wr') {
+        if (hour < 7)  return 'shift1'
+        if (hour < 11) return 'mid'
+        return 'shift2'
+      }
       // Madison: tighter 1st-shift cutoff. Several Madison B2E employees carry a
       // raw time-range work_schedule string (e.g. "8:00am - 4:30pm") instead of a
       // named shift label, so they fall through to this numeric fallback. An
