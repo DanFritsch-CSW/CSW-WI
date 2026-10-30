@@ -67,6 +67,18 @@
 // Postgres as public.norm_reference (used by the weekly report) -- keep the
 // two in sync if either changes. Everything else is graded as before.
 //
+// PER-FACILITY BLOCKS 2026-10-30 (Dan's explicit request): below the
+// unchanged all-facility block the task now lists one block per facility
+// (Kenosha, Franksville, Madison, Eau Claire, Wisconsin Rapids) in the same
+// "today | rolling 7 days" format, so Dan can drill into a facility without
+// a chat deep-dive. Warehouse is omitted inside a facility block (always
+// 100% there). A facility with nothing graded in the 7-day window prints
+// "nothing graded" (Eau Claire / Wisconsin Rapids until a CSR approves an
+// agent-created appointment there). Same grading logic as the top block;
+// facility comes from agent_field_accuracy.warehouse (legacy CAL/KEN/MAD/WR/EC
+// codes are mapped to the CSW- names). The text stays a few thousand
+// characters -- far under Front's 65,535 limit.
+//
 // DELIVERY LOG 2026-10-18: every run is also written to public.digest_runs
 // (digest 'agent-accuracy-digest': posted, task_id, error, detail).
 //
@@ -102,7 +114,7 @@ const FIELD_KEYS = [
 ]
 
 // Only the columns this digest needs -- keeps the payload small.
-const SELECT_COLUMNS = ['compared_at', ...FIELD_KEYS.flatMap((f) => [`${f.key}_match`, `${f.key}_agent`, `${f.key}_actual`])].join(',')
+const SELECT_COLUMNS = ['compared_at', 'warehouse', ...FIELD_KEYS.flatMap((f) => [`${f.key}_match`, `${f.key}_agent`, `${f.key}_actual`])].join(',')
 
 // Normalized text for grading: lowercase, drop periods, no spaces around
 // commas, collapse whitespace. Blank and null are equivalent.
@@ -195,6 +207,17 @@ function mdLabel(ymd) {
   return `${m}/${d}`
 }
 
+// Facility blocks, in display order. `names` are every warehouse spelling
+// seen in agent_field_accuracy.warehouse (current CSW- names plus the legacy
+// short codes).
+const FACILITIES = [
+  { label: 'KENOSHA', names: ['CSW-Kenosha', 'KEN'] },
+  { label: 'FRANKSVILLE', names: ['CSW-Franksville', 'CAL', 'CSW-Caledonia'] },
+  { label: 'MADISON', names: ['CSW-Madison', 'MAD'] },
+  { label: 'EAU CLAIRE', names: ['CSW-Eau Claire', 'EC'] },
+  { label: 'WISCONSIN RAPIDS', names: ['CSW-Wisconsin Rapids', 'WR'] },
+]
+
 function buildFieldTally(rows) {
   const tally = {}
   for (const { key } of FIELD_KEYS) tally[key] = { matched: 0, compared: 0 }
@@ -243,6 +266,25 @@ function buildSummary(rows) {
   if (todayRows.length === 0) {
     lines.push('')
     lines.push('Nothing was graded today (no approved appointments), so the left column is empty.')
+  }
+
+  // Per-facility drill-down (2026-10-30) -- same format, one block each.
+  for (const fac of FACILITIES) {
+    const inFac = (r) => fac.names.includes(String(r.warehouse || '').trim())
+    const fToday = todayRows.filter(inFac)
+    const fWeek = weekRows.filter(inFac)
+    lines.push('')
+    if (fWeek.length === 0) {
+      lines.push(`${fac.label} — nothing graded`)
+      continue
+    }
+    const t = buildFieldTally(fToday)
+    const w = buildFieldTally(fWeek)
+    lines.push(`${fac.label} — today ${fToday.length} | 7 days ${fWeek.length}`)
+    for (const { key, label } of FIELD_KEYS) {
+      if (key === 'warehouse') continue // always 100% inside a facility block
+      lines.push(`- ${label}: ${fmtPct(t[key].matched, t[key].compared)} | ${fmtPct(w[key].matched, w[key].compared)}`)
+    }
   }
   return { subject, description: lines.join('\n'), gradedToday: todayRows.length, gradedWeek: weekRows.length }
 }
