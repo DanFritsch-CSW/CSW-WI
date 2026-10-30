@@ -40,6 +40,23 @@ export const LANES_CAL2 = [
 
 export const ACTIVE_LANES = ['shift1', 'mid', 'shift2', 'shift3']
 
+// WR has no 3rd shift and isn't expected to get one. Its 4th lane is
+// repurposed as a read-only display of job-code-206 "Case Pickers"
+// (see fetchWrPickers in lib/omni.js) rather than a real shift lane —
+// it's intentionally left out of ACTIVE_LANES_WR so it's never counted
+// toward labor availability/required calculations.
+export const LANES_WR = [
+  { id: 'shift1',         label: '1st Shift'       },
+  { id: 'mid',            label: 'Mid Shift'       },
+  { id: 'shift2',         label: '2nd Shift'       },
+  { id: 'casePickers',    label: 'Case Pickers'    },
+  { id: 'pto',            label: 'PTO'             },
+  { id: 'callin',         label: 'Call-In'         },
+  { id: 'specialProject', label: 'Special Project' },
+]
+
+export const ACTIVE_LANES_WR = ['shift1', 'mid', 'shift2']
+
 export const ACTIVE_LANES_CAL2 = [
   'side12_shift1', 'side12_mid', 'side12_shift2', 'side12_shift3',
   'side35_shift1', 'side35_mid', 'side35_shift2', 'side35_shift3',

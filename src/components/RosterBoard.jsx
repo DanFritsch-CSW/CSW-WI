@@ -16,7 +16,7 @@ import EmployeeTile from './EmployeeTile.jsx'
 import AddTempModal from './AddTempModal.jsx'
 import OtModal from './OtModal.jsx'
 import BreakOverrideModal from './BreakOverrideModal.jsx'
-import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, FACILITIES, FACILITY_LIST } from '../lib/constants.js'
+import { LANES, ACTIVE_LANES, LANES_CAL2, ACTIVE_LANES_CAL2, LANES_WR, ACTIVE_LANES_WR, FACILITIES, FACILITY_LIST } from '../lib/constants.js'
 import {
   fetchTodayAssignments, upsertAssignment, replaceEmployees,
   seedRosterAssignments, deleteAssignment,
@@ -27,7 +27,7 @@ import {
   fetchEmployeeBreaks, upsertEmployeeBreak, deleteEmployeeBreak,
 } from '../lib/supabase.js'
 import { applyFacilityOt, revertFacilityOt } from '../lib/ot.js'
-import { fetchB2eRoster, fetchB2eRosterForRange, fetchB2eTimeOff, fetchActiveB2eEmployees, fetchActiveB2eEmployeesFull } from '../lib/omni.js'
+import { fetchB2eRoster, fetchB2eRosterForRange, fetchB2eTimeOff, fetchActiveB2eEmployees, fetchActiveB2eEmployeesFull, fetchWrPickers } from '../lib/omni.js'
 
 const LANE_SETTING_KEYS = {
   shift1: { start: 'shift1_start', hours: 'shift1_hours' },
@@ -83,6 +83,9 @@ const CAL_ACTIVE_LANES = new Set([
   'side12_shift1','side12_mid','side12_shift2','side12_shift3',
   'side35_shift1','side35_mid','side35_shift2','side35_shift3',
 ])
+// WR has no 3rd shift — its 4th lane ('casePickers') is a read-only
+// job-code-206 display, not a real shift, so it's excluded here too.
+const WR_ACTIVE_LANES = new Set(['shift1', 'mid', 'shift2'])
 
 function getLaneSettings(laneId, settings) {
   const keys = LANE_SETTING_KEYS[laneId]
@@ -230,6 +233,14 @@ function LoanModal({ employee, sourceFacility, onConfirm, onCancel }) {
         { id: 'side35_shift1', label: '3.5 · 1st' }, { id: 'side35_mid', label: '3.5 · Mid' },
         { id: 'side35_shift2', label: '3.5 · 2nd' }, { id: 'side35_shift3', label: '3.5 · 3rd' },
       ]
+    : destFacility === 'wr'
+    ? [
+        // No 3rd Shift / Case Pickers option here — WR has no 3rd shift,
+        // and Case Pickers is a read-only job-code display, not a lane
+        // employees can be loaned into.
+        { id: 'shift1', label: '1st Shift' }, { id: 'mid', label: 'Mid Shift' },
+        { id: 'shift2', label: '2nd Shift' },
+      ]
     : [
         { id: 'shift1', label: '1st Shift' }, { id: 'mid', label: 'Mid Shift' },
         { id: 'shift2', label: '2nd Shift' }, { id: 'shift3', label: '3rd Shift' },
@@ -340,6 +351,40 @@ function DroppableLane({ lane, employees, assignmentMap, carryoverMap, settings,
   )
 }
 
+// Read-only lane for WR's "Case Pickers" column — job-code-206 employees
+// pulled straight from B2E via fetchWrPickers (same source PicklinePanel's
+// "Sync from B2E" picker list uses). Deliberately NOT wired into the
+// drag-and-drop roster_assignments system: these employees' real shift
+// lane (1st/2nd/etc.) is untouched, so this column is purely informational
+// and never affects labor availability/required calculations.
+function CasePickersLane({ lane, pickers }) {
+  return (
+    <div className="lane">
+      <div className="lane-header">
+        <span className="lane-title">{lane.label}</span>
+        <span className="lane-count">{pickers.length}</span>
+      </div>
+      <div className="lane-body">
+        {pickers.map(p => (
+          <div key={p.id} className="emp-tile emp-tile--readonly" title={p.name}>
+            <div className="emp-avatar" style={{ background: '#8a8a8a', opacity: 0.8 }}>
+              {p.name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)}
+            </div>
+            <div className="emp-info">
+              <div className="emp-name">{p.name}</div>
+            </div>
+          </div>
+        ))}
+        {pickers.length === 0 && (
+          <div className="lane-empty-hint" style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-dim)' }}>
+            No job code 206 employees found
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 const STUB_EMPLOYEES = [
   { id: 'e1', name: 'Alex Rivera',    role: 'Lead',       default_lane: 'shift1' },
   { id: 'e2', name: 'Sam Torres',     role: 'Associate',  default_lane: 'shift1' },
@@ -355,10 +400,13 @@ const STUB_EMPLOYEES = [
 export default function RosterBoard({ facility, planDate, settings, onLaborCount, onRosterChange, onBusyChange }) {
   const isCal          = facility === 'cal'
   const isMad          = facility === 'mad'
-  const activeLaneSet  = isCal ? LANES_CAL2     : LANES
-  const activeLaneIds  = isCal ? ACTIVE_LANES_CAL2 : ACTIVE_LANES
-  const activeLaneSet_ = isCal ? CAL_ACTIVE_LANES : STANDARD_ACTIVE_LANES
+  const isWr           = facility === 'wr'
+  const activeLaneSet  = isCal ? LANES_CAL2     : isWr ? LANES_WR     : LANES
+  const activeLaneIds  = isCal ? ACTIVE_LANES_CAL2 : isWr ? ACTIVE_LANES_WR : ACTIVE_LANES
+  const activeLaneSet_ = isCal ? CAL_ACTIVE_LANES  : isWr ? WR_ACTIVE_LANES : STANDARD_ACTIVE_LANES
   const activeLaneIdSet = new Set(activeLaneIds)
+
+  const [casePickers, setCasePickers] = useState([])
 
   const [laneMap, setLaneMap]             = useState({})
   const [assignmentMap, setAssignmentMap] = useState({})
@@ -643,6 +691,20 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
     load(facility, date, () => cancelled)
     return () => { cancelled = true }
   }, [facility, planDate])
+
+  // WR "Case Pickers" column — independent of the roster_assignments load
+  // above. Pulls job-code-206 employees straight from B2E (same source as
+  // PicklinePanel's picker sync) purely for display; does not touch
+  // laneMap/assignmentMap, so it can't affect labor calculations.
+  useEffect(() => {
+    if (!isWr) { setCasePickers([]); return }
+    let cancelled = false
+    const date = planDate || todayISO()
+    fetchWrPickers(date)
+      .then(list => { if (!cancelled) setCasePickers(list) })
+      .catch(() => { if (!cancelled) setCasePickers([]) })
+    return () => { cancelled = true }
+  }, [isWr, facility, planDate])
 
   // ── Busy signal, bubbled up to FacilityPanel / LaborPlanning ────────────
   // Covers: initial/date-change roster load, any in-flight drag-drop write,
@@ -1162,24 +1224,28 @@ export default function RosterBoard({ facility, planDate, settings, onLaborCount
       >
         <div className="roster-lanes" style={gridStyle}>
           {activeLaneSet.map(lane => (
-            <DroppableLane
-              key={lane.id}
-              lane={lane}
-              employees={laneEmployees(lane.id)}
-              assignmentMap={assignmentMap}
-              carryoverMap={carryoverMap}
-              settings={settings}
-              sortOrder={sortOrder}
-              isActiveLane={activeLaneIdSet.has(lane.id)}
-              onDeleteTemp={handleDeleteTemp}
-              onShiftChange={handleShiftChange}
-              onRecall={handleRecall}
-              onSpecialProjectLabelChange={handleSpecialProjectLabelChange}
-              autoEditLabelId={autoEditLabelId}
-              onAutoEditConsumed={handleAutoEditConsumed}
-              breaksMap={breaksMap}
-              onBreakEdit={handleBreakEdit}
-            />
+            lane.id === 'casePickers' ? (
+              <CasePickersLane key={lane.id} lane={lane} pickers={casePickers} />
+            ) : (
+              <DroppableLane
+                key={lane.id}
+                lane={lane}
+                employees={laneEmployees(lane.id)}
+                assignmentMap={assignmentMap}
+                carryoverMap={carryoverMap}
+                settings={settings}
+                sortOrder={sortOrder}
+                isActiveLane={activeLaneIdSet.has(lane.id)}
+                onDeleteTemp={handleDeleteTemp}
+                onShiftChange={handleShiftChange}
+                onRecall={handleRecall}
+                onSpecialProjectLabelChange={handleSpecialProjectLabelChange}
+                autoEditLabelId={autoEditLabelId}
+                onAutoEditConsumed={handleAutoEditConsumed}
+                breaksMap={breaksMap}
+                onBreakEdit={handleBreakEdit}
+              />
+            )
           ))}
         </div>
         <DragOverlay>
