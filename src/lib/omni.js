@@ -355,8 +355,17 @@ const B2E_LOCATION = {
 // and EC (Dan, 2026-07-14 — Ritchie Hazleton). All other facilities keep
 // excluding 209s exactly as before (ALLOWED_JOB_CODES was '205' only,
 // fixed 2026-04-28).
+//
+// WR Case Pickers (206) were previously excluded entirely — fetchWrPickers()
+// had to re-query B2E from scratch for the Picking panel because 206 never
+// made it into the roster board at all. As of 2026-10-30, 206 is allowed
+// through at WR so Case Pickers appear on the roster board (defaulting to
+// the 'casePickers' lane via applyWrCasePickerLane) and can be dragged into
+// a real shift lane like any other employee.
 function getAllowedJobCodes(facilityId) {
-  return (facilityId === 'mad' || facilityId === 'ec') ? new Set(['205', '209']) : new Set(['205'])
+  if (facilityId === 'mad' || facilityId === 'ec') return new Set(['205', '209'])
+  if (facilityId === 'wr') return new Set(['205', '206'])
+  return new Set(['205'])
 }
 
 const CAL2_DOCK_NAMES_35 = new Set([
@@ -369,6 +378,21 @@ function cal2FallbackLane(name, shiftLane) {
   const side = is35 ? 'side35' : 'side12'
   const suffix = { shift1: 'shift1', mid: 'mid', shift2: 'shift2', shift3: 'shift3' }[shiftLane] || 'shift1'
   return `${side}_${suffix}`
+}
+
+// WR has no 3rd shift and isn't expected to get one. Employees whose B2E
+// job code is 206 (Case Pickers) default into WR's 'casePickers' lane
+// instead of whatever scheduleToLane would have picked, so the roster
+// board groups them there by default. This only sets their DEFAULT/seed
+// lane — once a roster_assignments row exists, drag-and-drop can move
+// them into any other lane (1st/Mid/2nd/PTO/Call-In/Special Project) like
+// any other employee, and their hours count toward labor calculations
+// the moment they land in a real shift lane. 'casePickers' itself has no
+// entry in laborCalc.js's LANE_TO_SHIFT map, so it's excluded from every
+// calculation while an employee sits there. See LANES_WR in constants.js.
+function applyWrCasePickerLane(facilityId, jobCode, shiftLane) {
+  if (facilityId === 'wr' && jobCode === '206') return 'casePickers'
+  return shiftLane
 }
 
 function scheduleToLane(workSchedule, startTime, facilityId) {
@@ -1262,7 +1286,7 @@ export async function fetchB2eTimeOff(facilityId, date) {
       ],
       filters: {
         [`${TIME_OFF}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: (facilityId === 'mad' || facilityId === 'ec') ? ['205', '209'] : ['205'] }, // MAD + EC: include Shift Supervisors (209) — Dan, 2026-07-10 / 2026-07-14
+        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: [...getAllowedJobCodes(facilityId)] }, // MAD + EC: include Shift Supervisors (209) — Dan, 2026-07-10 / 2026-07-14. WR: include Case Pickers (206) — 2026-10-30, so their PTO is captured like any other job code.
         [`${TIME_OFF}.date`]: {
           kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
           isFiscal: false, left_side: date, is_negative: false,
@@ -1394,6 +1418,7 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
       const firstName = r[`${SCHEDULE}.first_name`] || ''
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
+      const jobCode   = String(r[`${SCHEDULE}.default_job_code`] ?? '')
       const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
 
       let defaultLane
@@ -1406,14 +1431,14 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
           defaultLane = cal2FallbackLane(fullName, shiftLane)
         }
       } else {
-        defaultLane = shiftLane
+        defaultLane = applyWrCasePickerLane(facilityId, jobCode, shiftLane)
       }
 
       return {
         id,
         name:         fullName,
         role:         null,
-        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
+        job_code:     jobCode,
         default_lane: defaultLane,
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),
@@ -1518,6 +1543,7 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
       const firstName = r[`${SCHEDULE}.first_name`] || ''
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
+      const jobCode   = String(r[`${SCHEDULE}.default_job_code`] ?? '')
       const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
 
       let defaultLane
@@ -1530,14 +1556,14 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
           defaultLane = cal2FallbackLane(fullName, shiftLane)
         }
       } else {
-        defaultLane = shiftLane
+        defaultLane = applyWrCasePickerLane(facilityId, jobCode, shiftLane)
       }
 
       employees.push({
         id,
         name:         fullName,
         role:         null,
-        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
+        job_code:     jobCode,
         default_lane: defaultLane,
         shift_start:  normalizeShiftStart(startTime),
         shift_hours:  computeShiftHours(startTime, endTime),
