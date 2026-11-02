@@ -130,6 +130,13 @@
   external_node_modules = ["duckdb"]
   included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
 
+# Late-carrier ETA nudge -- appointment check-in status lookup (2026-11-02). Read by the
+# late-eta-nudge Supabase Edge Function; needs duckdb like the order lookups above.
+[functions."scheduling-appointment-status"]
+  timeout = 26
+  external_node_modules = ["duckdb"]
+  included_files = ["node_modules/duckdb/**", "node_modules/@mapbox/node-pre-gyp/**", "node_modules/node-addon-api/**"]
+
 # Automated Appointment Creation pilot (Palermo's / Sam Rohde) -- added
 # 2026-08-22 per Dan's explicit "tread lightly" framing. Scans CAL's
 # Appointments inbox every 15 min for emails from s.rohde@palermospizza.com
