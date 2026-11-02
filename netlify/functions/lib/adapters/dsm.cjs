@@ -81,6 +81,43 @@
 // the extracted JSON, not live Datex data — same split as every other
 // customer here.
 //
+// ENHANCEMENTS ADDED 2026-11-02, from the "DF <> Kenosha DSM Team - Order
+// Agent" Fathom call (Mike McNutt, Mercedes Dile, Nate Williams, Dean
+// Dioguardi, Monica Espino):
+//
+//   1. ITEM 21672 ALWAYS FLAGS FOR HUMAN REVIEW. This material is
+//      sometimes ordered in CASES rather than EACHES — unpredictably, not
+//      on every order — which requires a manual case->each conversion
+//      (e.g. 4 cases x 16 = 64 pieces) that this adapter has no reliable
+//      way to detect from the PDF alone (nothing on the document marks
+//      which UOM was used). This exact item previously caused a real
+//      wrong-quantity incident ("got us in trouble before" — Michael
+//      McNutt). Rather than guess, resolveOrderLines short-circuits the
+//      instant item 21672 appears anywhere on the order and flags the
+//      whole order for manual entry — "stop, drop, and roll", Dan's words
+//      on the call — before any project/lot resolution even runs.
+//
+//   2. UNAVAILABLE LOT -> DRAFT REPLY (not just an internal flag). Mercedes
+//      pointed out that today, when a requested lot/batch can't be
+//      resolved against live Datex inventory, the agent silently does not
+//      create the order — no CSR-facing action at all. Dan asked for an
+//      auto-drafted (never auto-sent) Front reply on the same thread,
+//      naming the unavailable lot and quantifying the shortfall, for
+//      Monica to review/edit and send to DSM requesting a revised
+//      transfer order. resolveOrderLines now returns a `draftReply`
+//      string whenever a lot is unresolved; order-agent-common.cjs's
+//      resolveAndPushBatch posts it as a Front DRAFT (Front's create_draft
+//      MCP tool, via the same order-agent-reply Edge Function sibling
+//      postFrontComment already used, with action:'draft') alongside the
+//      existing internal flag comment. SHORTFALL ASSUMPTION: since the
+//      lot code isn't found in Datex under that material at all (or
+//      belongs to a different material), this treats availability as zero
+//      and the shortfall as the FULL line quantity requested — it does
+//      NOT attempt to net against partial on-hand quantity for a
+//      near-miss lot, since there's no reliable "did they mean a
+//      different lot" signal on the document. Revisit if that turns out
+//      to be too blunt in practice.
+//
 // OPEN / UNCONFIRMED (same caution as every other adapter's early days):
 //   - Only 2 real sample orders seen so far (one per project) — worth a
 //     broader sample before trusting this fully unattended, same spirit as
@@ -109,6 +146,12 @@ const DSM_PROJECTS = {
   DSMFO8: { id: 67, ownerId: 770, name: 'DSM FOOD SPECIALTIES, USA' }, // cultures
 }
 const DSM_PROJECT_IDS = Object.values(DSM_PROJECTS).map((p) => p.id)
+
+// Item numbers that must ALWAYS flag for manual entry, regardless of what
+// else resolves cleanly — see "ENHANCEMENTS ADDED 2026-11-02" #1 above.
+// Keyed as a Set of strings (item numbers are compared trimmed, as text —
+// same as every other item-number comparison in this file).
+const FLAGGED_ITEM_NUMBERS = new Set(['21672'])
 
 function zeroPad10(value) {
   const digits = String(value == null ? '' : value).replace(/\D/g, '')
@@ -162,6 +205,18 @@ async function resolveOrderLines(parsed) {
   const lines = parsed.lines || []
   if (lines.length === 0) {
     return { ok: false, flagReason: 'No line items were extracted from this order.' }
+  }
+
+  // ── Step 0: hard-coded flag item(s) — see FLAGGED_ITEM_NUMBERS above ────
+  // Checked before anything else resolves, so a flagged item never rides
+  // along on an otherwise-clean auto-resolution.
+  const flaggedLines = lines.filter((l) => FLAGGED_ITEM_NUMBERS.has((l.item_number || '').trim()))
+  if (flaggedLines.length) {
+    const flaggedItems = [...new Set(flaggedLines.map((l) => l.item_number))].join(', ')
+    return {
+      ok: false,
+      flagReason: `Order contains item(s) ${flaggedItems}, which must always be entered manually: this material is sometimes ordered in cases rather than eaches with no reliable way to tell which from the document, and an automatic conversion has caused a wrong-quantity incident before. Flagged for manual entry — verify the UOM against the PDF before creating this order in Datex.`,
+    }
   }
 
   const itemNumbers = [...new Set(lines.map((l) => (l.item_number || '').trim()).filter(Boolean))]
@@ -238,11 +293,26 @@ async function resolveOrderLines(parsed) {
   }
 
   if (unresolvedLots.length) {
+    const flagReason = `Could not resolve lot/batch code(s) against Datex for project ${projectCode}: ${[...new Set(unresolvedLots)].join(', ')}.`
+
+    // ── Build the customer-facing draft reply (see "ENHANCEMENTS ADDED
+    // 2026-11-02" #2 above) — one line per unresolved lot, quantifying the
+    // shortfall as the full requested quantity on that line (see the
+    // SHORTFALL ASSUMPTION note in the file header). Never sent
+    // automatically; Monica reviews/edits and sends it herself.
+    const unresolvedLineDetails = resolvedLines
+      .filter((l) => l.line_status === 'missing_lp')
+      .map((l) => `  - Item ${l.item_number}, lot/batch ${l.lot_code || '(none printed)'}: ${l.item_count ?? '(qty unknown)'} PC requested, 0 PC available under that lot in our current inventory — full quantity short.`)
+      .join('\n')
+    const deliveryRef = parsed.delivery_number ? ` (delivery ${parsed.delivery_number})` : ''
+    const draftReply = `Hi — we're unable to fulfill this order${deliveryRef} as submitted because the lot/batch requested isn't available in our current inventory:\n\n${unresolvedLineDetails}\n\nCould you send a revised transfer order reflecting an available lot for the quantity above? Happy to confirm what we do have on hand if that's helpful.`
+
     return {
       ok: false,
       resolvedLines,
       projectCode,
-      flagReason: `Could not resolve lot/batch code(s) against Datex for project ${projectCode}: ${[...new Set(unresolvedLots)].join(', ')}.`,
+      flagReason,
+      draftReply,
     }
   }
 

@@ -102,6 +102,25 @@ async function postFrontComment(conversationId, body) {
   }
 }
 
+// ADDED 2026-11-02 — "DF <> Kenosha DSM Team - Order Agent" Fathom call
+// (see adapters/dsm.cjs header note, enhancement #2). Posts a Front DRAFT
+// reply (never sent automatically — a human must review and hit send) on
+// the same conversation, via the same order-agent-reply Edge Function
+// sibling as postFrontComment, just with action:'draft' so it routes to
+// Front's create_draft MCP tool instead of add_comment. Currently used
+// when an adapter's resolveOrderLines returns a `draftReply` alongside a
+// non-ok result (unresolved lot/batch) — see resolveAndPushBatch below.
+async function postFrontDraft(conversationId, body) {
+  const res = await fetch(ORDER_AGENT_REPLY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-order-agent-internal-secret': ORDER_AGENT_INTERNAL_SECRET },
+    body: JSON.stringify({ conversationId, body, action: 'draft' }),
+  })
+  if (!res.ok) {
+    console.error(`[order-agent-resolve] draft post failed (${res.status}): ${await res.text().catch(() => '')}`)
+  }
+}
+
 // ── SmartUp API client (thin — reuses dpi-monthly-shared.cjs's token cache) ─
 
 async function smartUpPost(path, body) {
@@ -282,6 +301,13 @@ async function resolveAndPushBatch(batchId) {
       batch.front_conversation_id,
       `Order agent: could not safely resolve this order against current Datex inventory — flagged for manual entry.\nReason: ${resolution.flagReason}`
     )
+    // ADDED 2026-11-02 — see adapters/dsm.cjs enhancement #2 / postFrontDraft
+    // above. Only fires when the adapter supplied one (currently: DSM
+    // unresolved-lot case) — a DRAFT, never auto-sent, in addition to the
+    // internal flag comment above.
+    if (resolution.draftReply) {
+      await postFrontDraft(batch.front_conversation_id, resolution.draftReply)
+    }
     return { ok: false, batchId: batch.id, flagReason: resolution.flagReason }
   }
 
@@ -394,6 +420,7 @@ module.exports = {
   sbPost,
   sbPatch,
   postFrontComment,
+  postFrontDraft,
   smartUpPost,
   runMotherDuckQuery,
   isConfigured,

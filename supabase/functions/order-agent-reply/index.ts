@@ -39,6 +39,16 @@
 // (same value either way), so this brand-new endpoint works the moment
 // Netlify's order-agent-common.cjs starts calling it, with no window
 // where every reply/comment call would 401 pending Dan's manual step.
+//
+// ADDED 2026-11-02 — "DF <> Kenosha DSM Team - Order Agent" Fathom call:
+// request body now accepts an optional `action` field ('comment', the
+// default, or 'draft'). 'draft' calls Front's create_draft MCP tool
+// instead of add_comment, so order-agent-common.cjs's new postFrontDraft
+// can leave a ready-to-send (never auto-sent) reply on the thread — first
+// used for DSM's "requested lot is unavailable" case (adapters/dsm.cjs).
+// `shared: true` is passed on every draft because Front requires AI
+// teammates to share drafts (a non-shared draft from this agent identity
+// is rejected outright).
 
 // deno-lint-ignore-file no-explicit-any
 const env = (k: string) => Deno.env.get(k) || ''
@@ -85,13 +95,28 @@ async function mcpPost(token: string, st: any, body: any, expect: boolean) {
   return msg.result
 }
 
-async function postComment(conversationId: string, body: string) {
+async function initSession() {
   const token = await getAgentToken()
   const st: any = { sessionId: null, protocol: null }
   const init = await mcpPost(token, st, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo: { name: 'csw-order-agent-reply', version: '1.0.0' } } }, true)
   st.protocol = (init && init.protocolVersion) || MCP_PROTOCOL
   await mcpPost(token, st, { jsonrpc: '2.0', method: 'notifications/initialized' }, false)
+  return { token, st }
+}
+
+async function postComment(conversationId: string, body: string) {
+  const { token, st } = await initSession()
   await mcpPost(token, st, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'add_comment', arguments: { conversationId, body } } }, true)
+}
+
+// ADDED 2026-11-02 — see header note above. Creates a DRAFT reply (NOT
+// sent — Front only sends on an explicit send_message call, which this
+// never makes) on the given conversation, addressed to the original
+// recipients (reply-all default). `shared: true` because Front rejects a
+// non-shared draft from an AI teammate identity.
+async function createDraft(conversationId: string, body: string) {
+  const { token, st } = await initSession()
+  await mcpPost(token, st, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'create_draft', arguments: { conversationId, body, bodyFormat: 'plain', shared: true } } }, true)
 }
 
 Deno.serve(async (req: Request) => {
@@ -105,9 +130,13 @@ Deno.serve(async (req: Request) => {
     return new Response('Unauthorized', { status: 401 })
   }
   try {
-    const { conversationId, body } = await req.json()
+    const { conversationId, body, action } = await req.json()
     if (!conversationId || !body) return new Response('Missing conversationId or body', { status: 400 })
-    await postComment(conversationId, body)
+    if (action === 'draft') {
+      await createDraft(conversationId, body)
+    } else {
+      await postComment(conversationId, body)
+    }
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   } catch (e) {
     console.error('[order-agent-reply] error', (e as Error).message)
