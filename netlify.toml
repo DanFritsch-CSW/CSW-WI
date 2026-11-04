@@ -723,6 +723,23 @@
 [functions."cmm-empty-trailer-ping-test"]
   timeout = 26
 
+# JDF Daily Comms daily kickoff email (Madison) -- added 2026-11-04 per Dan's
+# ask (cnv_1cspos44) to stop the daily "Outbounds {date}" thread from growing
+# forever: JDF never starts a new one, so this starts a fresh thread each
+# morning instead. Direct mirror of cmm-empty-trailer-email-run above, MINUS
+# the hourly ping (kickoff only, per Dan). No duckdb/native-module dependency
+# (Supabase REST + Front API only). See lib/jdf-daily-comms-email-shared.cjs
+# for the full design writeup.
+[functions."jdf-daily-comms-email-run"]
+  schedule = "*/15 * * * *"
+  timeout = 26
+
+# JDF Daily Comms daily email MANUAL TEST -- no schedule, so direct POST
+# works (same 403-avoidance pattern as above). NOT a dry run -- really sends
+# a live email to whatever TO/CC recipients are configured.
+[functions."jdf-daily-comms-email-test"]
+  timeout = 26
+
 # Customer Shortage Report EMAIL draft creation -- added 2026-09-01,
 # MOVED same day from an earlier "Daily Discussion Email" version per
 # Dan's follow-up: "I would've thought they would live within the

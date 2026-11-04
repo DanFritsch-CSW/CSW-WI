@@ -22,6 +22,12 @@ import {
   fetchCmmEmptyTrailerDiscussionRecipients, saveCmmEmptyTrailerDiscussionRecipients,
   triggerCmmEmptyTrailerTest, triggerCmmEmptyTrailerPingTest,
 } from '../lib/cmmEmptyTrailer.js'
+import {
+  fetchJdfDailyCommsSettings, upsertJdfDailyCommsSettings,
+  fetchJdfDailyCommsEmailRecipients, saveJdfDailyCommsEmailRecipients,
+  fetchJdfDailyCommsDiscussionRecipients, saveJdfDailyCommsDiscussionRecipients,
+  triggerJdfDailyCommsTest,
+} from '../lib/jdfDailyComms.js'
 import { PROJECT_DROP_RULES, KEN_GUARANTEED_PROJECTS, fetchKnownProjectsByFacility } from '../lib/omni.js'
 import { fetchCronHealth } from '../lib/cronHealth.js'
 import PviAccountsTab from '../components/settings/PviAccountsTab.jsx'
@@ -37,6 +43,7 @@ const TABS = [
   { id: 'discussions', label: 'Daily Discussions' },
   { id: 'cmmOutbound', label: 'CMM Outbound Appts' },
   { id: 'cmmEmptyTrailer', label: 'CMM Empty Trailer' },
+  { id: 'jdfDailyComms', label: 'JDF Daily Comms' },
   { id: 'b2eSync',     label: 'B2E Sync Health' },
 ]
 
@@ -1458,6 +1465,308 @@ function CmmEmptyTrailerEditor() {
   )
 }
 
+// ── JDF Daily Comms (Madison) ────────────────────────────────
+//
+// Direct mirror of CmmEmptyTrailerEditor above, MINUS the hourly ping
+// section/state/handler (per Dan — kickoff only, see jdfDailyComms.js
+// header). Added 2026-11-04 (cnv_1cspos44) so JDF's daily outbound thread
+// gets a fresh start each morning instead of growing forever.
+
+function JdfDailyCommsEditor() {
+  const [settings, setSettings]   = useState(null)
+  const [teammates, setTeammates] = useState([])
+  const [channels, setChannels]   = useState([])
+  const [syncingChannels, setSyncingChannels] = useState(false)
+  const [toEmails, setToEmails]   = useState([])
+  const [ccEmails, setCcEmails]   = useState([])
+  const [selectedDiscussion, setSelectedDiscussion] = useState(new Set())
+  const [senderName, setSenderName] = useState('CSW Operations')
+  const [subjectTemplate, setSubjectTemplate] = useState('Outbounds {date}')
+  const [bodyTemplate, setBodyTemplate] = useState("<p>Starting today's outbound thread — please reply here with today's order(s).</p>")
+  const [channelId, setChannelId] = useState('')
+  const [notifyHour, setNotifyHour] = useState(5)
+  const [notifyMinute, setNotifyMinute] = useState(0)
+  const [notifyDays, setNotifyDays] = useState([1, 2, 3, 4, 5, 6, 7])
+  const [active, setActive]       = useState(false)
+  const [loading, setLoading]     = useState(true)
+  const [saveState, setSave]      = useState(null)
+  const [testState, setTestState] = useState(null)
+  const [testDetail, setTestDetail] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const [s, tms, chans, emails, discussion] = await Promise.all([
+        fetchJdfDailyCommsSettings(),
+        fetchFrontTeammates(),
+        fetchFrontChannels(),
+        fetchJdfDailyCommsEmailRecipients(),
+        fetchJdfDailyCommsDiscussionRecipients(),
+      ])
+      if (cancelled) return
+      setSettings(s)
+      setTeammates(tms)
+      setChannels(chans)
+      setToEmails((emails.to || []).map(r => r.email))
+      setCcEmails((emails.cc || []).map(r => r.email))
+      setSelectedDiscussion(new Set(discussion.filter(r => r.front_teammate_id).map(r => r.front_teammate_id)))
+      if (s) {
+        setNotifyHour(s.notify_hour ?? 5)
+        setNotifyMinute(s.notify_minute ?? 0)
+        setNotifyDays(s.notify_days ?? [1, 2, 3, 4, 5, 6, 7])
+        setActive(!!s.active)
+        setSenderName(s.sender_name ?? 'CSW Operations')
+        setSubjectTemplate(s.email_subject_template ?? 'Outbounds {date}')
+        setBodyTemplate(s.email_body_template ?? "<p>Starting today's outbound thread — please reply here with today's order(s).</p>")
+        setChannelId(s.from_channel_id ?? '')
+      }
+      setLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  function toggleDay(day) {
+    setNotifyDays(prev => prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day].sort())
+  }
+
+  function toggleTeammate(teammateId) {
+    setSelectedDiscussion(prev => {
+      const next = new Set(prev)
+      if (next.has(teammateId)) next.delete(teammateId)
+      else next.add(teammateId)
+      return next
+    })
+  }
+
+  async function handleSyncChannels() {
+    setSyncingChannels(true)
+    try {
+      await triggerFrontChannelsSync()
+      setChannels(await fetchFrontChannels())
+    } catch (err) {
+      alert(`Failed to sync channels: ${err.message}`)
+    } finally {
+      setSyncingChannels(false)
+    }
+  }
+
+  async function persist() {
+    await Promise.all([
+      upsertJdfDailyCommsSettings({
+        notifyHour, notifyMinute, notifyDays, active,
+        senderName, emailSubjectTemplate: subjectTemplate, emailBodyTemplate: bodyTemplate,
+        fromChannelId: channelId || null,
+      }),
+      saveJdfDailyCommsEmailRecipients(toEmails, ccEmails),
+      saveJdfDailyCommsDiscussionRecipients(
+        teammates.filter(t => selectedDiscussion.has(t.teammate_id))
+      ),
+    ])
+  }
+
+  async function handleSave() {
+    setSave('saving')
+    try {
+      await persist()
+      setSave('ok')
+      setTimeout(() => setSave(null), 2500)
+    } catch (err) {
+      setSave('error')
+      setTimeout(() => setSave(null), 3000)
+    }
+  }
+
+  async function handleTest() {
+    setTestState('running')
+    setTestDetail(null)
+    try {
+      // Save current state first — same reasoning as CmmEmptyTrailerEditor's
+      // handleTest: a freshly-edited field that hasn't been saved yet would
+      // otherwise send with stale recipients/content.
+      await persist()
+      const res = await triggerJdfDailyCommsTest()
+      if (res?.success) {
+        setTestState('ok')
+        setTestDetail(`Email sent: "${res.subject}" — ${res.toCount} TO / ${res.ccCount} CC, ${res.followerCount} follower(s).`)
+      } else {
+        setTestState('error')
+        setTestDetail(res?.reason || 'No result returned.')
+      }
+    } catch (err) {
+      setTestState('error')
+      setTestDetail(err.message)
+    }
+    setTimeout(() => { setTestState(null); setTestDetail(null) }, 8000)
+  }
+
+  if (loading) {
+    return <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)', padding: '24px 0' }}>Loading…</div>
+  }
+
+  const DAY_LABELS = [['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6], ['Sun', 7]]
+
+  return (
+    <div className="jdf-daily-comms-editor">
+      <p className="settings-page-sub" style={{ marginBottom: 16 }}>
+        Automatically <strong>sends a live email</strong> (no review step) kicking off a fresh daily
+        "Outbounds {'{date}'}" thread with Jones Dairy Farm at Madison. JDF never starts a new thread on their
+        end, so without this the conversation just keeps growing all day, every day. Content-free — this just
+        starts the thread; Chris/Anne still reply with the real outbound order details, same as today.
+        Currently configured for Madison only. No hourly ping (unlike CMM Empty Trailer) — the JDF thread
+        stays active via ordinary customer replies all day.
+      </p>
+
+      <div className="break-schedule-controls" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+          <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} />
+          Auto-send daily
+        </label>
+        <div className="break-schedule-warehouse">
+          <span className="break-schedule-warehouse-label">Send time (CT)</span>
+          <select className="est-drops-select" value={notifyHour} onChange={e => setNotifyHour(Number(e.target.value))}>
+            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{h}:00</option>)}
+          </select>
+          <select className="est-drops-select" value={notifyMinute} onChange={e => setNotifyMinute(Number(e.target.value))}>
+            {[0, 15, 30, 45].map(m => <option key={m} value={m}>:{String(m).padStart(2, '0')}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+        {DAY_LABELS.map(([label, day]) => {
+          const on = notifyDays.includes(day)
+          return (
+            <button
+              key={day}
+              onClick={() => toggleDay(day)}
+              style={{
+                padding: '4px 12px', fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
+                letterSpacing: '0.06em', borderRadius: 'var(--r-md)', cursor: 'pointer',
+                background: on ? 'var(--brand)' : 'var(--bg3)',
+                color: on ? '#000' : 'var(--text-dim)',
+                border: on ? '1px solid var(--brand)' : '1px solid var(--border)',
+              }}
+            >
+              {label}
+            </button>
+          )
+        })}
+      </div>
+
+      <EmailListEditor label="TO (external + internal — receives the email)" emails={toEmails} onChange={setToEmails} />
+      <EmailListEditor label="CC (external + internal — receives the email)" emails={ccEmails} onChange={setCcEmails} />
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          From (Front channel — the address the email actually sends from)
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select className="est-drops-select" value={channelId} onChange={e => setChannelId(e.target.value)} style={{ minWidth: 280 }}>
+            <option value="">— CSW Main (default) —</option>
+            {channels.map(c => (
+              <option key={c.channel_id} value={c.channel_id}>
+                {c.name}{c.address ? ` <${c.address}>` : ''}
+              </option>
+            ))}
+          </select>
+          <button className="settings-save-btn" onClick={handleSyncChannels} disabled={syncingChannels}>
+            {syncingChannels ? 'Syncing…' : 'Sync channels now'}
+          </button>
+        </div>
+        <p className="settings-page-sub" style={{ marginTop: 4, fontSize: 10 }}>
+          {channels.length} channel(s) available (synced nightly, or click "Sync channels now" for an immediate refresh).
+        </p>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Sender name (shown as the From name — Front's direct-send API uses a display name here, not a teammate)
+        </div>
+        <input
+          type="text"
+          value={senderName}
+          onChange={e => setSenderName(e.target.value)}
+          className="est-drops-select"
+          style={{ width: 280 }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Subject template (<code>{'{date}'}</code> is replaced with e.g. "11.04.26")
+        </div>
+        <input
+          type="text"
+          value={subjectTemplate}
+          onChange={e => setSubjectTemplate(e.target.value)}
+          className="est-drops-select"
+          style={{ width: '100%' }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Body template (HTML, <code>{'{date}'}</code> supported)
+        </div>
+        <textarea
+          value={bodyTemplate}
+          onChange={e => setBodyTemplate(e.target.value)}
+          rows={3}
+          className="est-drops-select"
+          style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+          Internal discussion people (added as conversation followers on the sent thread, NOT in TO/CC — {teammates.length} available)
+        </div>
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 6,
+          maxHeight: 260, overflowY: 'auto', padding: 8, border: '1px solid var(--border)', borderRadius: 4,
+        }}>
+          {teammates.map(t => {
+            const label = [t.first_name, t.last_name].filter(Boolean).join(' ') || t.email
+            const checked = selectedDiscussion.has(t.teammate_id)
+            return (
+              <label
+                key={t.teammate_id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', borderRadius: 3,
+                  fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer',
+                  background: checked ? 'var(--brand-bg, rgba(61,186,126,0.12))' : 'transparent',
+                }}
+              >
+                <input type="checkbox" checked={checked} onChange={() => toggleTeammate(t.teammate_id)} />
+                <span>{label}</span>
+              </label>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="settings-card-footer" style={{ marginTop: 16, display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="settings-save-btn" onClick={handleSave} disabled={saveState === 'saving'}>
+          {saveState === 'saving' ? 'Saving…' : saveState === 'ok' ? 'Saved ✓' : saveState === 'error' ? 'Error' : 'Save'}
+        </button>
+        <button className="settings-save-btn" onClick={handleTest} disabled={testState === 'running' || toEmails.length === 0}>
+          {testState === 'running' ? 'Sending…' : testState === 'ok' ? 'Sent ✓' : testState === 'error' ? 'Failed' : 'Send Now (test — real email!)'}
+        </button>
+        {testDetail && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: testState === 'error' ? '#e05a5a' : 'var(--text-dim)' }}>
+            {testDetail}
+          </span>
+        )}
+      </div>
+      {toEmails.length === 0 && (
+        <p className="settings-page-sub" style={{ marginTop: 8, fontStyle: 'italic' }}>
+          Add at least one TO recipient above to enable the test button.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── B2E Sync Health ──────────────────────────────────────────
 //
 // Added 2026-08-11 alongside the nightly-b2e-sync shared/run/test split.
@@ -1768,6 +2077,16 @@ export default function Settings() {
             <p className="settings-page-sub">Auto-sends (no review step) the daily CSW/CMM/Palermo's trailer-status kickoff email at Caledonia, plus an hourly keep-on-top ping.</p>
           </div>
           <CmmEmptyTrailerEditor />
+        </>
+      )}
+
+      {activeTab === 'jdfDailyComms' && (
+        <>
+          <div className="settings-page-header">
+            <h2 className="settings-page-title">JDF Daily Comms</h2>
+            <p className="settings-page-sub">Auto-sends (no review step) a fresh daily "Outbounds {'{date}'}" kickoff email to Jones Dairy Farm at Madison, so the existing thread doesn't keep growing all day.</p>
+          </div>
+          <JdfDailyCommsEditor />
         </>
       )}
 
