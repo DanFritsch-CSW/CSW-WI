@@ -213,19 +213,22 @@ export async function purgeStaleAssignments(employeeIds, correctFacility, fromDa
 //   - from_facility != null  → incoming loans; the home facility's B2E owns
 //                              the active/terminated status of that employee
 //
-// PROTECTED by manually_edited=true. Fixed 2026-07-07 after Dean reported
-// that dragging employees to PTO / specialProject / callin was silently
-// resetting to their original shift lane on the next sync (or the nightly
-// auto-sync at 5am). Reason: this DELETE was silently RLS-blocked before
-// 2026-07-06; after adding the anon_delete_roster policy, its long-standing
-// design decision to "ignore manually_edited" started actually destroying
-// manager overrides. New policy: managers own manually_edited=true rows,
-// full stop. If HR terms someone who has manual callin/PTO/specialProject
-// rows, those rows stay until a manager explicitly removes them.
+// PROTECTED by manually_edited=true — this one stays guarded. Its
+// staleness signal (currentB2eEmpIds, from RosterBoard's
+// fetchB2eRosterForEntryDate) is "does this employee have a published
+// schedule row for THIS SPECIFIC DATE" — not B2E's master employee_status.
+// An active employee with no shift that day (PTO, weekend, not-yet-published
+// schedule) is legitimately absent from that set, so this is the exact same
+// per-date ambiguity that caused the 2026-07-07 "reset to original column"
+// bug (see seedForwardHorizon below) and must not bypass manually_edited.
+// Contrast with purgeTerminatedAcrossFuture below, whose staleness signal
+// (B2E's master employeeroster, employee_status='Active') IS authoritative
+// and, as of 2026-11-04, does bypass manually_edited for that reason.
 //
 // Scope: current plan_date only. For broader cleanup across all future dates
 // (catches stale rows on dates the manager hasn't visited+synced), use
-// purgeTerminatedAcrossFuture below.
+// purgeTerminatedAcrossFuture below — it's the one that actually catches a
+// termed employee sitting in Special Project or another manual lane.
 export async function purgeTerminatedAssignments(facility, planDate, currentB2eEmpIds) {
   if (!supabase) return null
   const { data, error: fetchErr } = await supabase
@@ -276,14 +279,22 @@ export async function purgeTerminatedAssignments(facility, planDate, currentB2eE
 // Safety: if activeEmpIdSet is empty (Omni outage), the function NO-OPS rather
 // than risk wiping a facility's roster on a transient failure.
 //
-// Same row-level protections as the per-date variant: preserves is_temp=true
-// (manual temps), from_facility!=null (incoming loans), and
-// manually_edited=true (manager overrides). Post-2026-07-07: the third guard
-// is critical. When RLS was silently blocking deletes it was harmless to
-// omit; once deletes actually landed, terminated-employee purges were
-// destroying manager placements (Dean-reported "reset to original column"
-// bug). Managers own manually_edited=true rows even for termed employees;
-// they can wipe leftover callin/PTO rows themselves when ready.
+// Row-level protections: preserves is_temp=true (manual temps) and
+// from_facility!=null (incoming loans). Does NOT preserve manually_edited=true
+// — changed 2026-11-04. Unlike purgeTerminatedAssignments above (per-date
+// schedule presence, ambiguous — stays guarded), this function's staleness
+// signal is absence from B2E's master employeeroster, employee_status='Active'
+// — that's authoritative termination/transfer, not a per-date schedule gap,
+// so a manual lane placement from before the termination shouldn't keep the
+// row alive indefinitely. Found 2026-11-04: Daniel Gasparin and Kaylyn Jones
+// (both termed, both previously manually dragged into Special Project at
+// Madison) kept reappearing after every "Sync from B2E" click because the
+// old guard treated a termed employee's stale manual placement the same as
+// a live manager override. (seedForwardHorizon below still fully respects
+// manually_edited=true — its staleness signal, no schedule row for one
+// specific date, is NOT authoritative termination, and relaxing the guard
+// there would reopen the exact 2026-07-07 bug this whole protection scheme
+// was built to fix.)
 export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, fromDate) {
   if (!supabase) return null
   if (!activeEmpIdSet || activeEmpIdSet.size === 0) {
@@ -310,7 +321,6 @@ export async function purgeTerminatedAcrossFuture(facility, activeEmpIdSet, from
     .gte('plan_date', fromDate)
     .eq('is_temp', false)
     .is('from_facility', null)
-    .eq('manually_edited', false)
     .in('employee_id', staleIds)
   if (delErr) { console.error('purgeTerminatedAcrossFuture delete:', delErr); return delErr.message }
   return null
