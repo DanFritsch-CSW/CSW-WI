@@ -295,6 +295,14 @@ async function purgeTerminatedAcrossFuture(supabase, facility, activeEmpIdSet, f
     data.map(r => String(r.employee_id)).filter(id => !activeEmpIdSet.has(id))
   )]
   if (!staleIds.length) return { purged: 0 }
+  // NOT guarded by manually_edited=true — changed 2026-11-04 to match
+  // src/lib/supabase.js's purgeTerminatedAcrossFuture. activeEmpIdSet comes
+  // from B2E's master employeeroster, employee_status='Active', which is
+  // authoritative termination/transfer, not a per-date schedule gap — so a
+  // stale manual lane placement (e.g. Special Project) from before the
+  // termination no longer blocks this delete. seedForwardHorizon below still
+  // fully respects manually_edited=true, since its own staleness signal (no
+  // schedule row for one specific date) is NOT authoritative termination.
   const { error: delErr } = await supabase
     .from('roster_assignments')
     .delete()
@@ -302,7 +310,6 @@ async function purgeTerminatedAcrossFuture(supabase, facility, activeEmpIdSet, f
     .gte('plan_date', fromDate)
     .eq('is_temp', false)
     .is('from_facility', null)
-    .eq('manually_edited', false)
     .in('employee_id', staleIds)
   if (delErr) return { error: `delete: ${delErr.message}` }
   return { purged: staleIds.length, staleIds }
