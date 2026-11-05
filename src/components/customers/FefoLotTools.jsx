@@ -74,7 +74,7 @@ export function LotRibbon({ order, onRefetch, Dismiss }) {
     if (v !== 'violation' && v !== 'hold' && v !== 'blocked') continue
     if (!line.rem?.lot) continue
     const key = `${line.code}|${line.rem.lot}`
-    if (!seen.has(key)) seen.set(key, { code: line.code, lot: line.rem.lot, v, holdType: line.rem.holdType })
+    if (!seen.has(key)) seen.set(key, { code: line.code, lot: line.rem.lot, v, holdType: line.rem.holdType, cases: line.rem.cases })
   }
   const items = [...seen.values()]
   if (!items.length) return null
@@ -87,6 +87,9 @@ export function LotRibbon({ order, onRefetch, Dismiss }) {
           <div key={`${it.code}|${it.lot}`} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: 'var(--text-secondary)' }}>{it.code}</span>
             <span style={{ fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: t.color }}>lot {it.lot}</span>
+            {typeof it.cases === 'number' && (
+              <span style={{ fontSize: 11, fontFamily: 'var(--font-mono, ui-monospace, monospace)', color: 'var(--text-secondary)' }}>{it.cases} cs</span>
+            )}
             <span style={{ fontSize: 10, color: t.color, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
               {it.v === 'hold' && it.holdType ? it.holdType : LABEL[it.v]}
             </span>
