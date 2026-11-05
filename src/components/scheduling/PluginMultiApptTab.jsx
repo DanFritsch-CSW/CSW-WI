@@ -66,7 +66,7 @@ export default function PluginMultiApptTab({
           <ComboBox small label="Warehouse" fieldKey="warehouse" value={multiShared.warehouse} options={lookups.warehouses} loading={lookupsLoading} onChange={handleMultiSharedChange} />
           <ComboBox small label="Type" fieldKey="type" value={multiShared.type} options={lookups.types} loading={lookupsLoading} onChange={handleMultiSharedChange} />
         </div>
-        {multiShared.type === 'Outbound/Drop' && <p className="text-xs text-amber-600">Email confirmation will show Ready Time (arrival + 2 hrs)</p>}
+        {multiShared.type === 'Outbound/Drop' && ['CSW-Franksville', 'CSW-Caledonia', 'CSW-Kenosha'].includes(multiShared.warehouse) && <p className="text-xs text-amber-600">Email confirmation will show Ready Time (arrival + 2 hrs) — Caledonia/Kenosha only</p>}
         <div className="grid grid-cols-2 gap-2">
           <ComboBox
             small

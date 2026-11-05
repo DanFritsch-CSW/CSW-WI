@@ -1994,7 +1994,7 @@ export default function PluginView() {
               <ComboBox small label="Warehouse" fieldKey="warehouse" value={draft.warehouse} options={lookups.warehouses} loading={lookupsLoading} onChange={handleFieldChange} />
               <ComboBox small label="Type" fieldKey="type" value={draft.type} options={lookups.types} loading={lookupsLoading} onChange={handleFieldChange} />
             </div>
-            {draft.type === 'Outbound/Drop' && <p className="text-xs text-amber-600">Email confirmation will show Ready Time (arrival + 2 hrs)</p>}
+            {draft.type === 'Outbound/Drop' && ['CSW-Franksville', 'CSW-Caledonia', 'CSW-Kenosha'].includes(draft.warehouse) && <p className="text-xs text-amber-600">Email confirmation will show Ready Time (arrival + 2 hrs) — Caledonia/Kenosha only</p>}
             <div className="grid grid-cols-2 gap-2">
               <ComboBox small label="Project" fieldKey="project" value={draft.project} options={filteredProjects} loading={lookupsLoading} onChange={handleFieldChange} />
               <ComboBox small label="Owner" fieldKey="owner" value={draft.owner} options={lookups.owners} loading={lookupsLoading} onChange={handleFieldChange} />

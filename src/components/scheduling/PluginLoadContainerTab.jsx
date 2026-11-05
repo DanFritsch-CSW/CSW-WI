@@ -72,7 +72,7 @@ export default function PluginLoadContainerTab({
           <ComboBox small label="Warehouse" fieldKey="warehouse" value={lcDraft.warehouse ?? ''} options={lookups.warehouses} loading={lookupsLoading} onChange={handleLcFieldChange} />
           <ComboBox small label="Type" fieldKey="type" value={lcDraft.type ?? ''} options={lookups.types} loading={lookupsLoading} onChange={handleLcFieldChange} />
         </div>
-        {lcDraft.type === 'Outbound/Drop' && <p className="text-xs text-amber-600">Email confirmation will show Ready Time (arrival + 2 hrs)</p>}
+        {lcDraft.type === 'Outbound/Drop' && ['CSW-Franksville', 'CSW-Caledonia', 'CSW-Kenosha'].includes(lcDraft.warehouse) && <p className="text-xs text-amber-600">Email confirmation will show Ready Time (arrival + 2 hrs) — Caledonia/Kenosha only</p>}
         <div className="grid grid-cols-2 gap-2">
           <ComboBox small label="Project" fieldKey="project" value={lcDraft.project ?? ''} options={lcFilteredProjects} loading={lookupsLoading} onChange={handleLcFieldChange} />
           <ComboBox small label="Owner" fieldKey="owner" value={lcDraft.owner ?? ''} options={lookups.owners} loading={lookupsLoading} onChange={handleLcFieldChange} />
