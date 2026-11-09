@@ -271,7 +271,7 @@ function buildAlertBody(newlyViolating, project, reallocByOrder) {
       const lot = line.rem?.lot || '(unknown lot)'
       const days = lineDaysOlder(line)
       if (!entriesByLot.has(lot)) entriesByLot.set(lot, [])
-      entriesByLot.get(lot).push({ order: o, days })
+      entriesByLot.get(lot).push({ order: o, days, cases: line.rem?.cases })
     }
   }
 
@@ -298,7 +298,13 @@ function buildAlertBody(newlyViolating, project, reallocByOrder) {
     const moreCount = orderEntries.length - 1
     const realloc = reallocByOrder.get(first.order.id)
     const reallocSuffix = realloc ? ` — reallocated by ${realloc.user}` : ''
-    lines.push(`• Lot ${lot} jumped the queue — ${first.order.id} — ${first.days}d older (${sev.toUpperCase()}) — ${first.order.dest || 'dest unknown'}${first.order.appt ? ` — appt ${first.order.appt}` : ''}${moreCount > 0 ? ` — also affects ${moreCount} more order${moreCount === 1 ? '' : 's'}` : ''}${reallocSuffix}`)
+    // Cases (2026-11-09, Dean's ask) — the lot itself is one physical thing
+    // regardless of which order's line hit it, so this is the SAME number
+    // on every entry for a given lot; pull it off `first` rather than
+    // summing across orderEntries (that would double-count one lot's cases
+    // once per order it clipped).
+    const casesSuffix = typeof first.cases === 'number' ? ` — ${first.cases} cs` : ''
+    lines.push(`• Lot ${lot} jumped the queue${casesSuffix} — ${first.order.id} — ${first.days}d older (${sev.toUpperCase()}) — ${first.order.dest || 'dest unknown'}${first.order.appt ? ` — appt ${first.order.appt}` : ''}${moreCount > 0 ? ` — also affects ${moreCount} more order${moreCount === 1 ? '' : 's'}` : ''}${reallocSuffix}`)
     lines.push('')
   }
   while (lines.length && lines[lines.length - 1] === '') lines.pop()

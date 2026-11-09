@@ -473,7 +473,7 @@ function aggregateLotActions(violatingOrders, nearExpiryStuck, project, asOfDate
         byLot.set(lot, {
           lot, code: line.code, desc: line.desc, location: line.rem.location || '',
           date: line.rem.date, orderIds: new Set(), maxSeverity: null, maxDaysOlder: 0,
-          isViolation: true, isStuck: false, holdType: null,
+          isViolation: true, isStuck: false, holdType: null, cases: line.rem.cases,
         })
       }
       const entry = byLot.get(lot)
@@ -493,7 +493,7 @@ function aggregateLotActions(violatingOrders, nearExpiryStuck, project, asOfDate
       byLot.set(lot, {
         lot, code: line.code, desc: line.desc, location: line.rem.location || '',
         date: line.rem.date, orderIds: new Set(), maxSeverity: null, maxDaysOlder: 0,
-        isViolation: false, isStuck: false, holdType: null, stuckKind: null,
+        isViolation: false, isStuck: false, holdType: null, stuckKind: null, cases: line.rem.cases,
       })
     }
     const entry = byLot.get(lot)
@@ -573,6 +573,10 @@ function formatLotActionLine(entry, project) {
   const parts = [entry.location || 'location unknown']
   parts.push(shelf || `${verb} ${entry.date}`)
   parts.push(`${entry.orderCount} order${entry.orderCount === 1 ? '' : 's'}`)
+  // Cases (2026-11-09, Dean's ask) — count sitting in this culprit lot,
+  // same field the FefoLotTools ribbon shows (line.rem.cases); already on
+  // the entry from aggregateLotActions above.
+  if (typeof entry.cases === 'number') parts.push(`${entry.cases} cs`)
   if (entry.isViolation && entry.maxSeverity) parts.push(entry.maxSeverity.toUpperCase())
   if (entry.isStuck && !entry.isViolation) {
     parts.push(entry.stuckKind === 'hold'
