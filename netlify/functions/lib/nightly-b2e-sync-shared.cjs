@@ -113,6 +113,18 @@ function scheduleToLane(workSchedule, startTime) {
   return 'shift1'
 }
 
+// Hardcoded fixed day shifts (Dan, 2026-11-11) — mirrors EC_FIXED_SHIFTS in
+// src/lib/omni.js. B2E "Free Flow" rows have no clock times, so these three
+// Eau Claire employees would otherwise seed with null shift_start/shift_hours.
+const EC_FIXED_SHIFTS = {
+  '235': { start: 8, hours: 8.5 }, // Andrew Nelson
+  '283': { start: 8, hours: 8.5 }, // Richard Hazelton
+  '292': { start: 8, hours: 8.5 }, // Roger Sagler
+}
+function fixedShiftFor(facilityId, employeeId) {
+  return facilityId === 'ec' ? (EC_FIXED_SHIFTS[String(employeeId)] ?? null) : null
+}
+
 function parseB2eTime(s) {
   if (!s || s === '0' || s === 0) return null
   const str = String(s).trim().toLowerCase()
@@ -246,8 +258,8 @@ async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward
         role:         null,
         job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
         default_lane: defaultLane,
-        shift_start:  normalizeShiftStart(startTime),
-        shift_hours:  computeShiftHours(startTime, endTime),
+        shift_start:  fixedShiftFor(facilityId, id)?.start ?? normalizeShiftStart(startTime),
+        shift_hours:  fixedShiftFor(facilityId, id)?.hours ?? computeShiftHours(startTime, endTime),
         facility:     facilityId,
       })
     }

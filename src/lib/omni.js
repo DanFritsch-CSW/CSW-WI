@@ -428,6 +428,21 @@ function scheduleToLane(workSchedule, startTime, facilityId) {
   return 'shift1'
 }
 
+// Hardcoded fixed day shifts (Dan, 2026-11-11). B2E publishes these three Eau
+// Claire employees as "Free Flow" (start_time/end_time = "-"), which parses to
+// null shift_start/shift_hours, so the roster board fell back to the 1st Shift
+// lane default (5:00am-1:00pm). Their real shift is 8:00am-4:30pm. Applied
+// unconditionally for these employee ids at EC only. Mirrored in
+// netlify/functions/lib/nightly-b2e-sync-shared.cjs.
+const EC_FIXED_SHIFTS = {
+  '235': { start: 8, hours: 8.5 }, // Andrew Nelson
+  '283': { start: 8, hours: 8.5 }, // Richard Hazelton
+  '292': { start: 8, hours: 8.5 }, // Roger Sagler
+}
+function fixedShiftFor(facilityId, employeeId) {
+  return facilityId === 'ec' ? (EC_FIXED_SHIFTS[String(employeeId)] ?? null) : null
+}
+
 function parseB2eTime(s) {
   if (!s || s === '0' || s === 0) return null
   const str = String(s).trim().toLowerCase()
@@ -1449,8 +1464,8 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
         role:         null,
         job_code:     jobCode,
         default_lane: defaultLane,
-        shift_start:  normalizeShiftStart(startTime),
-        shift_hours:  computeShiftHours(startTime, endTime),
+        shift_start:  fixedShiftFor(facilityId, id)?.start ?? normalizeShiftStart(startTime),
+        shift_hours:  fixedShiftFor(facilityId, id)?.hours ?? computeShiftHours(startTime, endTime),
         facility:     facilityId,
       }
     })
@@ -1574,8 +1589,8 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
         role:         null,
         job_code:     jobCode,
         default_lane: defaultLane,
-        shift_start:  normalizeShiftStart(startTime),
-        shift_hours:  computeShiftHours(startTime, endTime),
+        shift_start:  fixedShiftFor(facilityId, id)?.start ?? normalizeShiftStart(startTime),
+        shift_hours:  fixedShiftFor(facilityId, id)?.hours ?? computeShiftHours(startTime, endTime),
         facility:     facilityId,
       })
     }
