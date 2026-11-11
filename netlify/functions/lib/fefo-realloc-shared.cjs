@@ -65,7 +65,11 @@ async function sbUpsert(path, rows) {
   if (!res.ok) { const t = await res.text(); throw new Error(t) }
 }
 
-const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, blocked: 3, clean: 4 }
+// transfer — added 2026-11-11 (Hill's ask, IT Ops Sync 11/11). Mirrors
+// src/lib/fefo.js — keeps a stuck-op-138-transfer lot (palvi9/palma9/
+// paldsd9 only) from firing a false "lot jumped the queue" realloc alert;
+// it's correctly skipped, not a real reallocation.
+const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, transfer: 3, blocked: 4, clean: 5 }
 
 function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
@@ -76,6 +80,7 @@ function lineVerdict(line) {
   const remKDay = rem?.kDay ?? rem?.k
   if (rem && !rem.dateUnknown && rem.lps > 0 && remKDay != null && remKDay < oldKDay) {
     if (rem.hold) return 'hold'
+    if (rem.transferSelect) return 'transfer'
     if (rem.locationBlocked) return 'blocked'
     return 'violation'
   }

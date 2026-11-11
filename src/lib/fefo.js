@@ -411,7 +411,14 @@ export function undatedLotsInView(orders) {
 // a lot is somehow both (shouldn't normally happen, but a lot in receiving
 // could theoretically also carry a hold status).
 
-export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, blocked: 3, clean: 4 }
+// transfer — added 2026-11-11 (Hill's ask, IT Ops Sync 11/11). Scoped to
+// Palermo's Caledonia projects (palvi9/palma9/paldsd9) only — see
+// TRANSFER_SELECT_PROJECTS in fefo-orders.cjs. Same tier as hold/blocked:
+// "correctly skipped, not a real FEFO miss" — the lot's cases are tied up
+// by an open, stuck Datex Inventory Transfer License Plate Select task
+// (op code 138, status Released) rather than a real hold or a real
+// put-away backlog.
+export const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, transfer: 3, blocked: 4, clean: 5 }
 
 export function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
@@ -425,6 +432,7 @@ export function lineVerdict(line) {
   const remKDay = rem?.kDay ?? rem?.k
   if (rem && !rem.dateUnknown && rem.lps > 0 && remKDay != null && remKDay < oldKDay) {
     if (rem.hold) return 'hold'
+    if (rem.transferSelect) return 'transfer'
     if (rem.locationBlocked) return 'blocked'
     return 'violation'
   }
@@ -555,6 +563,9 @@ export function verdictCopy(line, projId, asOfDate = new Date()) {
   if (v === 'hold') {
     return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, projId)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
   }
+  if (v === 'transfer') {
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, projId)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it's tied up in an open Inventory Transfer task stuck in Released status (op 138) — a known Datex bug, not a real hold — so it is correctly skipped. Cancel the stuck transfer task in Datex before it can ship in rotation.`
+  }
   if (v === 'blocked') {
     const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
     return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, projId)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
@@ -568,7 +579,7 @@ export function verdictCopy(line, projId, asOfDate = new Date()) {
 // ─── Aggregations ───────────────────────────────────────────────────────────
 
 export function bannerCounts(orders) {
-  const out = { violations: [], criticalCount: 0, warningCount: 0, stale: [], holds: [], blocked: [], allClean: false }
+  const out = { violations: [], criticalCount: 0, warningCount: 0, stale: [], holds: [], transfers: [], blocked: [], allClean: false }
   for (const o of orders) {
     const v = orderVerdict(o)
     if (v === 'violation') {
@@ -579,14 +590,15 @@ export function bannerCounts(orders) {
     }
     else if (v === 'stale') out.stale.push(o.id)
     else if (v === 'hold') out.holds.push(o.id)
+    else if (v === 'transfer') out.transfers.push(o.id)
     else if (v === 'blocked') out.blocked.push(o.id)
   }
-  out.allClean = orders.length > 0 && !out.violations.length && !out.stale.length && !out.holds.length && !out.blocked.length
+  out.allClean = orders.length > 0 && !out.violations.length && !out.stale.length && !out.holds.length && !out.transfers.length && !out.blocked.length
   return out
 }
 
 export function kpiRow(orders) {
-  let lps = 0, materials = new Set(), violations = 0, critical = 0, warning = 0, stale = 0, holds = 0, blocked = 0
+  let lps = 0, materials = new Set(), violations = 0, critical = 0, warning = 0, stale = 0, holds = 0, transfers = 0, blocked = 0
   for (const o of orders) {
     const v = orderVerdict(o)
     if (v === 'violation') {
@@ -597,19 +609,20 @@ export function kpiRow(orders) {
     }
     else if (v === 'stale') stale++
     else if (v === 'hold') holds++
+    else if (v === 'transfer') transfers++
     else if (v === 'blocked') blocked++
     for (const line of (o.lines || [])) {
       materials.add(line.code)
       for (const s of (line.ship || [])) lps += s.lps || 0
     }
   }
-  return { orders: orders.length, lps, materials: materials.size, violations, critical, warning, stale, holds, blocked }
+  return { orders: orders.length, lps, materials: materials.size, violations, critical, warning, stale, holds, transfers, blocked }
 }
 
 export function rollupByProject(orders) {
   const map = new Map()
   for (const proj of FEFO_PROJECTS) {
-    map.set(proj.id, { proj, orders: 0, lps: 0, violations: 0, critical: 0, warning: 0, stale: 0, holds: 0, blocked: 0 })
+    map.set(proj.id, { proj, orders: 0, lps: 0, violations: 0, critical: 0, warning: 0, stale: 0, holds: 0, transfers: 0, blocked: 0 })
   }
   for (const o of orders) {
     const r = map.get(o.proj)
@@ -626,6 +639,7 @@ export function rollupByProject(orders) {
     }
     else if (v === 'stale') r.stale++
     else if (v === 'hold') r.holds++
+    else if (v === 'transfer') r.transfers++
     else if (v === 'blocked') r.blocked++
   }
   return [...map.values()].sort((a, b) => {
@@ -685,6 +699,7 @@ export const VERDICT_TOKENS = {
   violation: { color: 'var(--red, #c0392b)',    bg: 'rgba(192, 57, 43, 0.08)',  label: '⚠ Out of rotation',   pill: 'violation' },
   stale:     { color: 'var(--orange, #d4824a)', bg: 'rgba(212, 130, 74, 0.08)', label: '◷ Stale · overdue',    pill: 'stale' },
   hold:      { color: 'var(--blue, #2a72b8)',   bg: 'rgba(42, 114, 184, 0.08)', label: '⏸ Older lot held',    pill: 'hold' },
+  transfer:  { color: 'var(--purple, #7a4ba0)', bg: 'rgba(122, 75, 160, 0.08)', label: '⇄ Older lot stuck in transfer', pill: 'transfer' },
   blocked:   { color: 'var(--amber, #a07818)',  bg: 'rgba(160, 120, 24, 0.08)', label: '⚑ Older lot in receiving', pill: 'blocked' },
   clean:     { color: 'var(--green, #1a8a52)',  bg: 'rgba(26, 138, 82, 0.08)',  label: '✓ In rotation',       pill: 'clean' },
 }

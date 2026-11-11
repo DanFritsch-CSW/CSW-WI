@@ -185,7 +185,12 @@ function formatHeaderDate(dateObj) {
   return `${WEEKDAYS[dateObj.getUTCDay()]} ${dateObj.getUTCMonth() + 1}/${dateObj.getUTCDate()}/${dateObj.getUTCFullYear()}`
 }
 
-const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, blocked: 3, clean: 4 }
+// transfer — added 2026-11-11 (Hill's ask, IT Ops Sync 11/11). Mirrors
+// src/lib/fefo.js exactly — see that file for the full writeup. Scoped to
+// palvi9/palma9/paldsd9 only (fefo-orders.cjs's TRANSFER_SELECT_PROJECTS);
+// outside those projects rem.transferSelect is never set, so this branch
+// is simply never hit.
+const VERDICT_PRECEDENCE = { violation: 0, stale: 1, hold: 2, transfer: 3, blocked: 4, clean: 5 }
 
 function lineVerdict(line) {
   if (!line?.ship?.length) return 'clean'
@@ -196,6 +201,7 @@ function lineVerdict(line) {
   const remKDay = rem?.kDay ?? rem?.k
   if (rem && !rem.dateUnknown && rem.lps > 0 && remKDay != null && remKDay < oldKDay) {
     if (rem.hold) return 'hold'
+    if (rem.transferSelect) return 'transfer'
     if (rem.locationBlocked) return 'blocked'
     return 'violation'
   }
@@ -340,6 +346,9 @@ function verdictCopy(line, project, asOfDate = new Date()) {
   if (v === 'hold') {
     return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, project)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it is on ${line.rem.holdType || 'hold'}, so it is correctly skipped. Clear the hold before it can ship in rotation.`
   }
+  if (v === 'transfer') {
+    return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, project)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it's tied up in an open Inventory Transfer task stuck in Released status (op 138) — a known Datex bug, not a real hold — so it is correctly skipped. Cancel the stuck transfer task in Datex before it can ship in rotation.`
+  }
   if (v === 'blocked') {
     const where = line.rem.location ? `in ${line.rem.location}` : 'in a non-allocatable location (receiving, staging, dock, etc.)'
     return `Older stock exists${lotSuffix(line.rem)} (${verb} ${line.rem.date}${shelfLifeSuffix(line.rem.date, asOfDate, project)}, ${line.rem.lps} LP${line.rem.lps === 1 ? '' : 's'}) but it hasn't been put away yet — sitting ${where}, so it is correctly skipped. Move it to an allocatable bin before it can ship in rotation.`
@@ -407,7 +416,7 @@ function findNearExpiryStuckLines(orders, project, asOfDate) {
   for (const o of orders) {
     for (const line of (o.lines || [])) {
       const v = lineVerdict(line)
-      if (v !== 'hold' && v !== 'blocked') continue
+      if (v !== 'hold' && v !== 'transfer' && v !== 'blocked') continue
       const days = shelfLifeDaysRemaining(line.rem?.date, asOfDate)
       if (days == null || days >= SHELF_LIFE_ALERT_THRESHOLD_DAYS) continue
       out.push({ order: o, line, days })
@@ -502,7 +511,10 @@ function aggregateLotActions(violatingOrders, nearExpiryStuck, project, asOfDate
     entry.holdType = entry.holdType || line.rem.holdType || null
     // 2026-09-29 (PVI FEFO call): 'on hold' is only for non-active status
     // (inactive / hold / QA hold). A lot in receiving is a different state.
+    // 2026-11-11: added 'transfer' — a lot stuck behind an open op-138
+    // Inventory Transfer task is neither a hold nor a receiving backlog.
     if (lineVerdict(line) === 'hold') entry.stuckKind = 'hold'
+    else if (lineVerdict(line) === 'transfer') entry.stuckKind = 'transfer'
     else if (!entry.stuckKind) entry.stuckKind = 'blocked'
   }
 
@@ -581,7 +593,9 @@ function formatLotActionLine(entry, project) {
   if (entry.isStuck && !entry.isViolation) {
     parts.push(entry.stuckKind === 'hold'
       ? `ON ${String(entry.holdType || 'HOLD').toUpperCase()} — NEAR EXPIRY`
-      : 'IN RECEIVING — NOT YET PUT AWAY — NEAR EXPIRY')
+      : entry.stuckKind === 'transfer'
+        ? 'STUCK — OPEN INVENTORY TRANSFER (OP 138) — NEAR EXPIRY'
+        : 'IN RECEIVING — NOT YET PUT AWAY — NEAR EXPIRY')
   }
   const icon = entry.isViolation ? '⚠' : '⏸'
   const noteLine = entry.latestNote ? `\n   📝 ${formatNoteLine(entry.latestNote)}` : ''
@@ -639,7 +653,7 @@ async function buildDigestBody(orders, project, dateObj) {
     return lines.join('\n')
   }
 
-  const byVerdict = { violation: [], stale: [], hold: [], blocked: [], clean: [] }
+  const byVerdict = { violation: [], stale: [], hold: [], transfer: [], blocked: [], clean: [] }
   for (const o of orders) byVerdict[orderVerdict(o)].push(o)
 
   const critical = byVerdict.violation.filter(o => orderSeverity(o) === 'critical').length
@@ -652,6 +666,7 @@ async function buildDigestBody(orders, project, dateObj) {
   const summaryParts = []
   if (byVerdict.stale.length) summaryParts.push(`${byVerdict.stale.length} stale`)
   if (byVerdict.hold.length) summaryParts.push(`${byVerdict.hold.length} on hold`)
+  if (byVerdict.transfer.length) summaryParts.push(`${byVerdict.transfer.length} stuck in transfer`)
   if (byVerdict.blocked.length) summaryParts.push(`${byVerdict.blocked.length} in receiving`)
   lines.push(project.closedOrders
     ? `${orders.length} order${orders.length === 1 ? '' : 's'} shipped · ${byVerdict.clean.length} in FEFO order${summaryParts.length ? ' · ' + summaryParts.join(' · ') : ''}`
@@ -702,7 +717,7 @@ async function buildDigestBody(orders, project, dateObj) {
     lines.push(`⚠ ${undated} lot${undated === 1 ? '' : 's'} with no parseable date in this window — verify in Datex.`)
     lines.push('')
   }
-  if (!byVerdict.violation.length && !byVerdict.stale.length && !byVerdict.hold.length && !byVerdict.blocked.length && undated === 0) {
+  if (!byVerdict.violation.length && !byVerdict.stale.length && !byVerdict.hold.length && !byVerdict.transfer.length && !byVerdict.blocked.length && undated === 0) {
     lines.push('✓ All orders pulling oldest available stock — no other issues.')
     lines.push('')
   }

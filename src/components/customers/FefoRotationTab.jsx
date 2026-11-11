@@ -535,6 +535,13 @@ function Banners({ banners }) {
       body: `Older lots correctly skipped because they're on a Datex hold (QA, Food Safety, Administrative, etc.): ${banners.holds.join(', ')}. Clear the hold in Datex before it can ship in rotation.`,
     })
   }
+  if (banners.transfers.length > 0) {
+    items.push({
+      key: 't', kind: 'transfer',
+      title: `${banners.transfers.length} lot${banners.transfers.length === 1 ? '' : 's'} stuck in open transfer`,
+      body: `Older lots correctly skipped because they're reserved by an open Inventory Transfer task stuck in Released status (op 138) — a known Datex bug, not a real hold: ${banners.transfers.join(', ')}. Cancel the stuck transfer task in Datex before it can ship in rotation.`,
+    })
+  }
   if (banners.blocked.length > 0) {
     items.push({
       key: 'b', kind: 'blocked',
@@ -635,6 +642,7 @@ function KpiRow({ kpis }) {
     { label: 'WARNING',          value: kpis.warning  || 0, color: (kpis.warning  || 0) > 0 ? SEVERITY_TOKENS.warning.color  : 'var(--text-dim)' },
     { label: 'STALE',            value: kpis.stale,      color: kpis.stale > 0 ? VERDICT_TOKENS.stale.color : 'var(--text-dim)' },
     { label: 'ON HOLD',          value: kpis.holds,      color: kpis.holds > 0 ? VERDICT_TOKENS.hold.color : 'var(--text-dim)' },
+    { label: 'STUCK IN TRANSFER', value: kpis.transfers || 0, color: (kpis.transfers || 0) > 0 ? VERDICT_TOKENS.transfer.color : 'var(--text-dim)' },
     { label: 'IN RECEIVING',     value: kpis.blocked  || 0, color: (kpis.blocked || 0) > 0 ? VERDICT_TOKENS.blocked.color : 'var(--text-dim)' },
   ]
   return (
@@ -1225,7 +1233,21 @@ function OldestRemainingColumn({ rem, verb, verdict, undatedOnHand }) {
                   fontFamily: 'var(--font-mono, ui-monospace, monospace)',
                 }}>⏸ {rem.holdType || 'HOLD'}</span>
               )}
-              {!rem.hold && rem.locationBlocked && (
+              {!rem.hold && rem.transferSelect && (
+                <span
+                  title="Older lot is reserved by an open Inventory Transfer task stuck in Released status (op 138) — a known Datex bug, not a real hold. Cancel the stuck transfer task in Datex."
+                  style={{
+                    fontSize: 9, fontWeight: 600,
+                    padding: '1px 5px',
+                    background: 'rgba(122, 75, 160, 0.08)',
+                    color: 'var(--purple, #7a4ba0)',
+                    border: '1px solid var(--purple, #7a4ba0)',
+                    borderRadius: 2,
+                    fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+                  }}
+                >⇄ TRANSFER</span>
+              )}
+              {!rem.hold && !rem.transferSelect && rem.locationBlocked && (
                 <span
                   title="Older lot is in a non-allocatable location (receiving, staging, dock, etc.). It won't be picked until moved to an allocatable bin."
                   style={{

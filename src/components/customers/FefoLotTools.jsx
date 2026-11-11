@@ -71,14 +71,14 @@ export function LotRibbon({ order, onRefetch, Dismiss }) {
   const seen = new Map()
   for (const line of order.lines || []) {
     const v = lineVerdict(line)
-    if (v !== 'violation' && v !== 'hold' && v !== 'blocked') continue
+    if (v !== 'violation' && v !== 'hold' && v !== 'transfer' && v !== 'blocked') continue
     if (!line.rem?.lot) continue
     const key = `${line.code}|${line.rem.lot}`
     if (!seen.has(key)) seen.set(key, { code: line.code, lot: line.rem.lot, v, holdType: line.rem.holdType, cases: line.rem.cases })
   }
   const items = [...seen.values()]
   if (!items.length) return null
-  const LABEL = { violation: 'out of rotation', hold: 'on hold', blocked: 'in receiving' }
+  const LABEL = { violation: 'out of rotation', hold: 'on hold', transfer: 'stuck in transfer', blocked: 'in receiving' }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '0 14px 10px 42px' }}>
       {items.map(it => {
