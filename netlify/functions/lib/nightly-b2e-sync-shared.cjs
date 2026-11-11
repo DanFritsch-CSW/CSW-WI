@@ -63,8 +63,14 @@ const { createClient } = require('@supabase/supabase-js')
 const FACILITIES = ['cal', 'mad', 'ec', 'ken', 'wr']
 const FORWARD_DAYS = 21
 
+// Kept in lockstep with getAllowedJobCodes in src/lib/omni.js — MAD/EC
+// include Shift Supervisors (209), WR includes Case Pickers (206, added
+// 2026-10-30 so their PTO/schedule rows aren't filtered out of the nightly
+// seed the way they were before — see the WR scheduleToLane branch below).
 function getAllowedJobCodes(facilityId) {
-  return (facilityId === 'mad' || facilityId === 'ec') ? new Set(['205', '209']) : new Set(['205'])
+  if (facilityId === 'mad' || facilityId === 'ec') return new Set(['205', '209'])
+  if (facilityId === 'wr') return new Set(['205', '206'])
+  return new Set(['205'])
 }
 
 const ROSTER   = 'silver__b2e_slv_employeeroster'
@@ -95,16 +101,26 @@ function cal2FallbackLane(name, shiftLane) {
   return `${side}_${suffix}`
 }
 
-function scheduleToLane(workSchedule, startTime) {
+// Kept in lockstep with scheduleToLane in src/lib/omni.js, including the
+// per-facility numeric-fallback cutoffs: WR has no 3rd shift (2026-10-30),
+// so 2nd Shift is WR's catch-all instead of falling through to shift3, and
+// Madison's 1st-shift cutoff is tighter (<8) than the KEN/EC/CAL/WR default.
+function scheduleToLane(workSchedule, startTime, facilityId) {
   const ws = (workSchedule || '').toLowerCase()
   if (ws.includes('1st shift')) return 'shift1'
   if (ws.includes('mid'))       return 'mid'
   if (ws.includes('2nd shift')) return 'shift2'
-  if (ws.includes('3rd shift')) return 'shift3'
+  if (ws.includes('3rd shift')) return facilityId === 'wr' ? 'shift2' : 'shift3'
   if (startTime && startTime !== '0' && startTime !== 0) {
     const hour = parseInt(String(startTime).split(':')[0], 10)
     if (!isNaN(hour)) {
-      if (hour < 10)  return 'shift1'
+      if (facilityId === 'wr') {
+        if (hour < 7)  return 'shift1'
+        if (hour < 11) return 'mid'
+        return 'shift2'
+      }
+      const shift1Cutoff = facilityId === 'mad' ? 8 : 10
+      if (hour < shift1Cutoff) return 'shift1'
       if (hour < 14)  return 'mid'
       if (hour < 20)  return 'shift2'
       return 'shift3'
@@ -123,6 +139,15 @@ const EC_FIXED_SHIFTS = {
 }
 function fixedShiftFor(facilityId, employeeId) {
   return facilityId === 'ec' ? (EC_FIXED_SHIFTS[String(employeeId)] ?? null) : null
+}
+
+// Mirrors applyWrCasePickerLane in src/lib/omni.js: job-code-206 WR
+// employees default-seed into the 'casePickers' lane instead of whatever
+// scheduleToLane picked. Seed/default only — manual drags still win via
+// the manually_edited guard in seedForwardHorizon below.
+function applyWrCasePickerLane(facilityId, jobCode, shiftLane) {
+  if (facilityId === 'wr' && jobCode === '206') return 'casePickers'
+  return shiftLane
 }
 
 function parseB2eTime(s) {
@@ -237,7 +262,8 @@ async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward
       const firstName = r[`${SCHEDULE}.first_name`] || ''
       const lastName  = r[`${SCHEDULE}.last_name`]  || ''
       const fullName  = [firstName, lastName].filter(Boolean).join(' ')
-      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime)
+      const jobCode   = String(r[`${SCHEDULE}.default_job_code`] ?? '')
+      const shiftLane = scheduleToLane(r[`${SCHEDULE}.work_schedule`], startTime, facilityId)
 
       let defaultLane
       if (isCal) {
@@ -249,14 +275,14 @@ async function fetchB2eRosterForRange(baseUrl, facilityId, fromDate, daysForward
           defaultLane = cal2FallbackLane(fullName, shiftLane)
         }
       } else {
-        defaultLane = shiftLane
+        defaultLane = applyWrCasePickerLane(facilityId, jobCode, shiftLane)
       }
 
       employees.push({
         id,
         name:         fullName,
         role:         null,
-        job_code:     String(r[`${SCHEDULE}.default_job_code`] ?? ''),
+        job_code:     jobCode,
         default_lane: defaultLane,
         shift_start:  fixedShiftFor(facilityId, id)?.start ?? normalizeShiftStart(startTime),
         shift_hours:  fixedShiftFor(facilityId, id)?.hours ?? computeShiftHours(startTime, endTime),

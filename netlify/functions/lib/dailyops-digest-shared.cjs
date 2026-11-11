@@ -444,6 +444,20 @@ const LANE_COLUMNS = [
   { key: 'pto', label: 'PTO' },
 ]
 
+// WR has no 3rd shift (2026-10-30) — its 4th lane is Case Pickers instead.
+// Mirrors LANES_WR in src/lib/constants.js.
+const LANE_COLUMNS_WR = [
+  { key: 'shift1', label: '1st Shift' },
+  { key: 'mid', label: 'Mid Shift' },
+  { key: 'shift2', label: '2nd Shift' },
+  { key: 'casePickers', label: 'Case Pickers' },
+  { key: 'pto', label: 'PTO' },
+]
+
+function laneColumnsFor(facilityId) {
+  return facilityId === 'wr' ? LANE_COLUMNS_WR : LANE_COLUMNS
+}
+
 const AVATAR_PALETTE = ['#e07b4d', '#4d9de0', '#3dba7e', '#d4b84a', '#c084fc', '#e05c5c', '#4dc9e0']
 function avatarColor(name) {
   let h = 0
@@ -470,7 +484,7 @@ function fmtShift(start, hours) {
 const FACILITY_CODE_MAP = { cal: 'CAL', mad: 'MAD', ken: 'KEN', wr: 'WR', ec: 'EC' }
 
 function groupRosterByLane(rosterRows) {
-  const groups = { shift1: [], mid: [], shift2: [], shift3: [], pto: [] }
+  const groups = { shift1: [], mid: [], shift2: [], shift3: [], casePickers: [], pto: [] }
   for (const row of rosterRows) {
     if (row.on_loan_to) continue
     if (!groups[row.lane]) continue
@@ -486,9 +500,10 @@ function groupRosterByLane(rosterRows) {
   return groups
 }
 
-function renderShiftRoster(rosterRows, dateObj, cfg) {
+function renderShiftRoster(rosterRows, dateObj, cfg, facilityId) {
   const create = loadCanvasLib()
   const groups = groupRosterByLane(rosterRows)
+  const laneColumns = laneColumnsFor(facilityId)
 
   const COL_W = 246
   const COL_GAP = 12
@@ -498,8 +513,8 @@ function renderShiftRoster(rosterRows, dateObj, cfg) {
   const COL_HEADER_H = 40
   const PAD = 20
 
-  const maxRows = Math.max(1, ...LANE_COLUMNS.map(c => groups[c.key].length))
-  const W = PAD * 2 + LANE_COLUMNS.length * COL_W + (LANE_COLUMNS.length - 1) * COL_GAP
+  const maxRows = Math.max(1, ...laneColumns.map(c => groups[c.key].length))
+  const W = PAD * 2 + laneColumns.length * COL_W + (laneColumns.length - 1) * COL_GAP
   const H = HEADER_H + COL_HEADER_H + maxRows * (CARD_H + CARD_GAP) + PAD
 
   const canvas = create(W, H)
@@ -515,7 +530,7 @@ function renderShiftRoster(rosterRows, dateObj, cfg) {
   ctx.fillStyle = THEME.textDim
   ctx.fillText(formatHeaderDate(dateObj), PAD, 52)
 
-  LANE_COLUMNS.forEach((col, colIdx) => {
+  laneColumns.forEach((col, colIdx) => {
     const x = PAD + colIdx * (COL_W + COL_GAP)
     const rows = groups[col.key]
     const colTop = HEADER_H
@@ -723,7 +738,7 @@ async function runDigestForFacility(facilityId, { isManualTest }) {
     const data = await fetchSnapshotData(facilityId, date)
     const cardPng = renderTotalAppointmentsCard(data, dateObj, cfg)
     const tablePng = renderProjectsTable(data, dateObj, cfg)
-    const rosterPng = renderShiftRoster(data.rosterRows, dateObj, cfg)
+    const rosterPng = renderShiftRoster(data.rosterRows, dateObj, cfg, facilityId)
 
     const headerDate = formatHeaderDate(dateObj)
     const cardResult = await postImageComment(
