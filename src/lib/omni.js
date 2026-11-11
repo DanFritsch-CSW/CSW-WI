@@ -351,20 +351,22 @@ const B2E_LOCATION = {
   wr:   '023 - Wisconsin Rapids',
 }
 
-// Shift Supervisors (209) count toward labor hours at MAD (Dan, 2026-07-10)
-// and EC (Dan, 2026-07-14 — Ritchie Hazleton). All other facilities keep
-// excluding 209s exactly as before (ALLOWED_JOB_CODES was '205' only,
-// fixed 2026-04-28).
+// Shift Supervisors (209) count toward labor hours at MAD (Dan, 2026-07-10),
+// EC (Dan, 2026-07-14 — Ritchie Hazleton), and WR (Dan, 2026-11-11 — same
+// treatment as MAD/EC; CAL and KEN deliberately keep excluding 209s exactly
+// as before, ALLOWED_JOB_CODES was '205' only, fixed 2026-04-28).
 //
 // WR Case Pickers (206) were previously excluded entirely — fetchWrPickers()
 // had to re-query B2E from scratch for the Picking panel because 206 never
 // made it into the roster board at all. As of 2026-10-30, 206 is allowed
 // through at WR so Case Pickers appear on the roster board (defaulting to
 // the 'casePickers' lane via applyWrCasePickerLane) and can be dragged into
-// a real shift lane like any other employee.
+// a real shift lane like any other employee. 209s at WR get no such special
+// lane — they land in whatever shift lane scheduleToLane picks, same as a
+// 205, and count toward labor hours normally.
 function getAllowedJobCodes(facilityId) {
   if (facilityId === 'mad' || facilityId === 'ec') return new Set(['205', '209'])
-  if (facilityId === 'wr') return new Set(['205', '206'])
+  if (facilityId === 'wr') return new Set(['205', '206', '209'])
   return new Set(['205'])
 }
 
@@ -1310,7 +1312,7 @@ export async function fetchB2eTimeOff(facilityId, date) {
       ],
       filters: {
         [`${TIME_OFF}.default_location_full_path`]: { kind: 'EQUALS', type: 'string', values: [location] },
-        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: [...getAllowedJobCodes(facilityId)] }, // MAD + EC: include Shift Supervisors (209) — Dan, 2026-07-10 / 2026-07-14. WR: include Case Pickers (206) — 2026-10-30, so their PTO is captured like any other job code.
+        [`${TIME_OFF}.default_job_code`]:           { kind: 'EQUALS', type: 'string', values: [...getAllowedJobCodes(facilityId)] }, // MAD + EC + WR: include Shift Supervisors (209) — Dan, 2026-07-10 / 2026-07-14 / 2026-11-11. WR also: include Case Pickers (206) — 2026-10-30, so their PTO is captured like any other job code.
         [`${TIME_OFF}.date`]: {
           kind: 'TIME_FOR_UNIT_DURATION', type: 'date', ui_type: 'DAY',
           isFiscal: false, left_side: date, is_negative: false,
@@ -1433,7 +1435,7 @@ async function fetchB2eRosterForEntryDate(facilityId, entryDate, isCal, dockAssi
   return [...schedMap.entries()]
     .filter(([id, { row: r }]) => {
       if (!activeIds.has(id)) return false
-      // Madison-only: also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
+      // MAD/EC/WR also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
       return getAllowedJobCodes(facilityId).has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))
     })
     .map(([id, { row: r }]) => {
@@ -1544,7 +1546,7 @@ export async function fetchB2eRosterForRange(facilityId, fromDate, daysForward) 
   for (const r of scheduleRows) {
     const id = String(r[`${SCHEDULE}.employee_id`])
     if (!activeIds.has(id)) continue
-    // Madison-only: also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
+    // MAD/EC/WR also allow 209 (Shift Supervisors) — see getAllowedJobCodes.
     if (!getAllowedJobCodes(facilityId).has(String(r[`${SCHEDULE}.default_job_code`] ?? ''))) continue
     const ts = r[`${SCHEDULE}.ingestion_ts`] ?? ''
     if (ts !== maxIngestByEmp.get(id)) continue

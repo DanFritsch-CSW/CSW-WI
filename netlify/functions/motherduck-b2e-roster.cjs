@@ -42,6 +42,23 @@ const SCHEDULE = 'silver__b2e_slv_futurescheduleentries'
 const ROSTER_TABLE_PATH   = 'production_db.silver.b2e_slv_employeeroster'
 const SCHEDULE_TABLE_PATH = 'production_db.silver.b2e_slv_futurescheduleentries'
 
+// Shared by 'active_roster' and 'active_roster_named' below. Kept in
+// lockstep with getAllowedJobCodes in src/lib/omni.js and
+// netlify/functions/lib/nightly-b2e-sync-shared.cjs: MAD + EC include
+// Shift Supervisors (209) — Dan, 2026-07-10 / 2026-07-14. WR includes
+// both Case Pickers (206, 2026-10-30) and Shift Supervisors (209,
+// 2026-11-11, same treatment as MAD/EC). CAL and KEN are untouched —
+// 205 only. Getting this filter wrong silently purges the extra job
+// codes as "terminated" on the next nightly sync even though they're
+// correctly seeded elsewhere, since this is the query that defines the
+// "active roster" set purgeTerminatedAcrossFuture compares future rows
+// against.
+function jobCodeFilterFor(facilityId) {
+  if (facilityId === 'mad' || facilityId === 'ec') return "default_job_code IN ('205', '209')"
+  if (facilityId === 'wr') return "default_job_code IN ('205', '206', '209')"
+  return "default_job_code = '205'"
+}
+
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, headers: NO_CACHE_HEADERS, body: 'Method Not Allowed' }
@@ -87,18 +104,11 @@ exports.handler = async (event) => {
 
   let sql, scopeTable
   if (kind === 'active_roster') {
-    // Mirrors fetchActiveB2eEmployees in omni.js: Active + job_code 205 only.
-    // Used by purge paths to identify the current live roster.
-    //
-    // Madison + EC: also include job_code 209 (Shift Supervisors) here —
-    // Dan, 2026-07-10 (MAD) and 2026-07-14 (EC, Ritchie Hazleton). Without
-    // this, their 209s would be silently purged from the roster board on
-    // every sync as "terminated" once they're allowed onto the board
-    // elsewhere. All other facilities are untouched.
+    // Mirrors fetchActiveB2eEmployees in omni.js. Used by purge paths to
+    // identify the current live roster — see jobCodeFilterFor above for
+    // which job codes count as "active" per facility.
     scopeTable = ROSTER
-    const jobCodeFilter = (facilityId === 'mad' || facilityId === 'ec')
-      ? "default_job_code IN ('205', '209')"
-      : "default_job_code = '205'"
+    const jobCodeFilter = jobCodeFilterFor(facilityId)
     sql = `
       SELECT DISTINCT employee_id
       FROM ${ROSTER_TABLE_PATH}
@@ -117,9 +127,7 @@ exports.handler = async (event) => {
     // field (confirmed via schema — no separate first/last columns here,
     // unlike futurescheduleentries).
     scopeTable = ROSTER
-    const jobCodeFilter = (facilityId === 'mad' || facilityId === 'ec')
-      ? "default_job_code IN ('205', '209')"
-      : "default_job_code = '205'"
+    const jobCodeFilter = jobCodeFilterFor(facilityId)
     sql = `
       SELECT DISTINCT employee_id, employee_name, default_job_code
       FROM ${ROSTER_TABLE_PATH}

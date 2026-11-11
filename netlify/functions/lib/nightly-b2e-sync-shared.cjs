@@ -65,11 +65,13 @@ const FORWARD_DAYS = 21
 
 // Kept in lockstep with getAllowedJobCodes in src/lib/omni.js — MAD/EC
 // include Shift Supervisors (209), WR includes Case Pickers (206, added
-// 2026-10-30 so their PTO/schedule rows aren't filtered out of the nightly
-// seed the way they were before — see the WR scheduleToLane branch below).
+// 2026-10-30) and, as of 2026-11-11, Shift Supervisors (209) too, same
+// treatment as MAD/EC. CAL/KEN are untouched (205 only). 209s get no
+// special lane at WR — they flow through scheduleToLane/
+// applyWrCasePickerLane like a 205 and land in a normal shift lane.
 function getAllowedJobCodes(facilityId) {
   if (facilityId === 'mad' || facilityId === 'ec') return new Set(['205', '209'])
-  if (facilityId === 'wr') return new Set(['205', '206'])
+  if (facilityId === 'wr') return new Set(['205', '206', '209'])
   return new Set(['205'])
 }
 
