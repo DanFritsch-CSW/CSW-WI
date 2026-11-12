@@ -38,4 +38,5 @@ jobs:
         run: |
           supabase functions deploy scheduling-agent-webhook \
             --project-ref ppsbqekabtbwsmvdiyga \
-            --no-verify-jwt
+            --no-verify-jwt \
+            --yes
