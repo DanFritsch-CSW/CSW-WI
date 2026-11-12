@@ -1,0 +1,41 @@
+name: Deploy scheduling-agent-webhook
+
+# Deploys the scheduling-agent-webhook Supabase Edge Function whenever its
+# source changes on main. This is the ONLY deploy path for this function --
+# see supabase/functions/scheduling-agent-webhook/index.ts header comment
+# for why (2026-11-10 incident: a direct/manual deploy wiped 3 of its 4
+# files with placeholder content, with no Supabase-side version history to
+# roll back to, since the function wasn't committed anywhere). Routing
+# deploys through a merged commit means GitHub keeps full history/diffs/
+# rollback for this function going forward, and a bad deploy is just a
+# revert + re-run away.
+#
+# Requires a repo secret SUPABASE_ACCESS_TOKEN (a personal access token
+# from https://supabase.com/dashboard/account/tokens, scoped to this
+# project). Add it under Settings > Secrets and variables > Actions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/scheduling-agent-webhook/**'
+      - '.github/workflows/deploy-scheduling-agent.yml'
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy scheduling-agent-webhook
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase functions deploy scheduling-agent-webhook \
+            --project-ref ppsbqekabtbwsmvdiyga \
+            --no-verify-jwt
