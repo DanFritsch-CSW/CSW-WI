@@ -338,6 +338,29 @@ export function isRuleProject(facilityId, projectName) {
   return custom.some(r => r.project_name === projectName)
 }
 
+// Snapshot of the hardcoded SYSTEM project names per facility, taken here
+// (before loadCustomDropRules starts appending custom rows into
+// PROJECT_DROP_RULES) so it only ever reflects code-constant rules.
+//
+// Added 2026-11-12 after Palermos CALEDONIA finished (CAL) silently
+// disappeared from the Caledonia EST Drops forecast for a Friday: the old
+// "guaranteed floor row" treatment was KEN-only (KEN_GUARANTEED_PROJECTS),
+// so every other facility's hardcoded system project had no floor to fall
+// back on. If Omni's project-discovery query (fetchProjectData) or a given
+// week's rule query failed/returned nothing for a system project, the
+// project vanished from the forecast entirely — no row, no "↺ refresh"
+// button, nothing to recover from in the UI — instead of showing 0 like a
+// KEN-guaranteed or custom project would. getGuaranteedProjectsForFacility
+// generalizes the KEN-only treatment to every facility's system projects.
+const SYSTEM_PROJECT_NAMES_BY_FACILITY = {}
+for (const [name, rule] of Object.entries(PROJECT_DROP_RULES)) {
+  (SYSTEM_PROJECT_NAMES_BY_FACILITY[rule.facility] ??= []).push(name)
+}
+
+export function getGuaranteedProjectsForFacility(facilityId) {
+  return SYSTEM_PROJECT_NAMES_BY_FACILITY[facilityId] ?? []
+}
+
 const B2E_MODEL_ID = 'f3aaca97-bb7c-405d-809b-efab83649ab3'
 const ROSTER       = 'silver__b2e_slv_employeeroster'
 const SCHEDULE     = 'silver__b2e_slv_futurescheduleentries'
@@ -1052,30 +1075,50 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
   if (!pastDates.length) return {}
   const effectiveWeeks = pastDates.length
 
+  // guaranteedForFacility is computed first (not just for KEN — every
+  // facility's hardcoded system projects, e.g. CAL's "Palermos CALEDONIA
+  // finished") and seeded into seenProjects below so a system project
+  // always gets a rule task run for it, even when fetchProjectData below
+  // fails or simply doesn't surface it that day.
+  const guaranteedForFacility = getGuaranteedProjectsForFacility(facilityId)
+
   const results = []
-  for (const d of pastDates)
-    results.push(await fetchProjectData(facilityId, d).catch(() => []))
+  let projectDiscoveryHadError = false
+  for (const d of pastDates) {
+    results.push(await fetchProjectData(facilityId, d).catch(e => {
+      projectDiscoveryHadError = true
+      console.warn(`fetchHistoricalProjectHourlyDrops: fetchProjectData failed for ${facilityId} ${d}:`, e?.message)
+      return []
+    }))
+  }
 
   const seenProjects = new Set(
     results.flat().map(r => r.name).filter(n => isRuleProject(facilityId, n))
   )
-  if (facilityId === 'ken') {
-    for (const p of KEN_GUARANTEED_PROJECTS) seenProjects.add(p)
-  }
+  for (const p of guaranteedForFacility) seenProjects.add(p)
   for (const row of (CUSTOM_DROP_RULES_CACHE[facilityId] ?? []))
     seenProjects.add(row.project_name)
 
   const ruleProjects = [...seenProjects]
-  const guaranteedForFacility = facilityId === 'ken' ? KEN_GUARANTEED_PROJECTS : []
 
   const projectTasks = ruleProjects.map(projectName => async () => {
     const rule = PROJECT_DROP_RULES[projectName]
-    if (!rule) return [projectName, {}]
+    if (!rule) return [projectName, {}, false]
 
-    // Fetch raw hourly counts for each of the 4 past same-weekday dates
+    // Fetch raw hourly counts for each of the 4 past same-weekday dates.
+    // Track whether EVERY week's fetch failed (as opposed to genuinely
+    // having zero matching appointments) so the caller can avoid writing a
+    // confidently-wrong "zero" result into the 7-day historical cache —
+    // see fetchHistoricalProjectHourlyDropsCached below.
+    let errorCount = 0
     const weeklyHourCounts = await Promise.all(
-      pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(() => ({})))
+      pastDates.map(d => fetchProjectHourlyDropsByRule(facilityId, d, projectName, rule).catch(e => {
+        errorCount += 1
+        console.warn(`L4W fetch failed for "${projectName}" on ${d}:`, e?.message)
+        return {}
+      }))
     )
+    const hadError = pastDates.length > 0 && errorCount === pastDates.length
 
     // Step 1 — daily totals per week (sum all hours for that day)
     const dailyTotals = weeklyHourCounts.map(hourMap =>
@@ -1086,7 +1129,7 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
     // (excludes future + holiday dates). Rounded to integer.
     const dailyForecast = Math.round(dailyTotals.reduce((s, v) => s + v, 0) / effectiveWeeks)
 
-    if (dailyForecast === 0) return [projectName, {}]
+    if (dailyForecast === 0) return [projectName, {}, hadError]
 
     // Step 3 — aggregate raw hourly frequency across all 4 weeks
     const hourFreq = {}
@@ -1095,7 +1138,7 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
         hourFreq[h] = (hourFreq[h] ?? 0) + count
 
     const totalFreq = Object.values(hourFreq).reduce((s, v) => s + v, 0)
-    if (totalFreq === 0) return [projectName, {}]
+    if (totalFreq === 0) return [projectName, {}, hadError]
 
     // Step 4 — build decimal proportions, then redistribute to integers via largest-remainder
     const decimalMap = {}
@@ -1103,13 +1146,15 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
       const avg = dailyForecast * (freq / totalFreq)
       if (avg > 0) decimalMap[Number(h)] = avg
     }
-    return [projectName, redistributeToIntegers(decimalMap)]
+    return [projectName, redistributeToIntegers(decimalMap), hadError]
   })
 
   const projectResults = await batchedRun(projectTasks, 2)
 
   const out = {}
-  for (const [projectName, avgs] of projectResults) {
+  const erroredProjects = []
+  for (const [projectName, avgs, hadError] of projectResults) {
+    if (hadError) erroredProjects.push(projectName)
     if (Object.keys(avgs).length > 0) {
       out[projectName] = avgs
     } else if (
@@ -1119,6 +1164,13 @@ export async function fetchHistoricalProjectHourlyDrops(facilityId, targetDate, 
       out[projectName] = { 17: 0 }
     }
   }
+  if (projectDiscoveryHadError) erroredProjects.push('__project_discovery__')
+  // Non-enumerable: doesn't show up in Object.entries(out) / for...in, so
+  // every existing consumer (FacilityPanel.jsx, motherduck-l4w parity,
+  // etc.) that just iterates the project map is unaffected. Only
+  // fetchHistoricalProjectHourlyDropsCached reads it, to decide whether
+  // today's result is safe to cache for 7 days.
+  Object.defineProperty(out, '__hadErrors', { value: erroredProjects, enumerable: false })
   return out
 }
 
@@ -1224,12 +1276,33 @@ export async function fetchHistoricalProjectHourlyDropsCached(
     fresh = await fetchHistoricalProjectHourlyDrops(facilityId, targetDate, weeksBack)
   }
 
-  // Write back to cache — fire-and-forget. If write fails (RLS, transient
-  // network) we still return the fresh result to the caller; next page load
-  // will just re-query the upstream.
-  writeHistoricalDropsCache(facilityId, targetDate, fresh).catch(e =>
-    console.warn('writeHistoricalDropsCache failed (non-fatal):', e?.message)
-  )
+  // Skip the cache write if any project's L4W computation hit a total
+  // fetch failure (every one of its weekly queries errored) rather than
+  // genuinely finding zero matching appointments. Without this, a
+  // transient Omni hiccup gets written to est_drops_historical_cache as a
+  // confident "{}" / zero result and then served as truth for up to 7
+  // days (L4W_CACHE_TTL_MS) — which is exactly how Palermos CALEDONIA
+  // finished (CAL) silently disappeared from the Caledonia Friday forecast
+  // on 2026-11-12: that day's L4W run failed for it, the failure was
+  // swallowed and cached, and nothing re-queried it for a week since no
+  // guaranteed-floor row existed to even show a "↺ refresh" button. The
+  // MotherDuck path (fetchHistoricalProjectHourlyDropsMD) doesn't have
+  // this field — only the Omni path populates __hadErrors — so caching is
+  // skipped there too when the MD call itself threw and we fell back.
+  const hadErrors = fresh?.__hadErrors?.length > 0
+  if (hadErrors) {
+    console.warn(
+      `fetchHistoricalProjectHourlyDropsCached: skipping cache write for ${facilityId} ${targetDate} — ` +
+      `fetch errors for: ${fresh.__hadErrors.join(', ')}. Will retry fresh on next load instead of caching a possibly-wrong result for ${Math.round(L4W_CACHE_TTL_MS / 86400000)} days.`
+    )
+  } else {
+    // Write back to cache — fire-and-forget. If write fails (RLS, transient
+    // network) we still return the fresh result to the caller; next page load
+    // will just re-query the upstream.
+    writeHistoricalDropsCache(facilityId, targetDate, fresh).catch(e =>
+      console.warn('writeHistoricalDropsCache failed (non-fatal):', e?.message)
+    )
+  }
 
   return fresh
 }

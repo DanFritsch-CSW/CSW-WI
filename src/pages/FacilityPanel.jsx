@@ -20,7 +20,7 @@ import NotifySettingsPanel from '../components/NotifySettingsPanel.jsx'
 import {
   fetchHourlyData, fetchHourlyAppointments, fetchProjectData,
   fetchHistoricalProjectHourlyDropsCached, fetchProjectHourlyAppointments,
-  isRuleProject, KEN_GUARANTEED_PROJECTS, loadCustomDropRules,
+  isRuleProject, getGuaranteedProjectsForFacility, loadCustomDropRules,
   fetchAppointmentList,
 } from '../lib/omni.js'
 import {
@@ -498,8 +498,16 @@ export default function FacilityPanel({ facility, planDate, view, networkKpi, on
         ])
         if (cancelled) return
 
-        if (isKen) {
-          for (const p of KEN_GUARANTEED_PROJECTS) { if (!(p in historical)) historical[p] = { 17: 0 } }
+        // Guarantee every facility's hardcoded SYSTEM project a floor row
+        // (not just KEN's) — otherwise a system project whose L4W
+        // computation comes back empty (stale/poisoned cache, a failed
+        // Omni query, or a genuine zero day) just vanishes from the
+        // forecast table and the UI entirely, with no row and no "↺
+        // refresh" button to recover it. This is what happened to
+        // Palermos CALEDONIA finished (CAL) on 2026-11-12 — see
+        // getGuaranteedProjectsForFacility in omni.js.
+        for (const p of getGuaranteedProjectsForFacility(facility.id)) {
+          if (!(p in historical)) historical[p] = { 17: 0 }
         }
         for (const row of customRows) {
           if (!(row.project_name in historical)) historical[row.project_name] = { 17: 0 }

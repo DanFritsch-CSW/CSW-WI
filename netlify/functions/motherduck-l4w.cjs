@@ -62,18 +62,33 @@ const KEN_DISPLAY_NAME_REMAP_SQL = `
   END
 `
 
-// KEN guaranteed projects — same list as KEN_GUARANTEED_PROJECTS in omni.js.
-// Projects with 0 historical appointments still get a seed row at hour 17 so
-// the editable column appears in the UI.
-const KEN_GUARANTEED = [
-  'CROWN BAKERIES',
-  'Pretzilla Kenosha',
-  'Birchwood Foods Kenosha',
-  'Fair Oaks Farms',
-  'RICHELIEU KENOSHA',
-  'RICHELIEU RAW MATERIALS KENOSHA',
-  'BossBites',
-]
+// Guaranteed SYSTEM projects per facility — mirrors
+// getGuaranteedProjectsForFacility in src/lib/omni.js. Projects with 0
+// historical appointments (or a failed/empty query) still get a seed row at
+// hour 17 so the editable column appears in the UI, instead of the project
+// silently disappearing.
+//
+// Was KEN-only until 2026-11-12, when Palermos CALEDONIA finished (CAL) —
+// which has real, substantial daily volume — vanished from the Caledonia
+// Friday forecast because it had no such floor to fall back on. This path
+// (motherduck-l4w.cjs) isn't the live one yet (VITE_USE_MD_L4W defaults to
+// false, Omni stays canonical — see fetchHistoricalProjectHourlyDropsCached
+// in omni.js), but keeping it in parity matters since the two
+// implementations are meant to produce identical output if the flag is
+// ever flipped, same as the client/server roster-sync duplication elsewhere
+// in this app.
+const GUARANTEED_BY_FACILITY = {
+  cal: ['Palermos CALEDONIA finished'],
+  ken: [
+    'CROWN BAKERIES',
+    'Pretzilla Kenosha',
+    'Birchwood Foods Kenosha',
+    'Fair Oaks Farms',
+    'RICHELIEU KENOSHA',
+    'RICHELIEU RAW MATERIALS KENOSHA',
+    'BossBites',
+  ],
+}
 
 // PROJECT_DROP_RULES filter SQL fragment, by display_name.
 // Mirrors omni.js fetchProjectHourlyDropsByRule:
@@ -291,13 +306,12 @@ exports.handler = async (event) => {
       if (Object.keys(ints).length) result[project] = ints
     }
 
-    // KEN guaranteed projects: if missing from result (no historical data
-    // matching the rules), seed with hour-17 zero so the editable column
-    // appears in the UI.
-    if (facilityId === 'ken') {
-      for (const p of KEN_GUARANTEED) {
-        if (!(p in result)) result[p] = { 17: 0 }
-      }
+    // Guaranteed system projects for this facility: if missing from result
+    // (no historical data matching the rules, or the query above came back
+    // empty for them), seed with hour-17 zero so the project — and its
+    // refresh control in the UI — stays visible instead of disappearing.
+    for (const p of (GUARANTEED_BY_FACILITY[facilityId] || [])) {
+      if (!(p in result)) result[p] = { 17: 0 }
     }
     // Same for custom drop projects: ensure they always appear.
     for (const r of (customRules || [])) {
