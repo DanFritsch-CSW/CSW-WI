@@ -243,6 +243,22 @@ const ANTHROPIC_API_KEY = env('ANTHROPIC_API_KEY')
 const CLAUDE_MODEL = 'claude-sonnet-4-5'
 const CONFIDENCE_THRESHOLD = 0.8
 const CARRIER_MATCH_THRESHOLD = 0.8
+// ADDED 2026-11-18 (Kay's report, cnv_1cqwbes4) -- a customer requested a
+// date with no year stated ("10/17") in an email sent after that calendar
+// date had already passed for the current year; the existing past-date
+// safety net below only catches a resolved date that's STILL before today,
+// so the "resolve to nearest occurrence on or after today" anchoring logic
+// (see the extraction prompt) silently rolled it a full year forward to
+// 2027 instead of flagging the ambiguity. A correction reply then arrived
+// while the submission was still pending ("Apologies 11/17 at 15:00*"), but
+// a reply on a pending submission is a no-op (see 'pending' bucket in
+// runSchedulingAgentMention) -- the stale 2027 year was never re-derived,
+// and the CSR who manually fixed the day/month in the Scheduling tab didn't
+// notice the year was still wrong. This constant is the symmetric ceiling:
+// any resolved date more than ~6 months out is just as suspicious as one in
+// the past, and gets the same treatment (forced to low confidence rather
+// than silently written/auto-pushed with full confidence).
+const FAR_FUTURE_DAYS = 183
 const MCP_URL = 'https://mcp.frontapp.com/mcp'
 const MCP_PROTOCOL = '2025-11-25'
 const MAX_SKEW_MS = 10 * 60 * 1000
@@ -440,6 +456,23 @@ function hasPastDate(extracted: any): string | null {
   const todayStr = new Date().toISOString().slice(0, 10)
   for (const a of extracted.appointments || []) {
     if (a.date && a.date < todayStr) return a.date
+  }
+  return null
+}
+
+// ADDED 2026-11-18 -- see FAR_FUTURE_DAYS comment above. Symmetric to
+// hasPastDate: catches a resolved date that's suspiciously far in the
+// future, most often produced by the year-omitted-date anchoring logic
+// rolling a genuinely past (typo'd or ambiguous) date a full year forward
+// instead of flagging it.
+function hasFarFutureDate(extracted: any): string | null {
+  const todayMs = Date.now()
+  for (const a of extracted.appointments || []) {
+    if (!a.date) continue
+    const d = new Date(`${a.date}T00:00:00Z`)
+    if (Number.isNaN(d.getTime())) continue
+    const diffDays = (d.getTime() - todayMs) / (1000 * 60 * 60 * 24)
+    if (diffDays > FAR_FUTURE_DAYS) return a.date
   }
   return null
 }
@@ -849,7 +882,7 @@ async function extractAppointmentData({ subject, text, senderEmail, warehouse, c
   "reasoning": short string, one sentence
 }
 
-TODAY'S ACTUAL DATE IS ${todayStr}. Use this as the anchor for resolving any date -- do not use your own training-data sense of "the current date," it is wrong. This matters most when the email states a date with no year (e.g. "10/14" or "next Tuesday"): resolve it to the nearest occurrence of that month/day that is ON OR AFTER ${todayStr}. A resolved date earlier than ${todayStr} is always wrong when the year was inferred -- never produce one.
+TODAY'S ACTUAL DATE IS ${todayStr}. Use this as the anchor for resolving any date -- do not use your own training-data sense of "the current date," it is wrong. This matters most when the email states a date with no year (e.g. "10/14" or "next Tuesday"): resolve it to the nearest occurrence of that month/day that is ON OR AFTER ${todayStr}. A resolved date earlier than ${todayStr} is always wrong when the year was inferred -- never produce one. HOWEVER: if the literal month/day, taken in the CURRENT year, has already passed by more than a couple of weeks, that is much more often a typo or a genuine ambiguity (the sender meant a different month, or mis-stated the date) than a real next-year request -- rolling the year forward and reporting full confidence is exactly the kind of mistake that has caused wrong appointments before. In that situation, still resolve to the nearest on-or-after occurrence as instructed, but lower your confidence and say so in "reasoning" rather than treating the rolled-forward year as certain.
 
 ROUTING RULES:
 - "single": exactly one order, one truck, one appointment. Default when nothing below applies. appointments has exactly 1 entry.
@@ -999,7 +1032,7 @@ async function fetchLatestInboundMessage(raw: string, call: (name: string, args:
   return { subject: full?.subject || '', text: stripTags(full?.content || full?.text || ''), senderEmail, rawMessageKeys }
 }
 
-function formatConfirmation(warehouse: string, extracted: any, carrierResolution: CarrierResolution, ownerResolution: OwnerResolution, projectDockDoorFill: ProjectDockDoorFill | undefined, notesValue: string | null, senderFillNotes: string[] = [], autoPushNote: string | null = null) {
+function formatConfirmation(warehouse: string, extracted: any, carrierResolution: CarrierResolution, ownerResolution: OwnerResolution, projectDockDoorFill: ProjectDockDoorFill | undefined, notesValue: string | null, senderFillNotes: string[] = [], autoPushNote: string | null = null, actuallyAutoPushed: boolean = !!autoPushNote) {
   const poList = extracted.appointments.map((a: any) => a.poNumber).filter(Boolean).join(', ')
   const carrierLine = carrierResolution.matched
     ? `- Carrier: ${carrierResolution.name}`
@@ -1058,7 +1091,7 @@ function formatConfirmation(warehouse: string, extracted: any, carrierResolution
     ...base.slice(2),
     `- PO Number: ${poList}`,
   ]
-  const pendingLine = autoPushNote ? 'Auto-scheduling (no CSR review) -- see note below.' : 'Pending review in the Scheduling tab.'
+  const pendingLine = actuallyAutoPushed ? 'Auto-scheduling (no CSR review) -- see note below.' : 'Pending review in the Scheduling tab.'
   return `Scheduling agent extracted an appointment:\n${lines.join('\n')}\n\n${pendingLine}${flagLine}`
 }
 
@@ -1101,6 +1134,11 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
     if (pastDate) {
       confidence = 0
       extracted.reasoning = `${extracted.reasoning || ''} [safety net: resolved date ${pastDate} is in the past -- forced to low confidence]`.trim()
+    }
+    const farFutureDate = !pastDate ? hasFarFutureDate(extracted) : null
+    if (farFutureDate) {
+      confidence = 0
+      extracted.reasoning = `${extracted.reasoning || ''} [safety net: resolved date ${farFutureDate} is more than ${FAR_FUTURE_DAYS} days out -- forced to low confidence]`.trim()
     }
 
     if (confidence < CONFIDENCE_THRESHOLD || !isUsableSingleOrContainer(extracted)) {
@@ -1195,6 +1233,7 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
     let carrierOverride: CarrierResolution | null = null
     let extraFields: any = undefined
     let palermoAutoPush = false
+    let palermoDateImplausible = false
     if (isPalermo) {
       effectiveExtracted = {
         ...extracted,
@@ -1224,6 +1263,24 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
       const apptDateStr = effectiveExtracted.appointments[0].date
       const isSameDay = apptDateStr === centralDateStr(new Date())
       palermoAutoPush = !isSameDay
+
+      // ADDED 2026-11-18 -- resolvePalermoDatesFromParts() has the identical
+      // silent year-rollover pattern as the main extraction prompt (rolls
+      // the year forward whenever the literal month/day is already more
+      // than 60 days in the past), with no upper bound either. This path is
+      // worse than the main one: palermoAutoPush skips CSR review entirely,
+      // so a bad year here pushes straight to Datex and to the carrier with
+      // nobody looking at it first. Same ceiling as FAR_FUTURE_DAYS, plus a
+      // past-date check as a belt-and-suspenders (the 60-day lookback above
+      // should prevent a past date, but don't trust that blindly here).
+      const apptDateMs = new Date(`${apptDateStr}T00:00:00Z`).getTime()
+      const apptDiffDays = (apptDateMs - Date.now()) / (1000 * 60 * 60 * 24)
+      palermoDateImplausible = !Number.isNaN(apptDateMs) && (apptDiffDays > FAR_FUTURE_DAYS || apptDiffDays < -1)
+      if (palermoDateImplausible) {
+        // Never auto-push an implausible date with no human review -- always
+        // fall back to normal CSR-reviewed pending, whatever isSameDay said.
+        palermoAutoPush = false
+      }
     }
 
     const carrierList = carrierOverride ? [] : await fetchCarrierList()
@@ -1251,7 +1308,9 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
       ? await writeMultiSubmissions({ conversationId, warehouse, extracted: effectiveExtracted, carrierResolution, senderEmail, frontCustomNote })
       : await writeSingleOrContainerSubmission({ conversationId, warehouse, extracted: effectiveExtracted, carrierResolution, extraFields, senderEmail, frontCustomNote })
 
-    let autoPushNote: string | null = null
+    let autoPushNote: string | null = palermoDateImplausible
+      ? `⚠️ Computed appointment date (${effectiveExtracted.appointments?.[0]?.date || 'unknown'}) is in the past or more than ${FAR_FUTURE_DAYS} days out -- skipped auto-push, left for CSR review. Please verify the date before approving.`
+      : null
     const submissionIdForPush = (writeResult as any)?.submissionId
     if (palermoAutoPush && submissionIdForPush) {
       try {
@@ -1271,7 +1330,7 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
 
     await logIntakeAttempt({ conversationId, inboxId, warehouse, outcome: 'submitted', routing, extractedFields: { ...extracted, carrierResolution, ownerResolution, senderDefaults, ownerFilledFromSender, learnedOwner: learnedPred, llmOwnerBeforeDefault: ownerDefaultResult.llmOwner, carrierFilledFromSender, dockDoorFilledFromSender, datexLookup: datexLog, projectDockDoorFill, frontCustomNote, palermoOverrideApplied: isPalermo, palermoAutoPush, senderEmail, correctionHints, ...(senderEmail ? {} : { rawMessageKeys }) }, confidence, submissionId: submissionIdForPush || ((writeResult as any).submissionIds || [])[0] })
 
-    await withMcp((c) => c('add_comment', { conversationId, body: formatConfirmation(warehouse!, effectiveExtracted, carrierResolution, ownerResolutionForComment, projectDockDoorFill, notesValue, senderFillNotes, autoPushNote) }))
+    await withMcp((c) => c('add_comment', { conversationId, body: formatConfirmation(warehouse!, effectiveExtracted, carrierResolution, ownerResolutionForComment, projectDockDoorFill, notesValue, senderFillNotes, autoPushNote, palermoAutoPush) }))
 
     return { ok: true, routing, confidence, warehouse, carrierMatched: carrierResolution.matched, palermoAutoPush }
   } catch (e) {

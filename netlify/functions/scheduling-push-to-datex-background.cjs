@@ -100,8 +100,18 @@
  * design (same-day carve-out, the 'processing' PATCH before this is
  * triggered, the @mention note posted back to the Front thread).
  *
+ * ADDED 2026-11-18 (Kay's report, cnv_1cqwbes4) -- a Palermo's appointment
+ * got confirmed with the customer for a date a full year out (2027 instead
+ * of 2026): a year-omitted date rolled forward by scheduling-agent-webhook's
+ * extraction, then a CSR correction to the day/month didn't touch the
+ * already-wrong year. Added a push-time guard (see farFutureCheck below)
+ * that blocks any push whose scheduled_arrival is more than ~6 months out,
+ * whatever path put that date on the record -- this is the backstop behind
+ * the two upstream fixes in scheduling-agent-webhook, not a replacement for
+ * them.
+ *
  * POST /.netlify/functions/scheduling-push-to-datex-background
- * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean }
+ * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean, override_far_future_date?: boolean }
  */
 
 const { pushToDatex } = require('./lib/datex-push-shared.cjs')
@@ -343,7 +353,7 @@ exports.handler = async (event) => {
     return
   }
 
-  const { id, source, draft_template, send_email } = body
+  const { id, source, draft_template, send_email, override_far_future_date } = body
   if (!id) {
     console.error('[scheduling-push-to-datex-background] Missing submission id')
     return
@@ -354,19 +364,60 @@ exports.handler = async (event) => {
   }
 
   try {
-    await _run({ id, source, draft_template, send_email })
+    await _run({ id, source, draft_template, send_email, override_far_future_date })
   } catch (err) {
     console.error('[scheduling-push-to-datex-background] Unhandled error:', err.message)
     await updateRecord(id, { status: 'failed', datex_error: `Internal error: ${err.message}` })
   }
 }
 
-async function _run({ id, source, draft_template, send_email }) {
+// ADDED 2026-11-18 (Kay's report, cnv_1cqwbes4) -- last-line-of-defense
+// check before a Datex push, regardless of how the date got onto the
+// record (bad AI extraction, a stale year surviving a CSR's manual
+// day/month-only edit, a Palermo auto-push bug -- see
+// scheduling-agent-webhook's matching 2026-11-18 note for the two upstream
+// safety nets this backstops). Deliberately generic: this file has no idea
+// whether the date came from the agent or a human, and doesn't need to --
+// a dock appointment more than ~6 months out is suspicious either way.
+// override_far_future_date lets a genuinely correct far-out date (e.g. a
+// real long-lead-time reservation) go through anyway -- not yet wired into
+// any UI, so nothing can set it today except a direct call; add a
+// confirm-and-resubmit control to PluginView.jsx/dashboard if this starts
+// firing on legitimate appointments.
+const FAR_FUTURE_DAYS = 183
+function farFutureCheck(record) {
+  const raw = record.scheduled_arrival
+  if (!raw) return null
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return null
+  const diffDays = (d.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+  if (diffDays > FAR_FUTURE_DAYS) return { date: raw, diffDays: Math.round(diffDays) }
+  return null
+}
+
+async function _run({ id, source, draft_template, send_email, override_far_future_date }) {
   const record = await fetchRecord(id)
   if (!record) {
     console.error('[scheduling-push-to-datex-background] Record not found:', id)
     await updateRecord(id, { status: 'failed', datex_error: 'Record not found -- Supabase fetch error' })
     return
+  }
+
+  if (!override_far_future_date) {
+    const farFuture = farFutureCheck(record)
+    if (farFuture) {
+      const errMsg = `Appointment date (${farFuture.date}) is ${farFuture.diffDays} days from today -- more than ${FAR_FUTURE_DAYS} days out. Blocked pending manual date verification; please confirm the date in the Scheduling tab and re-approve.`
+      console.warn('[scheduling-push-to-datex-background] Blocked far-future date for', id, '--', errMsg)
+      await updateRecord(id, { status: 'failed', datex_error: errMsg })
+      if (record.front_conversation_id && FRONT_API_KEY) {
+        try {
+          await createFrontErrorNote(record, FRONT_API_KEY, errMsg)
+        } catch (noteErr) {
+          console.error('[scheduling-push-to-datex-background] Failed to post far-future error note:', noteErr.message)
+        }
+      }
+      return
+    }
   }
 
   // Push to Datex with up to 3 attempts on clearly-transient failures.
