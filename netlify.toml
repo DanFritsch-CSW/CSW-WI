@@ -705,15 +705,24 @@
 [functions."cmm-empty-trailer-email-test"]
   timeout = 26
 
-# CMM Empty Trailer hourly ping -- added 2026-10-16. Posts a no-content
-# internal Front comment ("(4am Update)", "(5am Update)", etc.) every hour
-# from 4am-10pm CT to whatever conversation the kickoff email most recently
-# created, just to keep that thread at the top of the team's Front inbox.
-# Gated on the SAME active flag as the email above -- no separate toggle.
-# No duckdb/native-module dependency (Supabase REST + Front API only). See
-# lib/cmm-empty-trailer-ping-shared.cjs for the full design writeup.
+# CMM Empty Trailer hourly ping -- added 2026-10-16, DISABLED 2026-11-20
+# (cnv_1cxm8ql0 thread). Posted a no-content internal Front comment
+# ("(4am Update)", "(5am Update)", etc.) every hour from 4am-10pm CT to
+# whatever conversation the kickoff email most recently created, to keep
+# that thread at the top of the team's Front inbox. Turned out to be the
+# root cause of a separate bug: posting into an archived Front conversation
+# auto-reopens it, so this ping was undoing every archive and keeping the
+# SAME conversation (from 2026-11-11) open indefinitely -- which meant
+# Front kept threading each new morning's "kickoff" email into that one
+# stale conversation instead of starting a fresh thread, since Front merges
+# a new send into any still-open conversation with the same recipient on
+# the same channel. Dan confirmed in that Front thread the ping isn't
+# needed; removing the `schedule` line below is what turns it off (Netlify
+# only fires a function on a schedule it's given). The function itself,
+# cmm-empty-trailer-ping-test.cjs, and lib/cmm-empty-trailer-ping-shared.cjs
+# are left in place -- to reinstate, just add back
+# `schedule = "*/15 * * * *"` here.
 [functions."cmm-empty-trailer-ping-run"]
-  schedule = "*/15 * * * *"
   timeout = 26
 
 # CMM Empty Trailer hourly ping MANUAL TEST -- no schedule, so direct POST
