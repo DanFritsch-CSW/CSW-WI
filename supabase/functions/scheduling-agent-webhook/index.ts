@@ -11,6 +11,17 @@
 // the un-stripped prompt was flagging every real "Confirmed, thanks!" as a
 // non-acknowledgment.
 //
+// ADDED 2026-11-21 (Dan, cnv_1cyh4jmc) -- DUPLICATE-PO GUARD on the Sam/Daren
+// auto-push path. A follow-up/move email arrives as a NEW Front conversation,
+// so the per-conversation checks never saw it and a second Datex appointment
+// was pushed for an already-scheduled PO (6 POs double-pushed 10/26-11/20).
+// If the PO already has a pending/processing/approved submission in the same
+// warehouse from another conversation, palermoAutoPush is forced off: no Datex
+// push, no carrier confirmation, internal comment only, thread stays open in
+// the Appointments inbox for a CSR (no tag, no @mention -- Dan's call). Fails
+// closed on a lookup error. See duplicate-po.ts; the push function has a
+// backstop (source:'palermo_auto' only) for two emails seconds apart.
+//
 // ADDED 2026-10-23 (Dan's explicit decision) -- PALERMO'S FULL AUTOMATION
 // EXCEPT SAME-DAY. A Sam/Daren appointment NOT scheduled for today (Central
 // time) now pushes to Datex and sends the carrier confirmation with zero CSR
@@ -106,6 +117,15 @@ import {
   type CandidateResult,
   type DatexMatch,
 } from './datex-lookup.ts'
+import {
+  DUP_PO_STATUSES,
+  DUP_PO_WINDOW_DAYS,
+  describeExisting,
+  findDuplicateScheduledPo,
+  poTokens,
+  type DupCandidateRow,
+  type DuplicatePo,
+} from './duplicate-po.ts'
 
 const PALERMO_OWNER_NAME = 'Palermo Villa, Inc.'
 const PALERMO_OWNER_DATEX_ID = 704
@@ -344,6 +364,30 @@ async function fetchSubmissionStatuses(conversationId: string): Promise<string[]
   } catch (_) {
     return []
   }
+}
+
+// ADDED 2026-11-21 (Dan Fritsch, cnv_1cyh4jmc) -- every other duplicate check
+// in this file is per Front conversation, but Sam Rohde's follow-up / move
+// emails arrive as a NEW conversation about a PO that is already scheduled,
+// so the agent pushed a second Datex appointment (6 POs double-pushed
+// 10/26-11/20). Returns the existing pending/processing/approved submission
+// in the same warehouse (different conversation, last DUP_PO_WINDOW_DAYS
+// days) that shares a PO with this one, or null. Throws on a lookup error --
+// the caller fails CLOSED (no auto-push, CSR review). Matching/normalization
+// lives in duplicate-po.ts (twin: netlify/functions/lib/duplicate-po-shared.cjs).
+async function findExistingScheduledPo(warehouse: string, poRefs: Array<string | null | undefined>, conversationId: string): Promise<DuplicatePo | null> {
+  const tokens = Array.from(new Set(poRefs.flatMap((r) => poTokens(r))))
+  if (tokens.length === 0) return null
+  const since = new Date(Date.now() - DUP_PO_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+  const orFilter = tokens.map((t) => `reference_number.ilike.*${t}*`).join(',')
+  const rows = await sbGet(
+    `submissions?warehouse=eq.${encodeURIComponent(warehouse)}` +
+    `&status=in.(${DUP_PO_STATUSES.join(',')})` +
+    `&created_at=gte.${encodeURIComponent(since)}` +
+    `&or=(${orFilter})` +
+    `&select=id,created_at,status,reference_number,front_conversation_id,scheduled_arrival,datex_appointment_id&limit=200`,
+  )
+  return findDuplicateScheduledPo(Array.isArray(rows) ? (rows as DupCandidateRow[]) : [], { poRefs, conversationId })
 }
 
 function classifyConversationBucket(statuses: string[]): 'none' | 'pending' | 'confirmed' {
@@ -1234,6 +1278,8 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
     let extraFields: any = undefined
     let palermoAutoPush = false
     let palermoDateImplausible = false
+    let palermoDuplicate: DuplicatePo | null = null
+    let palermoDuplicateCheckError: string | null = null
     if (isPalermo) {
       effectiveExtracted = {
         ...extracted,
@@ -1281,6 +1327,19 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
         // fall back to normal CSR-reviewed pending, whatever isSameDay said.
         palermoAutoPush = false
       }
+
+      // ADDED 2026-11-21 -- never auto-push a PO that's already scheduled
+      // (see findExistingScheduledPo). Fails closed: if the lookup itself
+      // errors we can't prove it's not a duplicate, so fall back to CSR review.
+      if (palermoAutoPush) {
+        try {
+          palermoDuplicate = await findExistingScheduledPo(warehouse, effectiveExtracted.appointments.map((a: any) => a.poNumber), conversationId)
+        } catch (e) {
+          palermoDuplicateCheckError = (e as Error).message
+          console.error('[scheduling-agent] duplicate-PO lookup failed (failing closed, no auto-push)', palermoDuplicateCheckError)
+        }
+        if (palermoDuplicate || palermoDuplicateCheckError) palermoAutoPush = false
+      }
     }
 
     const carrierList = carrierOverride ? [] : await fetchCarrierList()
@@ -1310,8 +1369,22 @@ async function runSchedulingAgentMention(conversationId: string, commentId: stri
 
     let autoPushNote: string | null = palermoDateImplausible
       ? `⚠️ Computed appointment date (${effectiveExtracted.appointments?.[0]?.date || 'unknown'}) is in the past or more than ${FAR_FUTURE_DAYS} days out -- skipped auto-push, left for CSR review. Please verify the date before approving.`
-      : null
+      : palermoDuplicate
+        ? `⚠️ PO ${palermoDuplicate.matchedPo} is already scheduled -- ${describeExisting(palermoDuplicate)}. NOT auto-scheduled and no confirmation was sent to the carrier. Left open for CSR review: please check whether this is a duplicate, a move, or a new load before approving.`
+        : palermoDuplicateCheckError
+          ? `⚠️ Couldn't check whether this PO is already scheduled (lookup error) -- skipped auto-push, left for CSR review. Please verify in Datex before approving.`
+          : null
     const submissionIdForPush = (writeResult as any)?.submissionId
+    if (palermoDuplicate || palermoDuplicateCheckError) {
+      await logIntakeAttempt({
+        conversationId, inboxId, warehouse,
+        outcome: palermoDuplicate ? 'palermo_auto_push_blocked_duplicate' : 'palermo_auto_push_blocked_dup_check_error',
+        routing, submissionId: submissionIdForPush,
+        errorDetail: palermoDuplicate
+          ? `PO ${palermoDuplicate.matchedPo} already scheduled: submission ${palermoDuplicate.id} (${palermoDuplicate.status}, datex appt ${palermoDuplicate.datex_appointment_id ?? 'none'}, thread ${palermoDuplicate.front_conversation_id})`
+          : `duplicate-PO lookup failed: ${palermoDuplicateCheckError}`,
+      })
+    }
     if (palermoAutoPush && submissionIdForPush) {
       try {
         await sbPatch(`submissions?id=eq.${encodeURIComponent(submissionIdForPush)}`, { status: 'processing' })

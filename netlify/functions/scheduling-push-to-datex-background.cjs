@@ -110,12 +110,30 @@
  * the two upstream fixes in scheduling-agent-webhook, not a replacement for
  * them.
  *
+ * ADDED 2026-11-21 (Dan Fritsch, cnv_1cyh4jmc) -- duplicate-PO push guard
+ * for source:'palermo_auto' ONLY (see duplicatePoCheck below and
+ * lib/duplicate-po-shared.cjs). Sam Rohde's follow-up/move emails arrive as a
+ * new Front conversation about a PO that's already scheduled, and the agent
+ * pushed a second Datex appointment. scheduling-agent-webhook now blocks this
+ * at intake; this is the backstop for two emails landing seconds apart (neither
+ * sees the other at intake) -- the oldest submission wins. Deliberately NOT
+ * applied to source:'plugin': a CSR clicking Approve & Push on a flagged row
+ * has looked at it and must be able to push it.
+ *
  * POST /.netlify/functions/scheduling-push-to-datex-background
  * Body: { id: "<uuid>", source?: string, draft_template?: string, send_email?: boolean, override_far_future_date?: boolean }
  */
 
 const { pushToDatex } = require('./lib/datex-push-shared.cjs')
 const { createFrontErrorNote } = require('./lib/front-draft-shared.cjs')
+const {
+  DUP_PO_STATUSES,
+  DUP_PO_WINDOW_DAYS,
+  describeExisting,
+  findDuplicateScheduledPo,
+  poTokens,
+  shouldBlockAtPush,
+} = require('./lib/duplicate-po-shared.cjs')
 
 const SUPABASE_URL =
   process.env.VITE_SUPABASE_URL ||
@@ -395,12 +413,72 @@ function farFutureCheck(record) {
   return null
 }
 
+// Returns the existing submission this one would duplicate (and should lose
+// to), or null. Throws on lookup failure -- caller fails closed.
+async function duplicatePoCheck(record) {
+  const tokens = Array.from(new Set(poTokens(record.reference_number)))
+  if (tokens.length === 0 || !record.warehouse) return null
+  const since = new Date(Date.now() - DUP_PO_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+  const orFilter = tokens.map((t) => `reference_number.ilike.*${t}*`).join(',')
+  const url =
+    `${SUPABASE_URL}/rest/v1/submissions?warehouse=eq.${encodeURIComponent(record.warehouse)}` +
+    `&status=in.(${DUP_PO_STATUSES.join(',')})` +
+    `&created_at=gte.${encodeURIComponent(since)}` +
+    `&or=(${orFilter})` +
+    `&select=id,created_at,status,reference_number,front_conversation_id,scheduled_arrival,datex_appointment_id&limit=200`
+  const res = await fetch(url, { headers: supabaseHeaders() })
+  if (!res.ok) throw new Error(`Supabase duplicate-PO lookup failed: HTTP ${res.status}`)
+  const rows = await res.json()
+  // Compare against every candidate, not just the first match, so an older /
+  // already-pushed twin is found even if a newer one also shares the PO.
+  const remaining = Array.isArray(rows) ? rows.slice() : []
+  const opts = { poRefs: [record.reference_number], conversationId: record.front_conversation_id, selfId: record.id }
+  for (let i = 0; i < remaining.length + 1; i++) {
+    const dup = findDuplicateScheduledPo(remaining, opts)
+    if (!dup) return null
+    if (shouldBlockAtPush(record, dup)) return dup
+    const idx = remaining.findIndex((r) => r.id === dup.id)
+    if (idx === -1) return null
+    remaining.splice(idx, 1)
+  }
+  return null
+}
+
 async function _run({ id, source, draft_template, send_email, override_far_future_date }) {
   const record = await fetchRecord(id)
   if (!record) {
     console.error('[scheduling-push-to-datex-background] Record not found:', id)
     await updateRecord(id, { status: 'failed', datex_error: 'Record not found -- Supabase fetch error' })
     return
+  }
+
+  if (source === 'palermo_auto') {
+    let dup = null
+    let lookupError = null
+    try {
+      dup = await duplicatePoCheck(record)
+    } catch (err) {
+      lookupError = err.message
+    }
+    if (dup || lookupError) {
+      const errMsg = dup
+        ? `PO ${dup.matchedPo} is already scheduled -- ${describeExisting(dup)}. Auto-push blocked and no confirmation sent; CSR please check whether this is a duplicate, a move, or a new load, then approve from the Scheduling tab if it should go.`
+        : `Couldn't check whether this PO is already scheduled (${lookupError}). Auto-push blocked and no confirmation sent; CSR please verify in Datex, then approve from the Scheduling tab.`
+      console.warn('[scheduling-push-to-datex-background] Blocked palermo_auto push for', id, '--', errMsg)
+      await updateRecord(id, { status: 'failed', datex_error: errMsg })
+      if (record.front_conversation_id && FRONT_API_KEY) {
+        try {
+          await fetch(`https://api2.frontapp.com/conversations/${record.front_conversation_id}/comments`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${FRONT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ body: `⚠️ ${errMsg}` }),
+          })
+        } catch (noteErr) {
+          console.error('[scheduling-push-to-datex-background] Failed to post duplicate-PO note:', noteErr.message)
+        }
+      }
+      return
+    }
   }
 
   if (!override_far_future_date) {
