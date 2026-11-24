@@ -4,7 +4,7 @@ import {
   currentQuarter, priorQuarter, fetchScorecard,
   seedQuarterIfMissing, resetConfigToTemplate, updateMetric, computeAttainment,
   computeOverallAttainment, fetchLiveOtt, fetchLiveCasePickAccuracy,
-  fetchLiveOsdDollar, fetchLiveOsdCount, fetchLiveTakt,
+  fetchLiveOsdCount, fetchLiveTakt,
 } from '../lib/managerBonus.js'
 
 const FACILITY_COLOR_VAR = { cal: 'var(--cal)', ken: 'var(--ken)', mad: 'var(--mad)', wr: 'var(--wr)', ec: 'var(--ec)' }
@@ -197,24 +197,26 @@ function ScorecardTable({ metrics, editable, onFieldChange }) {
   )
 }
 
-// Pulls live OTT, Case Pick Accuracy (WR only), OSD $ (all facilities),
-// OSD count (cal/ken/mad/ec), and Takt Performance (all facilities) for
-// one quarter's metric list and writes any hits straight into Supabase
-// via updateMetric, then reports the updates back through `applyLocal` so
-// the caller can patch its own state. Used for BOTH the current quarter
-// and last quarter — these are all objectively computable from real
-// historical data regardless of whether the quarter is still open, so
-// there's no reason a closed quarter should sit with a stale/blank number
-// waiting on a manual pull that no longer exists as a button (Dan's ask
-// 2026-07-30: remove the button, auto-pull on open — and pull it for Q2
-// too, since that's a completed quarter and the data has been sitting
-// there the whole time). OSD $ added 2026-07-31, OSD count and Takt both
-// added 2026-08-02, each following the same pattern once their respective
-// sources were verified. Takt specifically carries a known residual
-// accuracy caveat — see motherduck-takt.cjs header for the full story;
-// shipped per Dan's explicit decision after extensive validation reduced
-// the gap from ~2x-inflated down to single digits, not because it's
-// verified exact.
+// Pulls live OTT, Case Pick Accuracy (WR only), OSD count (cal/ken/mad/ec
+// only — see fetchLiveOsdCount header for why wr is excluded), and Takt
+// Performance (all facilities) for one quarter's metric list and writes
+// any hits straight into Supabase via updateMetric, then reports the
+// updates back through `applyLocal` so the caller can patch its own
+// state. Used for BOTH the current quarter and last quarter — these are
+// all objectively computable from real historical data regardless of
+// whether the quarter is still open, so there's no reason a closed
+// quarter should sit with a stale/blank number waiting on a manual pull
+// that no longer exists as a button (Dan's ask 2026-07-30: remove the
+// button, auto-pull on open — and pull it for Q2 too, since that's a
+// completed quarter and the data has been sitting there the whole time).
+// OSD count and Takt both added 2026-08-02, each following the same
+// pattern once their respective sources were verified. Takt specifically
+// carries a known residual accuracy caveat — see motherduck-takt.cjs
+// header for the full story; shipped per Dan's explicit decision after
+// extensive validation reduced the gap from ~2x-inflated down to single
+// digits, not because it's verified exact. OSD $ pull removed 2026-11-24
+// — see managerBonus.js DEFAULT_TEMPLATES header note: the metric it fed
+// no longer exists on any facility's scorecard.
 async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal) {
   if (!metricsList || metricsList.length === 0) return { ok: true, pulledAt: null }
   const errors = []
@@ -251,20 +253,10 @@ async function autoPullLiveMetrics(facility, quarterStr, metricsList, applyLocal
     }
   }
 
-  try {
-    const osd = await fetchLiveOsdDollar(facility, quarterStr)
-    const osdMetric = metricsList.find((m) => m.metric_key === 'osd_dollar')
-    if (osdMetric && osd.osdDollar.amount != null) {
-      applyLocal(osdMetric.id, 'actual', osd.osdDollar.amount)
-      await updateMetric(osdMetric.id, { actual: osd.osdDollar.amount })
-    }
-    pulledAt = osd.fetchedAt
-  } catch (e) {
-    errors.push(`OSD $: ${e.message}`)
-  }
-
   // OSD count — cal/ken/mad (already-synced Silver tables) and ec (direct
-  // SharePoint read); not applicable to wr (no osd_count metric there).
+  // SharePoint read). wr has an osd_count metric on its scorecard too
+  // (since 2026-11-24, replacing osd_dollar) but no data source yet, so
+  // it's deliberately excluded here — manual-entry only until one exists.
   if (['cal', 'ken', 'mad', 'ec'].includes(facility)) {
     try {
       const osdCount = await fetchLiveOsdCount(facility, quarterStr)

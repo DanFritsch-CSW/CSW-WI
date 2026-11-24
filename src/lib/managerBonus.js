@@ -24,16 +24,33 @@ export const FACILITY_LABELS = {
 
 // Default templates used to seed a brand-new quarter AND (as of 2026-08-02)
 // to force-reset Weight/Anchor/100%Target/120%Target back to these exact
-// values on every page load — see resetConfigToTemplate below. WR drops
-// OSDs — count in favor of Case Pick Accuracy per Dan's 2026-07-28
-// direction; every other facility keeps the standard 6-metric template.
+// values on every page load — see resetConfigToTemplate below.
+//
+// 2026-11-24 per Dan/Dean (Nov 13 + Nov 20 Dean<>Dan check-ins): OSDs — $
+// is retired network-wide starting Q4 2026 — a single high-dollar damage
+// incident was disproportionately tanking a manager's whole-quarter score
+// off one event. It had already been zeroed out (weight 0) for every
+// facility except WR back on 2026-07-28, but the row itself was never
+// removed from the template, so it kept reappearing as a dead, editable
+// $0-weighted row on every page load via resetConfigToTemplate. Removed
+// outright here for cal/ken/mad/ec (OSDs — count already covers the same
+// ground for them at 25% weight). WR still had OSDs — $ live at 12.5%
+// weight (it uses Case Pick Accuracy instead of OSDs — count, per the
+// original 2026-07-28 direction noted above) — it's swapped for an
+// OSDs — count metric at the same 12.5% weight rather than just deleted,
+// so WR managers still have an OSD-related metric, just count-based
+// instead of dollar-based. anchor/target_100/target_120 reuse the same
+// 16/4/2 used elsewhere — no WR-specific historical OSD-count data source
+// exists yet to calibrate a WR-specific number (see motherduck-osd-count.cjs
+// — cal/ken/mad only, no WR Silver table). Revisit these three numbers once
+// a few quarters of real WR counts come in, or once a WR data source gets
+// built — actual is manual-entry only for WR until then.
 export const DEFAULT_TEMPLATES = {
   standard: [
     { metric_key: 'takt',         label: 'Takt Performance',         unit: '%',     weight: 25,   anchor: 50,   target_100: 80,  target_120: 90,  sort_order: 1 },
     { metric_key: 'ott3',         label: 'OTT — 3 Hour',             unit: '%',     weight: 20,   anchor: 90,   target_100: 98,  target_120: 100, sort_order: 2 },
     { metric_key: 'ott2',         label: 'OTT — 2 Hour',             unit: '%',     weight: 5,    anchor: 85,   target_100: 95,  target_120: 98,  sort_order: 3 },
     { metric_key: 'osd_count',    label: 'OSDs — count',             unit: 'count', weight: 25,   anchor: 16,   target_100: 4,   target_120: 2,   sort_order: 4 },
-    { metric_key: 'osd_dollar',   label: 'OSDs — $',                 unit: '$',     weight: 0,    anchor: 2000, target_100: 500, target_120: 0,   sort_order: 5 },
     { metric_key: 'discretionary',label: 'Discretionary Evaluation', unit: '%',     weight: 25,   anchor: 50,   target_100: 100, target_120: 120, sort_order: 6 },
   ],
   wr: [
@@ -41,7 +58,7 @@ export const DEFAULT_TEMPLATES = {
     { metric_key: 'ott3',         label: 'OTT — 3 Hour',             unit: '%', weight: 20,   anchor: 90,   target_100: 98,   target_120: 100,  sort_order: 2 },
     { metric_key: 'ott2',         label: 'OTT — 2 Hour',             unit: '%', weight: 5,    anchor: 85,   target_100: 95,   target_120: 98,   sort_order: 3 },
     { metric_key: 'case_pick',    label: 'Case Pick Accuracy',       unit: '%', weight: 12.5, anchor: 99.2, target_100: 99.6, target_120: 99.8, sort_order: 4 },
-    { metric_key: 'osd_dollar',   label: 'OSDs — $',                 unit: '$', weight: 12.5, anchor: 2000, target_100: 500,  target_120: 0,    sort_order: 5 },
+    { metric_key: 'osd_count',    label: 'OSDs — count',             unit: 'count', weight: 12.5, anchor: 16,  target_100: 4,   target_120: 2,    sort_order: 5 },
     { metric_key: 'discretionary',label: 'Discretionary Evaluation', unit: '%', weight: 25,   anchor: 50,   target_100: 100,  target_120: 120,  sort_order: 6 },
   ],
 }
@@ -202,23 +219,10 @@ export async function fetchLiveCasePickAccuracy(quarter) {
   return res.json()
 }
 
-// Live OSD $ pull (all facilities) — added 2026-07-31. Direct MotherDuck
-// query against bronze.acumatica_acumatica_gl_tran_detail — see
-// motherduck-osd-dollar.cjs header for the full source/formula
-// investigation (GL 4270 "Damages" only, not 4260 "Leased Equipment";
-// Madison uniquely combines the 'Madison' and 'Radford' GL subaccounts).
-export async function fetchLiveOsdDollar(facility, quarter) {
-  const res = await fetch('/.netlify/functions/motherduck-osd-dollar', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ facility, quarter }),
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`OSD $ pull failed (${res.status}): ${text.slice(0, 200)}`)
-  }
-  return res.json()
-}
+// OSDs — $ metric retired network-wide 2026-11-24 (see DEFAULT_TEMPLATES
+// header note) — fetchLiveOsdDollar and its motherduck-osd-dollar.cjs
+// backend are gone; no facility's template has an osd_dollar metric for
+// this call to write into anymore.
 
 // Live OSD — count pull — added 2026-08-02. Two different backends
 // depending on facility, both wired behind this one function so the
@@ -228,7 +232,15 @@ export async function fetchLiveOsdDollar(facility, quarter) {
 //     that sync; this app only reads the copy).
 //   - ec: sharepoint-ec-osd-count.cjs — direct read-only Graph read of
 //     the live SharePoint file, since no Silver table exists yet for EC.
-//   - wr: not applicable — WR's template doesn't have an osd_count metric.
+//   - wr: no backend yet. WR's template gained an osd_count metric
+//     2026-11-24 (replacing osd_dollar — see DEFAULT_TEMPLATES header
+//     note), but there's no Silver table or known SharePoint OSD tracker
+//     for WR to read from, so it's deliberately left out of the
+//     autoPullLiveMetrics facility list in Manager.jsx — WR's OSD count
+//     is manual-entry only until a data source exists. Calling this
+//     function with facility: 'wr' will throw (motherduck-osd-count.cjs's
+//     TABLE_NAME map is still cal/ken/mad only) — don't add 'wr' to that
+//     call site without building a backend for it first.
 // Both backends apply the same two rules (confirmed with Dan): only rows
 // where "CSW at Fault?" is true count, and the quarter is defined by
 // "Initial Email Date". This app never writes to any of these trackers.
